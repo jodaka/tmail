@@ -77,6 +77,7 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::ToggleStar => toggle_star(state),
         Action::MarkUnread => mark_unread(state),
         Action::Compose => open_composer(state),
+        Action::LoadDrafts => load_drafts(state),
         Action::ComposerEdit(edit) => {
             // Editing targets the focused composer control; without a
             // composer open (or without its focus) the edit is inert.
@@ -452,7 +453,84 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             state.operations.finish(result.id);
             save_draft_completed(state, draft, result)
         }
+        OperationKind::LoadDrafts => {
+            state.operations.finish(result.id);
+            match &result.outcome {
+                Ok(OperationOutcome::Drafts(drafts)) => drafts_restored(state, drafts),
+                Ok(_) => {
+                    tracing::warn!(id = %result.id, "unexpected payload for a draft restore");
+                    Vec::new()
+                }
+                Err(failure) => {
+                    // The journal is the crash-safety net; a failure to read
+                    // it must be visible (plan §12) even though mail
+                    // browsing can continue without drafts.
+                    open_error_modal(state, failure)
+                }
+            }
+        }
+        OperationKind::DeleteDraft { .. } => {
+            state.operations.finish(result.id);
+            // Confirmation of the remote half of a discard; the local half
+            // was applied optimistically when the confirm dialog was
+            // accepted (Phase 6.6 wires the flow).
+            match &result.outcome {
+                Ok(OperationOutcome::Done) => Vec::new(),
+                Ok(_) => {
+                    tracing::warn!(id = %result.id, "unexpected payload for a draft discard");
+                    Vec::new()
+                }
+                Err(failure) => open_error_modal(state, failure),
+            }
+        }
     }
+}
+
+/// Apply the journal restore (ADR 0002 §D.5): rebuild the newest draft
+/// into the composer so composing after a crash continues it. Never
+/// clobbers a live composer. A gap between the recorded and
+/// remote-confirmed revisions leaves the draft dirty, so the autosave
+/// self-heals the gap once composing resumes.
+fn drafts_restored(state: &mut AppState, drafts: &[crate::domain::RestoredDraft]) -> Vec<Effect> {
+    let Some(restored) = drafts.iter().max_by_key(|entry| entry.draft.revision) else {
+        return Vec::new();
+    };
+    if state.composer.is_some() {
+        tracing::debug!("draft restore skipped: a composer draft already exists");
+        return Vec::new();
+    }
+    let snapshot = restored.draft.clone();
+    // A gap between the recorded and remote-confirmed revisions means the
+    // crash interrupted a push: restore the draft dirty so the autosave
+    // self-heals it once the window elapses.
+    let save = if snapshot.revision > restored.saved_revision {
+        crate::domain::DraftSaveState::Debouncing
+    } else {
+        crate::domain::DraftSaveState::Saved
+    };
+    let draft = crate::domain::Draft {
+        to: snapshot.to,
+        cc: snapshot.cc,
+        bcc: snapshot.bcc,
+        subject: snapshot.subject,
+        body: snapshot.body,
+        revision: snapshot.revision,
+        saved_revision: restored.saved_revision,
+        saved_at: None,
+        last_edit_at: state.clock,
+        save,
+        local_id: Some(snapshot.local_id),
+        message_id: snapshot.message_id,
+        remote_id: snapshot.remote_id,
+    };
+    tracing::info!(
+        local_id = %draft.local_id.as_ref().map(|id| id.0.as_str()).unwrap_or("?"),
+        revision = draft.revision,
+        saved_revision = draft.saved_revision,
+        "draft restored from journal"
+    );
+    state.composer = Some(ComposerState::from_draft(draft));
+    Vec::new()
 }
 
 /// Apply a confirmed draft save (plan §14). Currency check: the draft must
@@ -912,6 +990,15 @@ fn open_composer(state: &mut AppState) -> Vec<Effect> {
     state.routes.push(Route::Composer);
     state.focus = Focus::Composer;
     Vec::new()
+}
+
+/// Start the journal restore (plan §19 Phase 6 crash/restart acceptance).
+/// Dispatched once at startup by the runtime.
+fn load_drafts(state: &mut AppState) -> Vec<Effect> {
+    if state.operations.is_loading_drafts() {
+        return Vec::new();
+    }
+    vec![state.operations.start(OperationKind::LoadDrafts)]
 }
 
 /// Leave the composer (plan §14: "Leaving returns to the prior route and

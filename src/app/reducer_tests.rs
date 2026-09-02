@@ -1747,3 +1747,94 @@ fn stale_failure_does_not_cancel_a_scheduled_save() {
     assert_eq!(snap2.revision, 2);
     assert_eq!(snap2.to, "ab");
 }
+
+// ── Draft restore (plan §19 Phase 6.4 crash/restart acceptance) ──────────
+
+fn restored_draft(to: &str, revision: u64, saved_revision: u64) -> crate::domain::RestoredDraft {
+    crate::domain::RestoredDraft {
+        draft: crate::domain::DraftSnapshot {
+            local_id: crate::domain::DraftId(String::from("local-crash-1")),
+            message_id: Some(String::from("<crash-1@post.local>")),
+            remote_id: Some(MessageId(String::from("remote-crash"))),
+            to: String::from(to),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: String::from("after the crash"),
+            body: String::from("typed before the crash\n"),
+            revision,
+        },
+        saved_revision,
+    }
+}
+
+fn complete_restore(s: &mut AppState, drafts: Vec<crate::domain::RestoredDraft>) {
+    let (id, kind) = effect_parts(&reduce(s, &Action::LoadDrafts));
+    assert_eq!(kind, OperationKind::LoadDrafts);
+    reduce(
+        s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Drafts(drafts)),
+        }),
+    );
+}
+
+#[test]
+fn startup_restores_the_last_safe_draft_from_the_journal() {
+    let mut s = state();
+    complete_restore(&mut s, vec![restored_draft("max@x.io", 5, 4)]);
+    let composer = s.composer.as_ref().expect("restored");
+    assert_eq!(composer.draft.to, "max@x.io");
+    assert_eq!(composer.draft.revision, 5);
+    assert_eq!(composer.draft.saved_revision, 4);
+    assert!(
+        composer.draft.is_dirty(),
+        "the unconfirmed revision must re-push (self-heal)"
+    );
+    // The body editor carries the restored text (trailing newline intact).
+    assert_eq!(composer.body.lines(), ["typed before the crash", ""]);
+    // Composing reopens exactly this draft.
+    compose(&mut s);
+    assert_eq!(
+        s.composer.as_ref().unwrap().draft.local_id,
+        Some(crate::domain::DraftId(String::from("local-crash-1")))
+    );
+}
+
+#[test]
+fn restored_unconfirmed_drafts_autosave_after_startup() {
+    let mut s = state();
+    tick(&mut s, 0); // the clock is running
+    complete_restore(&mut s, vec![restored_draft("max@x.io", 5, 4)]);
+    // The debounce window elapses and the gap self-heals: a save of
+    // revision 5 starts without any user edit.
+    let (id, snapshot) = expect_save(&tick(&mut s, 2));
+    assert_eq!(snapshot.revision, 5);
+    assert_eq!(
+        snapshot.local_id,
+        crate::domain::DraftId(String::from("local-crash-1")),
+        "ids stay stable across the restart"
+    );
+    complete_save_ok(&mut s, id, snapshot.revision, "remote-new");
+    assert!(!s.composer.as_ref().unwrap().draft.is_dirty());
+}
+
+#[test]
+fn restore_is_skipped_when_a_composer_draft_already_exists() {
+    let mut s = state();
+    compose(&mut s);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    complete_restore(&mut s, vec![restored_draft("other@x.io", 9, 9)]);
+    assert_eq!(
+        s.composer.as_ref().unwrap().draft.to,
+        "x",
+        "live editing must never be clobbered"
+    );
+}
+
+#[test]
+fn an_empty_journal_restores_nothing() {
+    let mut s = state();
+    complete_restore(&mut s, Vec::new());
+    assert!(s.composer.is_none());
+}

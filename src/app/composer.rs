@@ -122,6 +122,28 @@ impl ComposerState {
         }
     }
 
+    /// Rebuild composer UI state around a draft (startup restore from the
+    /// journal, or reopening a preserved draft).
+    pub fn from_draft(draft: Draft) -> Self {
+        let body = TextArea::from(if draft.body.is_empty() {
+            vec![String::new()]
+        } else {
+            draft
+                .body
+                .split('\n')
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+        Self {
+            field: ComposerField::To,
+            cursor: draft.to.chars().count(),
+            show_cc: !draft.cc.is_empty(),
+            show_bcc: !draft.bcc.is_empty(),
+            body,
+            draft,
+        }
+    }
+
     /// Reveal and focus the Cc field (Enter on the Cc toggle).
     pub fn enter_cc(&mut self) {
         self.show_cc = true;

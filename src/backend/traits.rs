@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::app::operation::OperationId;
 use crate::domain::{
     DraftSnapshot, Mailbox, Message, MessageId, MessageLocator, MessageSummary, Page, PageRequest,
+    RestoredDraft,
 };
 
 /// Per-request context handed to every backend call (plan §8).
@@ -118,4 +119,14 @@ pub trait MailBackend: Send + Sync {
         ctx: RequestContext,
         draft: DraftSnapshot,
     ) -> BackendResult<MessageId>;
+
+    /// Restore drafts from the crash-safe journal (ADR 0002 §D.5, plan §19
+    /// Phase 6 crash/restart acceptance): purely local, so it succeeds
+    /// even when the account is unreachable.
+    async fn load_drafts(&self, ctx: RequestContext) -> BackendResult<Vec<RestoredDraft>>;
+
+    /// Delete a draft everywhere (confirmed discard, plan §14): remove the
+    /// journal entry, then best-effort delete every remote copy matching
+    /// the draft's identity (two-phase, ADR 0002 §D.4).
+    async fn delete_draft(&self, ctx: RequestContext, draft: DraftSnapshot) -> BackendResult<()>;
 }

@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::{
     DraftSnapshot, Mailbox, Message, MessageId, MessageLocator, MessageSummary, Page, PageRequest,
+    RestoredDraft,
 };
 
 /// Opaque identifier carried by every backend request and result (plan §5:
@@ -60,6 +61,12 @@ pub enum OperationKind {
     /// revision saved, so a stale success can be detected and re-saved.
     /// Boxed: full draft payloads must not bloat every operation kind.
     SaveDraft { draft: Box<DraftSnapshot> },
+    /// Restore drafts from the crash-safe journal at startup (ADR 0002
+    /// §D.5).
+    LoadDrafts,
+    /// Delete a draft everywhere (journal + remote) after a confirmed
+    /// discard (plan §14). Boxed snapshot, as with `SaveDraft`.
+    DeleteDraft { draft: Box<DraftSnapshot> },
 }
 
 impl OperationKind {
@@ -76,6 +83,8 @@ impl OperationKind {
             OperationKind::Archive(_) => "Archiving",
             OperationKind::Trash(_) => "Moving to trash",
             OperationKind::SaveDraft { .. } => "Saving draft",
+            OperationKind::LoadDrafts => "Restoring drafts",
+            OperationKind::DeleteDraft { .. } => "Discarding draft",
         }
     }
 
@@ -111,10 +120,16 @@ impl OperationKind {
             ) => newer.id == older.id,
             // A newer save of the same draft supersedes an older one: only
             // the newest revision may ever be pushed (plan §14 coalescing,
-            // ADR 0002 §D.2).
+            // ADR 0002 §D.2). Restores and discards likewise supersede
+            // their own kind.
             (
                 OperationKind::SaveDraft { draft: newer },
                 OperationKind::SaveDraft { draft: older },
+            ) => newer.local_id == older.local_id,
+            (OperationKind::LoadDrafts, OperationKind::LoadDrafts) => true,
+            (
+                OperationKind::DeleteDraft { draft: newer },
+                OperationKind::DeleteDraft { draft: older },
             ) => newer.local_id == older.local_id,
             _ => false,
         }
@@ -145,6 +160,8 @@ pub enum OperationOutcome {
     DraftSaved {
         remote_id: MessageId,
     },
+    /// Drafts restored from the journal at startup (ADR 0002 §D.5).
+    Drafts(Vec<RestoredDraft>),
 }
 
 /// A failure ready for the Retry/Dismiss modal (plan §12). Built by the
@@ -288,6 +305,13 @@ impl OperationRegistry {
         self.entries
             .values()
             .any(|op| matches!(op.kind, OperationKind::LoadMailboxes))
+    }
+
+    /// Whether a journal restore is currently in flight.
+    pub fn is_loading_drafts(&self) -> bool {
+        self.entries
+            .values()
+            .any(|op| matches!(op.kind, OperationKind::LoadDrafts))
     }
 
     /// Whether nothing is in flight (spinner hidden).

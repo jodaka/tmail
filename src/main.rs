@@ -79,8 +79,11 @@ async fn run() -> anyhow::Result<()> {
     let manager = OperationManager::new(Arc::clone(&backend), result_tx);
 
     // Startup work flows through the same reducer path as everything else:
-    // with no mailboxes loaded yet, Refresh starts the mailbox listing.
+    // with no mailboxes loaded yet, Refresh starts the mailbox listing;
+    // LoadDrafts restores any crash-safe draft from the journal (plan §14).
     let effects = reducer::reduce(&mut state, &Action::Refresh);
+    launch(&manager, &state, effects);
+    let effects = reducer::reduce(&mut state, &Action::LoadDrafts);
     launch(&manager, &state, effects);
 
     loop {

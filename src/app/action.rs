@@ -63,6 +63,8 @@ pub enum Action {
     SubmitSearch,
     /// Composer text editing / caret movement (Phase 6).
     ComposerEdit(ComposerEdit),
+    /// Restore drafts from the crash-safe journal (startup, Phase 6).
+    LoadDrafts,
     Compose,
     Reply,
     ReplyAll,

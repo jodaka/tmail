@@ -41,8 +41,8 @@ impl FakeHimalaya {
     ///
     /// mailbox: `ok` | `error-json` | `error-stderr` | `slow`
     /// envelope: `ok` | `empty` | `partial` | `malformed` | `non-utf8`
-    ///           | `error-json` | `error-stderr` | `slow`
-    /// message (`read`/`move`/`delete`): `ok` | `error-json` | `slow`
+    ///           | `error-json` | `error-stderr` | `slow` | `draft-stray`
+    /// message (`read`/`move`/`delete`/`add`): `ok` | `error-json` | `slow`
     /// flag (`add`/`remove`): `ok` | `error-json` | `slow`
     pub fn spawn(mailbox_mode: &'static str, envelope_mode: &'static str) -> Self {
         Self::spawn_full(mailbox_mode, envelope_mode, "ok", "ok")
@@ -55,13 +55,25 @@ impl FakeHimalaya {
         message_mode: &'static str,
         flag_mode: &'static str,
     ) -> Self {
+        Self::spawn_script(mailbox_mode, envelope_mode, message_mode, flag_mode, SCRIPT)
+    }
+
+    /// The fake built from an explicit script body (custom envelope
+    /// fixtures for draft reconciliation tests).
+    pub fn spawn_script(
+        mailbox_mode: &'static str,
+        envelope_mode: &'static str,
+        message_mode: &'static str,
+        flag_mode: &'static str,
+        script_template: &str,
+    ) -> Self {
         let dir = TempDir::new().expect("temp dir");
         let program = dir.path().join("himalaya");
         let argv_log = dir.path().join("argv.log");
         let stdin_record = dir.path().join("stdin.record");
         let config = dir.path().join("config.toml");
 
-        let script = SCRIPT
+        let script = script_template
             .replace("@ARGV_LOG@", &argv_log.display().to_string())
             .replace("@STDIN_RECORD@", &stdin_record.display().to_string())
             .replace("@MAILBOX_MODE@", mailbox_mode)
@@ -121,6 +133,19 @@ impl FakeHimalaya {
     pub fn stdin_bytes(&self) -> Vec<u8> {
         fs::read(&self.stdin_record).unwrap_or_default()
     }
+
+    /// Poll until the fake has recorded `wanted` invocations (the draft
+    /// cleanup runs in detached tasks; tests wait for it explicitly).
+    pub fn wait_for_invocations(&self, wanted: usize) -> Option<Vec<Vec<String>>> {
+        for _ in 0..100 {
+            let argv = self.argv();
+            if argv.len() >= wanted {
+                return Some(argv);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        None
+    }
 }
 
 const SCRIPT: &str = r#"#!/usr/bin/env bash
@@ -130,11 +155,19 @@ ARGV_LOG="@ARGV_LOG@"
 STDIN_RECORD="@STDIN_RECORD@"
 
 # Exact argv record: NUL-separated args, one newline per invocation.
+# A mkdir critical section serializes concurrent appends (cleanup runs in
+# detached tasks); two appends each stay atomic under O_APPEND.
+while ! mkdir "$ARGV_LOG.lock" 2>/dev/null; do sleep 0.01; done
 printf '%s\0' "$@" >> "$ARGV_LOG"
 printf '\n' >> "$ARGV_LOG"
+rmdir "$ARGV_LOG.lock"
 
 # Read-only commands must receive no stdin; record whatever arrives.
-cat > "$STDIN_RECORD"
+# Appends: several invocations (draft save + detached cleanup) share the
+# log, and a null-stdin invocation must not truncate earlier records.
+while ! mkdir "$STDIN_RECORD.lock" 2>/dev/null; do sleep 0.01; done
+cat >> "$STDIN_RECORD"
+rmdir "$STDIN_RECORD.lock"
 
 # Identify the subcommand anywhere in argv (global flags like `-c` come
 # first on real invocations). For `message`, the operation is the word that
@@ -201,6 +234,12 @@ if [ "$SUB" = "envelope" ]; then
     error-stderr)
       printf '%s' 'boom' >&2
       exit 4
+      ;;
+    draft-stray)
+      # One stale draft copy whose Message-ID matches the contract tests'
+      # draft snapshot (<123.draft@post.local>), as reconciliation sweeps
+      # must find it.
+      printf '%s' '{"envelopes":[{"id":"stray-1","message-id":"123.draft@post.local","in-reply-to":[],"flags":[{"raw":"\\Draft","iana":"draft"}],"subject":"stale","from":[],"date":null}]}'
       ;;
     slow)
       # Long-running invocation for cancellation tests: hangs for 30s

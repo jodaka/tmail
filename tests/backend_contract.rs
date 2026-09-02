@@ -656,28 +656,35 @@ fn backend_with_journal(fake: &FakeHimalaya) -> (HimalayaCliBackend, TempDir) {
     (backend, dir)
 }
 
+/// Run `future` to completion, then yield for `quiet` so the adapter's
+/// detached cleanup tasks (spawned onto the same runtime) get their turn
+/// before the runtime shuts down.
+fn block_quiet<T>(future: impl Future<Output = T>, quiet_ms: u64) -> T {
+    Runtime::new().expect("runtime").block_on(async move {
+        let result = future.await;
+        tokio::time::sleep(std::time::Duration::from_millis(quiet_ms)).await;
+        result
+    })
+}
+
 #[test]
 fn save_draft_adds_with_draft_flag_and_pipes_the_message() {
     let fake = FakeHimalaya::spawn_ok();
     let (backend, dir) = backend_with_journal(&fake);
     let snapshot = draft_snapshot(3, None);
-    let remote = block(backend.save_draft(ctx(), snapshot.clone())).expect("save succeeds");
+    let remote =
+        block_quiet(backend.save_draft(ctx(), snapshot.clone()), 300).expect("save succeeds");
     assert_eq!(remote, MessageId(String::from("new-draft-1")));
+    // Detached cleanup runs after the result: wait for add + stray sweep list.
+    let argv = fake.wait_for_invocations(2).expect("cleanup recorded");
+    assert_eq!(argv.len(), 2, "nothing else may spawn: {argv:?}");
     assert_eq!(
-        fake.argv(),
-        vec![vec![
-            "-c".to_string(),
-            fake.config().display().to_string(),
-            "-a".to_string(),
-            "probe".to_string(),
-            "message".to_string(),
-            "add".to_string(),
-            "-m".to_string(),
-            "Drafts".to_string(),
-            "--flag".to_string(),
-            "draft".to_string(),
-            "--json".to_string(),
-        ]]
+        argv[0][5..],
+        ["add", "-m", "Drafts", "--flag", "draft", "--json"]
+    );
+    assert_eq!(
+        &argv[1][5..],
+        ["list", "-m", "Drafts", "-p", "1", "-s", "100", "--json"]
     );
     // The serialized RFC 5322 message travels on stdin: library-built
     // headers, the stable Message-ID, Post's draft metadata, and the body.
@@ -719,27 +726,61 @@ fn save_draft_adds_with_draft_flag_and_pipes_the_message() {
 fn save_draft_replaces_the_old_remote_only_after_confirm() {
     let fake = FakeHimalaya::spawn_ok();
     let (backend, _dir) = backend_with_journal(&fake);
-    block(backend.save_draft(ctx(), draft_snapshot(2, Some("old-1")))).expect("save succeeds");
-    let argv = fake.argv();
-    assert_eq!(argv.len(), 2, "add first, then the old-copy delete");
+    block_quiet(
+        backend.save_draft(ctx(), draft_snapshot(2, Some("old-1"))),
+        300,
+    )
+    .expect("save succeeds");
+    // `add` is awaited by the save; the old-copy delete and the stray
+    // sweep run detached (two tasks, order between them unspecified).
+    let argv = fake.wait_for_invocations(4).expect("cleanup recorded");
+    assert_eq!(
+        &argv[0][5..],
+        ["add", "-m", "Drafts", "--flag", "draft", "--json"]
+    );
+    let mut rest = argv[1..]
+        .iter()
+        .map(|inv| inv[5..].to_vec())
+        .collect::<Vec<_>>();
+    rest.sort();
+    assert_eq!(
+        rest,
+        vec![
+            vec!["delete", "-m", "Drafts", "old-1", "--json"],
+            vec!["list", "-m", "Archive", "-p", "1", "-s", "100", "--json"],
+            vec!["list", "-m", "Drafts", "-p", "1", "-s", "100", "--json"],
+        ]
+    );
+}
+
+#[test]
+fn save_draft_sweeps_stray_copies_by_message_id_two_phase() {
+    // The envelope listing reports a stale copy of this draft's Message-ID
+    // ("123.draft@post.local"): the sweep must delete it from Drafts and
+    // then purge it from trash (ADR 0002 §D.4/§D.5).
+    let fake = FakeHimalaya::spawn_full("ok", "draft-stray", "ok", "ok");
+    let (backend, _dir) = backend_with_journal(&fake);
+    block_quiet(backend.save_draft(ctx(), draft_snapshot(1, None)), 300).expect("save succeeds");
+    let argv = fake.wait_for_invocations(5).expect("sweep recorded");
     assert_eq!(
         &argv[0][5..],
         ["add", "-m", "Drafts", "--flag", "draft", "--json"]
     );
     assert_eq!(
-        argv[1],
-        vec![
-            "-c".to_string(),
-            fake.config().display().to_string(),
-            "-a".to_string(),
-            "probe".to_string(),
-            "message".to_string(),
-            "delete".to_string(),
-            "-m".to_string(),
-            "Drafts".to_string(),
-            "old-1".to_string(),
-            "--json".to_string(),
-        ]
+        &argv[1][5..],
+        ["list", "-m", "Drafts", "-p", "1", "-s", "100", "--json"]
+    );
+    assert_eq!(
+        &argv[2][5..],
+        ["delete", "-m", "Drafts", "stray-1", "--json"]
+    );
+    assert_eq!(
+        &argv[3][5..],
+        ["list", "-m", "Archive", "-p", "1", "-s", "100", "--json"]
+    );
+    assert_eq!(
+        &argv[4][5..],
+        ["delete", "-m", "Archive", "stray-1", "--json"]
     );
 }
 

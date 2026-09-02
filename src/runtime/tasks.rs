@@ -100,6 +100,24 @@ async fn run_effect(
             Ok(remote_id) => Some(Ok(OperationOutcome::DraftSaved { remote_id })),
             Err(err) => operation_failure(&effect, err).map(Err),
         },
+        OperationKind::LoadDrafts => match backend.load_drafts(ctx).await {
+            Ok(drafts) => Some(Ok(OperationOutcome::Drafts(drafts))),
+            Err(err) => operation_failure(&effect, err).map(Err),
+        },
+        OperationKind::DeleteDraft { .. } => {
+            match backend.delete_draft(ctx, effect_draft(&effect)).await {
+                Ok(()) => Some(Ok(OperationOutcome::Done)),
+                Err(err) => operation_failure(&effect, err).map(Err),
+            }
+        }
+    }
+}
+
+/// The snapshot carried by a delete-draft effect.
+fn effect_draft(effect: &Effect) -> crate::domain::DraftSnapshot {
+    match &effect.kind {
+        OperationKind::DeleteDraft { draft } => (**draft).clone(),
+        other => unreachable!("effect_draft on non-delete kind: {other:?}"),
     }
 }
 
@@ -164,6 +182,8 @@ mod tests {
         messages_delay: Duration,
         /// `(exit code, detail)` of a failed command.
         error: Option<(Option<i32>, String)>,
+        /// Journal-restored drafts for `load_drafts`.
+        drafts: Vec<crate::domain::RestoredDraft>,
     }
 
     impl FakeBackend {
@@ -172,6 +192,7 @@ mod tests {
                 mailboxes_delay: Duration::ZERO,
                 messages_delay: Duration::ZERO,
                 error: None,
+                drafts: Vec::new(),
             }
         }
 
@@ -180,6 +201,7 @@ mod tests {
                 mailboxes_delay: Duration::ZERO,
                 messages_delay: Duration::ZERO,
                 error: Some((code, String::from(detail))),
+                drafts: Vec::new(),
             }
         }
     }
@@ -269,6 +291,21 @@ mod tests {
             // Fake confirmation; failures come from the error injection.
             Ok(MessageId(format!("remote-{}", draft.revision)))
         }
+
+        async fn load_drafts(
+            &self,
+            _req: RequestContext,
+        ) -> BackendResult<Vec<crate::domain::RestoredDraft>> {
+            Ok(self.drafts.clone())
+        }
+
+        async fn delete_draft(
+            &self,
+            _req: RequestContext,
+            _draft: crate::domain::DraftSnapshot,
+        ) -> BackendResult<()> {
+            Ok(())
+        }
     }
 
     fn manager(
@@ -307,6 +344,7 @@ mod tests {
             mailboxes_delay: Duration::from_millis(400),
             messages_delay: Duration::ZERO,
             error: None,
+            drafts: Vec::new(),
         });
         let (manager, mut rx) = manager(backend);
         let (slow, slow_token) = effect(OperationKind::LoadMailboxes);
@@ -330,6 +368,7 @@ mod tests {
             mailboxes_delay: Duration::from_secs(30),
             messages_delay: Duration::ZERO,
             error: None,
+            drafts: Vec::new(),
         });
         let (manager, mut rx) = manager(backend);
         let (effect, token) = effect(OperationKind::LoadMailboxes);

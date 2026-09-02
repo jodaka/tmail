@@ -94,6 +94,16 @@ pub struct DraftSnapshot {
     pub revision: u64,
 }
 
+/// A draft restored from the journal at startup (ADR 0002 §D.5): the
+/// newest recorded revision plus how far the remote had confirmed before
+/// the interruption. A gap between them means the restored draft re-pushes
+/// itself (self-healing autosave) once the composer reopens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoredDraft {
+    pub draft: DraftSnapshot,
+    pub saved_revision: u64,
+}
+
 impl Draft {
     /// Whether unsaved edits exist (`revision > saved_revision`).
     pub fn is_dirty(&self) -> bool {

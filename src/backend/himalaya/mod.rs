@@ -24,7 +24,7 @@ use crate::backend::traits::{BackendError, BackendResult, MailBackend, RequestCo
 use crate::config::Config;
 use crate::domain::{
     DraftSnapshot, Mailbox, MailboxRole, Message, MessageId, MessageLocator, MessageSummary, Page,
-    PageRequest,
+    PageRequest, RestoredDraft,
 };
 
 /// Drives the `himalaya` executable with argv-only child processes.
@@ -264,24 +264,16 @@ impl MailBackend for HimalayaCliBackend {
         let new_id = MessageId(added.id);
 
         // 4. Only after the new copy is confirmed: best-effort deletion of
-        //    the previous remote copy (ADR 0002 §D.3/§D.4 — failure here
-        //    leaves a duplicate, never data loss; reconciliation is
-        //    opportunistic).
+        //    every previous remote copy (ADR 0002 §D.3/§D.4 — failure here
+        //    leaves a duplicate, never data loss). The known previous id
+        //    is deleted explicitly; a sweep by the stable Message-ID then
+        //    removes any stray copies (e.g. from a crash mid-replacement).
         if let Some(old) = draft.remote_id.as_ref()
             && old != &new_id
         {
-            let argv = command::message_delete_argv(
-                self.config_path.as_deref(),
-                self.account.as_deref(),
-                &drafts,
-                &old.0,
-            );
-            if let Err(err) = process::run(&self.program, &argv, &ctx.cancellation).await
-                && !matches!(err, BackendError::Cancelled)
-            {
-                tracing::warn!(old = %old.0, %err, "old draft copy could not be deleted");
-            }
+            self.delete_draft_copy(&ctx, &drafts, &old.0, &draft.message_id);
         }
+        self.delete_stray_draft_copies(&ctx, &drafts, Some(&new_id), &draft.message_id);
 
         // 5. Confirm the revision in the journal (newest pushed).
         self.journal
@@ -289,6 +281,35 @@ impl MailBackend for HimalayaCliBackend {
             .map_err(BackendError::Io)?;
 
         Ok(new_id)
+    }
+
+    async fn load_drafts(&self, _ctx: RequestContext) -> BackendResult<Vec<RestoredDraft>> {
+        tracing::debug!("load_drafts");
+        // Purely local (ADR 0002 §D.1): the journal is the source of truth
+        // for restore, independent of account reachability.
+        Ok(self
+            .journal
+            .load_all()?
+            .into_iter()
+            .map(|entry| RestoredDraft {
+                draft: entry.draft,
+                saved_revision: entry.saved_revision,
+            })
+            .collect())
+    }
+
+    async fn delete_draft(&self, ctx: RequestContext, draft: DraftSnapshot) -> BackendResult<()> {
+        tracing::debug!(local_id = %draft.local_id.0, "delete_draft");
+        // The user confirmed the discard: journal first (worst case after a
+        // crash is a lingering remote copy, never a resurrected draft).
+        self.journal.remove(&draft.local_id.0)?;
+        if let Some(drafts) = self.mailbox_for_role(MailboxRole::Drafts) {
+            if let Some(old) = draft.remote_id.as_ref() {
+                self.delete_draft_copy(&ctx, &drafts, &old.0, &draft.message_id);
+            }
+            self.delete_stray_draft_copies(&ctx, &drafts, None, &draft.message_id);
+        }
+        Ok(())
     }
 }
 
@@ -354,6 +375,97 @@ impl HimalayaCliBackend {
             MailboxRole::Spam => "junk",
         };
         self.aliases.get(alias_key).cloned()
+    }
+
+    /// Best-effort deletion of one remote copy from `mailbox` (ADR 0002
+    /// §D.4): `message delete` is trash-first, so a copy deleted elsewhere
+    /// lands in the trash mailbox under a NEW backend id; locate it there
+    /// by the stable `Message-ID` and delete again for permanent removal.
+    /// Spawned detached so cleanup never delays the save result; every
+    /// failure is logged and swallowed — a leftover copy is always
+    /// preferable to risking data loss.
+    fn delete_draft_copy(
+        &self,
+        ctx: &RequestContext,
+        mailbox: &str,
+        id: &str,
+        message_id: &Option<String>,
+    ) {
+        let trash = self.mailbox_for_role(MailboxRole::Trash);
+        spawn_draft_cleanup(
+            Cli {
+                program: self.program.clone(),
+                config: self.config_path.clone(),
+                account: self.account.clone(),
+            },
+            CleanupTarget {
+                mailbox: mailbox.to_string(),
+                id: id.to_string(),
+                message_id: message_id.clone(),
+            },
+            trash,
+            ctx.clone(),
+        );
+    }
+
+    /// Remove every remote copy of a draft (matched by its stable
+    /// `Message-ID`) from the Drafts mailbox except `keep` — the
+    /// reconciliation sweep for copies orphaned by a crash mid-replacement
+    /// (ADR 0002 §D.5). Best-effort; `envelope list` is requested with a
+    /// generous page (v1 drafts are few).
+    fn delete_stray_draft_copies(
+        &self,
+        ctx: &RequestContext,
+        drafts_mailbox: &str,
+        keep: Option<&MessageId>,
+        message_id: &Option<String>,
+    ) {
+        let Some(message_id) = message_id else {
+            return;
+        };
+        let cli = Cli {
+            program: self.program.clone(),
+            config: self.config_path.clone(),
+            account: self.account.clone(),
+        };
+        let trash = self.mailbox_for_role(MailboxRole::Trash);
+        let drafts_mailbox = drafts_mailbox.to_string();
+        let keep = keep.map(|id| id.0.clone());
+        let message_id = message_id.clone();
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            let argv = command::envelope_list_argv(
+                cli.config.as_deref(),
+                cli.account.as_deref(),
+                &drafts_mailbox,
+                1,
+                100,
+            );
+            let Ok(output) = process::run(&cli.program, &argv, &ctx.cancellation).await else {
+                return;
+            };
+            let Ok(listed) = process::decode::<dto::EnvelopesDto>(output) else {
+                return;
+            };
+            let bare = message_id.trim_start_matches('<').trim_end_matches('>');
+            for envelope in listed.envelopes {
+                if envelope.message_id.as_deref() != Some(bare)
+                    || keep.as_deref() == Some(envelope.id.as_str())
+                {
+                    continue;
+                }
+                tracing::info!(id = %envelope.id, "deleting stray draft copy");
+                run_two_phase_delete(
+                    &cli,
+                    &drafts_mailbox,
+                    trash.as_deref(),
+                    &envelope.id,
+                    &message_id,
+                    &ctx.cancellation,
+                )
+                .await;
+            }
+        });
     }
 
     /// Serialize one draft revision as a single-part `text/plain` RFC 5322
@@ -429,5 +541,99 @@ impl HimalayaCliBackend {
             .map_err(|err| {
                 BackendError::InvalidRequest(format!("draft serialization failed: {err}"))
             })
+    }
+}
+
+/// One remote draft copy to clean up.
+struct CleanupTarget {
+    mailbox: String,
+    id: String,
+    message_id: Option<String>,
+}
+
+/// Spawn a detached best-effort cleanup: delete one copy from its mailbox,
+/// then purge the copy the trash-first delete parked in the trash mailbox
+/// (ADR 0002 §D.4). Failures are logged, never propagated.
+fn spawn_draft_cleanup(
+    cli: Cli,
+    target: CleanupTarget,
+    trash: Option<String>,
+    ctx: RequestContext,
+) {
+    tokio::spawn(async move {
+        run_two_phase_delete(
+            &cli,
+            &target.mailbox,
+            trash.as_deref(),
+            &target.id,
+            target.message_id.as_deref().unwrap_or_default(),
+            &ctx.cancellation,
+        )
+        .await;
+    });
+}
+
+/// Grouped CLI identity for the detached cleanup helpers, so the delete
+/// calls stay under clippy's argument budget and read as one unit.
+struct Cli {
+    program: String,
+    config: Option<PathBuf>,
+    account: Option<String>,
+}
+
+/// The two-phase delete for one copy: delete in `mailbox`, then locate the
+/// moved copy in the trash mailbox by `Message-ID` and delete again
+/// (maildir renames give it a new id; only the Message-ID survives the
+/// move, ADR 0002 §D.6). Skips phase 2 when the copy already lived in
+/// trash (the first delete removed it outright).
+async fn run_two_phase_delete(
+    cli: &Cli,
+    mailbox: &str,
+    trash: Option<&str>,
+    id: &str,
+    message_id: &str,
+    cancellation: &tokio_util::sync::CancellationToken,
+) {
+    let argv =
+        command::message_delete_argv(cli.config.as_deref(), cli.account.as_deref(), mailbox, id);
+    if let Err(err) = process::run(&cli.program, &argv, cancellation).await {
+        if !matches!(err, BackendError::Cancelled) {
+            tracing::warn!(old = %id, mailbox, %err, "draft copy could not be deleted");
+        }
+        return;
+    }
+    let Some(trash) = trash.filter(|trash| *trash != mailbox) else {
+        return;
+    };
+    if message_id.is_empty() {
+        tracing::warn!(old = %id, "no Message-ID; trashed draft copy cannot be located");
+        return;
+    }
+    let argv =
+        command::envelope_list_argv(cli.config.as_deref(), cli.account.as_deref(), trash, 1, 100);
+    let Ok(output) = process::run(&cli.program, &argv, cancellation).await else {
+        return;
+    };
+    let Ok(listed) = process::decode::<dto::EnvelopesDto>(output) else {
+        return;
+    };
+    let bare = message_id.trim_start_matches('<').trim_end_matches('>');
+    for envelope in listed.envelopes {
+        if envelope.message_id.as_deref() != Some(bare) {
+            continue;
+        }
+        let argv = command::message_delete_argv(
+            cli.config.as_deref(),
+            cli.account.as_deref(),
+            trash,
+            &envelope.id,
+        );
+        match process::run(&cli.program, &argv, cancellation).await {
+            Ok(_) => tracing::debug!(id = %envelope.id, "trashed draft copy purged"),
+            Err(err) if !matches!(err, BackendError::Cancelled) => {
+                tracing::warn!(id = %envelope.id, %err, "trashed draft copy could not be purged");
+            }
+            Err(_) => {}
+        }
     }
 }
