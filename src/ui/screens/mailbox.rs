@@ -34,8 +34,18 @@ pub fn render(
     let (head, rows) = crate::ui::layout::split_list(area);
     render_head(frame, head, state, theme);
 
+    // Draw from the reducer-maintained scroll anchor so the selected row is
+    // always on screen regardless of movement, page loads, or resize
+    // (Phase 2 acceptance).
     let bottom = area.y + area.height;
-    for (y, (i, message)) in (rows.y..).zip(state.messages.items.iter().enumerate()) {
+    for (y, (i, message)) in (rows.y..).zip(
+        state
+            .messages
+            .items
+            .iter()
+            .enumerate()
+            .skip(state.list_scroll),
+    ) {
         if y >= bottom {
             break;
         }

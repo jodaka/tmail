@@ -1,0 +1,144 @@
+//! Child-process handling for the Himalaya CLI (ADR 0001 decision 2).
+//!
+//! Every invocation uses `tokio::process::Command` with argv arrays only —
+//! never a shell string — with stdout/stderr piped and drained by dedicated
+//! tasks so a full pipe can never deadlock. `kill_on_drop(true)` is set now;
+//! explicit SIGKILL-on-cancel arrives with the Phase 3 operation manager
+//! (the proven pattern lives in `src/bin/probe.rs`).
+
+use std::process::Stdio;
+
+use serde::de::DeserializeOwned;
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
+
+use crate::backend::traits::{BackendError, BackendResult};
+
+/// Raw result of one child process run.
+pub(crate) struct ChildOutput {
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// Run `program args` capturing stdout/stderr separately. stdin is null:
+/// Phase 2 operations are read-only; stdin piping arrives with the composer
+/// phases (plan §14/§7).
+pub(crate) async fn run(program: &str, args: &[String]) -> BackendResult<ChildOutput> {
+    tracing::debug!(program, args = ?args, "spawning himalaya");
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    // Drain pipes from separate tasks so a chatty child can never block us.
+    let stdout_task = child.stdout.take().map(|mut pipe| {
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            pipe.read_to_end(&mut buf).await?;
+            Ok::<_, std::io::Error>(buf)
+        })
+    });
+    let stderr_task = child.stderr.take().map(|mut pipe| {
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            pipe.read_to_end(&mut buf).await?;
+            Ok::<_, std::io::Error>(buf)
+        })
+    });
+
+    let status = child.wait().await?;
+    let stdout = match stdout_task {
+        Some(task) => join_reader(task).await?,
+        None => Vec::new(),
+    };
+    let stderr = match stderr_task {
+        Some(task) => join_reader(task).await?,
+        None => Vec::new(),
+    };
+    Ok(ChildOutput {
+        code: status.code(),
+        stdout,
+        stderr,
+    })
+}
+
+/// Await one pipe-reader task; a panicked reader is surfaced as I/O.
+async fn join_reader(
+    task: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
+) -> BackendResult<Vec<u8>> {
+    let bytes = task.await.unwrap_or_else(|join| {
+        Err(std::io::Error::other(format!(
+            "output reader failed: {join}"
+        )))
+    })?;
+    Ok(bytes)
+}
+
+/// Decode one successful child run into the expected DTO (ADR 0001 finding
+/// 1: exit status is authoritative; stdout is JSON in both success and
+/// error cases). Non-zero exits become [`BackendError::Command`], and any
+/// parse failure — including truncated or non-UTF-8 output — becomes a
+/// non-panicking [`BackendError::InvalidOutput`].
+pub(crate) fn decode<T: DeserializeOwned>(output: ChildOutput) -> BackendResult<T> {
+    if output.code != Some(0) {
+        return Err(command_error(&output));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|err| {
+        BackendError::InvalidOutput(format!(
+            "invalid JSON ({}): {:?}",
+            err,
+            snippet(&output.stdout)
+        ))
+    })
+}
+
+/// Build the error for a non-zero exit. Prefers the JSON error object on
+/// stdout (ADR 0001 finding 1), then stderr, then a generic note.
+fn command_error(output: &ChildOutput) -> BackendError {
+    let detail = detail_from_stdout_json(&output.stdout)
+        .or_else(|| nonempty_lossy(&output.stderr))
+        .unwrap_or_else(|| "no diagnostic output".to_string());
+    BackendError::Command {
+        code: output.code,
+        detail,
+    }
+}
+
+/// Extract `{"error": …, "sources": […]}` text from stdout, if present.
+fn detail_from_stdout_json(stdout: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(stdout).ok()?;
+    let mut detail = value
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)?;
+    if let Some(sources) = value.get("sources").and_then(serde_json::Value::as_array) {
+        let sources: Vec<&str> = sources
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        if !sources.is_empty() {
+            detail.push_str(&format!(" ({})", sources.join("; ")));
+        }
+    }
+    Some(detail)
+}
+
+fn nonempty_lossy(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// Lossy, bounded preview for error messages; never panics on bad bytes.
+fn snippet(bytes: &[u8]) -> String {
+    const MAX: usize = 200;
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX)]);
+    if bytes.len() > MAX {
+        format!("{text}…")
+    } else {
+        text.into_owned()
+    }
+}

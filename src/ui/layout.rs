@@ -71,6 +71,27 @@ pub fn split_list(area: Rect) -> (Rect, Rect) {
     (head, rows)
 }
 
+/// Height of the message-list row area for a terminal `size`, computed with
+/// the exact same layout functions the renderer uses. The reducer consumes
+/// this to keep the selection on screen across movement, page loads, and
+/// resize (Phase 2 acceptance); `0` means the list is not drawn at all.
+pub fn message_rows_visible(size: (u16, u16)) -> usize {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: size.0,
+        height: size.1,
+    };
+    let mode = mode_for(area.width, area.height);
+    if mode == LayoutMode::TooSmall {
+        return 0;
+    }
+    let (_, body, _) = split_vertical(area);
+    let (_, list) = split_body(mode, body);
+    let (_, rows) = split_list(list);
+    rows.height as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +111,15 @@ mod tests {
         assert_eq!(mode_for(152, 19), LayoutMode::TooSmall);
         assert_eq!(mode_for(80, 15), LayoutMode::TooSmall);
         assert_eq!(mode_for(0, 0), LayoutMode::TooSmall);
+    }
+
+    #[test]
+    fn message_rows_visible_matches_chrome_budget() {
+        // 40 rows − topbar 4 − statusbar 3 − list head 2 = 31.
+        assert_eq!(message_rows_visible((152, 40)), 31);
+        // Mode does not change the row height, only the sidebar width.
+        assert_eq!(message_rows_visible((100, 30)), 21);
+        // Too small renders no list.
+        assert_eq!(message_rows_visible((80, 15)), 0);
     }
 }

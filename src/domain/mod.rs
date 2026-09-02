@@ -10,4 +10,4 @@ pub mod page;
 pub use address::Address;
 pub use mailbox::{Mailbox, MailboxId, MailboxRole};
 pub use message::{MessageId, MessageSummary};
-pub use page::Page;
+pub use page::{Page, PageRequest};

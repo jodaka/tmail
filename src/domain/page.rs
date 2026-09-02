@@ -1,3 +1,15 @@
+use super::mailbox::MailboxId;
+
+/// An explicit page request against one mailbox (plan §7). `offset` is
+/// 0-based and `limit` is the fixed page size; the Himalaya adapter maps
+/// this onto its 1-based `-p`/`-s` flags (ADR 0001 finding 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageRequest {
+    pub mailbox_id: MailboxId,
+    pub offset: usize,
+    pub limit: usize,
+}
+
 /// An explicitly paginated slice of items (plan §7).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page<T> {
@@ -23,12 +35,15 @@ impl<T> Page<T> {
         self.offset > 0
     }
 
-    /// Whether a next page exists. Requires a known total; without one the
-    /// UI must not guess (plan §16 degrade path).
+    /// Whether a next page exists. With a known total this is exact; without
+    /// one (maildir, ADR 0001 finding 2) a *full* page is assumed to have a
+    /// successor — asking for the next page then either yields more items or
+    /// a valid empty page, and the UI degrades to next-availability instead
+    /// of a total (plan §16).
     pub fn has_next(&self) -> bool {
         match self.total {
             Some(total) => self.offset + self.items.len() < total,
-            None => false,
+            None => self.items.len() == self.limit,
         }
     }
 
@@ -72,7 +87,13 @@ mod tests {
         p.items = vec![0u8; 12];
         assert!(p.has_previous());
         assert!(!p.has_next());
+        // Unknown total (maildir): a full page may have a successor, a short
+        // page is the last one.
         let unknown = page(20, None);
-        assert!(!unknown.has_next());
+        assert!(unknown.has_next());
+        let unknown_last = page(5, None);
+        assert!(!unknown_last.has_next());
+        let unknown_empty = page(0, None);
+        assert!(!unknown_empty.has_next());
     }
 }

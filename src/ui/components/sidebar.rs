@@ -49,25 +49,56 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
         rows.compose,
     );
 
-    // Mailbox list.
-    if let Some(mailboxes) = state.mailboxes.as_loaded() {
-        let active_id = state.active_route().and_then(|r| r.mailbox_id().cloned());
-        let bottom = area.y + area.height;
-        for (y, (i, mailbox)) in (rows.folders.y..).zip(mailboxes.iter().enumerate()) {
-            if y >= bottom {
-                break;
+    // Mailbox list: backend-driven since Phase 2, so all loadable states
+    // render safely (plan §16: empty results are valid).
+    match &state.mailboxes {
+        crate::app::state::Loadable::Loaded(mailboxes) if !mailboxes.is_empty() => {
+            let active_id = state.active_route().and_then(|r| r.mailbox_id().cloned());
+            let bottom = area.y + area.height;
+            for (y, (i, mailbox)) in (rows.folders.y..).zip(mailboxes.iter().enumerate()) {
+                if y >= bottom {
+                    break;
+                }
+                let is_active = Some(&mailbox.id) == active_id.as_ref();
+                let cursor = state.focus == Focus::Sidebar && i == state.mailbox_selection;
+                let row_area = Rect {
+                    x: area.x,
+                    y,
+                    width: area.width,
+                    height: 1,
+                };
+                render_folder_row(frame, row_area, state, theme, mailbox, is_active, cursor);
             }
-            let is_active = Some(&mailbox.id) == active_id.as_ref();
-            let cursor = state.focus == Focus::Sidebar && i == state.mailbox_selection;
-            let row_area = Rect {
-                x: area.x,
-                y,
-                width: area.width,
-                height: 1,
-            };
-            render_folder_row(frame, row_area, state, theme, mailbox, is_active, cursor);
+        }
+        crate::app::state::Loadable::Loaded(_) => {
+            render_note(frame, rows.folders, theme, "(no mailboxes)")
+        }
+        crate::app::state::Loadable::Loading => {
+            render_note(frame, rows.folders, theme, "loading mailboxes…")
+        }
+        crate::app::state::Loadable::Failed(_) => {
+            render_note(frame, rows.folders, theme, "mailboxes unavailable")
         }
     }
+}
+
+/// A dim one-line placeholder for the mailbox list area.
+fn render_note(frame: &mut Frame<'_>, area: Rect, theme: &Theme, note: &str) {
+    if area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            text::clip(note, area.width as usize),
+            Style::new().fg(theme.dim),
+        )),
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        },
+    );
 }
 
 fn render_folder_row(

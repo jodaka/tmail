@@ -12,6 +12,9 @@ pub struct MessageId(pub String);
 pub struct MessageSummary {
     pub id: MessageId,
     pub mailbox_id: MailboxId,
+    /// RFC `Message-ID` header value when the backend surfaces it. This is
+    /// the only identity that survives message moves (ADR 0001 finding 4).
+    pub message_id: Option<String>,
     pub from: Vec<Address>,
     pub subject: String,
     /// Not available from `envelope list` on maildir (ADR 0001 finding 2);

@@ -1,12 +1,11 @@
-//! Application state (plan §9) — Phase 1 subset.
+//! Application state (plan §9) — Phase 2 subset.
 //!
 //! `operations: OperationRegistry` and `overlay: Option<Overlay>` arrive with
-//! Phase 3; `config: PostConfig` with the config work. Everything here is
-//! plain data mutated only by the reducer.
+//! Phase 3. Everything here is plain data mutated only by the reducer.
 
 use crate::app::focus::Focus;
-use crate::app::route::{MailboxRoute, Route};
-use crate::domain::{Mailbox, MailboxId, MessageSummary, Page};
+use crate::app::route::Route;
+use crate::domain::{Mailbox, MessageSummary, Page, PageRequest};
 
 /// Async load lifecycle for backend-fed collections (mock-fed in Phase 1).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +49,14 @@ pub struct AppState {
     pub messages: Page<MessageSummary>,
     /// Index into `messages.items`; always valid or the list is empty.
     pub selection: usize,
+    /// First row of `messages.items` currently drawn, kept by the reducer so
+    /// the selection always stays on screen across movement and resize
+    /// (Phase 2 acceptance).
+    pub list_scroll: usize,
+    /// The page request currently in flight. A result is applied only when
+    /// it still matches, so a slow older fetch can never overwrite a newer
+    /// one; the Phase 3 operation registry supersedes this scalar guard.
+    pub pending_page: Option<PageRequest>,
     pub search_query: String,
     pub focus: Focus,
     /// Last known terminal size; drives the responsive layout (plan §18).
@@ -61,17 +68,18 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn initial(mailboxes: Vec<Mailbox>, messages: Page<MessageSummary>) -> Self {
-        let mailbox_id = mailboxes
-            .first()
-            .map(|m| m.id.clone())
-            .unwrap_or(MailboxId(String::from("inbox")));
+    /// Fresh startup state: nothing loaded, no route yet. Mailboxes and the
+    /// first page arrive via backend results (`MailboxesLoaded` selects the
+    /// Inbox or first usable mailbox).
+    pub fn initial(page_size: usize) -> Self {
         Self {
-            routes: vec![Route::Mailbox(MailboxRoute { mailbox_id })],
-            mailboxes: Loadable::Loaded(mailboxes),
+            routes: Vec::new(),
+            mailboxes: Loadable::Loading,
             mailbox_selection: 0,
-            messages,
+            messages: Page::empty(page_size.max(1)),
             selection: 0,
+            list_scroll: 0,
+            pending_page: None,
             search_query: String::new(),
             focus: Focus::MessageList,
             size: (152, 40),

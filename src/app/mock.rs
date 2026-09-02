@@ -1,14 +1,17 @@
-//! Mock/fake data for Phase 1 (plan §19 Phase 1: no Himalaya calls yet).
+//! Mock/fake data for deterministic tests and snapshots (plan §20: UI
+//! snapshots inject fixed data).
 //!
 //! Content mirrors `mockups/list.html` so visual checks compare directly.
 //! All timestamps are fixed constants, which keeps rendering and snapshots
-//! deterministic when tests inject a fixed `now`.
+//! deterministic when tests inject a fixed `now`. The live app no longer
+//! consumes mock data — it runs on the real backend since Phase 2.
 
+use crate::app::route::{MailboxRoute, Route};
+use crate::app::state::{AppState, Loadable};
 use crate::domain::{Address, Mailbox, MailboxId, MailboxRole, MessageId, MessageSummary, Page};
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 
-/// Page size used while the real config does not exist yet (plan §17
-/// default).
+/// Page size used by the mock fixtures (plan §17 default).
 pub const PAGE_SIZE: usize = 20;
 
 const TZ_PLUS_3: FixedOffset = match FixedOffset::east_opt(3 * 3600) {
@@ -104,6 +107,7 @@ fn inbox_seed() -> Vec<MessageSummary> {
                starred: bool| MessageSummary {
         id: mid(id_),
         mailbox_id: MailboxId(String::from("inbox")),
+        message_id: None,
         from: vec![from],
         subject: String::from(subject),
         snippet: snippet.map(String::from),
@@ -245,6 +249,7 @@ fn inbox_filler(existing: usize, wanted: usize) -> Vec<MessageSummary> {
         .map(|i| MessageSummary {
             id: MessageId(format!("m{}", i + 1)),
             mailbox_id: MailboxId(String::from("inbox")),
+            message_id: None,
             from: vec![addr(
                 senders[i % senders.len()].0,
                 senders[i % senders.len()].1,
@@ -264,6 +269,7 @@ fn small_mailbox(mailbox: &str, count: usize) -> Vec<MessageSummary> {
         .map(|i| MessageSummary {
             id: MessageId(format!("{mailbox}-{i}")),
             mailbox_id: MailboxId(String::from(mailbox)),
+            message_id: None,
             from: vec![addr("Post Probe", "probe@post.local")],
             subject: format!("{mailbox} message {}", i + 1),
             snippet: None,
@@ -306,12 +312,17 @@ pub fn mock_page(mailbox_id: &MailboxId, offset: usize, limit: usize) -> Page<Me
     }
 }
 
-/// State fixture: mailboxes + first page of Inbox.
+/// State fixture: mailboxes loaded, Inbox selected, first page in place —
+/// as a backend-driven session looks once startup results have applied.
 pub fn mock_initial_state() -> crate::app::state::AppState {
-    crate::app::state::AppState::initial(
-        mock_mailboxes(),
-        mock_page(&MailboxId(String::from("inbox")), 0, PAGE_SIZE),
-    )
+    let mut state = AppState::initial(PAGE_SIZE);
+    state.mailboxes = Loadable::Loaded(mock_mailboxes());
+    state.routes = vec![Route::Mailbox(MailboxRoute {
+        mailbox_id: MailboxId(String::from("inbox")),
+    })];
+    state.mailbox_selection = 0;
+    state.messages = mock_page(&MailboxId(String::from("inbox")), 0, PAGE_SIZE);
+    state
 }
 
 #[cfg(test)]

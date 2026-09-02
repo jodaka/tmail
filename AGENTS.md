@@ -1,15 +1,15 @@
 ## Rust development
 
-This project uses the standard Rust toolchain.
+This project uses the standard Rust toolchain. Document code using comments.
 
 ### Required checks
 
 After modifying Rust code:
 
-- Run cargo fmt --all.
-- Run cargo check --all-targets --all-features.
-- Run cargo clippy --all-targets --all-features -- -D warnings.
-- Run cargo test --all-features.
+- Run `cargo fmt --all`
+- Run `cargo check --all-targets --all-features`
+- Run `cargo clippy --all-targets --all-features -- -D warnings`
+- Run `cargo test --all-features`
 
 All checks must pass before considering a task complete.
 
@@ -71,3 +71,16 @@ digraph kata {
 }
 ~~~
 <!-- END KATA -->
+
+Do not use OpenCode's internal todo list (`todowrite` / `todoread`).
+
+For implementation work that would normally be broken into a todo list:
+
+- Use Kata as the task tracking system.
+- Search Kata before creating new work.
+- Create or reuse Kata issues for independently meaningful work items.
+- Keep issue state updated while working.
+- Close Kata issues only after verification.
+- Do not create Kata issues for trivial implementation steps that are only useful within a single edit.
+
+Use the Kata MCP tools when available rather than shelling out to the `kata` CLI.
