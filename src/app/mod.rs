@@ -1,4 +1,5 @@
 pub mod action;
+pub mod composer;
 pub mod effect;
 pub mod focus;
 pub mod mock;
@@ -10,6 +11,7 @@ pub mod sanitize;
 pub mod state;
 
 pub use action::Action;
+pub use composer::{ComposerField, ComposerState};
 pub use effect::Effect;
 pub use focus::Focus;
 pub use operation::{

@@ -17,6 +17,22 @@ pub enum SearchEdit {
     Backspace,
 }
 
+/// Character-level edit or caret move inside the focused composer control
+/// (Phase 6). The reducer routes it by [`ComposerField`](crate::app::composer::ComposerField).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposerEdit {
+    Char(char),
+    Backspace,
+    Delete,
+    /// Enter in the body inserts a newline (plan §10); elsewhere Enter
+    /// activates, which the reducer routes separately.
+    Newline,
+    CursorLeft,
+    CursorRight,
+    CursorUp,
+    CursorDown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     MoveUp,
@@ -30,6 +46,8 @@ pub enum Action {
     OpenSearch,
     SearchEdit(SearchEdit),
     SubmitSearch,
+    /// Composer text editing / caret movement (Phase 6).
+    ComposerEdit(ComposerEdit),
     Compose,
     Reply,
     ReplyAll,

@@ -26,14 +26,20 @@ pub struct MessageRoute {
 pub enum Route {
     Mailbox(MailboxRoute),
     Message(MessageRoute),
+    /// The built-in composer (plan §19 Phase 6). The draft data lives in
+    /// `AppState.composer`, so leaving pops the route but preserves the
+    /// draft for reopening.
+    Composer,
 }
 
 impl Route {
-    /// The mailbox this route displays, if any.
+    /// The mailbox this route displays, if any. The composer has none:
+    /// background refreshes must not touch a list while composing (plan §11).
     pub fn mailbox_id(&self) -> Option<&MailboxId> {
         match self {
             Route::Mailbox(r) => Some(&r.mailbox_id),
             Route::Message(r) => Some(&r.mailbox_id),
+            Route::Composer => None,
         }
     }
 }

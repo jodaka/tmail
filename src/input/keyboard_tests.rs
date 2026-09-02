@@ -153,6 +153,95 @@ fn ctrl_enter_sends_plain_enter_activates() {
     assert_eq!(to_action(plain(KeyCode::Enter), f), Some(Action::Activate));
 }
 
+// ── Composer (plan §19 Phase 6.1) ────────────────────────────────────────
+
+#[test]
+fn composer_letters_are_text_never_shortcuts() {
+    let f = Focus::Composer;
+    for c in "cafrehsu/?z".chars() {
+        assert_eq!(
+            to_action(plain(KeyCode::Char(c)), f),
+            Some(Action::ComposerEdit(ComposerEdit::Char(c))),
+            "{c} must be composed text"
+        );
+    }
+    // Ctrl/Alt chords stay unbound (global Ctrl+C/Ctrl+R matched earlier).
+    assert_eq!(
+        to_action(key(KeyCode::Char('c'), KeyModifiers::ALT), f),
+        None
+    );
+    assert_eq!(
+        to_action(key(KeyCode::Char('r'), KeyModifiers::ALT), f),
+        None
+    );
+}
+
+#[test]
+fn composer_backspace_edits_and_delete_is_not_trash() {
+    let f = Focus::Composer;
+    assert_eq!(
+        to_action(plain(KeyCode::Backspace), f),
+        Some(Action::ComposerEdit(ComposerEdit::Backspace))
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Delete), f),
+        Some(Action::ComposerEdit(ComposerEdit::Delete))
+    );
+}
+
+#[test]
+fn composer_arrows_move_the_caret() {
+    let f = Focus::Composer;
+    assert_eq!(
+        to_action(plain(KeyCode::Up), f),
+        Some(Action::ComposerEdit(ComposerEdit::CursorUp))
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Down), f),
+        Some(Action::ComposerEdit(ComposerEdit::CursorDown))
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Left), f),
+        Some(Action::ComposerEdit(ComposerEdit::CursorLeft))
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Right), f),
+        Some(Action::ComposerEdit(ComposerEdit::CursorRight))
+    );
+}
+
+#[test]
+fn composer_enter_activates_ctrl_enter_sends_esc_leaves() {
+    let f = Focus::Composer;
+    assert_eq!(to_action(plain(KeyCode::Enter), f), Some(Action::Activate));
+    assert_eq!(
+        to_action(key(KeyCode::Enter, KeyModifiers::CONTROL), f),
+        Some(Action::Send)
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Esc), f),
+        Some(Action::BackOrCancel)
+    );
+    assert_eq!(to_action(plain(KeyCode::Tab), f), Some(Action::FocusNext));
+    assert_eq!(
+        to_action(plain(KeyCode::BackTab), f),
+        Some(Action::FocusPrevious)
+    );
+}
+
+#[test]
+fn global_shortcuts_still_work_from_the_composer() {
+    let f = Focus::Composer;
+    assert_eq!(
+        to_action(key(KeyCode::Char('c'), KeyModifiers::CONTROL), f),
+        Some(Action::Quit)
+    );
+    assert_eq!(
+        to_action(key(KeyCode::Char('r'), KeyModifiers::CONTROL), f),
+        Some(Action::Refresh)
+    );
+}
+
 #[test]
 fn unbound_keys_return_none() {
     let f = Focus::MessageList;

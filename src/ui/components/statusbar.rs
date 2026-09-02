@@ -42,7 +42,14 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
     // Key hints follow the input contract (plan §10) and the active screen
     // (mockup `.statusbar` per layout). Deliberately no j/k, no help.
     let reader = matches!(state.active_route(), Some(Route::Message(_)));
-    let hints: &[(&str, &str)] = if reader {
+    let composer = matches!(state.active_route(), Some(Route::Composer));
+    let hints: &[(&str, &str)] = if composer {
+        &[
+            ("tab", "next field"),
+            ("esc", "save & leave"),
+            ("^↵", "send"),
+        ]
+    } else if reader {
         &[
             ("↑↓", "scroll"),
             ("esc", "back"),
@@ -60,7 +67,13 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
             ("/", "search"),
         ]
     };
-    let mode = if reader { " READER " } else { " NORMAL " };
+    let mode = if composer {
+        " COMPOSE "
+    } else if reader {
+        " READER "
+    } else {
+        " NORMAL "
+    };
     let mut spans: Vec<Span<'_>> = vec![Span::styled(
         mode,
         theme.mode_badge().add_modifier(Modifier::empty()),

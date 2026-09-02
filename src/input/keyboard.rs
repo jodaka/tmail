@@ -5,7 +5,7 @@
 //! while a text field is focused; `j`/`k` and `?` are deliberately absent
 //! (plan §4 overrides).
 
-use crate::app::action::{Action, SearchEdit};
+use crate::app::action::{Action, ComposerEdit, SearchEdit};
 use crate::app::focus::Focus;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -19,11 +19,15 @@ pub fn to_action(key: KeyEvent, focus: Focus) -> Option<Action> {
         Enter => Some(enter_action(key.modifiers)),
         Tab => Some(Action::FocusNext),
         BackTab => Some(Action::FocusPrevious),
-        Up => Some(Action::MoveUp),
-        Down => Some(Action::MoveDown),
-        Left => Some(Action::PagePrevious),
-        Right => Some(Action::PageNext),
-        Backspace => search_edit(focus, SearchEdit::Backspace),
+        Up => Some(move_action(key.modifiers, focus, ComposerEdit::CursorUp)),
+        Down => Some(move_action(key.modifiers, focus, ComposerEdit::CursorDown)),
+        Left => Some(move_action(key.modifiers, focus, ComposerEdit::CursorLeft)),
+        Right => Some(move_action(key.modifiers, focus, ComposerEdit::CursorRight)),
+        Backspace if focus == Focus::SearchField => Some(Action::SearchEdit(SearchEdit::Backspace)),
+        Backspace if focus == Focus::Composer => {
+            Some(Action::ComposerEdit(ComposerEdit::Backspace))
+        }
+        Delete if focus == Focus::Composer => Some(Action::ComposerEdit(ComposerEdit::Delete)),
         Delete if focus != Focus::SearchField => Some(Action::Trash),
         Char('/') if focus.accepts_shortcuts() => Some(Action::OpenSearch),
         Char(c) => char_action(c, key.modifiers, focus),
@@ -41,14 +45,34 @@ fn enter_action(modifiers: KeyModifiers) -> Action {
     }
 }
 
-fn search_edit(focus: Focus, edit: SearchEdit) -> Option<Action> {
-    matches!(focus, Focus::SearchField).then_some(Action::SearchEdit(edit))
+/// Arrows move the composer caret (Phase 6); elsewhere they move the
+/// selection / scroll the focused area (plan §10). Shift+arrows are plain
+/// movement, not selection: Post has no text selection in v1.
+fn move_action(modifiers: KeyModifiers, focus: Focus, edit: ComposerEdit) -> Action {
+    if focus == Focus::Composer && !modifiers.contains(KeyModifiers::ALT) {
+        Action::ComposerEdit(edit)
+    } else {
+        match edit {
+            ComposerEdit::CursorUp => Action::MoveUp,
+            ComposerEdit::CursorDown => Action::MoveDown,
+            ComposerEdit::CursorLeft => Action::PagePrevious,
+            _ => Action::PageNext,
+        }
+    }
 }
 
 fn char_action(c: char, modifiers: KeyModifiers, focus: Focus) -> Option<Action> {
     if focus == Focus::SearchField {
         // Any printable character goes into the field; no shortcuts fire.
         return Some(Action::SearchEdit(SearchEdit::Char(c)));
+    }
+    if focus == Focus::Composer {
+        // Any printable character (including '/' and letters) is composed
+        // text; no single-letter shortcuts fire while editing (plan §10).
+        return match modifiers {
+            m if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::ALT) => None,
+            _ => Some(Action::ComposerEdit(ComposerEdit::Char(c))),
+        };
     }
     if modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT) {
         return None;

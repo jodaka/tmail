@@ -4,6 +4,7 @@
 //! backend work is tracked in `operations` (the operation registry); the
 //! `overlay` stack currently holds only the error modal.
 
+use crate::app::composer::ComposerState;
 use crate::app::focus::Focus;
 use crate::app::operation::OperationRegistry;
 use crate::app::overlay::Overlay;
@@ -69,6 +70,10 @@ pub struct AppState {
     pub operations: OperationRegistry,
     /// Modal overlay above every screen; `Some` intercepts all input.
     pub overlay: Option<Overlay>,
+    /// The built-in composer (plan §19 Phase 6): fields, body editor, and
+    /// focus. `Some` while a draft exists — the route may be popped, the
+    /// draft data stays for reopening.
+    pub composer: Option<ComposerState>,
     pub search_query: String,
     pub focus: Focus,
     /// Last known terminal size; drives the responsive layout (plan §18).
@@ -95,6 +100,7 @@ impl AppState {
             reader_scroll: 0,
             operations: OperationRegistry::default(),
             overlay: None,
+            composer: None,
             search_query: String::new(),
             focus: Focus::MessageList,
             size: (152, 40),

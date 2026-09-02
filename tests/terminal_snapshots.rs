@@ -524,3 +524,66 @@ fn reader_handles_missing_fields() {
     );
     assert!(text.contains("unknown date"), "date placeholder:\n{text}");
 }
+
+// ── Composer screen (plan §19 Phase 6.1) ─────────────────────────────────
+
+#[test]
+fn composer_renders_fields_actions_and_toggles() {
+    let mut state = mock_initial_state();
+    let text = draw_after(&mut state, &[Action::Compose], 152, 40);
+    assert!(text.contains("New message"), "header missing:\n{text}");
+    assert!(text.contains("      To"), "To label missing:\n{text}");
+    assert!(
+        text.contains("   Subject"),
+        "Subject label missing:\n{text}"
+    );
+    assert!(text.contains("[Cc]"), "Cc toggle missing:\n{text}");
+    assert!(text.contains("[Bcc]"), "Bcc toggle missing:\n{text}");
+    assert!(text.contains("Send"), "send button missing:\n{text}");
+    assert!(text.contains("Discard"), "discard button missing:\n{text}");
+    // Composer mode badge and hints.
+    assert!(text.contains("COMPOSE"), "mode badge missing:\n{text}");
+}
+
+#[test]
+fn composer_renders_typed_text_and_revealed_fields() {
+    let mut state = mock_initial_state();
+    let actions: Vec<Action> = [
+        Action::Compose,
+        // "max@" into To.
+        Action::ComposerEdit(tmail::app::action::ComposerEdit::Char('m')),
+        Action::ComposerEdit(tmail::app::action::ComposerEdit::Char('a')),
+        Action::ComposerEdit(tmail::app::action::ComposerEdit::Char('x')),
+        Action::ComposerEdit(tmail::app::action::ComposerEdit::Char('@')),
+        // Enter on the Cc toggle reveals the Cc row.
+        Action::FocusNext,
+        Action::Activate,
+    ]
+    .into_iter()
+    .collect();
+    let text = draw_after(&mut state, &actions, 152, 40);
+    assert!(text.contains("max@"), "typed address missing:\n{text}");
+    assert!(
+        !text.contains("[Cc]"),
+        "Cc toggle must hide once revealed:\n{text}"
+    );
+    // Subject label still there; body textarea occupies the lower pane.
+    assert!(text.contains("Subject"), "subject row missing:\n{text}");
+}
+
+#[test]
+fn composer_focused_field_draws_a_caret_cell() {
+    let mut state = mock_initial_state();
+    let actions: Vec<Action> = [
+        Action::Compose,
+        Action::ComposerEdit(tmail::app::action::ComposerEdit::Char('x')),
+    ]
+    .into_iter()
+    .collect();
+    let text = draw_after(&mut state, &actions, 152, 40);
+    // "x" then the reversed caret block drawn at the value start column.
+    assert!(
+        text.contains("x "),
+        "typed text + caret must render:\n{text}"
+    );
+}

@@ -8,6 +8,7 @@
 //! (plan §11). Reducers never perform I/O themselves.
 
 use crate::app::action::{Action, SearchEdit};
+use crate::app::composer::{ComposerField, ComposerState};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::operation::{OperationFailure, OperationKind, OperationOutcome, OperationResult};
@@ -34,15 +35,31 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::FocusNext => {
-            state.focus = state.focus.next();
+            if state.focus == Focus::Composer {
+                if let Some(composer) = state.composer.as_mut() {
+                    composer.focus_next();
+                }
+            } else {
+                state.focus = state.focus.next();
+            }
             Vec::new()
         }
         Action::FocusPrevious => {
-            state.focus = state.focus.previous();
+            if state.focus == Focus::Composer {
+                if let Some(composer) = state.composer.as_mut() {
+                    composer.focus_previous();
+                }
+            } else {
+                state.focus = state.focus.previous();
+            }
             Vec::new()
         }
         Action::OpenSearch => {
-            state.focus = Focus::SearchField;
+            // Search lives on the mailbox screen; while composing, the '/'
+            // is composed text (plan §10: shortcuts never fire in fields).
+            if state.focus != Focus::Composer {
+                state.focus = Focus::SearchField;
+            }
             Vec::new()
         }
         Action::SearchEdit(edit) => {
@@ -59,8 +76,18 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::Trash => trash_message(state),
         Action::ToggleStar => toggle_star(state),
         Action::MarkUnread => mark_unread(state),
-        Action::Compose
-        | Action::Reply
+        Action::Compose => open_composer(state),
+        Action::ComposerEdit(edit) => {
+            // Editing targets the focused composer control; without a
+            // composer open (or without its focus) the edit is inert.
+            if state.focus == Focus::Composer
+                && let Some(composer) = state.composer.as_mut()
+            {
+                composer.apply(edit);
+            }
+            Vec::new()
+        }
+        Action::Reply
         | Action::ReplyAll
         | Action::Forward
         | Action::Send
@@ -581,7 +608,7 @@ fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
             // the query is edited append/backspace only (Phase 1).
         }
         Focus::Reader => scroll_reader(state, delta),
-        Focus::ErrorModal => {}
+        Focus::Composer | Focus::ErrorModal => {}
     }
     Vec::new()
 }
@@ -709,12 +736,49 @@ fn activate(state: &mut AppState) -> Vec<Effect> {
             Some(summary) => open_message(state, summary),
             None => Vec::new(),
         },
+        Focus::Composer => activate_composer(state),
         Focus::Reader | Focus::SearchField | Focus::ErrorModal => {
             if state.focus == Focus::SearchField {
                 reduce(state, &Action::SubmitSearch)
             } else {
                 Vec::new()
             }
+        }
+    }
+}
+
+/// Enter on a composer control (plan §10): newline in the body, reveal a
+/// hidden Cc/Bcc field, or activate the focused action. Enter on To/Cc/
+/// Bcc/Subject itself does nothing (single-line fields have no activation).
+fn activate_composer(state: &mut AppState) -> Vec<Effect> {
+    let Some(field) = state.composer.as_ref().map(|c| c.field) else {
+        return Vec::new();
+    };
+    match field {
+        ComposerField::Body => {
+            if let Some(composer) = state.composer.as_mut() {
+                composer.apply(&crate::app::action::ComposerEdit::Newline);
+            }
+            Vec::new()
+        }
+        ComposerField::CcToggle => {
+            if let Some(composer) = state.composer.as_mut() {
+                composer.show_cc = true;
+                composer.enter_cc();
+            }
+            Vec::new()
+        }
+        ComposerField::BccToggle => {
+            if let Some(composer) = state.composer.as_mut() {
+                composer.show_bcc = true;
+                composer.enter_bcc();
+            }
+            Vec::new()
+        }
+        ComposerField::Send => reduce(state, &Action::Send),
+        ComposerField::Discard => reduce(state, &Action::DiscardDraft),
+        ComposerField::To | ComposerField::Cc | ComposerField::Bcc | ComposerField::Subject => {
+            Vec::new()
         }
     }
 }
@@ -747,6 +811,31 @@ fn close_reader(state: &mut AppState) {
         state.routes.pop();
         state.open_message = Loadable::Idle;
         state.reader_scroll = 0;
+        state.focus = Focus::MessageList;
+    }
+}
+
+/// Open (or reopen) the built-in composer (plan §19 Phase 6). A left-open
+/// draft is preserved in `AppState.composer`, so composing again returns to
+/// it; only one composer exists at a time.
+fn open_composer(state: &mut AppState) -> Vec<Effect> {
+    if matches!(state.active_route(), Some(Route::Composer)) {
+        return Vec::new();
+    }
+    if state.composer.is_none() {
+        state.composer = Some(ComposerState::new());
+    }
+    state.routes.push(Route::Composer);
+    state.focus = Focus::Composer;
+    Vec::new()
+}
+
+/// Leave the composer (plan §14: "Leaving returns to the prior route and
+/// preserves the draft"). The route pops; the draft data stays so compose
+/// reopens it. Forcing a save before leaving lands with Phase 6.5.
+fn leave_composer(state: &mut AppState) {
+    if matches!(state.active_route(), Some(Route::Composer)) {
+        state.routes.pop();
         state.focus = Focus::MessageList;
     }
 }
@@ -798,9 +887,15 @@ fn back_or_cancel(state: &mut AppState) {
         state.focus = Focus::MessageList;
         return;
     }
+    if matches!(state.active_route(), Some(Route::Composer)) {
+        // The composer may sit at the root (no mailbox loaded yet); Esc
+        // leaves it either way, preserving the draft (plan §14).
+        leave_composer(state);
+        return;
+    }
     if state.routes.len() > 1 {
-        // Pop the reader (or a later screen): the mailbox route underneath
-        // still holds the exact page, selection, and scroll.
+        // Pop the reader: the mailbox route underneath still holds the
+        // exact page, selection, and scroll.
         state.routes.pop();
         state.open_message = Loadable::Idle;
         state.reader_scroll = 0;

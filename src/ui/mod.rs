@@ -63,9 +63,12 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, ctx: &Rend
         components::sidebar::render(frame, sidebar, state, theme);
     }
     // The reader screen replaces the message list; the sidebar and topbar
-    // chrome stay (mockup `viewer.html`).
+    // chrome stay (mockup `viewer.html`). The composer likewise replaces
+    // the list (mockup `new-mail.html`).
     if matches!(state.active_route(), Some(Route::Message(_))) {
         screens::reader::render(frame, list, state, theme);
+    } else if matches!(state.active_route(), Some(Route::Composer)) {
+        screens::composer::render(frame, list, state, theme);
     } else {
         screens::mailbox::render(frame, list, state, mode, theme, ctx.now);
     }

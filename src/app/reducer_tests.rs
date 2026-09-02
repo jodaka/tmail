@@ -9,6 +9,7 @@ use crate::app::focus::Focus;
 use crate::app::mock::{self, mock_initial_state};
 use crate::app::operation::{OperationId, RetrySpec};
 use crate::app::overlay::Overlay;
+use crate::app::route::Route;
 use crate::app::state::AppState;
 use crate::domain::{Mailbox, MailboxId, MailboxRole, MessageId, PageRequest};
 
@@ -1271,7 +1272,6 @@ fn unimplemented_actions_are_safe_noops() {
     let mut s = state();
     let before = s.clone();
     for action in [
-        Action::Compose,
         Action::Reply,
         Action::ReplyAll,
         Action::Forward,
@@ -1345,4 +1345,180 @@ fn reducer_is_free_of_io_by_construction() {
         }]
     ));
     assert!(s.mailboxes.as_loaded().is_some());
+}
+
+// ── Composer (plan §19 Phase 6.1) ────────────────────────────────────────
+
+use crate::app::action::ComposerEdit;
+use crate::app::composer::ComposerField;
+
+/// Open the composer and return the state (asserts the route/focus).
+fn compose(s: &mut AppState) -> &mut crate::app::composer::ComposerState {
+    no_effects(&reduce(s, &Action::Compose));
+    assert_eq!(s.routes.len(), 2);
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    assert_eq!(s.focus, Focus::Composer);
+    s.composer.as_mut().expect("composer open")
+}
+
+#[test]
+fn compose_opens_the_composer_over_the_mailbox_route() {
+    let mut s = state();
+    compose(&mut s);
+    // The list underneath is untouched (restoration by construction).
+    assert_eq!(s.messages.offset, 0);
+    assert_eq!(s.selection, 0);
+}
+
+#[test]
+fn composer_focus_cycles_fields_and_actions() {
+    let mut s = state();
+    compose(&mut s);
+    assert_eq!(s.composer.as_ref().unwrap().field, ComposerField::To);
+    for expected in [
+        ComposerField::CcToggle,
+        ComposerField::BccToggle,
+        ComposerField::Subject,
+        ComposerField::Body,
+        ComposerField::Send,
+        ComposerField::Discard,
+        ComposerField::To,
+    ] {
+        reduce(&mut s, &Action::FocusNext);
+        assert_eq!(s.composer.as_ref().unwrap().field, expected);
+    }
+    reduce(&mut s, &Action::FocusPrevious);
+    assert_eq!(s.composer.as_ref().unwrap().field, ComposerField::Discard);
+}
+
+#[test]
+fn enter_on_cc_toggle_reveals_and_focuses_the_cc_field() {
+    let mut s = state();
+    compose(&mut s);
+    reduce(&mut s, &Action::FocusNext); // CcToggle
+    reduce(&mut s, &Action::Activate);
+    let composer = s.composer.as_ref().unwrap();
+    assert!(composer.show_cc);
+    assert_eq!(composer.field, ComposerField::Cc);
+    // The cycle now contains Cc, not the toggle.
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.composer.as_ref().unwrap().field, ComposerField::BccToggle);
+}
+
+#[test]
+fn typing_edits_the_focused_field_only() {
+    let mut s = state();
+    compose(&mut s);
+    for c in "max@".chars() {
+        reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char(c)));
+    }
+    // Tab through to Subject and type there.
+    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, &Action::FocusNext); // Subject
+    for c in "Hi".chars() {
+        reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char(c)));
+    }
+    let composer = s.composer.as_ref().unwrap();
+    assert_eq!(composer.to, "max@");
+    assert_eq!(composer.subject, "Hi");
+    assert!(composer.cc.is_empty());
+}
+
+#[test]
+fn enter_inserts_newline_in_body_only() {
+    let mut s = state();
+    compose(&mut s);
+    // Walk to the body: 3 Tabs (CcToggle, BccToggle, Subject) + 1 more.
+    for _ in 0..4 {
+        reduce(&mut s, &Action::FocusNext);
+    }
+    assert_eq!(s.composer.as_ref().unwrap().field, ComposerField::Body);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('a')));
+    reduce(&mut s, &Action::Activate); // Enter
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('b')));
+    assert_eq!(
+        s.composer.as_ref().unwrap().body.lines(),
+        ["a".to_string(), "b".to_string()]
+    );
+    // Enter on a single-line field does not edit it.
+    reduce(&mut s, &Action::FocusPrevious); // Subject
+    reduce(&mut s, &Action::Activate);
+    assert_eq!(s.composer.as_ref().unwrap().subject, "");
+}
+
+#[test]
+fn shortcuts_cannot_fire_while_composing() {
+    let mut s = state();
+    compose(&mut s);
+    // 'c' is compose text, not a new compose; 'e' is text, not archive;
+    // '/' is text, not search. (Keyboard mapping tested in input tests;
+    // here the reducer-level gating is exercised via focus.)
+    let before_routes = s.routes.clone();
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('c')));
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('/')));
+    reduce(&mut s, &Action::Archive);
+    reduce(&mut s, &Action::OpenSearch);
+    let composer = s.composer.as_ref().unwrap();
+    assert_eq!(composer.to, "c/");
+    assert_eq!(s.routes, before_routes, "composer stays open");
+    assert!(s.operations.is_empty());
+    assert_eq!(s.focus, Focus::Composer);
+}
+
+#[test]
+fn esc_leaves_the_composer_and_preserves_the_draft() {
+    let mut s = state();
+    compose(&mut s);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('d')));
+    reduce(&mut s, &Action::BackOrCancel);
+    assert_eq!(s.routes.len(), 1);
+    assert_eq!(s.focus, Focus::MessageList);
+    assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
+    // The draft data survives for reopening.
+    let composer = s.composer.as_ref().expect("draft preserved");
+    assert_eq!(composer.to, "d");
+}
+
+#[test]
+fn compose_again_reopens_the_preserved_draft() {
+    let mut s = state();
+    compose(&mut s);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('d')));
+    reduce(&mut s, &Action::BackOrCancel);
+    compose(&mut s);
+    let composer = s.composer.as_ref().unwrap();
+    assert_eq!(composer.to, "d", "reopening continues the draft");
+    assert_eq!(composer.field, ComposerField::To);
+}
+
+#[test]
+fn composing_without_a_list_underneath_is_safe() {
+    // Startup with no mailbox route yet: compose still opens cleanly and
+    // Esc returns to the empty root.
+    let mut s = AppState::initial(mock::PAGE_SIZE);
+    no_effects(&reduce(&mut s, &Action::Compose));
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    reduce(&mut s, &Action::BackOrCancel);
+    assert!(s.routes.is_empty());
+    assert!(!s.quit_requested);
+}
+
+#[test]
+fn message_actions_do_not_fire_from_composer_focus() {
+    let mut s = state();
+    compose(&mut s);
+    no_effects(&reduce(&mut s, &Action::ToggleStar));
+    no_effects(&reduce(&mut s, &Action::Archive));
+    no_effects(&reduce(&mut s, &Action::Trash));
+    no_effects(&reduce(&mut s, &Action::MarkUnread));
+    assert!(s.operations.is_empty());
+}
+
+#[test]
+fn composer_edits_without_composer_open_are_inert() {
+    let mut s = state();
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    assert!(s.composer.is_none());
+    assert!(!matches!(s.active_route(), Some(Route::Composer)));
 }
