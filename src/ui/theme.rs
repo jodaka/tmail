@@ -97,6 +97,33 @@ impl Theme {
     pub fn on_background(&self) -> Style {
         Style::new().fg(self.text).bg(self.background)
     }
+
+    /// HTML headings (plan §13: heading → bold; stronger color than body).
+    pub fn heading(&self) -> Style {
+        Style::new()
+            .fg(self.text)
+            .bg(self.background)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// HTML links (plan §13: accent + underline; target rides the span).
+    pub fn link(&self) -> Style {
+        Style::new()
+            .fg(self.accent)
+            .bg(self.background)
+            .add_modifier(Modifier::UNDERLINED)
+    }
+
+    /// `pre`/`code` runs (whitespace preservation is a layout property;
+    /// the surface fill marks the code region).
+    pub fn code(&self) -> Style {
+        Style::new().fg(self.text_soft).bg(self.surface)
+    }
+
+    /// Blockquoted text (plan §13: dim; the `>` left marker is content).
+    pub fn blockquote(&self) -> Style {
+        Style::new().fg(self.dim).bg(self.background)
+    }
 }
 
 #[cfg(test)]

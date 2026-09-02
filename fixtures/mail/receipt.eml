@@ -1,0 +1,23 @@
+From: Shop Receipts <receipts@shop.example.org>
+To: Grace Hopper <grace@post.local>
+Subject: Receipt for order 20260902-4471
+Date: Wed, 02 Sep 2026 12:05:00 +0000
+Message-ID: <receipt-1@shop.example.org>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html>
+<body>
+<h3>Receipt</h3>
+<p>Thanks for your purchase on Sep 2, 2026.</p>
+<table>
+  <tr><th>Description</th><th>Amount</th></tr>
+  <tr><td>Annual subscription</td><td>$120.00</td></tr>
+  <tr><td>VAT (20%)</td><td>$20.00</td></tr>
+  <tr><td><b>Total charged</b></td><td><b>$140.00</b></td></tr>
+</table>
+<p>Payment method: card ending 4242. <a href="https://shop.example.org/invoice/20260902-4471">View invoice</a>.</p>
+<hr>
+<p>Shop Inc, 1 Market Street.</p>
+</body>
+</html>

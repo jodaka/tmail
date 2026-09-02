@@ -1,0 +1,20 @@
+From: Broken Markup <broken@post.local>
+To: Grace Hopper <grace@post.local>
+Subject: Malformed HTML recovery
+Date: Wed, 02 Sep 2026 09:00:00 +0000
+Message-ID: <broken-1@post.local>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html>
+<body>
+<p>Unclosed bold <b>runs into this
+<div>stray div</p></div>
+<ul>
+<li>list item one
+<li>list item two without a closer
+<p>a paragraph inside nothing at all
+<span>span soup <span>keeps going
+more <<weird>> angle brackets
+</body>
+</html>

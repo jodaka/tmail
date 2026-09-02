@@ -1190,6 +1190,73 @@ fn resize_updates_size() {
 }
 
 #[test]
+fn resize_clamps_reader_scroll_after_reflow() {
+    let mut s = state();
+    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    complete_message_ok(&mut s, id);
+    // Scroll deep into a narrow (tall) document: many body lines wrap out.
+    let narrow: usize = 100;
+    reduce(
+        &mut s,
+        &Action::Resize {
+            width: narrow as u16,
+            height: 20,
+        },
+    );
+    let deep = crate::ui::screens::reader::content_line_count(&s, narrow);
+    s.reader_scroll = deep;
+    // Shrinking the width re-wraps and changes the document length; the
+    // anchor must respect the re-flowed budget.
+    reduce(
+        &mut s,
+        &Action::Resize {
+            width: 90,
+            height: 20,
+        },
+    );
+    let viewport = crate::ui::layout::reader_rows_visible(s.size).max(1);
+    let total = crate::ui::screens::reader::content_line_count(
+        &s,
+        crate::ui::layout::reader_width(s.size).max(10),
+    ) as i64;
+    let max = (total - viewport as i64).max(0) as usize;
+    assert!(
+        s.reader_scroll <= max,
+        "scroll {} must clamp to {max}",
+        s.reader_scroll
+    );
+    // Growing the window never resurrects an out-of-range anchor either.
+    reduce(
+        &mut s,
+        &Action::Resize {
+            width: 152,
+            height: 40,
+        },
+    );
+    let viewport = crate::ui::layout::reader_rows_visible(s.size).max(1);
+    let total = crate::ui::screens::reader::content_line_count(
+        &s,
+        crate::ui::layout::reader_width(s.size).max(10),
+    ) as i64;
+    let max = (total - viewport as i64).max(0) as usize;
+    assert!(s.reader_scroll <= max);
+}
+
+#[test]
+fn resize_leaves_reader_scroll_alone_outside_the_reader() {
+    let mut s = state();
+    s.reader_scroll = 7;
+    reduce(
+        &mut s,
+        &Action::Resize {
+            width: 152,
+            height: 40,
+        },
+    );
+    assert_eq!(s.reader_scroll, 7, "no reader route: the anchor is inert");
+}
+
+#[test]
 fn tick_increments_counter_only() {
     let mut s = state();
     let before = s.clone();

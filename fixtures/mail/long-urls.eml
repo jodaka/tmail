@@ -1,0 +1,25 @@
+From: Long Links <links@post.local>
+To: Grace Hopper <grace@post.local>
+Subject: One very long tracking URL
+Date: Wed, 02 Sep 2026 18:00:00 +0000
+Message-ID: <url-1@post.local>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="url-boundary-7"
+
+--url-boundary-7
+Content-Type: text/plain; charset=utf-8
+
+Track your parcel:
+https://tracking.example.org/track?id=TF-8841&token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9&step=4&lang=en-GB&campaign=autumn-2026&referrer=newsletter-button-primary
+
+Plain text fallback paragraph.
+
+--url-boundary-7
+Content-Type: text/html; charset=utf-8
+
+<html><body>
+<p>Track your parcel:
+<a href="https://tracking.example.org/track?id=TF-8841&amp;token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9&amp;step=4&amp;lang=en-GB&amp;campaign=autumn-2026&amp;referrer=newsletter-button-primary">this enormous link</a>.</p>
+</body></html>
+
+--url-boundary-7--

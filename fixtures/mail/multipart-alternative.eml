@@ -1,0 +1,27 @@
+From: Post Notifier <notify@post.local>
+To: Grace Hopper <grace@post.local>
+Subject: HTML alternative
+Date: Wed, 02 Sep 2026 11:15:00 +0000
+Message-ID: <alt-1@post.local>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="alt-boundary-42"
+
+--alt-boundary-42
+Content-Type: text/plain; charset=utf-8
+
+This message prefers HTML, but the plain part is here for fallback.
+
+--alt-boundary-42
+Content-Type: text/html; charset=utf-8
+
+<html>
+  <body>
+    <h1>Release 0.5</h1>
+    <p>The <strong>richer</strong> part lives here, with an
+    <a href="https://example.org/notes">annotated link</a> and an
+    <em>emphasised</em> phrase.</p>
+    <blockquote>Wise words quoted from elsewhere.</blockquote>
+  </body>
+</html>
+
+--alt-boundary-42--

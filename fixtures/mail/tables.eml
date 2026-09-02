@@ -1,0 +1,22 @@
+From: Tables Only <tables@post.local>
+To: Grace Hopper <grace@post.local>
+Subject: Weekly burndown
+Date: Wed, 02 Sep 2026 16:40:00 +0000
+Message-ID: <tables-1@post.local>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html>
+<body>
+<p>Here is this week's burndown:</p>
+<table>
+  <tr><th>Team</th><th>Open</th><th>Closed</th><th>Delta</th></tr>
+  <tr><td>Core</td><td>14</td><td>9</td><td>-5</td></tr>
+  <tr><td>UI</td><td>22</td><td>4</td><td>-18</td></tr>
+  <tr><td>Backend</td><td>7</td><td>7</td><td>0</td></tr>
+</table>
+<p>A very wide cell to force a graceful fallback: this cell contains an
+enormous run of text that cannot possibly fit into a narrow terminal
+column, so the layout engine has to degrade instead of corrupting.</p>
+</body>
+</html>

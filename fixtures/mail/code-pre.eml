@@ -1,0 +1,21 @@
+From: Build Bot <build@post.local>
+To: Grace Hopper <grace@post.local>
+Subject: Failing test snippet
+Date: Wed, 02 Sep 2026 17:10:00 +0000
+Message-ID: <code-1@post.local>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html>
+<body>
+<p>The reducer panics here:</p>
+<pre>
+fn clamp(&amp;mut self, max: usize) {
+    self.scroll     = self.scroll.min(max);
+    self.selection  = self.selection.min(max - 1);   // underflow at max == 0
+}
+</pre>
+<p>Inline <code>max - 1</code> underflows when the document is shorter
+than the viewport. Compare with <code>max.saturating_sub(1)</code>.</p>
+</body>
+</html>

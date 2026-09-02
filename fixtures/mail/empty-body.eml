@@ -1,0 +1,21 @@
+From: Vacant Sender <empty@post.local>
+To: Grace Hopper <grace@post.local>
+Subject: (no content in body)
+Date: Wed, 02 Sep 2026 21:00:00 +0000
+Message-ID: <empty-1@post.local>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="empty-boundary-1"
+
+--empty-boundary-1
+Content-Type: text/html; charset=utf-8
+
+<html><head><style>body { display: none; }</style></head><body></body></html>
+
+--empty-boundary-1
+Content-Type: application/pdf; name="invisible.pdf"
+Content-Disposition: attachment; filename="invisible.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQK
+
+--empty-boundary-1--

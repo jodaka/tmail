@@ -85,6 +85,7 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             state.size = (*width, *height);
             // A smaller window may have pushed the selection off screen.
             keep_selection_visible(state);
+            clamp_reader_scroll(state);
             Vec::new()
         }
         Action::Quit => {
@@ -603,11 +604,30 @@ fn page_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
 /// frame.
 fn scroll_reader(state: &mut AppState, delta: i64) {
     let viewport = crate::ui::layout::reader_rows_visible(state.size).max(1) as i64;
-    let total =
-        crate::ui::screens::reader::content_line_count(state, state.size.0.max(1) as usize) as i64;
+    let total = crate::ui::screens::reader::content_line_count(
+        state,
+        crate::ui::layout::reader_width(state.size).max(10),
+    ) as i64;
     let max = (total - viewport).max(0);
     let next = (state.reader_scroll as i64 + delta).clamp(0, max);
     state.reader_scroll = next as usize;
+}
+
+/// Reflow on terminal resize (plan §13/§19 Phase 5): the document re-wraps
+/// at the new reader width inside the renderer, and the scroll anchor is
+/// clamped to the re-flowed length so the viewport can never point past the
+/// end of the document.
+fn clamp_reader_scroll(state: &mut AppState) {
+    if !matches!(state.active_route(), Some(Route::Message(_))) {
+        return;
+    }
+    let viewport = crate::ui::layout::reader_rows_visible(state.size).max(1) as i64;
+    let total = crate::ui::screens::reader::content_line_count(
+        state,
+        crate::ui::layout::reader_width(state.size).max(10),
+    ) as i64;
+    let max = (total - viewport).max(0);
+    state.reader_scroll = (state.reader_scroll as i64).clamp(0, max) as usize;
 }
 
 /// Shift `list_scroll` so the selection stays on screen. Row geometry comes

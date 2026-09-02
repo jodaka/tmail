@@ -116,10 +116,7 @@ pub(crate) fn message(dto: dto::MessageReadDto, locator: MessageLocator) -> Mess
             to: address_header(&headers, "to"),
             cc: address_header(&headers, "cc"),
             date: date_header(&headers, "date"),
-            // mail_parser's serde dump spells the header `message_id`
-            // (fixtures); RFC spells it `Message-ID`. Accept both.
-            message_id: text_header(&headers, "message-id")
-                .or_else(|| text_header(&headers, "message_id")),
+            message_id: text_header(&headers, "message-id"),
         },
         plain_body: None,
         html_body: None,
@@ -150,9 +147,14 @@ fn parts_headers(parts: &[dto::PartDto]) -> Vec<dto::HeaderDto> {
 }
 
 fn header<'a>(headers: &'a [dto::HeaderDto], name: &str) -> Option<&'a dto::HeaderValueDto> {
+    // mail_parser's serde dump spells header names with underscores
+    // (`content_type`, `message_id`); the dashed RFC spelling appears in
+    // synthetic shapes. Normalize both sides and match case-insensitively —
+    // the Phase 5 fixture corpus caught this for attachment metadata.
+    let needle = name.replace('-', "_");
     headers
         .iter()
-        .find(|header| header.name.eq_ignore_ascii_case(name))
+        .find(|header| header.name.replace('-', "_").eq_ignore_ascii_case(&needle))
         .and_then(|header| header.value.as_ref())
 }
 

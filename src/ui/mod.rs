@@ -3,6 +3,7 @@
 pub mod components;
 pub mod dates;
 pub mod layout;
+pub(crate) mod rich;
 pub mod screens;
 pub mod text;
 pub mod theme;

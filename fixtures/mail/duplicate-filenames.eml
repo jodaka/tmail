@@ -1,0 +1,29 @@
+From: Duplicates <dup@post.local>
+To: Grace Hopper <grace@post.local>
+Subject: Two attachments, one filename
+Date: Wed, 02 Sep 2026 22:00:00 +0000
+Message-ID: <dup-1@post.local>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="dup-boundary-1"
+
+--dup-boundary-1
+Content-Type: text/plain; charset=utf-8
+
+Both parts claim the filename report.pdf. Phase 8 must save them
+collision-safely; the reader lists both deterministically.
+
+--dup-boundary-1
+Content-Type: application/pdf; name="report.pdf"
+Content-Disposition: attachment; filename="report.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKMSAwIG9iag==
+
+--dup-boundary-1
+Content-Type: application/pdf; name="report.pdf"
+Content-Disposition: attachment; filename="report.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKMiAwIG9iag==
+
+--dup-boundary-1--

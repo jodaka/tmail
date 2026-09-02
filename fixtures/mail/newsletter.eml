@@ -1,0 +1,23 @@
+From: KKF Notifications <no-reply@kkf.example.org>
+To: Grace Hopper <grace@post.local>
+Subject: Your order has shipped
+Date: Wed, 02 Sep 2026 08:30:00 +0100
+Message-ID: <news-1@kkf.example.org>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html>
+  <body style="background:#fff">
+    <img src="https://kkf.example.org/banner.png" alt="KKF Blades banner">
+    <h2 style="color:rebeccapurple">Your order has shipped</h2>
+    <p>Hi Grace, order <strong>#TF-8841</strong> left our workshop today.</p>
+    <table>
+      <tr><th>Item</th><th>Qty</th><th>Price</th></tr>
+      <tr><td>Shirogami #2 gyuto 210&nbsp;mm</td><td>1</td><td>&euro;180</td></tr>
+      <tr><td>Leather saya</td><td>1</td><td>&euro;35</td></tr>
+    </table>
+    <p>Track it <a href="https://tracking.example.org/TF-8841?lang=en&amp;src=mail">on the carrier site</a>.</p>
+    <img src="https://pixel.example.org/open.gif" alt="">
+    <p style="color:#999">You get these mails because you ordered once in 2019.</p>
+  </body>
+</html>

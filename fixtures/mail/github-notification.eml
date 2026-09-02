@@ -1,0 +1,22 @@
+From: GitHub <notifications@github.example.org>
+To: Grace Hopper <grace@post.local>
+Subject: [post-app/post] CI failed on macos-latest (Issue #412)
+Date: Wed, 02 Sep 2026 07:45:00 -0700
+Message-ID: <gh-1@github.example.org>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html>
+<body>
+<p><b>grace-hopper</b> opened an issue:</p>
+<h2>CI failed on macos-latest <span class="issue-number">#412</span></h2>
+<p>The <code>terminal_snapshots</code> suite timed out:</p>
+<pre><code>test reader_renders_document ... FAILED
+panicked at 'snapshot mismatch'</code></pre>
+<p>See the run: <a href="https://github.example.org/post-app/post/actions/runs/998">Actions run #998</a></p>
+<blockquote>
+  <p>Looks like the runner was slow, not the code. Retry?</p>
+</blockquote>
+<p>You are receiving this because you are subscribed to this thread.</p>
+</body>
+</html>

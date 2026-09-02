@@ -1,0 +1,17 @@
+From: Ada Lovelace <ada@post.local>
+To: Grace Hopper <grace@post.local>
+Subject: Plain text only
+Date: Wed, 02 Sep 2026 10:03:40 +0300
+Message-ID: <plain-1@post.local>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+This is a plain text message.
+Line two.
+
+A third paragraph after a blank line. Nothing here needs HTML:
+no markup, no styles, just prose that wraps at the viewport.
+
+-- 
+Ada Lovelace
+Analytical Engine Dept.

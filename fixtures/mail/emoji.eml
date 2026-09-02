@@ -1,0 +1,17 @@
+From: Emoji Fan <emoji@post.local>
+To: Grace Hopper <grace@post.local>
+Subject: Grüße mit emoji 🎉🚀
+Date: Wed, 02 Sep 2026 20:00:00 +0000
+Message-ID: <emoji-1@post.local>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Hello! 👋 This body mixes widths deliberately:
+
+- ASCII text
+- accented Latin: café, naïve, straße, Grüße
+- CJK: 東京タワー and 汉字测试
+- emoji: 🎉🚀🌊🔪👨‍👩‍👧‍👦
+- combining marks: áé 寅
+
+If any of these split a codepoint or panic, the width math is wrong.

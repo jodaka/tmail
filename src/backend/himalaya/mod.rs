@@ -7,8 +7,10 @@
 //! shared freely once the Phase 3 operation manager holds an `Arc` to it.
 
 mod command;
-mod dto;
-mod map;
+pub(crate) mod dto;
+#[cfg(feature = "test-fixtures")]
+pub mod fixtures;
+pub(crate) mod map;
 mod process;
 
 use std::collections::HashMap;
