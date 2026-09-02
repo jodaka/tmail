@@ -51,9 +51,7 @@ pub(crate) struct EnvelopeDto {
     pub from: Vec<AddressDto>,
     #[serde(default)]
     pub subject: String,
-    // Parsed to keep the DTO a faithful mirror of the wire format; the
-    // reader phase (Phase 4) maps recipients into domain types.
-    #[allow(dead_code)]
+    /// Recipients, mapped into the reader's meta block (Phase 4).
     #[serde(default)]
     pub to: Vec<AddressDto>,
     /// ISO-8601 with offset; `None` when the header is missing/unparseable.
@@ -79,4 +77,155 @@ pub(crate) struct AddressDto {
     #[serde(default)]
     pub name: Option<String>,
     pub email: String,
+}
+
+// ── `message read --json` (ADR 0001 finding 10) ──────────────────────────
+//
+// The raw serde dump of `mail_parser::Message`: a part list plus the part
+// indexes that hold the plain-text body, the HTML body, and the attachments.
+// Everything optional carries `#[serde(default)]` so a future himalaya (or
+// an exotic message) cannot crash the reader.
+
+/// The parsed-message dump for `message read`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct MessageReadDto {
+    #[serde(default)]
+    pub parts: Vec<PartDto>,
+    /// Indexes into `parts` holding `text/plain` bodies.
+    #[serde(default)]
+    pub text_body: Vec<usize>,
+    /// Indexes into `parts` holding `text/html` bodies.
+    #[serde(default)]
+    pub html_body: Vec<usize>,
+    /// Indexes into `parts` holding attachments.
+    #[serde(default)]
+    pub attachments: Vec<usize>,
+}
+
+/// One MIME part: headers plus a tagged body.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PartDto {
+    #[serde(default)]
+    pub headers: Vec<HeaderDto>,
+    #[serde(default)]
+    pub body: Option<BodyDto>,
+}
+
+/// One header as a `(name, tagged value)` pair.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct HeaderDto {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub value: Option<HeaderValueDto>,
+}
+
+/// Header values are externally tagged on the wire (`{"Text": …}`,
+/// `{"Address": …}`, `{"DateTime": …}`, `{"ContentType": …}`, …). The
+/// outer untagged wrapper falls back to a raw value so unknown header
+/// kinds never fail the whole message.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum HeaderValueDto {
+    Known(KnownHeaderValue),
+    /// Catch-all for value kinds Post does not interpret (they only need
+    /// to parse, not to be read).
+    #[allow(dead_code)]
+    Other(serde_json::Value),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) enum KnownHeaderValue {
+    Text(String),
+    Address(AddressValueDto),
+    DateTime(RawDateTimeDto),
+    ContentType(ContentTypeDto),
+}
+
+/// `message read --json` address shape: mail_parser serializes the email
+/// as `address` (the envelope listing uses `email`, ADR 0001 finding 10).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PartAddressDto {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub address: String,
+}
+
+/// `{"Address": {"List": [...]}}` (and group form, mapped leniently).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) enum AddressValueDto {
+    List(Vec<PartAddressDto>),
+    Group(Vec<AddressGroupDto>),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AddressGroupDto {
+    #[serde(default)]
+    pub addresses: Vec<PartAddressDto>,
+}
+
+/// mail_parser's `DateTime` serde shape (fixture shape, ADR 0001 finding
+/// 10): wall-clock fields plus the offset carried as `tz_hour`/`tz_minute`
+/// with `tz_before_gmt` as the sign.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RawDateTimeDto {
+    #[serde(default)]
+    pub year: i32,
+    #[serde(default)]
+    pub month: u32,
+    #[serde(default)]
+    pub day: u32,
+    #[serde(default)]
+    pub hour: u32,
+    #[serde(default)]
+    pub minute: u32,
+    #[serde(default)]
+    pub second: u32,
+    #[serde(default)]
+    pub tz_before_gmt: bool,
+    #[serde(default)]
+    pub tz_hour: i32,
+    #[serde(default)]
+    pub tz_minute: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ContentTypeDto {
+    #[serde(default)]
+    pub c_type: String,
+    #[serde(default)]
+    pub c_subtype: Option<String>,
+    #[serde(default)]
+    pub attributes: Vec<ContentTypeAttributeDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ContentTypeAttributeDto {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+/// Part bodies are externally tagged too: decoded text, HTML, raw binary
+/// (a JSON number array), or nested part indexes for multipart. The outer
+/// untagged wrapper tolerates unknown body shapes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum BodyDto {
+    Known(KnownBody),
+    /// Catch-all for body kinds Post does not interpret.
+    #[allow(dead_code)]
+    Other(serde_json::Value),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) enum KnownBody {
+    Text(String),
+    Html(String),
+    Binary(Vec<u8>),
+    /// Nested part indexes; parsed for shape fidelity but not traversed
+    /// (bodies are selected by `text_body`/`html_body`/`attachments`).
+    #[allow(dead_code)]
+    Multipart(Vec<usize>),
 }

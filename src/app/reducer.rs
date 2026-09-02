@@ -12,9 +12,9 @@ use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::operation::{OperationFailure, OperationKind, OperationOutcome, OperationResult};
 use crate::app::overlay::{ErrorDialog, ModalButton, Overlay};
-use crate::app::route::{MailboxRoute, Route};
+use crate::app::route::{MailboxRoute, MessageRoute, Route};
 use crate::app::state::{AppState, Loadable};
-use crate::domain::{Mailbox, MailboxId, MailboxRole, Page, PageRequest};
+use crate::domain::{Mailbox, MailboxId, MailboxRole, Message, MessageLocator, Page, PageRequest};
 
 /// Apply `action` to `state`, returning backend work to spawn. Never
 /// performs I/O, never panics on odd input.
@@ -26,8 +26,8 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
     match action {
         Action::MoveUp => move_selection(state, -1),
         Action::MoveDown => move_selection(state, 1),
-        Action::PagePrevious => change_page(state, -1),
-        Action::PageNext => change_page(state, 1),
+        Action::PagePrevious => page_step(state, -1),
+        Action::PageNext => page_step(state, 1),
         Action::Activate => activate(state),
         Action::BackOrCancel => {
             back_or_cancel(state);
@@ -55,19 +55,19 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             tracing::debug!(query = %state.search_query, "submit search (noop until phase 9)");
             Vec::new()
         }
+        Action::Archive => archive_message(state),
+        Action::Trash => trash_message(state),
+        Action::ToggleStar => toggle_star(state),
+        Action::MarkUnread => mark_unread(state),
         Action::Compose
         | Action::Reply
         | Action::ReplyAll
         | Action::Forward
-        | Action::Archive
-        | Action::Trash
-        | Action::ToggleStar
-        | Action::MarkUnread
         | Action::Send
         | Action::LeaveComposer
         | Action::DiscardDraft => {
-            // Vocabulary is complete (plan §9); the screens owning these
-            // actions arrive in later phases. No-op, never a crash.
+            // Vocabulary is complete (plan §9); the composer phases own
+            // these actions. No-op, never a crash.
             tracing::debug!(?action, "action not yet implemented");
             Vec::new()
         }
@@ -142,10 +142,16 @@ fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
                 state.overlay = None;
                 state.focus = focus;
                 // Retrying replays the equivalent typed intent under a
-                // *new* operation id (plan §12; acceptance: new id).
-                let is_mailboxes = matches!(&spec.kind, OperationKind::LoadMailboxes);
-                if is_mailboxes {
-                    state.mailboxes = Loadable::Loading;
+                // *new* operation id (plan §12; acceptance: new id). The
+                // loading placeholders reset so no stale failure text
+                // lingers while the replay runs.
+                match &spec.kind {
+                    OperationKind::LoadMailboxes => state.mailboxes = Loadable::Loading,
+                    OperationKind::LoadMessage(_) => {
+                        state.open_message = Loadable::Loading;
+                        state.reader_scroll = 0;
+                    }
+                    _ => {}
                 }
                 return Some(vec![state.operations.start(spec.kind)]);
             }
@@ -180,6 +186,64 @@ fn open_error_modal(state: &mut AppState, failure: &OperationFailure) -> Vec<Eff
     Vec::new()
 }
 
+// ── Message actions (plan §19 Phase 4) ───────────────────────────────────
+
+/// The message a list/reader shortcut acts on, when one is under focus.
+/// Shortcuts are list/reader context (plan §10); they never fire from the
+/// sidebar or search field.
+fn message_target(state: &AppState) -> Option<MessageLocator> {
+    match state.focus {
+        Focus::MessageList | Focus::Reader => state.action_target(),
+        _ => None,
+    }
+}
+
+fn archive_message(state: &mut AppState) -> Vec<Effect> {
+    match message_target(state) {
+        Some(locator) => {
+            state.set_status("Archiving…");
+            vec![state.operations.start(OperationKind::Archive(locator))]
+        }
+        None => Vec::new(),
+    }
+}
+
+fn trash_message(state: &mut AppState) -> Vec<Effect> {
+    match message_target(state) {
+        Some(locator) => {
+            state.set_status("Moving to trash…");
+            vec![state.operations.start(OperationKind::Trash(locator))]
+        }
+        None => Vec::new(),
+    }
+}
+
+fn toggle_star(state: &mut AppState) -> Vec<Effect> {
+    // The target summary carries the current state to invert; the UI only
+    // flips once the backend confirms (plan §19 Phase 4 acceptance).
+    let Some(locator) = message_target(state) else {
+        return Vec::new();
+    };
+    let starred = match state.focus {
+        Focus::Reader => state.open_summary().is_some_and(|s| s.is_starred),
+        _ => state.selected_message().is_some_and(|s| s.is_starred),
+    };
+    vec![state.operations.start(OperationKind::SetStarred {
+        locator,
+        starred: !starred,
+    })]
+}
+
+fn mark_unread(state: &mut AppState) -> Vec<Effect> {
+    match message_target(state) {
+        Some(locator) => vec![state.operations.start(OperationKind::SetRead {
+            locator,
+            read: false,
+        })],
+        None => Vec::new(),
+    }
+}
+
 // ── Backend results (plan §11) ───────────────────────────────────────────
 
 /// Apply a backend result. Results for unknown, cancelled, or superseded
@@ -200,6 +264,10 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                 }
                 Ok(OperationOutcome::Page(_)) => {
                     tracing::warn!(id = %result.id, "page payload for a mailbox operation");
+                    Vec::new()
+                }
+                Ok(_) => {
+                    tracing::warn!(id = %result.id, "unexpected payload for a mailbox operation");
                     Vec::new()
                 }
                 Err(failure) => {
@@ -242,9 +310,193 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                     // Retry/Dismiss (plan §12).
                     open_error_modal(state, failure)
                 }
+                _ => {
+                    tracing::warn!(id = %result.id, "unexpected payload for a page operation");
+                    Vec::new()
+                }
+            }
+        }
+        OperationKind::LoadMessage(locator) => {
+            // Currency check: the reader must still show this message.
+            let current = matches!(
+                state.active_route(),
+                Some(Route::Message(route))
+                    if route.mailbox_id == locator.mailbox && route.summary.id == locator.id
+            );
+            state.operations.finish(result.id);
+            if !current {
+                tracing::debug!(
+                    id = %result.id,
+                    mailbox = %locator.mailbox.0,
+                    "dropping message result for a closed reader"
+                );
+                return Vec::new();
+            }
+            match &result.outcome {
+                Ok(OperationOutcome::Message(message)) => {
+                    message_loaded(state, (**message).clone())
+                }
+                Ok(_) => {
+                    tracing::warn!(id = %result.id, "unexpected payload for a message operation");
+                    Vec::new()
+                }
+                Err(failure) => {
+                    // The reader shows a failure placeholder; the modal
+                    // carries Retry/Dismiss (plan §12). Coherent state.
+                    state.open_message = Loadable::Failed(failure.detail.clone());
+                    open_error_modal(state, failure)
+                }
+            }
+        }
+        OperationKind::SetRead { locator, read } => {
+            state.operations.finish(result.id);
+            match &result.outcome {
+                // The flag commands echo affected flags, not resulting state
+                // (ADR 0001 finding 6): the confirmed request is the state.
+                Ok(OperationOutcome::Done) => {
+                    apply_flag(state, locator, FlagChange::Read(*read));
+                }
+                Ok(_) => {
+                    tracing::warn!(id = %result.id, "unexpected payload for a flag operation");
+                }
+                Err(failure) => {
+                    open_error_modal(state, failure);
+                }
+            }
+            Vec::new()
+        }
+        OperationKind::SetStarred { locator, starred } => {
+            state.operations.finish(result.id);
+            match &result.outcome {
+                Ok(OperationOutcome::Done) => {
+                    apply_flag(state, locator, FlagChange::Starred(*starred));
+                }
+                Ok(_) => {
+                    tracing::warn!(id = %result.id, "unexpected payload for a flag operation");
+                }
+                Err(failure) => {
+                    open_error_modal(state, failure);
+                }
+            }
+            Vec::new()
+        }
+        OperationKind::Archive(locator) | OperationKind::Trash(locator) => {
+            state.operations.finish(result.id);
+            match &result.outcome {
+                Ok(OperationOutcome::Done) => message_moved(state, locator),
+                Ok(_) => {
+                    tracing::warn!(id = %result.id, "unexpected payload for a move operation");
+                    Vec::new()
+                }
+                Err(failure) => {
+                    // Nothing was removed locally: the list/reader still
+                    // show the message (plan §12 coherent failure state).
+                    open_error_modal(state, failure)
+                }
             }
         }
     }
+}
+
+/// Local flag application after a confirmed flag operation. The list row
+/// and the reader's summary snapshot update together so the next `Esc` does
+/// not resurrect stale metadata.
+fn apply_flag(state: &mut AppState, locator: &MessageLocator, change: FlagChange) {
+    let matches = |summary: &crate::domain::MessageSummary| {
+        summary.id == locator.id
+            || locator
+                .message_id
+                .as_ref()
+                .is_some_and(|mid| summary.message_id.as_ref() == Some(mid))
+    };
+    if let Some(Route::Message(route)) = state.routes.last_mut()
+        && matches(&route.summary)
+    {
+        match change {
+            FlagChange::Read(read) => route.summary.is_read = read,
+            FlagChange::Starred(starred) => route.summary.is_starred = starred,
+        }
+    }
+    for summary in state.messages.items.iter_mut().filter(|s| matches(s)) {
+        match change {
+            FlagChange::Read(read) => summary.is_read = read,
+            FlagChange::Starred(starred) => summary.is_starred = starred,
+        }
+    }
+}
+
+enum FlagChange {
+    Read(bool),
+    Starred(bool),
+}
+
+/// Apply the fetched message: show it, fill the list snippet (Post fills
+/// snippets only from full fetches, see map.rs), and mark unread mail read
+/// after successful load (plan §19 Phase 4) as a separate, retryable flag
+/// operation whose confirmation updates the list.
+fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
+    let snippet = message.snippet();
+    let message_id = message.id.clone();
+    state.open_message = Loadable::Loaded(message);
+    if let Some(snippet) = snippet {
+        if let Some(Route::Message(route)) = state.routes.last_mut()
+            && route.summary.id == message_id
+            && route.summary.snippet.is_none()
+        {
+            route.summary.snippet = Some(snippet.clone());
+        }
+        if let Some(summary) = state
+            .messages
+            .items
+            .iter_mut()
+            .find(|s| s.id == message_id && s.snippet.is_none())
+        {
+            summary.snippet = Some(snippet);
+        }
+    }
+    // The summary in the route knows the read state; only an unread message
+    // triggers the flag operation (plan §19 Phase 4: mark read after load).
+    let Some(Route::Message(route)) = state.active_route() else {
+        return Vec::new();
+    };
+    if route.summary.is_read {
+        return Vec::new();
+    }
+    let locator = MessageLocator {
+        mailbox: route.mailbox_id.clone(),
+        id: route.summary.id.clone(),
+        message_id: route.summary.message_id.clone(),
+    };
+    vec![state.operations.start(OperationKind::SetRead {
+        locator,
+        read: true,
+    })]
+}
+
+/// A confirmed move (archive/trash): drop the row from the displayed page,
+/// keep the selection index on what took its place, close the reader if it
+/// was showing the moved message, and re-sync the page in the background so
+/// pagination stays truthful (maildir ids change on move, ADR 0001 finding
+/// 4; the reload re-resolves the selection by identity).
+fn message_moved(state: &mut AppState, locator: &MessageLocator) -> Vec<Effect> {
+    let matches = |summary: &crate::domain::MessageSummary| {
+        summary.id == locator.id
+            || locator
+                .message_id
+                .as_ref()
+                .is_some_and(|mid| summary.message_id.as_ref() == Some(mid))
+    };
+    // Close the reader when it was showing the moved message.
+    if matches!(state.active_route(), Some(Route::Message(route)) if matches(&route.summary)) {
+        close_reader(state);
+    }
+    state.messages.items.retain(|summary| !matches(summary));
+    state.selection = state
+        .selection
+        .min(state.messages.items.len().saturating_sub(1));
+    keep_selection_visible(state);
+    state.set_status("Message moved");
+    request_page(state, state.messages.offset)
 }
 
 /// Apply the mailbox listing: select the Inbox, or the first mailbox when
@@ -327,9 +579,35 @@ fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
             // Cursor movement inside the field is a render concern for now;
             // the query is edited append/backspace only (Phase 1).
         }
+        Focus::Reader => scroll_reader(state, delta),
         Focus::ErrorModal => {}
     }
     Vec::new()
+}
+
+/// Left/Right: pages in the message list, viewport steps in the reader.
+fn page_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
+    match state.focus {
+        Focus::Reader => {
+            let viewport = crate::ui::layout::reader_rows_visible(state.size).max(1) as i64;
+            scroll_reader(state, delta * viewport);
+            Vec::new()
+        }
+        _ => change_page(state, delta),
+    }
+}
+
+/// Scroll the reader document (Up/Down in reader focus, plan §10: "scroll
+/// focused area"). The line budget comes from the same pure content
+/// function the renderer draws, so the reducer's clamp always matches the
+/// frame.
+fn scroll_reader(state: &mut AppState, delta: i64) {
+    let viewport = crate::ui::layout::reader_rows_visible(state.size).max(1) as i64;
+    let total =
+        crate::ui::screens::reader::content_line_count(state, state.size.0.max(1) as usize) as i64;
+    let max = (total - viewport).max(0);
+    let next = (state.reader_scroll as i64 + delta).clamp(0, max);
+    state.reader_scroll = next as usize;
 }
 
 /// Shift `list_scroll` so the selection stays on screen. Row geometry comes
@@ -390,11 +668,11 @@ fn change_page(state: &mut AppState, delta: i64) -> Vec<Effect> {
 /// The registry supersedes any page request still in flight for the same
 /// mailbox (and cancels it), so only the newest result can win.
 fn request_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
-    let Some(Route::Mailbox(route)) = state.active_route().cloned() else {
+    let Some(mailbox_id) = state.active_route().and_then(Route::mailbox_id).cloned() else {
         return Vec::new();
     };
     let request = PageRequest {
-        mailbox_id: route.mailbox_id,
+        mailbox_id,
         offset,
         limit: state.messages.limit.max(1),
     };
@@ -407,14 +685,49 @@ fn activate(state: &mut AppState) -> Vec<Effect> {
             Some(mailbox) => switch_mailbox(state, &mailbox.id),
             None => Vec::new(),
         },
-        Focus::MessageList => {
-            // The reader screen arrives in Phase 4; opening a message is a
-            // no-op until then.
-            tracing::debug!("activate on message list (reader arrives in phase 4)");
-            Vec::new()
+        Focus::MessageList => match state.selected_message().cloned() {
+            Some(summary) => open_message(state, summary),
+            None => Vec::new(),
+        },
+        Focus::Reader | Focus::SearchField | Focus::ErrorModal => {
+            if state.focus == Focus::SearchField {
+                reduce(state, &Action::SubmitSearch)
+            } else {
+                Vec::new()
+            }
         }
-        Focus::SearchField => reduce(state, &Action::SubmitSearch),
-        Focus::ErrorModal => Vec::new(),
+    }
+}
+
+/// Open the selected message: push the reader route, snapshot the summary,
+/// and fetch the full message. The list page, selection, and scroll stay
+/// untouched so `Esc` restores them exactly (plan §19 Phase 4).
+fn open_message(state: &mut AppState, summary: crate::domain::MessageSummary) -> Vec<Effect> {
+    let mailbox_id = summary.mailbox_id.clone();
+    let locator = MessageLocator {
+        mailbox: mailbox_id.clone(),
+        id: summary.id.clone(),
+        message_id: summary.message_id.clone(),
+    };
+    state.routes.push(Route::Message(MessageRoute {
+        mailbox_id,
+        summary,
+    }));
+    state.focus = Focus::Reader;
+    state.open_message = Loadable::Loading;
+    state.reader_scroll = 0;
+    vec![state.operations.start(OperationKind::LoadMessage(locator))]
+}
+
+/// Close the reader if it is open: pop its route and drop its data. The
+/// mailbox route underneath was never mutated, so page, selection, focus,
+/// and scroll are restored by construction.
+fn close_reader(state: &mut AppState) {
+    if matches!(state.active_route(), Some(Route::Message(_))) {
+        state.routes.pop();
+        state.open_message = Loadable::Idle;
+        state.reader_scroll = 0;
+        state.focus = Focus::MessageList;
     }
 }
 
@@ -426,7 +739,12 @@ fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Vec<Effect> {
     {
         return Vec::new();
     }
-    state.routes.pop();
+    // A reader (or composer, later) open on top is replaced by the new
+    // mailbox; its data must not linger.
+    if state.routes.pop().is_some() {
+        state.open_message = Loadable::Idle;
+        state.reader_scroll = 0;
+    }
     state.routes.push(Route::Mailbox(MailboxRoute {
         mailbox_id: mailbox_id.clone(),
     }));
@@ -461,7 +779,11 @@ fn back_or_cancel(state: &mut AppState) {
         return;
     }
     if state.routes.len() > 1 {
+        // Pop the reader (or a later screen): the mailbox route underneath
+        // still holds the exact page, selection, and scroll.
         state.routes.pop();
+        state.open_message = Loadable::Idle;
+        state.reader_scroll = 0;
         state.focus = Focus::MessageList;
         return;
     }

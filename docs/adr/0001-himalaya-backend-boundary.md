@@ -52,7 +52,11 @@ Verified behaviors that constrain the adapter:
    returned**; it must be re-discovered by `Message-ID` in the trash mailbox.
 6. **Flag commands echo the affected flags**, not the resulting state
    (`flag remove --flag seen` → `{"flags":["seen"]}`). Authoritative flag
-   state must come from `envelope list`/`message read`.
+   state must come from `envelope list`/`message read`. *Correction
+   (Phase 4 probe)*: without `--json`, `flag {add,remove}` and
+   `message {move,delete}` print **human text** on stdout
+   (`Successfully added flags: flagged`) with exit 0 — Post must pass
+   `--json` on every mutation so the adapter's JSON validation holds.
 7. **All shared commands accept `-m <mailbox>`** and fall back to the inbox
    alias when omitted. Post must always pass the mailbox explicitly.
 8. **Pagination is 1-based** (`-p`, `-s`); page size defaults to

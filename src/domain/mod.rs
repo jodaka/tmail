@@ -10,6 +10,6 @@ pub mod send;
 
 pub use address::Address;
 pub use mailbox::{Mailbox, MailboxId, MailboxRole};
-pub use message::{MessageId, MessageSummary};
+pub use message::{Attachment, Message, MessageHeaders, MessageId, MessageLocator, MessageSummary};
 pub use page::{Page, PageRequest};
 pub use send::SendOutcome;

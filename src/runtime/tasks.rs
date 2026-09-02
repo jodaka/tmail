@@ -72,6 +72,30 @@ async fn run_effect(
             Ok(page) => Some(Ok(OperationOutcome::Page(page))),
             Err(err) => operation_failure(&effect, err).map(Err),
         },
+        OperationKind::LoadMessage(locator) => match backend.get_message(ctx, locator).await {
+            Ok(message) => Some(Ok(OperationOutcome::Message(Box::new(message)))),
+            Err(err) => operation_failure(&effect, err).map(Err),
+        },
+        OperationKind::SetRead { locator, read } => {
+            match backend.set_read(ctx, locator, read).await {
+                Ok(()) => Some(Ok(OperationOutcome::Done)),
+                Err(err) => operation_failure(&effect, err).map(Err),
+            }
+        }
+        OperationKind::SetStarred { locator, starred } => {
+            match backend.set_starred(ctx, locator, starred).await {
+                Ok(()) => Some(Ok(OperationOutcome::Done)),
+                Err(err) => operation_failure(&effect, err).map(Err),
+            }
+        }
+        OperationKind::Archive(locator) => match backend.archive(ctx, locator).await {
+            Ok(()) => Some(Ok(OperationOutcome::Done)),
+            Err(err) => operation_failure(&effect, err).map(Err),
+        },
+        OperationKind::Trash(locator) => match backend.trash(ctx, locator).await {
+            Ok(()) => Some(Ok(OperationOutcome::Done)),
+            Err(err) => operation_failure(&effect, err).map(Err),
+        },
     }
 }
 
@@ -107,7 +131,9 @@ mod tests {
     use super::*;
     use crate::app::operation::OperationId;
     use crate::backend::BackendResult;
-    use crate::domain::{Mailbox, MailboxId, MessageSummary, Page, PageRequest};
+    use crate::domain::{
+        Mailbox, MailboxId, Message, MessageId, MessageLocator, MessageSummary, Page, PageRequest,
+    };
     use std::time::Duration;
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
     use tokio_util::sync::CancellationToken;
@@ -184,6 +210,51 @@ mod tests {
                 },
                 _ = req.cancellation.cancelled() => Err(BackendError::Cancelled),
             }
+        }
+
+        async fn get_message(
+            &self,
+            _req: RequestContext,
+            _locator: MessageLocator,
+        ) -> BackendResult<Message> {
+            Ok(Message {
+                id: MessageId(String::from("fake")),
+                mailbox_id: MailboxId(String::from("fake")),
+                headers: Default::default(),
+                plain_body: None,
+                html_body: None,
+                attachments: Vec::new(),
+            })
+        }
+
+        async fn set_read(
+            &self,
+            _req: RequestContext,
+            _locator: MessageLocator,
+            _read: bool,
+        ) -> BackendResult<()> {
+            Ok(())
+        }
+
+        async fn set_starred(
+            &self,
+            _req: RequestContext,
+            _locator: MessageLocator,
+            _starred: bool,
+        ) -> BackendResult<()> {
+            Ok(())
+        }
+
+        async fn archive(
+            &self,
+            _req: RequestContext,
+            _locator: MessageLocator,
+        ) -> BackendResult<()> {
+            Ok(())
+        }
+
+        async fn trash(&self, _req: RequestContext, _locator: MessageLocator) -> BackendResult<()> {
+            Ok(())
         }
     }
 

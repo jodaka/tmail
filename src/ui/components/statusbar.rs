@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
+use crate::app::route::Route;
 use crate::app::state::AppState;
 use crate::ui::theme::Theme;
 
@@ -38,18 +39,30 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
         height: 1,
     };
 
-    // Key hints follow the input contract (plan §10). Arrows move, Enter
-    // opens, single letters act. Deliberately no j/k, no help.
-    let hints = [
-        ("↑↓", "move"),
-        ("↵", "open"),
-        ("s", "star"),
-        ("e", "archive"),
-        ("c", "compose"),
-        ("/", "search"),
-    ];
+    // Key hints follow the input contract (plan §10) and the active screen
+    // (mockup `.statusbar` per layout). Deliberately no j/k, no help.
+    let reader = matches!(state.active_route(), Some(Route::Message(_)));
+    let hints: &[(&str, &str)] = if reader {
+        &[
+            ("↑↓", "scroll"),
+            ("esc", "back"),
+            ("r", "reply"),
+            ("e", "archive"),
+            ("s", "star"),
+        ]
+    } else {
+        &[
+            ("↑↓", "move"),
+            ("↵", "open"),
+            ("s", "star"),
+            ("e", "archive"),
+            ("c", "compose"),
+            ("/", "search"),
+        ]
+    };
+    let mode = if reader { " READER " } else { " NORMAL " };
     let mut spans: Vec<Span<'_>> = vec![Span::styled(
-        " NORMAL ",
+        mode,
         theme.mode_badge().add_modifier(Modifier::empty()),
     )];
     // Foreground work never blocks input, but it is announced here so the
@@ -68,7 +81,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
     for (key, label) in hints {
         spans.push(Span::styled("  ", Style::new().bg(theme.background)));
         spans.push(Span::styled(
-            key,
+            *key,
             Style::new().fg(theme.text_soft).bg(theme.background),
         ));
         spans.push(Span::styled(

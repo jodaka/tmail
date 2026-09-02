@@ -673,7 +673,348 @@ fn ambiguous_failure_is_flagged_for_the_modal() {
     assert!(dialog.ambiguous, "ambiguity must reach the modal");
 }
 
-// ── Focus, search, routes, resize (Phase 1/2 behavior) ───────────────────
+// ── Reader and message actions (plan §19 Phase 4) ────────────────────────
+
+/// Complete an in-flight `LoadMessage` with the mock message for the open
+/// summary, exactly as the operation manager would deliver it. Returns the
+/// follow-up effects the reducer emitted (e.g. the mark-read operation).
+fn complete_message_ok(s: &mut AppState, id: OperationId) -> Vec<Effect> {
+    let summary = s.open_summary().expect("reader open").clone();
+    let message = mock::mock_message(&summary);
+    reduce(
+        s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(message))),
+        }),
+    )
+}
+
+/// Complete an in-flight mutation with a `Done` outcome. Returns the
+/// follow-up effects (e.g. the post-move page re-sync).
+fn complete_done(s: &mut AppState, id: OperationId) -> Vec<Effect> {
+    reduce(
+        s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Done),
+        }),
+    )
+}
+
+fn expect_kind(effects: &[Effect]) -> (OperationId, OperationKind) {
+    effect_parts(effects)
+}
+
+#[test]
+fn activate_on_message_list_opens_the_reader() {
+    let mut s = state();
+    s.selection = 1;
+    let selected = s.selected_message().unwrap().clone();
+    let (id, kind) = expect_kind(&reduce(&mut s, &Action::Activate));
+    assert!(
+        matches!(&kind, OperationKind::LoadMessage(locator)
+                if locator.id == selected.id && locator.mailbox == selected.mailbox_id
+        ),
+        "kind: {kind:?}"
+    );
+    assert!(s.operations.get(id).is_some());
+    // Route stack: reader on top of the mailbox route.
+    assert_eq!(s.routes.len(), 2);
+    assert_eq!(s.open_summary().unwrap().id, selected.id);
+    assert_eq!(s.focus, Focus::Reader);
+    assert!(matches!(s.open_message, Loadable::Loading));
+    assert_eq!(s.reader_scroll, 0);
+    // The list underneath is untouched (restoration is by construction).
+    assert_eq!(s.messages.offset, 0);
+}
+
+#[test]
+fn reader_result_applies_and_marks_unread_read() {
+    let mut s = state();
+    s.selection = 1; // m2: unread in the mock seed.
+    assert!(!s.selected_message().unwrap().is_read);
+    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    // The load completion itself emits the mark-read operation.
+    let (flag_id, kind) = expect_kind(&complete_message_ok(&mut s, id));
+    assert!(matches!(s.open_message, Loadable::Loaded(_)));
+    assert!(
+        matches!(&kind, OperationKind::SetRead { read: true, .. }),
+        "kind: {kind:?}"
+    );
+    // The list still shows the message as unread: the UI updates only
+    // after confirmation (plan §19 Phase 4 acceptance).
+    assert!(!s.messages.items[1].is_read);
+    complete_done(&mut s, flag_id);
+    // Confirmation updates both the list row and the reader's snapshot.
+    assert!(s.messages.items[1].is_read);
+    assert!(s.open_summary().unwrap().is_read);
+    assert!(s.operations.is_empty());
+}
+
+#[test]
+fn read_message_load_does_not_trigger_mark_read() {
+    let mut s = state();
+    s.selection = 3; // m4: read in the mock seed.
+    assert!(s.selected_message().unwrap().is_read);
+    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    complete_message_ok(&mut s, id);
+    // No further operations: a read message needs no flag change.
+    assert!(s.operations.is_empty());
+}
+
+#[test]
+fn reader_result_fills_missing_snippet() {
+    let mut s = state();
+    s.messages.items[2].snippet = None;
+    s.selection = 2;
+    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    complete_message_ok(&mut s, id);
+    let snippet = s.messages.items[2].snippet.as_deref();
+    assert_eq!(snippet, Some("body line 01"));
+}
+
+#[test]
+fn esc_from_reader_restores_exact_list_state() {
+    let mut s = state();
+    s.selection = 5;
+    s.list_scroll = 3;
+    let before = s.clone();
+    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    complete_message_ok(&mut s, id);
+    // The load may start a mark-read op; settle it so nothing is in flight.
+    while !s.operations.is_empty() {
+        let pending = s.operations.foreground().unwrap().id;
+        if matches!(
+            s.operations.get(pending).unwrap().kind,
+            OperationKind::SetRead { .. }
+        ) {
+            complete_done(&mut s, pending);
+        } else {
+            complete_message_ok(&mut s, pending);
+        }
+    }
+    reduce(&mut s, &Action::BackOrCancel);
+    assert_eq!(s.routes.len(), 1);
+    assert_eq!(s.focus, Focus::MessageList);
+    assert!(matches!(s.open_message, Loadable::Idle));
+    assert_eq!(s.reader_scroll, 0);
+    // Exact restoration: page, selection, scroll.
+    assert_eq!(s.messages.items.len(), before.messages.items.len());
+    assert_eq!(s.messages.offset, before.messages.offset);
+    assert_eq!(s.selection, before.selection);
+    assert_eq!(s.list_scroll, before.list_scroll);
+}
+
+#[test]
+fn esc_cancels_message_load_then_second_esc_returns() {
+    let mut s = state();
+    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let token = s.operations.cancellation(id).unwrap();
+    // First Esc cancels the foreground load (plan §10 order).
+    reduce(&mut s, &Action::BackOrCancel);
+    assert!(token.is_cancelled());
+    assert!(s.operations.get(id).is_none());
+    assert_eq!(s.routes.len(), 2, "reader stays open after cancel");
+    assert_eq!(s.focus, Focus::Reader);
+    // Second Esc goes back to the list.
+    reduce(&mut s, &Action::BackOrCancel);
+    assert_eq!(s.routes.len(), 1);
+    assert_eq!(s.focus, Focus::MessageList);
+}
+
+#[test]
+fn stale_message_result_after_close_is_dropped() {
+    let mut s = state();
+    s.selection = 1;
+    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    // Capture the open summary, then close the reader before the result
+    // arrives.
+    let summary = s.open_summary().unwrap().clone();
+    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, &Action::BackOrCancel);
+    assert!(matches!(s.open_message, Loadable::Idle));
+    let message = mock::mock_message(&summary);
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(message))),
+        }),
+    );
+    assert!(
+        matches!(s.open_message, Loadable::Idle),
+        "a result for a closed reader must never mutate state"
+    );
+    assert!(s.overlay.is_none());
+}
+
+#[test]
+fn message_load_failure_opens_modal_and_retry_replays() {
+    let mut s = state();
+    let (id, kind) = expect_kind(&reduce(&mut s, &Action::Activate));
+    reduce(&mut s, &failure(id, &kind, "no such message"));
+    // Coherent state: reader open, failed placeholder, modal up.
+    assert!(matches!(s.open_message, Loadable::Failed(_)));
+    assert!(s.overlay.is_some());
+    assert_eq!(s.routes.len(), 2);
+    let effects = reduce(&mut s, &Action::RetryError);
+    let (retry_id, retry_kind) = effect_parts(&effects);
+    assert_ne!(retry_id, id);
+    assert_eq!(retry_kind, kind, "same typed intent");
+    assert!(s.overlay.is_none());
+    assert!(matches!(s.open_message, Loadable::Loading));
+}
+
+#[test]
+fn toggle_star_from_list_requests_inverse_and_applies_on_confirmation() {
+    let mut s = state();
+    s.selection = 0; // m1: not starred.
+    assert!(!s.messages.items[0].is_starred);
+    let (id, kind) = expect_kind(&reduce(&mut s, &Action::ToggleStar));
+    assert!(
+        matches!(&kind, OperationKind::SetStarred { starred: true, .. }),
+        "kind: {kind:?}"
+    );
+    // Not applied before confirmation.
+    assert!(!s.messages.items[0].is_starred);
+    complete_done(&mut s, id);
+    assert!(s.messages.items[0].is_starred);
+
+    // Toggling a starred message requests the inverse.
+    let (id, kind) = expect_kind(&reduce(&mut s, &Action::ToggleStar));
+    assert!(
+        matches!(&kind, OperationKind::SetStarred { starred: false, .. }),
+        "kind: {kind:?}"
+    );
+    complete_done(&mut s, id);
+    assert!(!s.messages.items[0].is_starred);
+}
+
+#[test]
+fn star_from_reader_targets_the_open_message() {
+    let mut s = state();
+    s.selection = 2; // m3: not starred.
+    let (load_id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    complete_message_ok(&mut s, load_id);
+    let (id, kind) = expect_kind(&reduce(&mut s, &Action::ToggleStar));
+    assert!(matches!(
+        &kind,
+        OperationKind::SetStarred { starred: true, .. }
+    ));
+    complete_done(&mut s, id);
+    assert!(
+        s.open_summary().unwrap().is_starred,
+        "route snapshot updated"
+    );
+    assert!(s.messages.items[2].is_starred, "list row updated");
+}
+
+#[test]
+fn mark_unread_updates_list_and_route_after_confirmation() {
+    let mut s = state();
+    s.selection = 3; // m4: read.
+    let (load_id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    complete_message_ok(&mut s, load_id);
+    let (id, kind) = expect_kind(&reduce(&mut s, &Action::MarkUnread));
+    assert!(matches!(&kind, OperationKind::SetRead { read: false, .. }));
+    assert!(
+        s.messages.items[3].is_read,
+        "not applied before confirmation"
+    );
+    complete_done(&mut s, id);
+    assert!(!s.messages.items[3].is_read);
+    assert!(!s.open_summary().unwrap().is_read);
+}
+
+#[test]
+fn message_actions_do_not_fire_from_sidebar_focus() {
+    let mut s = state();
+    s.focus = Focus::Sidebar;
+    no_effects(&reduce(&mut s, &Action::ToggleStar));
+    no_effects(&reduce(&mut s, &Action::Archive));
+    no_effects(&reduce(&mut s, &Action::Trash));
+    no_effects(&reduce(&mut s, &Action::MarkUnread));
+    assert!(s.operations.is_empty());
+}
+
+#[test]
+fn archive_from_list_removes_row_and_resyncs_page() {
+    let mut s = state();
+    s.selection = 0;
+    let target = s.selected_message().unwrap().id.clone();
+    let (id, kind) = expect_kind(&reduce(&mut s, &Action::Archive));
+    assert!(matches!(&kind, OperationKind::Archive(_)), "kind: {kind:?}");
+    // The move confirmation itself emits the page re-sync effect.
+    let (_, req) = expect_page(&complete_done(&mut s, id));
+    // Confirmation removed the row, kept the selection index on what took
+    // its place, and re-synced the page at the same offset.
+    assert_eq!(s.messages.items.len(), mock::PAGE_SIZE - 1);
+    assert!(s.messages.items.iter().all(|m| m.id != target));
+    assert_eq!(s.selection, 0);
+    assert_eq!(req.offset, 0, "re-sync reloads the current page");
+}
+
+#[test]
+fn trash_closes_reader_and_removes_row() {
+    let mut s = state();
+    s.selection = 4;
+    let target = s.selected_message().unwrap().id.clone();
+    let (load_id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    complete_message_ok(&mut s, load_id);
+    let (id, kind) = expect_kind(&reduce(&mut s, &Action::Trash));
+    assert!(matches!(&kind, OperationKind::Trash(_)), "kind: {kind:?}");
+    let (_, req) = expect_page(&complete_done(&mut s, id));
+    // The reader closed; the row vanished; the page re-syncs.
+    assert_eq!(s.routes.len(), 1);
+    assert_eq!(s.focus, Focus::MessageList);
+    assert!(matches!(s.open_message, Loadable::Idle));
+    assert!(s.messages.items.iter().all(|m| m.id != target));
+    assert_eq!(req.offset, 0);
+}
+
+#[test]
+fn archive_failure_keeps_row_and_opens_modal() {
+    let mut s = state();
+    s.selection = 1;
+    let (id, kind) = expect_kind(&reduce(&mut s, &Action::Archive));
+    reduce(&mut s, &failure(id, &kind, "imap server refused"));
+    // Coherent failure state: nothing removed, no reload, modal up.
+    assert_eq!(s.messages.items.len(), mock::PAGE_SIZE);
+    assert!(s.overlay.is_some());
+    assert!(s.operations.is_empty());
+}
+
+#[test]
+fn reader_scrolls_within_content_and_clamps() {
+    let mut s = state();
+    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    complete_message_ok(&mut s, id);
+    let viewport = crate::ui::layout::reader_rows_visible(s.size).max(1);
+    let total = crate::ui::screens::reader::content_line_count(&s, s.size.0 as usize);
+    assert!(
+        total > viewport,
+        "mock body must overflow the viewport: total {total}, viewport {viewport}"
+    );
+    let max = total - viewport;
+    // Movement in reader focus scrolls the document.
+    reduce(&mut s, &Action::MoveDown);
+    assert_eq!(s.reader_scroll, 1);
+    for _ in 0..(max + 10) {
+        reduce(&mut s, &Action::MoveDown);
+    }
+    assert_eq!(s.reader_scroll, max, "scroll clamps at the end");
+    for _ in 0..(max + 10) {
+        reduce(&mut s, &Action::MoveUp);
+    }
+    assert_eq!(s.reader_scroll, 0, "scroll clamps at the start");
+    // Left/Right page through the reader document in viewport steps,
+    // clamped like single-line movement.
+    reduce(&mut s, &Action::PageNext);
+    assert_eq!(s.reader_scroll, viewport.min(max));
+    reduce(&mut s, &Action::PagePrevious);
+    assert_eq!(s.reader_scroll, 0);
+}
 
 #[test]
 fn focus_cycles_tab_shift_tab() {
@@ -867,10 +1208,6 @@ fn unimplemented_actions_are_safe_noops() {
         Action::Reply,
         Action::ReplyAll,
         Action::Forward,
-        Action::Archive,
-        Action::Trash,
-        Action::ToggleStar,
-        Action::MarkUnread,
         Action::Send,
         Action::LeaveComposer,
         Action::DiscardDraft,
@@ -884,6 +1221,18 @@ fn unimplemented_actions_are_safe_noops() {
     assert_eq!(s.routes, before.routes);
     assert_eq!(s.messages, before.messages);
     assert_eq!(s.focus, before.focus);
+    // Message actions need an operation target under list/reader focus and
+    // stay no-ops when the list is empty.
+    s.messages.items.clear();
+    for action in [
+        Action::Archive,
+        Action::Trash,
+        Action::ToggleStar,
+        Action::MarkUnread,
+    ] {
+        no_effects(&reduce(&mut s, &action));
+    }
+    assert!(s.operations.is_empty());
 }
 
 #[test]

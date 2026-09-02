@@ -18,13 +18,21 @@ use tokio_util::sync::CancellationToken;
 use tmail::app::operation::OperationId;
 use tmail::backend::himalaya::HimalayaCliBackend;
 use tmail::backend::{BackendError, MailBackend, RequestContext};
-use tmail::domain::{MailboxId, MailboxRole, PageRequest};
+use tmail::domain::{MailboxId, MailboxRole, MessageId, MessageLocator, PageRequest};
 
 /// A live request context; tests that do not cancel share one token.
 fn ctx() -> RequestContext {
     RequestContext {
         operation: OperationId(1),
         cancellation: CancellationToken::new(),
+    }
+}
+
+fn locator(mailbox: &str, id: &str) -> MessageLocator {
+    MessageLocator {
+        mailbox: MailboxId(String::from(mailbox)),
+        id: MessageId(String::from(id)),
+        message_id: Some(String::from("1@post.local")),
     }
 }
 
@@ -357,6 +365,201 @@ fn cancel_during_mailbox_list_reports_cancelled_not_output() {
         let result = task.await.expect("request task joins");
         assert!(matches!(result, Err(BackendError::Cancelled)));
     });
+}
+
+// ── Phase 4: reader and core actions ─────────────────────────────────────
+
+/// `message read -m <mbox> <id> --json` with exact argv, mapped into the
+/// domain message (plan §19 Phase 4).
+#[test]
+fn message_read_argv_is_exact_and_maps_domain_message() {
+    let fake = FakeHimalaya::spawn("ok", "ok");
+    let result = block(backend(&fake, Some("probe")).get_message(ctx(), locator("INBOX", "env-1")));
+    let message = result.expect("read succeeds");
+    assert_eq!(
+        fake.argv(),
+        vec![vec![
+            "-c".to_string(),
+            fake.config().display().to_string(),
+            "-a".to_string(),
+            "probe".to_string(),
+            "message".to_string(),
+            "read".to_string(),
+            "-m".to_string(),
+            "INBOX".to_string(),
+            "env-1".to_string(),
+            "--json".to_string(),
+        ]]
+    );
+    // Locator identity is echoed back onto the domain message.
+    assert_eq!(message.id.0, "env-1");
+    assert_eq!(message.mailbox_id.0, "INBOX");
+    assert_eq!(message.headers.subject, "Contract test");
+    assert_eq!(message.headers.from[0].display(), "Ada");
+    assert_eq!(message.headers.to[0].email, "probe@post.local");
+    assert_eq!(message.headers.message_id.as_deref(), Some("1@post.local"));
+    assert_eq!(
+        message.headers.date.map(|d| d.to_rfc3339()),
+        Some("2026-09-02T10:03:40+03:00".to_string())
+    );
+    assert_eq!(
+        message.plain_body.as_deref(),
+        Some("Hello from the fake.\n")
+    );
+    assert_eq!(message.html_body, None);
+    assert_eq!(message.attachments.len(), 1);
+    assert_eq!(message.attachments[0].name.as_deref(), Some("fake.pdf"));
+    assert_eq!(
+        message.attachments[0].mime_type.as_deref(),
+        Some("application/pdf")
+    );
+    assert_eq!(message.attachments[0].size, Some(3));
+    assert_eq!(message.attachments[0].part_id, 1);
+}
+
+#[test]
+fn message_read_failure_is_typed() {
+    let fake = FakeHimalaya::spawn_full("ok", "ok", "error-json", "ok");
+    let result =
+        block(backend(&fake, Some("probe")).get_message(ctx(), locator("INBOX", "env-404")));
+    match result {
+        Err(BackendError::Command { code, detail }) => {
+            assert_eq!(code, Some(1));
+            assert!(detail.contains("no such message"), "detail: {detail}");
+        }
+        other => panic!("expected Command, got {other:?}"),
+    }
+}
+
+#[test]
+fn set_read_and_set_starred_drive_flag_add_remove() {
+    let fake = FakeHimalaya::spawn("ok", "ok");
+    let backend = backend(&fake, Some("probe"));
+    block(backend.set_read(ctx(), locator("INBOX", "env-1"), true)).expect("mark read");
+    block(backend.set_read(ctx(), locator("INBOX", "env-1"), false)).expect("mark unread");
+    block(backend.set_starred(ctx(), locator("INBOX", "env-1"), true)).expect("star");
+    block(backend.set_starred(ctx(), locator("INBOX", "env-1"), false)).expect("unstar");
+    let argv = fake.argv();
+    let flags: Vec<Vec<String>> = argv
+        .iter()
+        .map(|inv| {
+            inv.iter()
+                .skip_while(|arg| arg.as_str() != "flag")
+                .cloned()
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        flags,
+        vec![
+            vec![
+                "flag", "add", "-m", "INBOX", "--flag", "seen", "env-1", "--json"
+            ],
+            vec![
+                "flag", "remove", "-m", "INBOX", "--flag", "seen", "env-1", "--json"
+            ],
+            vec![
+                "flag", "add", "-m", "INBOX", "--flag", "flagged", "env-1", "--json"
+            ],
+            vec![
+                "flag", "remove", "-m", "INBOX", "--flag", "flagged", "env-1", "--json"
+            ],
+        ]
+    );
+}
+
+#[test]
+fn flag_failure_is_typed() {
+    let fake = FakeHimalaya::spawn_full("ok", "ok", "ok", "error-json");
+    let result =
+        block(backend(&fake, Some("probe")).set_read(ctx(), locator("INBOX", "env-1"), true));
+    match result {
+        Err(BackendError::Command { code, detail }) => {
+            assert_eq!(code, Some(1));
+            assert!(detail.contains("mailbox not found"), "detail: {detail}");
+        }
+        other => panic!("expected Command, got {other:?}"),
+    }
+}
+
+/// Archive resolves its target inside the adapter from the cached mailbox
+/// listing (role match), never by guessing in the UI (ADR 0001).
+#[test]
+fn archive_resolves_target_from_cached_listing() {
+    // Alias `archive` → "Archive" makes the fake's Archive mailbox carry
+    // the Archive role (name heuristic; no trash alias overrides here).
+    let fake = FakeHimalaya::spawn("ok", "ok");
+    let backend = HimalayaCliBackend::new(
+        fake.program().display().to_string(),
+        Some(PathBuf::from(fake.config())),
+        Some(String::from("probe")),
+        aliases(&[("archive", "Archive")]),
+    );
+    // Populate the cache exactly like the app's startup listing does.
+    block(backend.list_mailboxes(ctx())).expect("listing");
+    block(backend.archive(ctx(), locator("INBOX", "env-1"))).expect("archive");
+    assert_eq!(
+        fake.argv(),
+        vec![
+            vec![
+                "-c".to_string(),
+                fake.config().display().to_string(),
+                "-a".to_string(),
+                "probe".to_string(),
+                "mailbox".to_string(),
+                "list".to_string(),
+                "--json".to_string(),
+            ],
+            vec![
+                "-c".to_string(),
+                fake.config().display().to_string(),
+                "-a".to_string(),
+                "probe".to_string(),
+                "message".to_string(),
+                "move".to_string(),
+                "--from".to_string(),
+                "INBOX".to_string(),
+                "--to".to_string(),
+                "/root/maildir/Archive".to_string(),
+                "env-1".to_string(),
+                "--json".to_string(),
+            ],
+        ]
+    );
+}
+
+/// Without a listing and without an `archive` alias, archiving is a typed
+/// request error before any child process runs.
+#[test]
+fn archive_without_a_known_target_is_rejected_without_spawning() {
+    let fake = FakeHimalaya::spawn_ok();
+    let result = block(backend(&fake, Some("probe")).archive(ctx(), locator("INBOX", "env-1")));
+    assert!(matches!(result, Err(BackendError::InvalidRequest(_))));
+    assert!(fake.argv().is_empty(), "no child process may be spawned");
+}
+
+/// Trash delegates to `message delete` (trash-first on himalaya's side,
+/// ADR 0001 finding 5) with exact argv.
+#[test]
+fn trash_argv_is_exact() {
+    let fake = FakeHimalaya::spawn("ok", "ok");
+    block(backend(&fake, Some("probe")).trash(ctx(), locator("INBOX", "env-1"))).expect("trash");
+    assert_eq!(
+        fake.argv(),
+        vec![vec![
+            "-c".to_string(),
+            fake.config().display().to_string(),
+            "-a".to_string(),
+            "probe".to_string(),
+            "message".to_string(),
+            "delete".to_string(),
+            "-m".to_string(),
+            "INBOX".to_string(),
+            "env-1".to_string(),
+            "--json".to_string(),
+        ]]
+    );
+    assert!(fake.stdin_bytes().is_empty(), "stdin must stay empty");
 }
 
 #[test]

@@ -76,6 +76,11 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
         crate::app::state::Loadable::Loading => {
             render_note(frame, rows.folders, theme, "loading mailboxes…")
         }
+        // `Idle` cannot occur for the sidebar slot, but the fallback keeps
+        // the exhaustive match honest.
+        crate::app::state::Loadable::Idle => {
+            render_note(frame, rows.folders, theme, "loading mailboxes…")
+        }
         crate::app::state::Loadable::Failed(_) => {
             render_note(frame, rows.folders, theme, "mailboxes unavailable")
         }

@@ -373,3 +373,154 @@ fn ambiguous_failure_shows_duplicate_warning() {
         "ambiguity warning missing:\n{text}"
     );
 }
+
+// ── Reader screen (plan §19 Phase 4) ─────────────────────────────────────
+
+use tmail::app::Focus;
+use tmail::app::route::{MessageRoute, Route};
+use tmail::app::state::Loadable;
+use tmail::domain::{MailboxId, Message, MessageId};
+
+/// A reader-open state: the selected mock summary is open with its mock
+/// message loaded.
+fn reader_state(selection: usize) -> tmail::app::AppState {
+    let mut state = mock_initial_state();
+    let summary = state.messages.items[selection].clone();
+    let message = mock::mock_message(&summary);
+    state.routes.push(Route::Message(MessageRoute {
+        mailbox_id: MailboxId(String::from("inbox")),
+        summary,
+    }));
+    state.open_message = Loadable::Loaded(message);
+    state.focus = Focus::Reader;
+    state
+}
+
+#[test]
+fn reader_renders_exactly_one_message_document() {
+    let mut state = reader_state(0);
+    state.size = (152, 40);
+    let text = draw_after(&mut state, &[], 152, 40);
+    // Header block.
+    assert!(
+        text.contains("Re: WIP — 240 mm stainless-clad gyuto"),
+        "subject missing:\n{text}"
+    );
+    assert!(text.contains("From"), "meta missing:\n{text}");
+    assert!(
+        text.contains("KKF Notifications"),
+        "sender missing:\n{text}"
+    );
+    // Action row and hints: exactly one message, no thread navigation
+    // (plan §4 overrides).
+    assert!(text.contains("Archive e"), "actions missing:\n{text}");
+    assert_absent(&text, "3 of 3", (152, 40));
+    assert_absent(&text, "thread", (152, 40));
+    // Body content from the mock message.
+    assert!(text.contains("body line 01"), "body missing:\n{text}");
+    // Reader mode badge (mockup `.mode`).
+    assert!(text.contains("READER"), "reader badge missing:\n{text}");
+    assert_absent(&text, "NORMAL", (152, 40));
+    // Sidebar chrome stays visible.
+    assert!(text.contains("Compose"), "sidebar hidden:\n{text}");
+}
+
+#[test]
+fn reader_loading_state_renders_placeholder() {
+    let mut state = reader_state(0);
+    state.open_message = Loadable::Loading;
+    let text = draw_after(&mut state, &[], 152, 40);
+    assert!(text.contains("loading message…"), "placeholder:\n{text}");
+    assert!(
+        !text.contains("body line 01"),
+        "body must not exist while loading:\n{text}"
+    );
+}
+
+#[test]
+fn reader_scrolls_body_with_reducer_state() {
+    let mut state = reader_state(0);
+    state.size = (152, 40);
+    let total = tmail::ui::screens::reader::content_line_count(&state, state.size.0 as usize);
+    let viewport = tmail::ui::layout::reader_rows_visible(state.size);
+    assert!(total > viewport, "document must overflow: {total} lines");
+    // Scroll to the end the way the reducer does.
+    for _ in 0..total {
+        reducer::reduce(&mut state, &Action::MoveDown);
+    }
+    let text = draw_after(&mut state, &[], 152, 40);
+    assert!(
+        text.contains(&format!("body line {:02}", 40)),
+        "bottom of body missing:\n{text}"
+    );
+    assert!(
+        !text.contains("body line 01"),
+        "top of body should be scrolled away:\n{text}"
+    );
+}
+
+#[test]
+fn reader_idle_message_never_panics() {
+    let mut state = mock_initial_state();
+    // A reader route whose data was cleared (defensive state): the summary
+    // snapshot still carries subject/sender, the body is the idle note.
+    let summary = state.messages.items[1].clone();
+    state.routes.push(Route::Message(MessageRoute {
+        mailbox_id: MailboxId(String::from("inbox")),
+        summary,
+    }));
+    state.open_message = Loadable::Idle;
+    state.focus = Focus::Reader;
+    let text = draw_after(&mut state, &[], 152, 40);
+    assert!(
+        text.contains("Re: gyuto for September"),
+        "summary meta:\n{text}"
+    );
+    assert!(text.contains("(no message loaded)"), "idle note:\n{text}");
+}
+
+/// A message with missing subject/from/body headers renders explicit
+/// placeholders: acceptance "reader handles missing subject/from/body".
+#[test]
+fn reader_handles_missing_fields() {
+    let mut state = mock_initial_state();
+    let mut summary = state.messages.items[1].clone();
+    summary.subject = String::new();
+    summary.from = Vec::new();
+    summary.to = Vec::new();
+    summary.timestamp = chrono::DateTime::from_timestamp(0, 0)
+        .expect("epoch")
+        .with_timezone(&chrono::FixedOffset::east_opt(0).expect("utc"));
+    let message = Message {
+        id: MessageId(String::from("m2")),
+        mailbox_id: MailboxId(String::from("inbox")),
+        headers: tmail::domain::MessageHeaders::default(),
+        plain_body: None,
+        html_body: None,
+        attachments: Vec::new(),
+    };
+    state.routes.push(Route::Message(MessageRoute {
+        mailbox_id: MailboxId(String::from("inbox")),
+        summary,
+    }));
+    state.open_message = Loadable::Loaded(message);
+    state.focus = Focus::Reader;
+    let text = draw_after(&mut state, &[], 152, 40);
+    assert!(
+        text.contains("(no subject)"),
+        "subject placeholder:\n{text}"
+    );
+    assert!(
+        text.contains("(no content)"),
+        "empty body placeholder:\n{text}"
+    );
+    assert!(
+        text.contains("(unknown sender)"),
+        "sender placeholder:\n{text}"
+    );
+    assert!(
+        text.contains("(no recipients)"),
+        "recipient placeholder:\n{text}"
+    );
+    assert!(text.contains("unknown date"), "date placeholder:\n{text}");
+}

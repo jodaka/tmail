@@ -8,7 +8,10 @@
 
 use crate::app::route::{MailboxRoute, Route};
 use crate::app::state::{AppState, Loadable};
-use crate::domain::{Address, Mailbox, MailboxId, MailboxRole, MessageId, MessageSummary, Page};
+use crate::domain::{
+    Address, Mailbox, MailboxId, MailboxRole, Message, MessageHeaders, MessageId, MessageSummary,
+    Page,
+};
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 
 /// Page size used by the mock fixtures (plan §17 default).
@@ -109,6 +112,7 @@ fn inbox_seed() -> Vec<MessageSummary> {
         mailbox_id: MailboxId(String::from("inbox")),
         message_id: None,
         from: vec![from],
+        to: Vec::new(),
         subject: String::from(subject),
         snippet: snippet.map(String::from),
         timestamp: ts(minutes),
@@ -254,6 +258,7 @@ fn inbox_filler(existing: usize, wanted: usize) -> Vec<MessageSummary> {
                 senders[i % senders.len()].0,
                 senders[i % senders.len()].1,
             )],
+            to: Vec::new(),
             subject: format!("{} #{}", subjects[i % subjects.len()], i + 1),
             snippet: Some(String::from("generated filler row for pagination")),
             timestamp: ts(60 * (24 + (i as i64) * 7)),
@@ -271,6 +276,7 @@ fn small_mailbox(mailbox: &str, count: usize) -> Vec<MessageSummary> {
             mailbox_id: MailboxId(String::from(mailbox)),
             message_id: None,
             from: vec![addr("Post Probe", "probe@post.local")],
+            to: Vec::new(),
             subject: format!("{mailbox} message {}", i + 1),
             snippet: None,
             timestamp: days_ago(i as i64 + 1, 9, 30),
@@ -323,6 +329,28 @@ pub fn mock_initial_state() -> crate::app::state::AppState {
     state.mailbox_selection = 0;
     state.messages = mock_page(&MailboxId(String::from("inbox")), 0, PAGE_SIZE);
     state
+}
+
+/// A full message for the given summary, as `message read` would map it.
+/// The body is long enough (40 lines) to overflow a full-size reader
+/// viewport, so scroll clamping is exercisable.
+pub fn mock_message(summary: &MessageSummary) -> Message {
+    let body: String = (1..=40).map(|i| format!("body line {i:02}\n")).collect();
+    Message {
+        id: summary.id.clone(),
+        mailbox_id: summary.mailbox_id.clone(),
+        headers: MessageHeaders {
+            subject: summary.subject.clone(),
+            from: summary.from.clone(),
+            to: summary.to.clone(),
+            cc: Vec::new(),
+            date: Some(summary.timestamp),
+            message_id: summary.message_id.clone(),
+        },
+        plain_body: Some(body),
+        html_body: None,
+        attachments: Vec::new(),
+    }
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::operation::OperationId;
-use crate::domain::{Mailbox, MessageSummary, Page, PageRequest};
+use crate::domain::{Mailbox, Message, MessageLocator, MessageSummary, Page, PageRequest};
 
 /// Per-request context handed to every backend call (plan §8).
 #[derive(Debug, Clone)]
@@ -72,4 +72,37 @@ pub trait MailBackend: Send + Sync {
         ctx: RequestContext,
         page: PageRequest,
     ) -> BackendResult<Page<MessageSummary>>;
+
+    /// One full message, parsed into domain types (plan §7/§13).
+    async fn get_message(
+        &self,
+        ctx: RequestContext,
+        locator: MessageLocator,
+    ) -> BackendResult<Message>;
+
+    /// Mark a message read/unread via flag operations (plan §19 Phase 4).
+    /// The backend applies the change; confirmation is the success return.
+    async fn set_read(
+        &self,
+        ctx: RequestContext,
+        locator: MessageLocator,
+        read: bool,
+    ) -> BackendResult<()>;
+
+    /// Star/unstar via flag operations.
+    async fn set_starred(
+        &self,
+        ctx: RequestContext,
+        locator: MessageLocator,
+        starred: bool,
+    ) -> BackendResult<()>;
+
+    /// Move a message to the account's archive mailbox. The target is
+    /// resolved inside the adapter (ADR 0001: the UI never guesses folder
+    /// names); a missing archive mailbox is a typed request error.
+    async fn archive(&self, ctx: RequestContext, locator: MessageLocator) -> BackendResult<()>;
+
+    /// Move a message to trash (himalaya is trash-first, ADR 0001 finding
+    /// 5); permanently deletes when already in trash.
+    async fn trash(&self, ctx: RequestContext, locator: MessageLocator) -> BackendResult<()>;
 }

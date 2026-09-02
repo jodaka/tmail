@@ -7,10 +7,13 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, TimeZone};
 
 use super::dto;
-use crate::domain::{Address, Mailbox, MailboxId, MailboxRole, MessageId, MessageSummary, Page};
+use crate::domain::{
+    Address, Attachment, Mailbox, MailboxId, MailboxRole, Message, MessageHeaders, MessageId,
+    MessageLocator, MessageSummary, Page,
+};
 
 /// Map a mailbox listing into domain mailboxes. Alias-derived roles win
 /// over name heuristics.
@@ -56,7 +59,8 @@ fn map_envelope(dto: dto::EnvelopeDto, mailbox_id: &MailboxId) -> MessageSummary
         id: MessageId(dto.id),
         mailbox_id: mailbox_id.clone(),
         message_id: dto.message_id,
-        from: dto.from.into_iter().map(address).collect(),
+        from: dto.from.iter().map(address).collect(),
+        to: dto.to.iter().map(address).collect(),
         subject: dto.subject,
         // `envelope list` carries no snippet (ADR 0001 finding 2); Post
         // fills it only once full messages are fetched (Phase 4+).
@@ -68,10 +72,17 @@ fn map_envelope(dto: dto::EnvelopeDto, mailbox_id: &MailboxId) -> MessageSummary
     }
 }
 
-fn address(dto: dto::AddressDto) -> Address {
+fn address(dto: &dto::AddressDto) -> Address {
     Address {
-        name: dto.name,
-        email: dto.email,
+        name: dto.name.clone(),
+        email: dto.email.clone(),
+    }
+}
+
+fn part_address(dto: &dto::PartAddressDto) -> Address {
+    Address {
+        name: dto.name.clone(),
+        email: dto.address.clone(),
     }
 }
 
@@ -89,6 +100,187 @@ fn epoch() -> DateTime<FixedOffset> {
     DateTime::from_timestamp(0, 0)
         .expect("epoch is valid")
         .with_timezone(&FixedOffset::east_opt(0).expect("UTC offset is valid"))
+}
+
+/// Map a `message read` dump into one domain message (plan §7). Missing
+/// headers, bodies, and attachments all map to safe defaults: the reader
+/// must render what exists and tolerate what does not (plan §19 Phase 4).
+pub(crate) fn message(dto: dto::MessageReadDto, locator: MessageLocator) -> Message {
+    let headers = parts_headers(&dto.parts);
+    let mut message = Message {
+        id: locator.id,
+        mailbox_id: locator.mailbox,
+        headers: MessageHeaders {
+            subject: text_header(&headers, "subject").unwrap_or_default(),
+            from: address_header(&headers, "from"),
+            to: address_header(&headers, "to"),
+            cc: address_header(&headers, "cc"),
+            date: date_header(&headers, "date"),
+            // mail_parser's serde dump spells the header `message_id`
+            // (fixtures); RFC spells it `Message-ID`. Accept both.
+            message_id: text_header(&headers, "message-id")
+                .or_else(|| text_header(&headers, "message_id")),
+        },
+        plain_body: None,
+        html_body: None,
+        attachments: Vec::new(),
+    };
+    if let Some(index) = dto.text_body.first() {
+        message.plain_body = text_body(&dto, *index);
+    }
+    if let Some(index) = dto.html_body.first() {
+        message.html_body = html_body(&dto, *index);
+    }
+    message.attachments = dto
+        .attachments
+        .iter()
+        .filter_map(|index| attachment(&dto, *index))
+        .collect();
+    message
+}
+
+/// Headers of the first part that carries any (the top-level part for a
+/// well-formed message; fallback keeps degenerate dumps renderable).
+fn parts_headers(parts: &[dto::PartDto]) -> Vec<dto::HeaderDto> {
+    parts
+        .iter()
+        .find(|part| !part.headers.is_empty())
+        .map(|part| part.headers.clone())
+        .unwrap_or_default()
+}
+
+fn header<'a>(headers: &'a [dto::HeaderDto], name: &str) -> Option<&'a dto::HeaderValueDto> {
+    headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case(name))
+        .and_then(|header| header.value.as_ref())
+}
+
+fn text_header(headers: &[dto::HeaderDto], name: &str) -> Option<String> {
+    match header(headers, name) {
+        Some(dto::HeaderValueDto::Known(dto::KnownHeaderValue::Text(text))) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn address_header(headers: &[dto::HeaderDto], name: &str) -> Vec<Address> {
+    match header(headers, name) {
+        Some(dto::HeaderValueDto::Known(dto::KnownHeaderValue::Address(
+            dto::AddressValueDto::List(list),
+        ))) => list.iter().map(part_address).collect(),
+        Some(dto::HeaderValueDto::Known(dto::KnownHeaderValue::Address(
+            dto::AddressValueDto::Group(groups),
+        ))) => groups
+            .iter()
+            .flat_map(|group| group.addresses.iter().map(part_address))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn date_header(headers: &[dto::HeaderDto], name: &str) -> Option<DateTime<FixedOffset>> {
+    match header(headers, name) {
+        Some(dto::HeaderValueDto::Known(dto::KnownHeaderValue::DateTime(raw))) => {
+            fixed_datetime(raw)
+        }
+        _ => None,
+    }
+}
+
+/// Convert mail_parser's split offset fields into a chrono timestamp. The
+/// sign rides on `tz_before_gmt` (fixture: `tz_before_gmt: false, tz_hour:
+/// 3` is `+03:00`); a malformed wall clock yields `None`, never a panic.
+fn fixed_datetime(raw: &dto::RawDateTimeDto) -> Option<DateTime<FixedOffset>> {
+    let minutes = raw.tz_hour.abs() * 60 + raw.tz_minute as i32;
+    let offset_seconds = if raw.tz_before_gmt {
+        -minutes * 60
+    } else {
+        minutes * 60
+    };
+    let offset = FixedOffset::east_opt(offset_seconds)?;
+    offset
+        .with_ymd_and_hms(
+            raw.year,
+            raw.month.clamp(1, 12),
+            raw.day.clamp(1, 31),
+            raw.hour.clamp(0, 23),
+            raw.minute.clamp(0, 59),
+            raw.second.clamp(0, 59),
+        )
+        .single()
+}
+
+fn body_of(dto: &dto::MessageReadDto, index: usize) -> Option<&dto::BodyDto> {
+    dto.parts.get(index).and_then(|part| part.body.as_ref())
+}
+
+fn text_body(dto: &dto::MessageReadDto, index: usize) -> Option<String> {
+    match body_of(dto, index) {
+        Some(dto::BodyDto::Known(dto::KnownBody::Text(text))) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn html_body(dto: &dto::MessageReadDto, index: usize) -> Option<String> {
+    match body_of(dto, index) {
+        Some(dto::BodyDto::Known(dto::KnownBody::Html(html))) => Some(html.clone()),
+        // An HTML body shipped as decoded text still renders in Phase 5;
+        // tolerate the loose shape instead of dropping the content.
+        Some(dto::BodyDto::Known(dto::KnownBody::Text(text))) if looks_like_html(text) => {
+            Some(text.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Cheap shape sniff for the loose text-as-html fallback above.
+fn looks_like_html(text: &str) -> bool {
+    let head = text.trim_start();
+    head.starts_with('<') && head.to_ascii_lowercase().contains("html")
+}
+
+/// Attachment metadata for one part index: name from Content-Disposition
+/// `filename` / Content-Type `name`, media type from Content-Type, size
+/// from the decoded binary length. Parts without a usable body are skipped
+/// rather than listed with fabricated sizes.
+fn attachment(dto: &dto::MessageReadDto, index: usize) -> Option<Attachment> {
+    let part = dto.parts.get(index)?;
+    let headers = &part.headers;
+    let content_type = match header(headers, "content-type") {
+        Some(dto::HeaderValueDto::Known(dto::KnownHeaderValue::ContentType(ct))) => {
+            Some(ct.clone())
+        }
+        _ => None,
+    };
+    let disposition_name = match header(headers, "content-disposition") {
+        Some(dto::HeaderValueDto::Known(dto::KnownHeaderValue::ContentType(ct))) => {
+            attribute(ct, "filename")
+        }
+        _ => None,
+    };
+    let type_name = content_type.as_ref().and_then(|ct| attribute(ct, "name"));
+    let mime_type = content_type.as_ref().map(|ct| match &ct.c_subtype {
+        Some(subtype) if !subtype.is_empty() => format!("{}/{}", ct.c_type, subtype),
+        _ => ct.c_type.clone(),
+    });
+    let size = match part.body.as_ref()? {
+        dto::BodyDto::Known(dto::KnownBody::Binary(bytes)) => Some(bytes.len() as u64),
+        _ => None,
+    };
+    Some(Attachment {
+        name: disposition_name.or(type_name),
+        mime_type,
+        size,
+        part_id: index,
+    })
+}
+
+fn attribute(ct: &dto::ContentTypeDto, name: &str) -> Option<String> {
+    ct.attributes
+        .iter()
+        .find(|attr| attr.name.eq_ignore_ascii_case(name))
+        .and_then(|attr| attr.value.clone())
+        .filter(|value| !value.is_empty())
 }
 
 /// Resolve a mailbox's role: exact `mailbox.alias` value match (against
@@ -246,5 +438,167 @@ mod tests {
         assert_eq!(mailboxes[0].total_count, None);
         assert_eq!(mailboxes[1].role, Some(MailboxRole::Inbox));
         assert_eq!(mailboxes[1].unread_count, None);
+    }
+
+    /// Real probe output captured in Phase 0 (ADR 0001 finding 10).
+    const MESSAGE_READ_PLAIN: &str =
+        include_str!("../../../fixtures/himalaya/message-read-plain.json");
+    const MESSAGE_READ_MULTIPART: &str =
+        include_str!("../../../fixtures/himalaya/message-read-multipart.json");
+
+    fn locator() -> MessageLocator {
+        MessageLocator {
+            mailbox: MailboxId(String::from("INBOX")),
+            id: MessageId(String::from("env-9")),
+            message_id: None,
+        }
+    }
+
+    #[test]
+    fn maps_real_plain_message_fixture() {
+        let dto: dto::MessageReadDto =
+            serde_json::from_str(MESSAGE_READ_PLAIN).expect("fixture parses");
+        let message = message(dto, locator());
+        assert_eq!(message.id.0, "env-9");
+        assert_eq!(message.mailbox_id.0, "INBOX");
+        assert_eq!(message.headers.subject, "Plain text only");
+        assert_eq!(message.headers.from.len(), 1);
+        assert_eq!(message.headers.from[0].display(), "Bob");
+        assert_eq!(message.headers.to.len(), 1);
+        assert!(message.headers.cc.is_empty());
+        assert_eq!(
+            message.headers.message_id.as_deref(),
+            Some("3180034027954358661@post.local")
+        );
+        let date = message.headers.date.expect("date parses");
+        assert_eq!(date.to_rfc3339(), "2026-09-02T10:03:40+03:00");
+        assert_eq!(
+            message.plain_body.as_deref(),
+            Some("This is a plain text message.\nLine two.\n")
+        );
+        assert_eq!(message.html_body, None);
+        assert!(message.attachments.is_empty());
+        assert_eq!(
+            message.snippet().as_deref(),
+            Some("This is a plain text message.")
+        );
+    }
+
+    #[test]
+    fn maps_real_multipart_message_fixture() {
+        let dto: dto::MessageReadDto =
+            serde_json::from_str(MESSAGE_READ_MULTIPART).expect("fixture parses");
+        let message = message(dto, locator());
+        assert_eq!(message.headers.subject, "HTML alternative");
+        assert_eq!(
+            message.plain_body.as_deref(),
+            Some("This message prefers HTML.\n"),
+            "plain body comes from the text_body part index"
+        );
+        assert!(
+            message
+                .html_body
+                .as_deref()
+                .is_some_and(|h| h.contains("html")),
+            "html body comes from the html_body part index"
+        );
+    }
+
+    #[test]
+    fn empty_dump_maps_to_renderable_defaults() {
+        let dto: dto::MessageReadDto = serde_json::from_str("{}").expect("parses");
+        let message = message(dto, locator());
+        assert_eq!(message.headers.subject, "");
+        assert!(message.headers.from.is_empty());
+        assert_eq!(message.headers.date, None);
+        assert_eq!(message.plain_body, None);
+        assert_eq!(message.html_body, None);
+        assert!(message.attachments.is_empty());
+        assert_eq!(message.snippet(), None);
+    }
+
+    #[test]
+    fn attachment_metadata_maps_from_part_headers() {
+        let dto: dto::MessageReadDto = serde_json::from_str(
+            r#"{
+                "parts": [
+                    {"headers": [{"name":"subject","value":{"Text":"att"}}],
+                     "body": {"Multipart": [1, 2]}},
+                    {"headers": [{"name":"content-type","value":{"ContentType":{
+                        "c_type":"application","c_subtype":"pdf",
+                        "attributes":[{"name":"name","value":"report.pdf"}]}}}],
+                     "body": {"Binary": [1,2,3,4,5]}},
+                    {"headers": [{"name":"content-type","value":{"ContentType":{
+                        "c_type":"image","c_subtype":"jpeg"}}},
+                        {"name":"content-disposition","value":{"ContentType":{
+                        "c_type":"attachment","c_subtype":null,
+                        "attributes":[{"name":"filename","value":"photo 1.jpg"}]}}}],
+                     "body": {"Binary": [9,9]}}
+                ],
+                "attachments": [1, 2]
+            }"#,
+        )
+        .expect("parses");
+        let message = message(dto, locator());
+        assert_eq!(message.attachments.len(), 2);
+        let pdf = &message.attachments[0];
+        assert_eq!(pdf.name.as_deref(), Some("report.pdf"));
+        assert_eq!(pdf.mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(pdf.size, Some(5));
+        assert_eq!(pdf.part_id, 1);
+        let jpg = &message.attachments[1];
+        assert_eq!(
+            jpg.name.as_deref(),
+            Some("photo 1.jpg"),
+            "disposition filename wins over type name"
+        );
+        assert_eq!(jpg.mime_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(jpg.size, Some(2));
+        assert_eq!(jpg.part_id, 2);
+    }
+
+    #[test]
+    fn datetime_offsets_support_negative_and_broken_values() {
+        let negative = fixed_datetime(&dto::RawDateTimeDto {
+            year: 2026,
+            month: 9,
+            day: 2,
+            hour: 10,
+            minute: 3,
+            second: 40,
+            tz_before_gmt: true,
+            tz_hour: 5,
+            tz_minute: 30,
+        });
+        assert_eq!(
+            negative.map(|d| d.to_rfc3339()),
+            Some("2026-09-02T10:03:40-05:30".into())
+        );
+        // Month out of range clamps instead of panicking…
+        let clamped = fixed_datetime(&dto::RawDateTimeDto {
+            year: 2026,
+            month: 13,
+            day: 2,
+            hour: 25,
+            minute: 3,
+            second: 40,
+            tz_before_gmt: false,
+            tz_hour: 0,
+            tz_minute: 0,
+        });
+        assert!(clamped.is_some());
+        // …and a hopeless wall clock is None, never a panic.
+        let broken = fixed_datetime(&dto::RawDateTimeDto {
+            year: 2026,
+            month: 2,
+            day: 30,
+            hour: 10,
+            minute: 3,
+            second: 40,
+            tz_before_gmt: false,
+            tz_hour: 0,
+            tz_minute: 0,
+        });
+        assert_eq!(broken, None);
     }
 }

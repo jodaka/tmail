@@ -41,6 +41,91 @@ pub(crate) fn envelope_list_argv(
     argv
 }
 
+/// `message read -m <mailbox> <id> --json` (ADR 0001 finding 10).
+pub(crate) fn message_read_argv(
+    config: Option<&Path>,
+    account: Option<&str>,
+    mailbox_id: &str,
+    id: &str,
+) -> Vec<String> {
+    let mut argv = global_flags(config, account);
+    argv.extend(
+        ["message", "read", "-m", mailbox_id, id, "--json"]
+            .into_iter()
+            .map(String::from),
+    );
+    argv
+}
+
+/// `flag {add,remove} -m <mailbox> --flag <flag> <id> --json`. Without
+/// `--json` the flag commands print human text; with it they emit
+/// `{"flags":[…]}` (ADR 0001 finding 6, corrected in the Phase 4 probe:
+/// plain text on stdout otherwise). Output shape is validated, not
+/// interpreted — success is the exit status.
+pub(crate) fn flag_argv(
+    config: Option<&Path>,
+    account: Option<&str>,
+    add: bool,
+    mailbox_id: &str,
+    flag: &str,
+    id: &str,
+) -> Vec<String> {
+    let mut argv = global_flags(config, account);
+    argv.extend(
+        [
+            "flag",
+            if add { "add" } else { "remove" },
+            "-m",
+            mailbox_id,
+            "--flag",
+            flag,
+            id,
+            "--json",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
+    argv
+}
+
+/// `message move --from <source> --to <target> <id> --json`. `--to` accepts
+/// the resolved target mailbox name/id; archive resolution happens in the
+/// adapter (ADR 0001: semantic operations map inside the backend).
+pub(crate) fn message_move_argv(
+    config: Option<&Path>,
+    account: Option<&str>,
+    source: &str,
+    target: &str,
+    id: &str,
+) -> Vec<String> {
+    let mut argv = global_flags(config, account);
+    argv.extend(
+        [
+            "message", "move", "--from", source, "--to", target, id, "--json",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
+    argv
+}
+
+/// `message delete -m <mailbox> <id> --json` (trash-first, ADR 0001
+/// finding 5). Without `--json` the output is human text.
+pub(crate) fn message_delete_argv(
+    config: Option<&Path>,
+    account: Option<&str>,
+    mailbox_id: &str,
+    id: &str,
+) -> Vec<String> {
+    let mut argv = global_flags(config, account);
+    argv.extend(
+        ["message", "delete", "-m", mailbox_id, id, "--json"]
+            .into_iter()
+            .map(String::from),
+    );
+    argv
+}
+
 fn global_flags(config: Option<&Path>, account: Option<&str>) -> Vec<String> {
     let mut argv = Vec::new();
     if let Some(config) = config {
@@ -119,5 +204,75 @@ mod tests {
         let path = PathBuf::from("/tmp/some dir/my config.toml");
         let argv = mailbox_list_argv(Some(&path), None);
         assert_eq!(argv[1], "/tmp/some dir/my config.toml");
+    }
+
+    #[test]
+    fn message_read_argv_is_exact() {
+        let argv = message_read_argv(
+            Some(Path::new("/tmp/cfg.toml")),
+            Some("probe"),
+            "INBOX",
+            "1788343420.M446833P1967Q1.RFT-R993YF",
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "-c",
+                "/tmp/cfg.toml",
+                "-a",
+                "probe",
+                "message",
+                "read",
+                "-m",
+                "INBOX",
+                "1788343420.M446833P1967Q1.RFT-R993YF",
+                "--json",
+            ]
+        );
+    }
+
+    #[test]
+    fn flag_argv_switches_add_and_remove() {
+        let add = flag_argv(None, None, true, "INBOX", "seen", "env-1");
+        assert_eq!(
+            add,
+            vec![
+                "flag", "add", "-m", "INBOX", "--flag", "seen", "env-1", "--json"
+            ]
+        );
+        let remove = flag_argv(None, None, false, "INBOX", "flagged", "env-1");
+        assert_eq!(
+            remove,
+            vec![
+                "flag", "remove", "-m", "INBOX", "--flag", "flagged", "env-1", "--json"
+            ]
+        );
+    }
+
+    #[test]
+    fn message_move_argv_uses_from_and_to() {
+        let argv = message_move_argv(None, None, "INBOX", "/root/maildir/Archive", "env-1");
+        assert_eq!(
+            argv,
+            vec![
+                "message",
+                "move",
+                "--from",
+                "INBOX",
+                "--to",
+                "/root/maildir/Archive",
+                "env-1",
+                "--json",
+            ]
+        );
+    }
+
+    #[test]
+    fn message_delete_argv_is_exact() {
+        let argv = message_delete_argv(None, None, "INBOX", "env-1");
+        assert_eq!(
+            argv,
+            vec!["message", "delete", "-m", "INBOX", "env-1", "--json"]
+        );
     }
 }

@@ -8,11 +8,13 @@ use crate::app::focus::Focus;
 use crate::app::operation::OperationRegistry;
 use crate::app::overlay::Overlay;
 use crate::app::route::Route;
-use crate::domain::{Mailbox, MessageSummary, Page};
+use crate::domain::{Mailbox, Message, MessageSummary, Page};
 
 /// Async load lifecycle for backend-fed collections (mock-fed in Phase 1).
+/// `Idle` marks a slot that is not currently in use (no message open).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Loadable<T> {
+    Idle,
     Loading,
     Loaded(T),
     Failed(String),
@@ -56,6 +58,11 @@ pub struct AppState {
     /// the selection always stays on screen across movement and resize
     /// (Phase 2 acceptance).
     pub list_scroll: usize,
+    /// The message currently open in the reader, when a `Route::Message` is
+    /// active (plan §19 Phase 4). `Idle` when the reader is closed.
+    pub open_message: Loadable<Message>,
+    /// First content line currently visible in the reader document.
+    pub reader_scroll: usize,
     /// In-flight backend operations with their ids, retry intents, and
     /// cancellation tokens (plan §9/§11). Results only apply while their
     /// operation is still registered here.
@@ -84,6 +91,8 @@ impl AppState {
             messages: Page::empty(page_size.max(1)),
             selection: 0,
             list_scroll: 0,
+            open_message: Loadable::Idle,
+            reader_scroll: 0,
             operations: OperationRegistry::default(),
             overlay: None,
             search_query: String::new(),
@@ -105,6 +114,28 @@ impl AppState {
     /// The message under the selection, if any.
     pub fn selected_message(&self) -> Option<&MessageSummary> {
         self.messages.items.get(self.selection)
+    }
+
+    /// The summary of the message open in the reader, if one is.
+    pub fn open_summary(&self) -> Option<&MessageSummary> {
+        match self.active_route() {
+            Some(Route::Message(route)) => Some(&route.summary),
+            _ => None,
+        }
+    }
+
+    /// The `MessageLocator` of the message a reader/list action should
+    /// target: the open message in the reader, else the selected row.
+    pub fn action_target(&self) -> Option<crate::domain::MessageLocator> {
+        let summary = match self.focus {
+            Focus::Reader => self.open_summary(),
+            _ => self.selected_message(),
+        }?;
+        Some(crate::domain::MessageLocator {
+            mailbox: summary.mailbox_id.clone(),
+            id: summary.id.clone(),
+            message_id: summary.message_id.clone(),
+        })
     }
 
     /// Unread count of the mailbox currently displayed, when known.

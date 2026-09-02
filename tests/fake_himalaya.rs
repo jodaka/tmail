@@ -42,7 +42,19 @@ impl FakeHimalaya {
     /// mailbox: `ok` | `error-json` | `error-stderr` | `slow`
     /// envelope: `ok` | `empty` | `partial` | `malformed` | `non-utf8`
     ///           | `error-json` | `error-stderr` | `slow`
+    /// message (`read`/`move`/`delete`): `ok` | `error-json` | `slow`
+    /// flag (`add`/`remove`): `ok` | `error-json` | `slow`
     pub fn spawn(mailbox_mode: &'static str, envelope_mode: &'static str) -> Self {
+        Self::spawn_full(mailbox_mode, envelope_mode, "ok", "ok")
+    }
+
+    /// The fake with every subcommand mode set explicitly.
+    pub fn spawn_full(
+        mailbox_mode: &'static str,
+        envelope_mode: &'static str,
+        message_mode: &'static str,
+        flag_mode: &'static str,
+    ) -> Self {
         let dir = TempDir::new().expect("temp dir");
         let program = dir.path().join("himalaya");
         let argv_log = dir.path().join("argv.log");
@@ -53,7 +65,9 @@ impl FakeHimalaya {
             .replace("@ARGV_LOG@", &argv_log.display().to_string())
             .replace("@STDIN_RECORD@", &stdin_record.display().to_string())
             .replace("@MAILBOX_MODE@", mailbox_mode)
-            .replace("@ENVELOPE_MODE@", envelope_mode);
+            .replace("@ENVELOPE_MODE@", envelope_mode)
+            .replace("@MESSAGE_MODE@", message_mode)
+            .replace("@FLAG_MODE@", flag_mode);
 
         let mut file = fs::File::create(&program).expect("write fake script");
         file.write_all(script.as_bytes())
@@ -72,7 +86,7 @@ impl FakeHimalaya {
         }
     }
 
-    /// The fake with both subcommands behaving like a healthy himalaya.
+    /// The fake with all subcommands behaving like a healthy himalaya.
     pub fn spawn_ok() -> Self {
         Self::spawn("ok", "ok")
     }
@@ -123,13 +137,22 @@ printf '\n' >> "$ARGV_LOG"
 cat > "$STDIN_RECORD"
 
 # Identify the subcommand anywhere in argv (global flags like `-c` come
-# first on real invocations).
+# first on real invocations). For `message`, the operation is the word that
+# follows (read/move/delete).
 SUB=""
+OP=""
+prev=""
 for a in "$@"; do
+  case "$prev" in
+    message) OP="$a" ;;
+  esac
   case "$a" in
     mailbox) SUB="mailbox" ;;
     envelope) SUB="envelope" ;;
+    message) SUB="message" ;;
+    flag) SUB="flag" ;;
   esac
+  prev="$a"
 done
 
 if [ "$SUB" = "mailbox" ]; then
@@ -182,6 +205,52 @@ if [ "$SUB" = "envelope" ]; then
     slow)
       # Long-running invocation for cancellation tests: hangs for 30s
       # unless killed. It never gets to print.
+      sleep 30
+      ;;
+  esac
+  exit 0
+fi
+
+if [ "$SUB" = "message" ]; then
+  case "@MESSAGE_MODE@" in
+    ok)
+      case "$OP" in
+        read)
+          printf '%s' '{"parts":[{"headers":[{"name":"subject","value":{"Text":"Contract test"}},{"name":"from","value":{"Address":{"List":[{"name":"Ada","address":"ada@example.org"}]}}},{"name":"to","value":{"Address":{"List":[{"name":null,"address":"probe@post.local"}]}}},{"name":"message_id","value":{"Text":"1@post.local"}},{"name":"date","value":{"DateTime":{"year":2026,"month":9,"day":2,"hour":10,"minute":3,"second":40,"tz_before_gmt":false,"tz_hour":3,"tz_minute":0}}}],"body":{"Text":"Hello from the fake.\n"}},{"headers":[{"name":"content-type","value":{"ContentType":{"c_type":"application","c_subtype":"pdf","attributes":[{"name":"name","value":"fake.pdf"}]}}}],"body":{"Binary":[1,2,3]}}],"text_body":[0],"html_body":[],"attachments":[1]}'
+          ;;
+        move)
+          printf '%s' '{"action":"moved"}'
+          ;;
+        delete)
+          printf '%s' '{"action":"moved-to-trash"}'
+          ;;
+      esac
+      ;;
+    error-json)
+      printf '%s' '{"error":"no such message","sources":["maildir"]}'
+      exit 1
+      ;;
+    slow)
+      # Long-running invocation for cancellation tests: hangs for 30s
+      # unless killed. It never gets to print.
+      sleep 30
+      ;;
+  esac
+  exit 0
+fi
+
+if [ "$SUB" = "flag" ]; then
+  case "@FLAG_MODE@" in
+    ok)
+      # The flag commands echo the affected flags, not the resulting state
+      # (ADR 0001 finding 6).
+      printf '%s' '{"flags":["seen"]}'
+      ;;
+    error-json)
+      printf '%s' '{"error":"mailbox not found","sources":["maildir"]}'
+      exit 1
+      ;;
+    slow)
       sleep 30
       ;;
   esac

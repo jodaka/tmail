@@ -13,6 +13,9 @@ pub enum Focus {
     SearchField,
     Sidebar,
     MessageList,
+    /// The message reader screen is open (plan §19 Phase 4): Up/Down scroll
+    /// the body; single-letter shortcuts act on the open message.
+    Reader,
     /// The Retry/Dismiss error modal is open; it intercepts all input.
     ErrorModal,
 }
@@ -25,6 +28,9 @@ impl Focus {
         match self {
             // The modal focus never cycles; the modal handles Tab itself.
             Focus::ErrorModal => self,
+            // The reader screen has a single focusable area (the scrolling
+            // document); Tab is inert there in v1 (plan §10).
+            Focus::Reader => self,
             _ => {
                 let i = FOCUS_ORDER
                     .iter()
@@ -38,6 +44,7 @@ impl Focus {
     pub fn previous(self) -> Self {
         match self {
             Focus::ErrorModal => self,
+            Focus::Reader => self,
             _ => {
                 let i = FOCUS_ORDER
                     .iter()
@@ -50,7 +57,7 @@ impl Focus {
 
     /// Whether single-letter shortcuts (c, r, a, f, e, s, u, /) are active.
     /// They never fire while editing a text field or while a modal is open
-    /// (plan §10).
+    /// (plan §10); the reader acts on the open message.
     pub fn accepts_shortcuts(self) -> bool {
         !matches!(self, Focus::SearchField | Focus::ErrorModal)
     }
@@ -62,6 +69,7 @@ impl fmt::Display for Focus {
             Focus::SearchField => write!(f, "search"),
             Focus::Sidebar => write!(f, "sidebar"),
             Focus::MessageList => write!(f, "list"),
+            Focus::Reader => write!(f, "reader"),
             Focus::ErrorModal => write!(f, "modal"),
         }
     }
@@ -99,5 +107,13 @@ mod tests {
         assert!(!Focus::SearchField.accepts_shortcuts());
         assert!(Focus::Sidebar.accepts_shortcuts());
         assert!(Focus::MessageList.accepts_shortcuts());
+    }
+
+    #[test]
+    fn reader_focus_is_self_cycle_and_accepts_shortcuts() {
+        // Single focusable area: Tab is inert; shortcuts act on the message.
+        assert_eq!(Focus::Reader.next(), Focus::Reader);
+        assert_eq!(Focus::Reader.previous(), Focus::Reader);
+        assert!(Focus::Reader.accepts_shortcuts());
     }
 }

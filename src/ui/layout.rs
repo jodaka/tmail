@@ -92,6 +92,43 @@ pub fn message_rows_visible(size: (u16, u16)) -> usize {
     rows.height as usize
 }
 
+/// Height of the reader viewport (the whole body area: the reader document
+/// replaces list head and rows, mockup `viewer.html` `.reader`). The
+/// reducer's scroll clamp uses this with the reader's content line count.
+pub fn reader_rows_visible(size: (u16, u16)) -> usize {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: size.0,
+        height: size.1,
+    };
+    let mode = mode_for(area.width, area.height);
+    if mode == LayoutMode::TooSmall {
+        return 0;
+    }
+    let (_, body, _) = split_vertical(area);
+    let (_, list) = split_body(mode, body);
+    list.height as usize
+}
+
+/// Width of the reader viewport (body area minus the sidebar in full mode).
+/// The reader's content function and renderer must agree on this.
+pub fn reader_width(size: (u16, u16)) -> usize {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: size.0,
+        height: size.1,
+    };
+    let mode = mode_for(area.width, area.height);
+    if mode == LayoutMode::TooSmall {
+        return 0;
+    }
+    let (_, body, _) = split_vertical(area);
+    let (_, list) = split_body(mode, body);
+    list.width as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

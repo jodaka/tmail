@@ -16,6 +16,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::app::route::Route;
 use crate::app::state::AppState;
 use crate::ui::layout::LayoutMode;
 
@@ -60,7 +61,13 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, ctx: &Rend
     if let Some(sidebar) = sidebar {
         components::sidebar::render(frame, sidebar, state, theme);
     }
-    screens::mailbox::render(frame, list, state, mode, theme, ctx.now);
+    // The reader screen replaces the message list; the sidebar and topbar
+    // chrome stay (mockup `viewer.html`).
+    if matches!(state.active_route(), Some(Route::Message(_))) {
+        screens::reader::render(frame, list, state, theme);
+    } else {
+        screens::mailbox::render(frame, list, state, mode, theme, ctx.now);
+    }
     components::statusbar::render(frame, statusbar, state, theme);
     components::error_modal::render(frame, state, theme);
 }

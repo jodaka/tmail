@@ -4,11 +4,18 @@
 //! - yesterday → `Yest`
 //! - same year → `Sep 1`
 //! - otherwise → `2025`
+//!
+//! Reader meta line (absolute): `Mon, Sep 1 · 18:32` (mockup `.mm-date`).
 
 use chrono::{DateTime, Datelike, Duration, FixedOffset};
 
 pub fn format_clock(now: DateTime<FixedOffset>) -> String {
     now.format("%a %b %-d · %H:%M").to_string()
+}
+
+/// Absolute header date for the reader meta line.
+pub fn format_absolute(timestamp: DateTime<FixedOffset>) -> String {
+    timestamp.format("%a, %b %-d · %H:%M").to_string()
 }
 
 pub fn format_relative(now: DateTime<FixedOffset>, timestamp: DateTime<FixedOffset>) -> String {

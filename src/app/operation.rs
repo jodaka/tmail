@@ -17,7 +17,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{Mailbox, MessageSummary, Page, PageRequest};
+use crate::domain::{Mailbox, Message, MessageLocator, MessageSummary, Page, PageRequest};
 
 /// Opaque identifier carried by every backend request and result (plan §5:
 /// "Every request and result carries an `OperationId`"). Constructed only
@@ -39,6 +39,20 @@ pub enum OperationKind {
     LoadMailboxes,
     /// Fetch one page of message summaries.
     LoadPage(PageRequest),
+    /// Fetch one full message (plan §19 Phase 4: reader).
+    LoadMessage(MessageLocator),
+    /// Mark a message read (`read: true`) or unread.
+    SetRead { locator: MessageLocator, read: bool },
+    /// Star (`starred: true`) or unstar a message.
+    SetStarred {
+        locator: MessageLocator,
+        starred: bool,
+    },
+    /// Move a message to the archive mailbox (target resolved by the
+    /// adapter, ADR 0001).
+    Archive(MessageLocator),
+    /// Move a message to trash (himalaya is trash-first).
+    Trash(MessageLocator),
 }
 
 impl OperationKind {
@@ -47,6 +61,13 @@ impl OperationKind {
         match self {
             OperationKind::LoadMailboxes => "Loading mailboxes",
             OperationKind::LoadPage(_) => "Loading messages",
+            OperationKind::LoadMessage(_) => "Loading message",
+            OperationKind::SetRead { read: true, .. } => "Marking read",
+            OperationKind::SetRead { read: false, .. } => "Marking unread",
+            OperationKind::SetStarred { starred: true, .. } => "Starring",
+            OperationKind::SetStarred { starred: false, .. } => "Unstarring",
+            OperationKind::Archive(_) => "Archiving",
+            OperationKind::Trash(_) => "Moving to trash",
         }
     }
 
@@ -58,13 +79,28 @@ impl OperationKind {
 
     /// Whether `newer` supersedes `older`: a result for `older` must never
     /// mutate state once `newer` started. Mailbox loads supersede each
-    /// other; page loads supersede page loads for the same mailbox.
+    /// other; page loads supersede page loads for the same mailbox; message
+    /// loads for the same mailbox supersede each other (only the newest
+    /// opened message can win); repeated flag toggles on the same message
+    /// supersede each other. Mutations that move mail never supersede — a
+    /// lost archive would be unrecoverable from state.
     fn supersedes(newer: &OperationKind, older: &OperationKind) -> bool {
         match (newer, older) {
             (OperationKind::LoadMailboxes, OperationKind::LoadMailboxes) => true,
             (OperationKind::LoadPage(newer), OperationKind::LoadPage(older)) => {
                 newer.mailbox_id == older.mailbox_id
             }
+            (OperationKind::LoadMessage(newer), OperationKind::LoadMessage(older)) => {
+                newer.mailbox == older.mailbox
+            }
+            (
+                OperationKind::SetRead { locator: newer, .. },
+                OperationKind::SetRead { locator: older, .. },
+            )
+            | (
+                OperationKind::SetStarred { locator: newer, .. },
+                OperationKind::SetStarred { locator: older, .. },
+            ) => newer.id == older.id,
             _ => false,
         }
     }
@@ -83,6 +119,12 @@ pub struct RetrySpec {
 pub enum OperationOutcome {
     Mailboxes(Vec<Mailbox>),
     Page(Page<MessageSummary>),
+    /// One fetched full message (plan §19 Phase 4).
+    Message(Box<Message>),
+    /// A mutation confirmed by the backend; the reducer applies the state
+    /// change its own operation kind describes (flags echo only the
+    /// affected values, ADR 0001 finding 6).
+    Done,
 }
 
 /// A failure ready for the Retry/Dismiss modal (plan §12). Built by the
