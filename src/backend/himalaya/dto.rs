@@ -79,6 +79,19 @@ pub(crate) struct AddressDto {
     pub email: String,
 }
 
+// ── `message add --json` (ADR 0002 draft spike) ──────────────────────────
+
+/// `message add` returns the created message's backend id; `sent` is false
+/// for a plain append (drafts). It is parsed for shape fidelity but not
+/// interpreted: a draft add never sends.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct MessageAddDto {
+    pub id: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub sent: Option<bool>,
+}
+
 // ── `message read --json` (ADR 0001 finding 10) ──────────────────────────
 //
 // The raw serde dump of `mail_parser::Message`: a part list plus the part

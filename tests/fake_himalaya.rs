@@ -224,6 +224,10 @@ if [ "$SUB" = "message" ]; then
         delete)
           printf '%s' '{"action":"moved-to-trash"}'
           ;;
+        add)
+          # Draft creation (ADR 0002 finding 1): the new backend id.
+          printf '%s' '{"id":"new-draft-1","sent":false}'
+          ;;
       esac
       ;;
     error-json)

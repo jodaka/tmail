@@ -10,6 +10,7 @@ use crate::app::operation::OperationRegistry;
 use crate::app::overlay::Overlay;
 use crate::app::route::Route;
 use crate::domain::{Mailbox, Message, MessageSummary, Page};
+use chrono::{DateTime, FixedOffset};
 
 /// Async load lifecycle for backend-fed collections (mock-fed in Phase 1).
 /// `Idle` marks a slot that is not currently in use (no message open).
@@ -78,6 +79,9 @@ pub struct AppState {
     pub focus: Focus,
     /// Last known terminal size; drives the responsive layout (plan §18).
     pub size: (u16, u16),
+    /// The last wall clock delivered by `Action::Tick { now }`: the
+    /// reducer's only source of time (autosave debounce, saved-at stamps).
+    pub clock: Option<DateTime<FixedOffset>>,
     pub status: StatusState,
     pub quit_requested: bool,
     /// Tick counter for animation state (spinner lands in Phase 3).
@@ -104,6 +108,7 @@ impl AppState {
             search_query: String::new(),
             focus: Focus::MessageList,
             size: (152, 40),
+            clock: None,
             status: StatusState {
                 mode: StatusMode::Normal,
                 message: None,

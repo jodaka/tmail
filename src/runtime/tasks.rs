@@ -96,6 +96,10 @@ async fn run_effect(
             Ok(()) => Some(Ok(OperationOutcome::Done)),
             Err(err) => operation_failure(&effect, err).map(Err),
         },
+        OperationKind::SaveDraft { draft } => match backend.save_draft(ctx, *draft).await {
+            Ok(remote_id) => Some(Ok(OperationOutcome::DraftSaved { remote_id })),
+            Err(err) => operation_failure(&effect, err).map(Err),
+        },
     }
 }
 
@@ -255,6 +259,15 @@ mod tests {
 
         async fn trash(&self, _req: RequestContext, _locator: MessageLocator) -> BackendResult<()> {
             Ok(())
+        }
+
+        async fn save_draft(
+            &self,
+            _req: RequestContext,
+            draft: crate::domain::DraftSnapshot,
+        ) -> BackendResult<MessageId> {
+            // Fake confirmation; failures come from the error injection.
+            Ok(MessageId(format!("remote-{}", draft.revision)))
         }
     }
 

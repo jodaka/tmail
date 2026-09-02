@@ -49,6 +49,13 @@ fn no_effects(effects: &[Effect]) {
     assert!(effects.is_empty(), "expected no effects, got {effects:?}");
 }
 
+/// A Tick carrying `mock::now()` plus `offset_seconds` — the reducer's
+/// injected clock for autosave timing.
+fn tick(s: &mut AppState, offset_seconds: i64) -> Vec<Effect> {
+    let now = mock::now() + chrono::Duration::seconds(offset_seconds);
+    reduce(s, &Action::Tick { now: Box::new(now) })
+}
+
 /// Complete `id` with an `Ok` page payload for `req` at `offset`.
 fn complete_page_ok(state: &mut AppState, id: OperationId, req: &PageRequest, offset: usize) {
     let page = mock::mock_page(&req.mailbox_id, offset, req.limit);
@@ -452,7 +459,7 @@ fn input_and_ticks_keep_working_while_an_operation_is_in_flight() {
     let _ = expect_page(&reduce(&mut s, &Action::PageNext));
     // Foreground work never blocks rendering or input (plan §3): movement
     // and ticks apply while the request is in flight.
-    reduce(&mut s, &Action::Tick);
+    tick(&mut s, 0);
     assert_eq!(s.ticks, 1);
     reduce(&mut s, &Action::MoveDown);
     assert_eq!(s.selection, 1);
@@ -1261,7 +1268,7 @@ fn resize_leaves_reader_scroll_alone_outside_the_reader() {
 fn tick_increments_counter_only() {
     let mut s = state();
     let before = s.clone();
-    reduce(&mut s, &Action::Tick);
+    tick(&mut s, 0);
     assert_eq!(s.ticks, before.ticks + 1);
     assert_eq!(s.selection, before.selection);
     assert_eq!(s.focus, before.focus);
@@ -1420,9 +1427,9 @@ fn typing_edits_the_focused_field_only() {
         reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char(c)));
     }
     let composer = s.composer.as_ref().unwrap();
-    assert_eq!(composer.to, "max@");
-    assert_eq!(composer.subject, "Hi");
-    assert!(composer.cc.is_empty());
+    assert_eq!(composer.draft.to, "max@");
+    assert_eq!(composer.draft.subject, "Hi");
+    assert!(composer.draft.cc.is_empty());
 }
 
 #[test]
@@ -1444,7 +1451,7 @@ fn enter_inserts_newline_in_body_only() {
     // Enter on a single-line field does not edit it.
     reduce(&mut s, &Action::FocusPrevious); // Subject
     reduce(&mut s, &Action::Activate);
-    assert_eq!(s.composer.as_ref().unwrap().subject, "");
+    assert_eq!(s.composer.as_ref().unwrap().draft.subject, "");
 }
 
 #[test]
@@ -1460,7 +1467,7 @@ fn shortcuts_cannot_fire_while_composing() {
     reduce(&mut s, &Action::Archive);
     reduce(&mut s, &Action::OpenSearch);
     let composer = s.composer.as_ref().unwrap();
-    assert_eq!(composer.to, "c/");
+    assert_eq!(composer.draft.to, "c/");
     assert_eq!(s.routes, before_routes, "composer stays open");
     assert!(s.operations.is_empty());
     assert_eq!(s.focus, Focus::Composer);
@@ -1477,7 +1484,7 @@ fn esc_leaves_the_composer_and_preserves_the_draft() {
     assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
     // The draft data survives for reopening.
     let composer = s.composer.as_ref().expect("draft preserved");
-    assert_eq!(composer.to, "d");
+    assert_eq!(composer.draft.to, "d");
 }
 
 #[test]
@@ -1488,7 +1495,7 @@ fn compose_again_reopens_the_preserved_draft() {
     reduce(&mut s, &Action::BackOrCancel);
     compose(&mut s);
     let composer = s.composer.as_ref().unwrap();
-    assert_eq!(composer.to, "d", "reopening continues the draft");
+    assert_eq!(composer.draft.to, "d", "reopening continues the draft");
     assert_eq!(composer.field, ComposerField::To);
 }
 
@@ -1521,4 +1528,222 @@ fn composer_edits_without_composer_open_are_inert() {
     reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
     assert!(s.composer.is_none());
     assert!(!matches!(s.active_route(), Some(Route::Composer)));
+}
+
+// ── Draft autosave state machine (plan §14 Phase 6.3) ────────────────────
+
+fn expect_save(effects: &[Effect]) -> (OperationId, crate::domain::DraftSnapshot) {
+    match effects {
+        [effect] => match &effect.kind {
+            OperationKind::SaveDraft { draft } => (effect.id, (**draft).clone()),
+            other => panic!("expected a SaveDraft effect, got {other:?}"),
+        },
+        other => panic!("expected exactly one effect, got {other:?}"),
+    }
+}
+
+fn complete_save_ok(
+    s: &mut AppState,
+    id: OperationId,
+    _revision: u64,
+    remote: &str,
+) -> Vec<Effect> {
+    reduce(
+        s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::DraftSaved {
+                remote_id: MessageId(String::from(remote)),
+            }),
+        }),
+    )
+}
+
+#[test]
+fn edits_arm_the_debounce_and_tick_starts_the_save() {
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0); // sets the clock
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    // Before the two-second window elapses nothing is requested.
+    no_effects(&tick(&mut s, 1));
+    // At 2 s the save fires with the current revision and content.
+    let effects = tick(&mut s, 2);
+    let (id, snapshot) = expect_save(&effects);
+    assert_eq!(snapshot.revision, 1);
+    assert_eq!(snapshot.to, "x");
+    assert!(s.operations.get(id).is_some());
+    assert_eq!(
+        s.composer.as_ref().unwrap().draft.save,
+        crate::domain::DraftSaveState::Saving
+    );
+    // Confirmation of the newest revision cleans the draft.
+    complete_save_ok(&mut s, id, snapshot.revision, "remote-1");
+    let draft = &s.composer.as_ref().unwrap().draft;
+    assert!(!draft.is_dirty());
+    assert_eq!(draft.save, crate::domain::DraftSaveState::Saved);
+    assert_eq!(draft.saved_revision, 1);
+    assert_eq!(
+        draft.remote_id,
+        Some(MessageId(String::from("remote-1"))),
+        "the confirmed remote id is remembered for replacement"
+    );
+}
+
+#[test]
+fn saving_revision_n_cannot_mark_revision_n_plus_1_clean() {
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('a')));
+    let (id1, snap1) = expect_save(&tick(&mut s, 2));
+    // An edit lands while revision 1 is in flight.
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('b')));
+    assert_eq!(s.composer.as_ref().unwrap().draft.revision, 2);
+    // The stale success confirms only revision 1...
+    let chained = complete_save_ok(&mut s, id1, snap1.revision, "remote-1");
+    assert_eq!(
+        s.composer.as_ref().unwrap().draft.saved_revision,
+        1,
+        "saved_revision must not jump to the newest revision"
+    );
+    // ...and the state machine immediately chains another save.
+    let (id2, snap2) = expect_save(&chained);
+    assert_eq!(
+        snap2.revision, 2,
+        "the chained save covers the newest revision"
+    );
+    assert_eq!(snap2.to, "ab");
+    complete_save_ok(&mut s, id2, snap2.revision, "remote-2");
+    let draft = &s.composer.as_ref().unwrap().draft;
+    assert!(!draft.is_dirty(), "now revision 2 is clean");
+    assert_eq!(draft.remote_id, Some(MessageId(String::from("remote-2"))));
+}
+
+#[test]
+fn rapid_edits_coalesce_into_one_pending_save() {
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0);
+    for c in "abc".chars() {
+        reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char(c)));
+        tick(&mut s, 0); // within the debounce window
+    }
+    no_effects(&tick(&mut s, 1));
+    let (_, snapshot) = expect_save(&tick(&mut s, 2));
+    assert_eq!(snapshot.revision, 3, "all edits in the window coalesce");
+    assert_eq!(snapshot.to, "abc");
+}
+
+#[test]
+fn draft_save_failure_opens_retry_modal_and_retains_content() {
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('k')));
+    let (id, snapshot) = expect_save(&tick(&mut s, 2));
+    reduce(
+        &mut s,
+        &failure(
+            id,
+            &OperationKind::SaveDraft {
+                draft: Box::new(snapshot.clone()),
+            },
+            "imap down",
+        ),
+    );
+    // Unsaved state, content retained, modal up (plan §14 acceptance).
+    let draft = &s.composer.as_ref().unwrap().draft;
+    assert_eq!(draft.save, crate::domain::DraftSaveState::Failed);
+    assert!(draft.is_dirty());
+    assert_eq!(draft.to, "k");
+    assert!(s.overlay.is_some());
+    assert_eq!(s.status.message.as_deref(), Some("Draft save failed"));
+    // Retry replays the *intent*: fresh snapshot of the newest revision
+    // under a new operation id.
+    let effects = reduce(&mut s, &Action::RetryError);
+    let (retry_id, retry_snapshot) = expect_save(&effects);
+    assert_ne!(retry_id, id);
+    assert_eq!(retry_snapshot.local_id, snapshot.local_id);
+    assert_eq!(retry_snapshot.revision, snapshot.revision);
+    assert_eq!(retry_snapshot.to, "k");
+    assert!(s.overlay.is_none());
+    assert_eq!(
+        s.composer.as_ref().unwrap().draft.save,
+        crate::domain::DraftSaveState::Saving
+    );
+}
+
+#[test]
+fn dismiss_after_failure_keeps_the_draft_awaiting_retry_or_edit() {
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('k')));
+    let (id, snapshot) = expect_save(&tick(&mut s, 2));
+    reduce(
+        &mut s,
+        &failure(
+            id,
+            &OperationKind::SaveDraft {
+                draft: Box::new(snapshot),
+            },
+            "imap down",
+        ),
+    );
+    reduce(&mut s, &Action::DismissError);
+    assert!(s.overlay.is_none());
+    assert_eq!(s.focus, Focus::Composer);
+    let draft = &s.composer.as_ref().unwrap().draft;
+    assert_eq!(draft.to, "k", "dismiss never discards content");
+    // No automatic re-save while Failed; the next edit re-arms autosave.
+    no_effects(&tick(&mut s, 60));
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('!')));
+    let (_, retry) = expect_save(&tick(&mut s, 62));
+    assert_eq!(retry.to, "k!");
+}
+
+#[test]
+fn caret_moves_do_not_dirty_the_draft() {
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    let (id, snapshot) = expect_save(&tick(&mut s, 2));
+    complete_save_ok(&mut s, id, snapshot.revision, "remote-1");
+    assert!(!s.composer.as_ref().unwrap().draft.is_dirty());
+    // Cross-field caret moves are not content edits: no new revision, no
+    // follow-up save.
+    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::CursorLeft));
+    no_effects(&tick(&mut s, 20));
+    assert_eq!(s.composer.as_ref().unwrap().draft.revision, 1);
+}
+
+#[test]
+fn stale_failure_does_not_cancel_a_scheduled_save() {
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('a')));
+    let (id1, snap1) = expect_save(&tick(&mut s, 2));
+    // Newer edits re-arm the debounce while revision 1 is failing...
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('b')));
+    reduce(
+        &mut s,
+        &failure(
+            id1,
+            &OperationKind::SaveDraft {
+                draft: Box::new(snap1.clone()),
+            },
+            "boom",
+        ),
+    );
+    // The failure modal intercepts ticks (plan §9); dismiss it and the
+    // debounce is still armed: the scheduled save retries with the newest
+    // revision without user action.
+    reduce(&mut s, &Action::DismissError);
+    let (_, snap2) = expect_save(&tick(&mut s, 4));
+    assert_eq!(snap2.revision, 2);
+    assert_eq!(snap2.to, "ab");
 }

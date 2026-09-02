@@ -9,6 +9,7 @@
 //!   and its failure payloads are already sanitized (plan §12).
 
 use crate::app::operation::OperationResult;
+use chrono::{DateTime, FixedOffset};
 
 /// Character-level edit of the search field.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +32,20 @@ pub enum ComposerEdit {
     CursorRight,
     CursorUp,
     CursorDown,
+}
+
+impl ComposerEdit {
+    /// Whether this edit changes draft content (caret moves do not): only
+    /// content edits bump the draft revision and re-arm autosave.
+    pub fn is_content_edit(&self) -> bool {
+        matches!(
+            self,
+            ComposerEdit::Char(_)
+                | ComposerEdit::Backspace
+                | ComposerEdit::Delete
+                | ComposerEdit::Newline
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,7 +80,13 @@ pub enum Action {
     /// Backend result for one operation. Results for unknown, cancelled,
     /// or superseded ids are rejected by the reducer (plan §11).
     BackendCompleted(OperationResult),
-    Tick,
+    /// Periodic tick. `now` is the injected wall clock: the reducer never
+    /// reads a clock itself (plan §20 determinism), using it for the
+    /// autosave debounce and saved-at stamps (Phase 6). Boxed to keep the
+    /// enum small next to the payload-carrying result variant.
+    Tick {
+        now: Box<DateTime<FixedOffset>>,
+    },
     Resize {
         width: u16,
         height: u16,

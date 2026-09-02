@@ -19,10 +19,12 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 
+use crate::backend::journal::DraftJournal;
 use crate::backend::traits::{BackendError, BackendResult, MailBackend, RequestContext};
 use crate::config::Config;
 use crate::domain::{
-    Mailbox, MailboxRole, Message, MessageLocator, MessageSummary, Page, PageRequest,
+    DraftSnapshot, Mailbox, MailboxRole, Message, MessageId, MessageLocator, MessageSummary, Page,
+    PageRequest,
 };
 
 /// Drives the `himalaya` executable with argv-only child processes.
@@ -45,6 +47,12 @@ pub struct HimalayaCliBackend {
     /// operations inside the backend adapter). `Arc` keeps the struct
     /// cheaply cloneable.
     mailboxes: Arc<RwLock<Option<Vec<Mailbox>>>>,
+    /// Post-owned crash-safe draft journal (ADR 0002 §D.1): every revision
+    /// is recorded here before any remote call.
+    journal: DraftJournal,
+    /// Configured account identity, used as the `From` header of drafts.
+    account_email: Option<String>,
+    account_display_name: Option<String>,
 }
 
 impl HimalayaCliBackend {
@@ -60,7 +68,17 @@ impl HimalayaCliBackend {
             account,
             aliases,
             mailboxes: Arc::new(RwLock::new(None)),
+            journal: DraftJournal::open_default()
+                .unwrap_or_else(|| DraftJournal::open(PathBuf::from("/dev/null/post-drafts"))),
+            account_email: None,
+            account_display_name: None,
         }
+    }
+
+    /// Override the journal location (tests, explicit data dirs).
+    pub fn with_journal(mut self, journal: DraftJournal) -> Self {
+        self.journal = journal;
+        self
     }
 
     /// Backend wired from the loaded Post configuration.
@@ -71,6 +89,21 @@ impl HimalayaCliBackend {
             config.account.clone(),
             config.aliases.clone(),
         )
+        .with_account_identity(
+            config.account_email.clone(),
+            config.account_display_name.clone(),
+        )
+    }
+
+    /// Set the configured account identity (`From` of drafts).
+    pub fn with_account_identity(
+        mut self,
+        email: Option<String>,
+        display_name: Option<String>,
+    ) -> Self {
+        self.account_email = email;
+        self.account_display_name = display_name;
+        self
     }
 }
 
@@ -185,6 +218,78 @@ impl MailBackend for HimalayaCliBackend {
         process::decode::<serde_json::Value>(output)?;
         Ok(())
     }
+
+    async fn save_draft(
+        &self,
+        ctx: RequestContext,
+        draft: DraftSnapshot,
+    ) -> BackendResult<MessageId> {
+        tracing::debug!(
+            operation = %ctx.operation,
+            local_id = %draft.local_id.0,
+            revision = draft.revision,
+            "save_draft"
+        );
+        // 1. Crash-safe local record BEFORE any remote call (ADR 0002
+        //    §D.1): a crash after this point can only leave duplicates,
+        //    never lost text.
+        self.journal.record(&draft)?;
+
+        // 2. Serialize the draft (library-built RFC 5322, plan §14).
+        let message = self.serialize_draft(&draft)?;
+
+        // 3. Add the new revision to the Drafts mailbox with the draft
+        //    flag; the confirmed id from stdout is the replacement's
+        //    identity (ADR 0002 §D.3).
+        let drafts = self.mailbox_for_role(MailboxRole::Drafts).ok_or_else(|| {
+            BackendError::InvalidRequest(String::from(
+                "no drafts mailbox is known; set \
+                 [accounts.<account>.mailbox.alias] drafts",
+            ))
+        })?;
+        let argv = command::message_add_argv(
+            self.config_path.as_deref(),
+            self.account.as_deref(),
+            &drafts,
+            "draft",
+        );
+        let output = process::run_with_stdin(
+            &self.program,
+            &argv,
+            Some(message.as_slice()),
+            &ctx.cancellation,
+        )
+        .await?;
+        let added: dto::MessageAddDto = process::decode(output)?;
+        let new_id = MessageId(added.id);
+
+        // 4. Only after the new copy is confirmed: best-effort deletion of
+        //    the previous remote copy (ADR 0002 §D.3/§D.4 — failure here
+        //    leaves a duplicate, never data loss; reconciliation is
+        //    opportunistic).
+        if let Some(old) = draft.remote_id.as_ref()
+            && old != &new_id
+        {
+            let argv = command::message_delete_argv(
+                self.config_path.as_deref(),
+                self.account.as_deref(),
+                &drafts,
+                &old.0,
+            );
+            if let Err(err) = process::run(&self.program, &argv, &ctx.cancellation).await
+                && !matches!(err, BackendError::Cancelled)
+            {
+                tracing::warn!(old = %old.0, %err, "old draft copy could not be deleted");
+            }
+        }
+
+        // 5. Confirm the revision in the journal (newest pushed).
+        self.journal
+            .mark_remote(&draft.local_id.0, draft.revision)
+            .map_err(BackendError::Io)?;
+
+        Ok(new_id)
+    }
 }
 
 impl HimalayaCliBackend {
@@ -249,5 +354,80 @@ impl HimalayaCliBackend {
             MailboxRole::Spam => "junk",
         };
         self.aliases.get(alias_key).cloned()
+    }
+
+    /// Serialize one draft revision as a single-part `text/plain` RFC 5322
+    /// message via the mail-builder library (plan §14: never hand-concatenate
+    /// MIME). The stable `Message-ID` (ADR 0002 §D.6) and Post-owned
+    /// `X-Post-Draft-Id` header make replacement and reconciliation
+    /// possible; only valid parsed addresses are written (the composer
+    /// flags invalid ones and send refuses them in Phase 7).
+    fn serialize_draft(&self, draft: &DraftSnapshot) -> BackendResult<Vec<u8>> {
+        use mail_builder::MessageBuilder;
+        use mail_builder::headers::address::Address as MailAddress;
+
+        /// Parse one composer address field into library addresses (valid
+        /// entries only; invalid ones are flagged in the composer UI and
+        /// refused at send time in Phase 7).
+        fn parse(field: &str) -> Vec<MailAddress<'static>> {
+            crate::domain::address::parse_address_list(field)
+                .into_iter()
+                .filter_map(Result::ok)
+                .map(|a| MailAddress::new_address(a.name, a.email))
+                .collect()
+        }
+
+        /// Header form: omitted when the field is empty.
+        fn addresses(list: Vec<MailAddress<'static>>) -> Option<MailAddress<'static>> {
+            (!list.is_empty()).then_some(MailAddress::List(list))
+        }
+
+        if draft.message_id.is_none() {
+            return Err(BackendError::InvalidRequest(String::from(
+                "draft is missing a stable Message-ID; it must be minted \
+                 before the first save",
+            )));
+        }
+
+        let mut builder = MessageBuilder::new()
+            .date(chrono::Utc::now().timestamp())
+            .header(
+                "X-Post-Draft-Id",
+                mail_builder::headers::raw::Raw::from(draft.local_id.0.clone()),
+            );
+        if let Some(message_id) = &draft.message_id {
+            // The draft stores the full RFC form `<id-left@id-right>`;
+            // mail-builder adds the angle brackets itself.
+            let bare = message_id.trim_start_matches('<').trim_end_matches('>');
+            builder = builder.message_id(bare);
+        }
+        if let Some(email) = &self.account_email {
+            builder = builder.from(MailAddress::new_address(
+                self.account_display_name.clone(),
+                email.clone(),
+            ));
+        }
+        // mail_builder takes ownership; build owned lists per field.
+        builder = match addresses(parse(&draft.to)) {
+            Some(addr) => builder.to(addr),
+            None => builder,
+        };
+        builder = match addresses(parse(&draft.cc)) {
+            Some(addr) => builder.cc(addr),
+            None => builder,
+        };
+        builder = match addresses(parse(&draft.bcc)) {
+            Some(addr) => builder.bcc(addr),
+            None => builder,
+        };
+        if !draft.subject.is_empty() {
+            builder = builder.subject(draft.subject.as_str());
+        }
+        builder
+            .text_body(draft.body.as_str())
+            .write_to_vec()
+            .map_err(|err| {
+                BackendError::InvalidRequest(format!("draft serialization failed: {err}"))
+            })
     }
 }

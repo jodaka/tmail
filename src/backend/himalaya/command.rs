@@ -126,6 +126,25 @@ pub(crate) fn message_delete_argv(
     argv
 }
 
+/// `message add -m <mailbox> --flag draft --json` with the raw RFC 5322
+/// message piped on stdin (ADR 0002 findings: create returns
+/// `{"id":"…","sent":false}`; there is no in-place update, replacement is
+/// add-then-delete).
+pub(crate) fn message_add_argv(
+    config: Option<&Path>,
+    account: Option<&str>,
+    mailbox_id: &str,
+    flag: &str,
+) -> Vec<String> {
+    let mut argv = global_flags(config, account);
+    argv.extend(
+        ["message", "add", "-m", mailbox_id, "--flag", flag, "--json"]
+            .into_iter()
+            .map(String::from),
+    );
+    argv
+}
+
 fn global_flags(config: Option<&Path>, account: Option<&str>) -> Vec<String> {
     let mut argv = Vec::new();
     if let Some(config) = config {

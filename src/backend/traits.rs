@@ -12,7 +12,9 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::operation::OperationId;
-use crate::domain::{Mailbox, Message, MessageLocator, MessageSummary, Page, PageRequest};
+use crate::domain::{
+    DraftSnapshot, Mailbox, Message, MessageId, MessageLocator, MessageSummary, Page, PageRequest,
+};
 
 /// Per-request context handed to every backend call (plan §8).
 #[derive(Debug, Clone)]
@@ -105,4 +107,15 @@ pub trait MailBackend: Send + Sync {
     /// Move a message to trash (himalaya is trash-first, ADR 0001 finding
     /// 5); permanently deletes when already in trash.
     async fn trash(&self, ctx: RequestContext, locator: MessageLocator) -> BackendResult<()>;
+
+    /// Persist one draft revision (plan §14, ADR 0002): record it in the
+    /// crash-safe local journal first, then push it to the remote Drafts
+    /// mailbox via add-then-delete replacement (the old remote copy is
+    /// deleted only after the new id is confirmed). Returns the backend id
+    /// of the confirmed remote copy.
+    async fn save_draft(
+        &self,
+        ctx: RequestContext,
+        draft: DraftSnapshot,
+    ) -> BackendResult<MessageId>;
 }

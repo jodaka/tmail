@@ -17,7 +17,9 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{Mailbox, Message, MessageLocator, MessageSummary, Page, PageRequest};
+use crate::domain::{
+    DraftSnapshot, Mailbox, Message, MessageId, MessageLocator, MessageSummary, Page, PageRequest,
+};
 
 /// Opaque identifier carried by every backend request and result (plan §5:
 /// "Every request and result carries an `OperationId`"). Constructed only
@@ -53,6 +55,11 @@ pub enum OperationKind {
     Archive(MessageLocator),
     /// Move a message to trash (himalaya is trash-first).
     Trash(MessageLocator),
+    /// Persist one draft revision (plan §14, ADR 0002): journal record +
+    /// remote add-then-delete replacement. The snapshot freezes the exact
+    /// revision saved, so a stale success can be detected and re-saved.
+    /// Boxed: full draft payloads must not bloat every operation kind.
+    SaveDraft { draft: Box<DraftSnapshot> },
 }
 
 impl OperationKind {
@@ -68,6 +75,7 @@ impl OperationKind {
             OperationKind::SetStarred { starred: false, .. } => "Unstarring",
             OperationKind::Archive(_) => "Archiving",
             OperationKind::Trash(_) => "Moving to trash",
+            OperationKind::SaveDraft { .. } => "Saving draft",
         }
     }
 
@@ -101,6 +109,13 @@ impl OperationKind {
                 OperationKind::SetStarred { locator: newer, .. },
                 OperationKind::SetStarred { locator: older, .. },
             ) => newer.id == older.id,
+            // A newer save of the same draft supersedes an older one: only
+            // the newest revision may ever be pushed (plan §14 coalescing,
+            // ADR 0002 §D.2).
+            (
+                OperationKind::SaveDraft { draft: newer },
+                OperationKind::SaveDraft { draft: older },
+            ) => newer.local_id == older.local_id,
             _ => false,
         }
     }
@@ -125,6 +140,11 @@ pub enum OperationOutcome {
     /// change its own operation kind describes (flags echo only the
     /// affected values, ADR 0001 finding 6).
     Done,
+    /// A draft save confirmed: the backend id of the new remote copy
+    /// (ADR 0002 §D.3).
+    DraftSaved {
+        remote_id: MessageId,
+    },
 }
 
 /// A failure ready for the Retry/Dismiss modal (plan §12). Built by the

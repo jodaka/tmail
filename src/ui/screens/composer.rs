@@ -155,13 +155,13 @@ fn field_row<'a>(
         .saturating_sub(LABEL_WIDTH + 2)
         .saturating_sub(reserved_right);
     let (text, cursor) = match field {
-        ComposerField::To => (&composer.to, composer.cursor),
-        ComposerField::Cc => (&composer.cc, composer.cursor),
-        ComposerField::Bcc => (&composer.bcc, composer.cursor),
-        ComposerField::Subject => (&composer.subject, composer.cursor),
+        ComposerField::To => (&composer.draft.to, composer.cursor),
+        ComposerField::Cc => (&composer.draft.cc, composer.cursor),
+        ComposerField::Bcc => (&composer.draft.bcc, composer.cursor),
+        ComposerField::Subject => (&composer.draft.subject, composer.cursor),
         // The body is not a single-line string; this arm is unreachable in
         // practice (visible_fields never yields it).
-        _ => (&composer.to, composer.cursor),
+        _ => (&composer.draft.to, composer.cursor),
     };
     let label_spans = vec![
         Span::styled(format!("{label:>LABEL_WIDTH$}"), Style::new().fg(theme.dim)),

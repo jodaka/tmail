@@ -33,6 +33,11 @@ pub struct Config {
     /// `[accounts.<account>.mailbox.alias]` entries: role key → mailbox
     /// name. Non-string values are ignored.
     pub aliases: HashMap<String, String>,
+    /// `[accounts.<account>].email`: the configured account address, used
+    /// as the `From` identity of drafts (Phase 6).
+    pub account_email: Option<String>,
+    /// `[accounts.<account>].display-name`, when configured.
+    pub account_display_name: Option<String>,
 }
 
 impl Default for Config {
@@ -42,6 +47,8 @@ impl Default for Config {
             account: None,
             page_size: DEFAULT_PAGE_SIZE,
             aliases: HashMap::new(),
+            account_email: None,
+            account_display_name: None,
         }
     }
 }
@@ -127,8 +134,20 @@ pub fn parse(text: &str, path: Option<PathBuf>) -> Config {
     }
     if let Some(account) = config.account.as_deref() {
         config.aliases = aliases_for(&doc, account);
+        config.account_email = account_field(&doc, account, "email");
+        config.account_display_name = account_field(&doc, account, "display-name");
     }
     config
+}
+
+/// One string field of `[accounts.<account>]`.
+fn account_field(doc: &toml::Value, account: &str, field: &str) -> Option<String> {
+    doc.get("accounts")
+        .and_then(|accounts| accounts.get(account))
+        .and_then(|account| account.get(field))
+        .and_then(toml::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 /// `[accounts.<account>.mailbox.alias]` entries, keeping only string values.
@@ -233,5 +252,23 @@ mod tests {
         "#;
         let config = parse(text, None);
         assert!(config.aliases.is_empty());
+    }
+
+    #[test]
+    fn account_identity_is_parsed_for_draft_from_headers() {
+        let text = r#"
+            [accounts.probe]
+            email = "probe@post.local"
+            display-name = "Post Probe"
+
+            [post]
+            account = "probe"
+        "#;
+        let config = parse(text, None);
+        assert_eq!(config.account_email.as_deref(), Some("probe@post.local"));
+        assert_eq!(config.account_display_name.as_deref(), Some("Post Probe"));
+        // Without an account selected, no identity resolves.
+        let config = parse("[accounts.probe]\nemail = \"probe@post.local\"\n", None);
+        assert_eq!(config.account_email, None);
     }
 }

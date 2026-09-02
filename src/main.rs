@@ -119,7 +119,13 @@ async fn run() -> anyhow::Result<()> {
                     launch(&manager, &state, effects);
                 }
                 Some(events::Event::Tick) => {
-                    reducer::reduce(&mut state, &Action::Tick);
+                    let effects = reducer::reduce(
+                        &mut state,
+                        &Action::Tick {
+                            now: Box::new(Local::now().fixed_offset()),
+                        },
+                    );
+                    launch(&manager, &state, effects);
                 }
                 None => {
                     tracing::warn!("event stream closed");

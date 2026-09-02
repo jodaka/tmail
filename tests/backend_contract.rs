@@ -612,3 +612,168 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
         }
     }
 }
+
+// ── Draft saves (plan §14, ADR 0002) ─────────────────────────────────────
+
+use tempfile::TempDir;
+use tmail::backend::journal::DraftJournal;
+use tmail::domain::{DraftId, DraftSnapshot};
+
+/// A draft snapshot ready to save.
+fn draft_snapshot(revision: u64, remote_id: Option<&str>) -> DraftSnapshot {
+    DraftSnapshot {
+        local_id: DraftId(String::from("local-123")),
+        message_id: Some(String::from("<123.draft@post.local>")),
+        remote_id: remote_id.map(|id| MessageId(String::from(id))),
+        to: String::from("Maksim Orlov <m.orlov@example.org>, broken-entry"),
+        cc: String::from("cc@example.org"),
+        bcc: String::new(),
+        subject: String::from("Gyuto — progress"),
+        body: String::from("first line\nsecond line"),
+        revision,
+    }
+}
+
+/// Backend with a hermetic journal directory; the tempdir must outlive the
+/// backend calls.
+fn backend_with_journal(fake: &FakeHimalaya) -> (HimalayaCliBackend, TempDir) {
+    let dir = TempDir::new().expect("journal tempdir");
+    let backend = HimalayaCliBackend::new(
+        fake.program().display().to_string(),
+        Some(PathBuf::from(fake.config())),
+        Some(String::from("probe")),
+        aliases(&[
+            ("inbox", "INBOX"),
+            ("trash", "Archive"),
+            ("drafts", "Drafts"),
+        ]),
+    )
+    .with_journal(DraftJournal::open(dir.path().to_path_buf()))
+    .with_account_identity(
+        Some(String::from("probe@post.local")),
+        Some(String::from("Post Probe")),
+    );
+    (backend, dir)
+}
+
+#[test]
+fn save_draft_adds_with_draft_flag_and_pipes_the_message() {
+    let fake = FakeHimalaya::spawn_ok();
+    let (backend, dir) = backend_with_journal(&fake);
+    let snapshot = draft_snapshot(3, None);
+    let remote = block(backend.save_draft(ctx(), snapshot.clone())).expect("save succeeds");
+    assert_eq!(remote, MessageId(String::from("new-draft-1")));
+    assert_eq!(
+        fake.argv(),
+        vec![vec![
+            "-c".to_string(),
+            fake.config().display().to_string(),
+            "-a".to_string(),
+            "probe".to_string(),
+            "message".to_string(),
+            "add".to_string(),
+            "-m".to_string(),
+            "Drafts".to_string(),
+            "--flag".to_string(),
+            "draft".to_string(),
+            "--json".to_string(),
+        ]]
+    );
+    // The serialized RFC 5322 message travels on stdin: library-built
+    // headers, the stable Message-ID, Post's draft metadata, and the body.
+    let stdin = String::from_utf8_lossy(&fake.stdin_bytes()).into_owned();
+    assert!(
+        stdin.contains("To: \"Maksim Orlov\" <m.orlov@example.org>"),
+        "{stdin}"
+    );
+    assert!(
+        !stdin.contains("broken-entry"),
+        "invalid entries must not reach the wire: {stdin}"
+    );
+    assert!(stdin.contains("Cc: <cc@example.org>"), "{stdin}");
+    assert!(
+        stdin.contains("Message-ID: <123.draft@post.local>"),
+        "{stdin}"
+    );
+    assert!(stdin.contains("X-Post-Draft-Id: local-123"), "{stdin}");
+    assert!(
+        stdin.contains("From: \"Post Probe\" <probe@post.local>"),
+        "{stdin}"
+    );
+    // Non-ASCII subjects are RFC 2047-encoded by the library.
+    assert!(stdin.contains("Subject: =?utf-8?"), "{stdin}");
+    assert!(stdin.contains("second line"), "{stdin}");
+    // The revision is confirmed in the journal after the remote save.
+    let entry = DraftJournal::open(dir.path().to_path_buf())
+        .load_all()
+        .expect("journal readable");
+    assert_eq!(entry.len(), 1);
+    assert_eq!(
+        entry[0].saved_revision, 3,
+        "journal confirms the pushed revision"
+    );
+    assert_eq!(entry[0].draft, snapshot);
+}
+
+#[test]
+fn save_draft_replaces_the_old_remote_only_after_confirm() {
+    let fake = FakeHimalaya::spawn_ok();
+    let (backend, _dir) = backend_with_journal(&fake);
+    block(backend.save_draft(ctx(), draft_snapshot(2, Some("old-1")))).expect("save succeeds");
+    let argv = fake.argv();
+    assert_eq!(argv.len(), 2, "add first, then the old-copy delete");
+    assert_eq!(
+        &argv[0][5..],
+        ["add", "-m", "Drafts", "--flag", "draft", "--json"]
+    );
+    assert_eq!(
+        argv[1],
+        vec![
+            "-c".to_string(),
+            fake.config().display().to_string(),
+            "-a".to_string(),
+            "probe".to_string(),
+            "message".to_string(),
+            "delete".to_string(),
+            "-m".to_string(),
+            "Drafts".to_string(),
+            "old-1".to_string(),
+            "--json".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn save_draft_records_the_revision_before_any_remote_call() {
+    // The `add` fails: the journal entry must still exist (ADR 0002 §D.1 —
+    // a crash mid-save can lose nothing).
+    let fake = FakeHimalaya::spawn_full("ok", "ok", "error-json", "ok");
+    let (backend, dir) = backend_with_journal(&fake);
+    let err = block(backend.save_draft(ctx(), draft_snapshot(1, None))).expect_err("add fails");
+    assert!(matches!(err, BackendError::Command { .. }));
+    let entries = DraftJournal::open(dir.path().to_path_buf())
+        .load_all()
+        .expect("journal readable");
+    assert_eq!(entries.len(), 1, "the revision was recorded first");
+    assert_eq!(entries[0].saved_revision, 0, "nothing was confirmed remote");
+}
+
+#[test]
+fn save_draft_without_a_known_drafts_mailbox_is_rejected() {
+    let fake = FakeHimalaya::spawn_ok();
+    let dir = TempDir::new().expect("journal tempdir");
+    let backend = HimalayaCliBackend::new(
+        fake.program().display().to_string(),
+        Some(PathBuf::from(fake.config())),
+        Some(String::from("probe")),
+        aliases(&[("inbox", "INBOX")]), // no drafts alias, no cached listing
+    )
+    .with_journal(DraftJournal::open(dir.path().to_path_buf()));
+    let err =
+        block(backend.save_draft(ctx(), draft_snapshot(1, None))).expect_err("no drafts mailbox");
+    assert!(
+        matches!(err, BackendError::InvalidRequest(ref msg) if msg.contains("drafts")),
+        "{err:?}"
+    );
+    assert!(fake.argv().is_empty(), "nothing was spawned");
+}

@@ -10,12 +10,11 @@
 
 use std::process::Stdio;
 
+use crate::backend::traits::{BackendError, BackendResult};
 use serde::de::DeserializeOwned;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
-
-use crate::backend::traits::{BackendError, BackendResult};
 
 /// Raw result of one child process run.
 pub(crate) struct ChildOutput {
@@ -25,23 +24,48 @@ pub(crate) struct ChildOutput {
 }
 
 /// Run `program args` capturing stdout/stderr separately. stdin is null:
-/// Phase 2/3 operations are read-only; stdin piping arrives with the
-/// composer phases (plan §14/§7). If `token` fires while the child runs,
-/// the child is SIGKILLed by pid and [`BackendError::Cancelled`] is
+/// Phase 2/3 operations are read-only. If `token` fires while the child
+/// runs, the child is SIGKILLed by pid and [`BackendError::Cancelled`] is
 /// returned.
 pub(crate) async fn run(
     program: &str,
     args: &[String],
     token: &CancellationToken,
 ) -> BackendResult<ChildOutput> {
-    tracing::debug!(program, args = ?args, "spawning himalaya");
+    run_with_stdin(program, args, None, token).await
+}
+
+/// [`run`] with a stdin payload: how serialized drafts/mail reach himalaya
+/// (plan §11: "Pipe serialized mail to stdin when required").
+pub(crate) async fn run_with_stdin(
+    program: &str,
+    args: &[String],
+    input: Option<&[u8]>,
+    token: &CancellationToken,
+) -> BackendResult<ChildOutput> {
+    tracing::debug!(program, args = ?args, stdin = input.is_some(), "spawning himalaya");
     let mut child = Command::new(program)
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(match input {
+            Some(_) => Stdio::piped(),
+            None => Stdio::null(),
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
+
+    // Write stdin from a dedicated task so a child that never reads cannot
+    // block us either. The payload is owned so the writer task is 'static.
+    let owned_input: Option<Vec<u8>> = input.map(<[u8]>::to_vec);
+    let stdin_task = match (owned_input, child.stdin.take()) {
+        (Some(bytes), Some(mut pipe)) => Some(tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            pipe.write_all(&bytes).await?;
+            pipe.shutdown().await
+        })),
+        _ => None,
+    };
 
     // Drain pipes from separate tasks so a chatty child can never block us.
     let stdout_task = child.stdout.take().map(|mut pipe| {
@@ -69,6 +93,9 @@ pub(crate) async fn run(
                 unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
             }
             let _ = child.wait().await;
+            if let Some(task) = stdin_task {
+                let _ = task.await;
+            }
             if let Some(task) = stdout_task {
                 let _ = task.await;
             }
@@ -79,6 +106,11 @@ pub(crate) async fn run(
         }
         status = child.wait() => {
             let status = status?;
+            if let Some(task) = stdin_task {
+                // A write failure (e.g. child died early) surfaces through
+                // the exit status; the payload is regenerable.
+                let _ = task.await;
+            }
             let stdout = match stdout_task {
                 Some(task) => join_reader(task).await?,
                 None => Vec::new(),

@@ -80,10 +80,15 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::ComposerEdit(edit) => {
             // Editing targets the focused composer control; without a
             // composer open (or without its focus) the edit is inert.
+            // Content edits sync the draft and re-arm autosave (plan §14);
+            // caret moves leave the revision untouched.
             if state.focus == Focus::Composer
                 && let Some(composer) = state.composer.as_mut()
             {
                 composer.apply(edit);
+                if edit.is_content_edit() {
+                    composer.sync_draft(state.clock);
+                }
             }
             Vec::new()
         }
@@ -104,9 +109,11 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         }
         Action::BackendCompleted(result) => backend_completed(state, result),
         Action::Refresh => refresh(state),
-        Action::Tick => {
+        Action::Tick { now } => {
             state.ticks += 1;
-            Vec::new()
+            let now = **now;
+            state.clock = Some(now);
+            autosave_tick(state, now)
         }
         Action::Resize { width, height } => {
             state.size = (*width, *height);
@@ -178,6 +185,24 @@ fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
                     OperationKind::LoadMessage(_) => {
                         state.open_message = Loadable::Loading;
                         state.reader_scroll = 0;
+                    }
+                    OperationKind::SaveDraft { draft } => {
+                        // A draft-save retry replays the *intent* ("save
+                        // this draft"), not the failed revision: retry
+                        // materializes the newest revision so retrying
+                        // after further edits never pushes stale content.
+                        if let Some(composer) = state.composer.as_mut()
+                            && composer.draft.local_id.as_ref() == Some(&draft.local_id)
+                            && let Some(now) = state.clock
+                        {
+                            let fresh = composer.draft.start_save(now);
+                            return Some(vec![state.operations.start(OperationKind::SaveDraft {
+                                draft: Box::new(fresh),
+                            })]);
+                        }
+                        // No live draft (or no clock yet): replay the
+                        // stored snapshot unchanged — the safe direction
+                        // is to preserve, never discard.
                     }
                     _ => {}
                 }
@@ -422,6 +447,65 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                     open_error_modal(state, failure)
                 }
             }
+        }
+        OperationKind::SaveDraft { draft } => {
+            state.operations.finish(result.id);
+            save_draft_completed(state, draft, result)
+        }
+    }
+}
+
+/// Apply a confirmed draft save (plan §14). Currency check: the draft must
+/// still be the one in the composer (a discarded draft is gone and its
+/// result is dropped). Success for the newest revision marks the draft
+/// saved; a stale success (edits happened meanwhile) immediately chains
+/// another save so revision N+1 is never left unpushed.
+fn save_draft_completed(
+    state: &mut AppState,
+    snapshot: &crate::domain::DraftSnapshot,
+    result: &OperationResult,
+) -> Vec<Effect> {
+    let current = state
+        .composer
+        .as_ref()
+        .is_some_and(|c| c.draft.local_id.as_ref() == Some(&snapshot.local_id));
+    if !current {
+        tracing::debug!(
+            local_id = %snapshot.local_id.0,
+            "dropping draft result for a discarded draft"
+        );
+        return Vec::new();
+    }
+    let composer = state.composer.as_mut().expect("checked above");
+    match &result.outcome {
+        Ok(OperationOutcome::DraftSaved { remote_id }) => {
+            let chain =
+                composer
+                    .draft
+                    .confirm_saved(snapshot.revision, remote_id.clone(), state.clock);
+            if chain {
+                // Remain dirty and save again (plan §14): one follow-up
+                // save covering the newest revision. It supersedes nothing
+                // in flight — the previous save just completed.
+                draft_save_effect(state).into_iter().collect()
+            } else {
+                Vec::new()
+            }
+        }
+        Err(failure) => {
+            // Unsaved state + Retry/Dismiss modal; content retained
+            // (plan §14 acceptance). A newer revision debounce outranks
+            // the stale failure — its scheduled save retries anyway.
+            if snapshot.revision >= composer.draft.revision {
+                composer.draft.mark_failed();
+            }
+            open_error_modal(state, failure);
+            state.set_status("Draft save failed");
+            Vec::new()
+        }
+        Ok(_) => {
+            tracing::warn!(id = %result.id, "unexpected payload for a draft save");
+            Vec::new()
         }
     }
 }
@@ -838,6 +922,42 @@ fn leave_composer(state: &mut AppState) {
         state.routes.pop();
         state.focus = Focus::MessageList;
     }
+}
+
+/// Autosave (plan §14): when the two-second debounce has elapsed on a
+/// dirty draft, transition it to saving and start one save operation. The
+/// registry supersedes any older save of the same draft, so only the
+/// newest revision is ever pushed (ADR 0002 §D.2 coalescing).
+fn autosave_tick(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset>) -> Vec<Effect> {
+    let Some(composer) = state.composer.as_mut() else {
+        return Vec::new();
+    };
+    if !composer.draft.autosave_due(now) {
+        return Vec::new();
+    }
+    tracing::debug!(
+        revision = composer.draft.revision,
+        "debounce elapsed; saving draft"
+    );
+    let snapshot = composer.draft.start_save(now);
+    vec![state.operations.start(OperationKind::SaveDraft {
+        draft: Box::new(snapshot),
+    })]
+}
+
+/// Start a save of the current draft revision right away (forced saves:
+/// follow-up after a stale success, retries). `None` when there is no
+/// composer, no clock yet, or nothing unsaved to write.
+fn draft_save_effect(state: &mut AppState) -> Option<Effect> {
+    let now = state.clock?;
+    let composer = state.composer.as_mut()?;
+    if !composer.draft.is_dirty() {
+        return None;
+    }
+    let snapshot = composer.draft.start_save(now);
+    Some(state.operations.start(OperationKind::SaveDraft {
+        draft: Box::new(snapshot),
+    }))
 }
 
 fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Vec<Effect> {

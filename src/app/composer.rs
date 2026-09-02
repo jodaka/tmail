@@ -14,6 +14,7 @@
 use ratatui_textarea::{CursorMove, TextArea};
 
 use crate::app::action::ComposerEdit;
+use crate::domain::Draft;
 
 /// A focusable composer control (mockup `new-mail.html`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,13 +48,13 @@ pub struct ComposerState {
     pub cursor: usize,
     pub show_cc: bool,
     pub show_bcc: bool,
-    pub to: String,
-    pub cc: String,
-    pub bcc: String,
-    pub subject: String,
     /// The body editor. `TextArea<'static>`: it owns its styling, so no
-    /// borrowed UI state outlives a frame.
+    /// borrowed UI state outlives a frame. Its lines are synced into
+    /// [`ComposerState::draft`] on every content edit.
     pub body: TextArea<'static>,
+    /// The draft being composed: field text, revision tracking, and the
+    /// autosave state machine (plan §14).
+    pub draft: Draft,
 }
 
 impl Default for ComposerState {
@@ -69,11 +70,8 @@ impl ComposerState {
             cursor: 0,
             show_cc: false,
             show_bcc: false,
-            to: String::new(),
-            cc: String::new(),
-            bcc: String::new(),
-            subject: String::new(),
             body: TextArea::from([""]),
+            draft: Draft::default(),
         }
     }
 
@@ -139,22 +137,31 @@ impl ComposerState {
     /// The text of the focused single-line field; the body is not a string.
     fn focused_text(&self) -> &str {
         match self.field {
-            ComposerField::To => &self.to,
-            ComposerField::Cc => &self.cc,
-            ComposerField::Bcc => &self.bcc,
-            ComposerField::Subject => &self.subject,
+            ComposerField::To => &self.draft.to,
+            ComposerField::Cc => &self.draft.cc,
+            ComposerField::Bcc => &self.draft.bcc,
+            ComposerField::Subject => &self.draft.subject,
             _ => "",
         }
     }
 
     fn focused_text_mut(&mut self) -> Option<&mut String> {
         match self.field {
-            ComposerField::To => Some(&mut self.to),
-            ComposerField::Cc => Some(&mut self.cc),
-            ComposerField::Bcc => Some(&mut self.bcc),
-            ComposerField::Subject => Some(&mut self.subject),
+            ComposerField::To => Some(&mut self.draft.to),
+            ComposerField::Cc => Some(&mut self.draft.cc),
+            ComposerField::Bcc => Some(&mut self.draft.bcc),
+            ComposerField::Subject => Some(&mut self.draft.subject),
             _ => None,
         }
+    }
+
+    /// Sync the editor surface into the draft and record a content edit:
+    /// bumps the revision and re-arms the two-second autosave debounce
+    /// (plan §14). Called by the reducer after every content edit, with
+    /// the injected clock (caret moves skip this entirely).
+    pub fn sync_draft(&mut self, now: Option<chrono::DateTime<chrono::FixedOffset>>) {
+        self.draft.body = self.body.lines().join("\n");
+        self.draft.note_edit(now);
     }
 
     /// Apply one character-level edit to the focused field (plan §10:
@@ -317,7 +324,7 @@ mod tests {
     #[test]
     fn entering_a_field_puts_the_caret_at_the_end() {
         let mut c = composer();
-        c.to = String::from("ab");
+        c.draft.to = String::from("ab");
         c.field = ComposerField::Subject;
         c.focus_previous(); // BccToggle
         c.focus_previous(); // CcToggle
@@ -332,40 +339,40 @@ mod tests {
         for ch in "max@post".chars() {
             c.apply(&ComposerEdit::Char(ch));
         }
-        assert_eq!(c.to, "max@post");
+        assert_eq!(c.draft.to, "max@post");
         assert_eq!(c.cursor, 8);
         c.focus_next(); // CcToggle
         c.apply(&ComposerEdit::Char('x'));
-        assert_eq!(c.to, "max@post", "toggle rows take no text");
+        assert_eq!(c.draft.to, "max@post", "toggle rows take no text");
     }
 
     #[test]
     fn backspace_and_delete_edit_around_the_caret() {
         let mut c = composer();
-        c.to = String::from("abc");
+        c.draft.to = String::from("abc");
         c.cursor = 2;
         c.apply(&ComposerEdit::Backspace);
-        assert_eq!(c.to, "ac");
+        assert_eq!(c.draft.to, "ac");
         assert_eq!(c.cursor, 1);
         c.apply(&ComposerEdit::Delete);
-        assert_eq!(c.to, "a");
+        assert_eq!(c.draft.to, "a");
         assert_eq!(c.cursor, 1);
         // At the end of the text Delete is a no-op…
         c.apply(&ComposerEdit::Delete);
-        assert_eq!(c.to, "a");
+        assert_eq!(c.draft.to, "a");
         // …and Backspace still removes the character before the caret.
         c.apply(&ComposerEdit::Backspace);
-        assert_eq!(c.to, "");
+        assert_eq!(c.draft.to, "");
         assert_eq!(c.cursor, 0);
         // Backspace at the very start is a no-op.
         c.apply(&ComposerEdit::Backspace);
-        assert_eq!(c.to, "");
+        assert_eq!(c.draft.to, "");
     }
 
     #[test]
     fn caret_moves_within_single_line_bounds() {
         let mut c = composer();
-        c.to = String::from("ab");
+        c.draft.to = String::from("ab");
         c.apply(&ComposerEdit::CursorLeft);
         c.apply(&ComposerEdit::CursorLeft);
         c.apply(&ComposerEdit::CursorLeft); // clamps at 0
@@ -381,7 +388,7 @@ mod tests {
         let mut c = composer();
         c.field = ComposerField::Subject;
         c.apply(&ComposerEdit::Newline);
-        assert_eq!(c.subject, "");
+        assert_eq!(c.draft.subject, "");
         c.focus_next(); // Body
         c.apply(&ComposerEdit::Char('a'));
         c.apply(&ComposerEdit::Newline);
@@ -424,7 +431,7 @@ mod tests {
         c.apply(&ComposerEdit::Char('c'));
         c.apply(&ComposerEdit::Backspace);
         c.apply(&ComposerEdit::Newline);
-        assert_eq!(c.to, "");
+        assert_eq!(c.draft.to, "");
         assert_eq!(c.body.lines(), [String::new()]);
     }
 
