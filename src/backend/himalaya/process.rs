@@ -2,15 +2,18 @@
 //!
 //! Every invocation uses `tokio::process::Command` with argv arrays only —
 //! never a shell string — with stdout/stderr piped and drained by dedicated
-//! tasks so a full pipe can never deadlock. `kill_on_drop(true)` is set now;
-//! explicit SIGKILL-on-cancel arrives with the Phase 3 operation manager
-//! (the proven pattern lives in `src/bin/probe.rs`).
+//! tasks so a full pipe can never deadlock. `kill_on_drop(true)` is set as
+//! a safety net, and the request's cancellation token terminates the owned
+//! child with an exact-pid SIGKILL (the pattern proven by the Phase 0
+//! probe), so cancelling never leaks a running himalaya or widens the kill
+//! to unrelated processes (plan §21).
 
 use std::process::Stdio;
 
 use serde::de::DeserializeOwned;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 use crate::backend::traits::{BackendError, BackendResult};
 
@@ -22,9 +25,15 @@ pub(crate) struct ChildOutput {
 }
 
 /// Run `program args` capturing stdout/stderr separately. stdin is null:
-/// Phase 2 operations are read-only; stdin piping arrives with the composer
-/// phases (plan §14/§7).
-pub(crate) async fn run(program: &str, args: &[String]) -> BackendResult<ChildOutput> {
+/// Phase 2/3 operations are read-only; stdin piping arrives with the
+/// composer phases (plan §14/§7). If `token` fires while the child runs,
+/// the child is SIGKILLed by pid and [`BackendError::Cancelled`] is
+/// returned.
+pub(crate) async fn run(
+    program: &str,
+    args: &[String],
+    token: &CancellationToken,
+) -> BackendResult<ChildOutput> {
     tracing::debug!(program, args = ?args, "spawning himalaya");
     let mut child = Command::new(program)
         .args(args)
@@ -50,20 +59,41 @@ pub(crate) async fn run(program: &str, args: &[String]) -> BackendResult<ChildOu
         })
     });
 
-    let status = child.wait().await?;
-    let stdout = match stdout_task {
-        Some(task) => join_reader(task).await?,
-        None => Vec::new(),
-    };
-    let stderr = match stderr_task {
-        Some(task) => join_reader(task).await?,
-        None => Vec::new(),
-    };
-    Ok(ChildOutput {
-        code: status.code(),
-        stdout,
-        stderr,
-    })
+    // Exact-pid termination of a child we own; SIGKILL for determinism.
+    let pid = child.id();
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => {
+            if let Some(pid) = pid {
+                // SAFETY: kill(2) with an int pid/signal; the child is ours.
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            }
+            let _ = child.wait().await;
+            if let Some(task) = stdout_task {
+                let _ = task.await;
+            }
+            if let Some(task) = stderr_task {
+                let _ = task.await;
+            }
+            Err(BackendError::Cancelled)
+        }
+        status = child.wait() => {
+            let status = status?;
+            let stdout = match stdout_task {
+                Some(task) => join_reader(task).await?,
+                None => Vec::new(),
+            };
+            let stderr = match stderr_task {
+                Some(task) => join_reader(task).await?,
+                None => Vec::new(),
+            };
+            Ok(ChildOutput {
+                code: status.code(),
+                stdout,
+                stderr,
+            })
+        }
+    }
 }
 
 /// Await one pipe-reader task; a panicked reader is surfaced as I/O.

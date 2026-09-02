@@ -1,7 +1,8 @@
 //! Focus within the mailbox screen (plan §9/§10).
 //!
-//! Phase 1 has a single screen, so this is the full focus model for now;
-//! reader/composer screens extend it in later phases.
+//! `ErrorModal` is a transitory focus held while the error overlay is open;
+//! it is not part of the Tab cycle. Reader/composer screens extend the
+//! list in later phases.
 
 use std::fmt;
 
@@ -12,6 +13,8 @@ pub enum Focus {
     SearchField,
     Sidebar,
     MessageList,
+    /// The Retry/Dismiss error modal is open; it intercepts all input.
+    ErrorModal,
 }
 
 /// Tab order: next/previous focus cycles through this list (plan §10).
@@ -19,25 +22,37 @@ pub const FOCUS_ORDER: [Focus; 3] = [Focus::SearchField, Focus::Sidebar, Focus::
 
 impl Focus {
     pub fn next(self) -> Self {
-        let i = FOCUS_ORDER
-            .iter()
-            .position(|f| *f == self)
-            .expect("focus in order");
-        FOCUS_ORDER[(i + 1) % FOCUS_ORDER.len()]
+        match self {
+            // The modal focus never cycles; the modal handles Tab itself.
+            Focus::ErrorModal => self,
+            _ => {
+                let i = FOCUS_ORDER
+                    .iter()
+                    .position(|f| *f == self)
+                    .expect("focus in order");
+                FOCUS_ORDER[(i + 1) % FOCUS_ORDER.len()]
+            }
+        }
     }
 
     pub fn previous(self) -> Self {
-        let i = FOCUS_ORDER
-            .iter()
-            .position(|f| *f == self)
-            .expect("focus in order");
-        FOCUS_ORDER[(i + FOCUS_ORDER.len() - 1) % FOCUS_ORDER.len()]
+        match self {
+            Focus::ErrorModal => self,
+            _ => {
+                let i = FOCUS_ORDER
+                    .iter()
+                    .position(|f| *f == self)
+                    .expect("focus in order");
+                FOCUS_ORDER[(i + FOCUS_ORDER.len() - 1) % FOCUS_ORDER.len()]
+            }
+        }
     }
 
     /// Whether single-letter shortcuts (c, r, a, f, e, s, u, /) are active.
-    /// They never fire while editing a text field (plan §10).
+    /// They never fire while editing a text field or while a modal is open
+    /// (plan §10).
     pub fn accepts_shortcuts(self) -> bool {
-        !matches!(self, Focus::SearchField)
+        !matches!(self, Focus::SearchField | Focus::ErrorModal)
     }
 }
 
@@ -47,6 +62,7 @@ impl fmt::Display for Focus {
             Focus::SearchField => write!(f, "search"),
             Focus::Sidebar => write!(f, "sidebar"),
             Focus::MessageList => write!(f, "list"),
+            Focus::ErrorModal => write!(f, "modal"),
         }
     }
 }

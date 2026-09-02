@@ -1,21 +1,28 @@
 //! Deterministic, I/O-free reducer (plan §5/§9).
 //!
 //! `reduce` is the only writer of `AppState`. State transitions that need
-//! backend data return [`Effect`]s for the runtime to execute; results come
-//! back as `Action::MailboxesLoaded` / `Action::PageLoaded` and are applied
-//! here under a pending-request guard so stale results never win. Reducers
-//! never perform I/O themselves.
+//! backend data start an operation in the registry and return an
+//! [`Effect`] for the runtime to execute; results come back as
+//! `Action::BackendCompleted` and apply only while their operation is still
+//! registered, so stale, cancelled, or superseded results never win
+//! (plan §11). Reducers never perform I/O themselves.
 
 use crate::app::action::{Action, SearchEdit};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
+use crate::app::operation::{OperationFailure, OperationKind, OperationOutcome, OperationResult};
+use crate::app::overlay::{ErrorDialog, ModalButton, Overlay};
 use crate::app::route::{MailboxRoute, Route};
 use crate::app::state::{AppState, Loadable};
-use crate::domain::{Mailbox, MailboxId, MailboxRole, MessageSummary, Page, PageRequest};
+use crate::domain::{Mailbox, MailboxId, MailboxRole, Page, PageRequest};
 
 /// Apply `action` to `state`, returning backend work to spawn. Never
 /// performs I/O, never panics on odd input.
 pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
+    // A modal overlay intercepts all input while it is open (plan §9).
+    if let Some(effects) = modal_reduce(state, action) {
+        return effects;
+    }
     match action {
         Action::MoveUp => move_selection(state, -1),
         Action::MoveDown => move_selection(state, 1),
@@ -58,16 +65,17 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         | Action::MarkUnread
         | Action::Send
         | Action::LeaveComposer
-        | Action::DiscardDraft
-        | Action::RetryError
-        | Action::DismissError => {
+        | Action::DiscardDraft => {
             // Vocabulary is complete (plan §9); the screens owning these
             // actions arrive in later phases. No-op, never a crash.
             tracing::debug!(?action, "action not yet implemented");
             Vec::new()
         }
-        Action::MailboxesLoaded(result) => mailboxes_loaded(state, result),
-        Action::PageLoaded { request, result } => apply_page(state, request, result),
+        Action::RetryError | Action::DismissError => {
+            // Only meaningful with the error overlay open (handled above).
+            Vec::new()
+        }
+        Action::BackendCompleted(result) => backend_completed(state, result),
         Action::Refresh => refresh(state),
         Action::Tick => {
             state.ticks += 1;
@@ -85,6 +93,216 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         }
     }
 }
+
+// ── Modal overlay (plan §9/§12) ──────────────────────────────────────────
+
+/// Handle `action` while the error modal is open. Returns `None` when no
+/// modal is open (the caller falls through to normal handling).
+fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
+    state.overlay.as_ref()?;
+    // Scroll budget from the same layout math the renderer uses, so the
+    // reducer and the drawn modal always agree on the clamp.
+    let (max_scroll, viewport) = match &state.overlay {
+        Some(Overlay::Error(dialog)) => {
+            let layout = crate::ui::components::error_modal::layout(
+                state.size,
+                dialog.code,
+                dialog.ambiguous,
+            );
+            (
+                crate::ui::components::error_modal::max_scroll(dialog, state.size),
+                layout.viewport_lines,
+            )
+        }
+        None => (0, 1),
+    };
+    let Some(Overlay::Error(dialog)) = state.overlay.as_mut() else {
+        return None;
+    };
+    match action {
+        Action::MoveUp => dialog.scroll = dialog.scroll.saturating_sub(1),
+        Action::MoveDown => dialog.scroll = (dialog.scroll + 1).min(max_scroll),
+        Action::PagePrevious => dialog.scroll = dialog.scroll.saturating_sub(viewport.max(1)),
+        Action::PageNext => dialog.scroll = (dialog.scroll + viewport.max(1)).min(max_scroll),
+        Action::FocusNext => dialog.button = dialog.button.next(),
+        Action::FocusPrevious => dialog.button = dialog.button.previous(),
+        Action::BackOrCancel | Action::DismissError => {
+            let focus = dialog.previous_focus;
+            state.overlay = None;
+            state.focus = focus;
+        }
+        Action::Activate | Action::RetryError => {
+            // `RetryError` always retries; `Enter` acts on the focused
+            // button (plan §12: Retry replays the intent, Dismiss closes).
+            let wants_retry =
+                matches!(action, Action::RetryError) || dialog.button == ModalButton::Retry;
+            let retry = dialog.retry.clone().filter(|_| wants_retry);
+            let focus = dialog.previous_focus;
+            if let Some(spec) = retry {
+                state.overlay = None;
+                state.focus = focus;
+                // Retrying replays the equivalent typed intent under a
+                // *new* operation id (plan §12; acceptance: new id).
+                let is_mailboxes = matches!(&spec.kind, OperationKind::LoadMailboxes);
+                if is_mailboxes {
+                    state.mailboxes = Loadable::Loading;
+                }
+                return Some(vec![state.operations.start(spec.kind)]);
+            }
+            if !wants_retry {
+                // Enter on Dismiss: close without new work.
+                state.overlay = None;
+                state.focus = focus;
+            }
+            // `RetryError` on a non-retryable failure keeps the modal open.
+            return Some(Vec::new());
+        }
+        // Everything else is swallowed while the modal is open.
+        _ => {}
+    }
+    Some(Vec::new())
+}
+
+/// Open the Retry/Dismiss modal for a failed operation (plan §12).
+fn open_error_modal(state: &mut AppState, failure: &OperationFailure) -> Vec<Effect> {
+    tracing::warn!(code = ?failure.code, detail = %failure.detail, "operation failed");
+    state.overlay = Some(Overlay::Error(ErrorDialog {
+        code: failure.code,
+        detail: failure.detail.clone(),
+        retry: failure.retry.clone(),
+        ambiguous: failure.ambiguous,
+        scroll: 0,
+        button: ModalButton::Dismiss,
+        previous_focus: state.focus,
+    }));
+    state.focus = Focus::ErrorModal;
+    state.set_status("Operation failed");
+    Vec::new()
+}
+
+// ── Backend results (plan §11) ───────────────────────────────────────────
+
+/// Apply a backend result. Results for unknown, cancelled, or superseded
+/// operation ids never mutate state: `finish` removes the operation, and a
+/// superseded operation was already cancelled and removed when its
+/// replacement started.
+fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
+    let Some(kind) = state.operations.get(result.id).map(|op| op.kind.clone()) else {
+        tracing::debug!(id = %result.id, "dropping result for unknown or cancelled operation");
+        return Vec::new();
+    };
+    match &kind {
+        OperationKind::LoadMailboxes => {
+            state.operations.finish(result.id);
+            match &result.outcome {
+                Ok(OperationOutcome::Mailboxes(mailboxes)) => {
+                    mailboxes_loaded(state, mailboxes.clone())
+                }
+                Ok(OperationOutcome::Page(_)) => {
+                    tracing::warn!(id = %result.id, "page payload for a mailbox operation");
+                    Vec::new()
+                }
+                Err(failure) => {
+                    // The sidebar keeps a dim failed note; the modal carries
+                    // the full sanitized detail and the retry intent.
+                    state.mailboxes = Loadable::Failed(failure.detail.clone());
+                    open_error_modal(state, failure)
+                }
+            }
+        }
+        OperationKind::LoadPage(request) => {
+            // Currency check: the request must still target the active
+            // mailbox. A newer request for the same mailbox superseded this
+            // operation, so its id would already be unknown above; this
+            // guard drops results that raced a mailbox switch.
+            let current = state
+                .active_route()
+                .and_then(Route::mailbox_id)
+                .is_some_and(|id| *id == request.mailbox_id);
+            state.operations.finish(result.id);
+            if !current {
+                tracing::debug!(
+                    mailbox = %request.mailbox_id.0,
+                    offset = request.offset,
+                    "dropping page result for inactive mailbox"
+                );
+                return Vec::new();
+            }
+            match &result.outcome {
+                Ok(OperationOutcome::Page(page)) => {
+                    apply_page(state, page.clone());
+                    Vec::new()
+                }
+                Ok(OperationOutcome::Mailboxes(_)) => {
+                    tracing::warn!(id = %result.id, "mailbox payload for a page operation");
+                    Vec::new()
+                }
+                Err(failure) => {
+                    // The last coherent page stays visible; the modal offers
+                    // Retry/Dismiss (plan §12).
+                    open_error_modal(state, failure)
+                }
+            }
+        }
+    }
+}
+
+/// Apply the mailbox listing: select the Inbox, or the first mailbox when
+/// no Inbox exists, and load its first page.
+fn mailboxes_loaded(state: &mut AppState, mailboxes: Vec<Mailbox>) -> Vec<Effect> {
+    state.mailboxes = Loadable::Loaded(mailboxes.clone());
+    let chosen = mailboxes
+        .iter()
+        .position(|m| m.role == Some(MailboxRole::Inbox))
+        .or_else(|| (!mailboxes.is_empty()).then_some(0));
+    match chosen {
+        Some(index) => {
+            let mailbox_id = mailboxes[index].id.clone();
+            state.routes = vec![Route::Mailbox(MailboxRoute { mailbox_id })];
+            state.mailbox_selection = index;
+            state.selection = 0;
+            state.list_scroll = 0;
+            state.messages = Page::empty(state.messages.limit);
+            state.set_status("Mailboxes loaded");
+            request_page(state, 0)
+        }
+        None => {
+            // The account genuinely has no mailboxes; an empty list
+            // is a valid state, not an error (plan §16).
+            state.routes.clear();
+            state.messages = Page::empty(state.messages.limit);
+            Vec::new()
+        }
+    }
+}
+
+/// Apply a page result for the active mailbox. The selection is
+/// re-resolved by `Message-ID` first, then backend id (ADR 0001 finding 4:
+/// only the Message-ID is stable across moves).
+fn apply_page(state: &mut AppState, page: Page<crate::domain::MessageSummary>) -> Vec<Effect> {
+    let previous = state.selected_message();
+    let previous_message_id = previous.and_then(|m| m.message_id.clone());
+    let previous_id = previous.map(|m| m.id.clone());
+    state.messages = page;
+    let len = state.messages.items.len();
+    state.selection = state
+        .messages
+        .items
+        .iter()
+        .position(|m| {
+            previous_message_id
+                .as_ref()
+                .is_some_and(|id| m.message_id.as_ref() == Some(id))
+                || previous_id.as_ref().is_some_and(|id| &m.id == id)
+        })
+        .unwrap_or(0)
+        .min(len.saturating_sub(1));
+    state.list_scroll = state.list_scroll.min(len.saturating_sub(1));
+    keep_selection_visible(state);
+    Vec::new()
+}
+
+// ── Navigation and input ─────────────────────────────────────────────────
 
 fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
     match state.focus {
@@ -109,6 +327,7 @@ fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
             // Cursor movement inside the field is a render concern for now;
             // the query is edited append/backspace only (Phase 1).
         }
+        Focus::ErrorModal => {}
     }
     Vec::new()
 }
@@ -137,17 +356,14 @@ fn change_page(state: &mut AppState, delta: i64) -> Vec<Effect> {
     // Base on the in-flight request when there is one, so repeated keys
     // before results arrive keep advancing instead of re-requesting the
     // same next page.
-    let base = match state.pending_page.as_ref() {
-        Some(pending)
-            if state
-                .active_route()
-                .and_then(Route::mailbox_id)
-                .is_some_and(|id| *id == pending.mailbox_id) =>
-        {
-            pending.offset as i64
-        }
-        _ => state.messages.offset as i64,
-    };
+    let base = match state.active_route().and_then(Route::mailbox_id) {
+        Some(id) => state
+            .operations
+            .page_in_flight(id)
+            .map(|pending| pending.offset as i64),
+        None => None,
+    }
+    .unwrap_or(state.messages.offset as i64);
     let target = base + delta * limit;
     if target < 0 {
         return Vec::new();
@@ -170,8 +386,9 @@ fn change_page(state: &mut AppState, delta: i64) -> Vec<Effect> {
     request_page(state, target as usize)
 }
 
-/// Record `offset` as the pending page request and emit the effect to fetch
-/// it for the active route's mailbox.
+/// Start a page load for the active route's mailbox and return its effect.
+/// The registry supersedes any page request still in flight for the same
+/// mailbox (and cancels it), so only the newest result can win.
 fn request_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
     let Some(Route::Mailbox(route)) = state.active_route().cloned() else {
         return Vec::new();
@@ -181,96 +398,7 @@ fn request_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
         offset,
         limit: state.messages.limit.max(1),
     };
-    state.pending_page = Some(request.clone());
-    vec![Effect::LoadPage(request)]
-}
-
-/// Apply a page result when it still matches the pending request. The
-/// selection is re-resolved by `Message-ID` first, then backend id
-/// (ADR 0001 finding 4: only the Message-ID is stable across moves).
-fn apply_page(
-    state: &mut AppState,
-    request: &PageRequest,
-    result: &Result<Page<MessageSummary>, String>,
-) -> Vec<Effect> {
-    let still_pending = state
-        .pending_page
-        .as_ref()
-        .is_some_and(|pending| pending == request);
-    if !still_pending {
-        tracing::debug!(mailbox = %request.mailbox_id.0, offset = request.offset, "dropping stale page result");
-        return Vec::new();
-    }
-    state.pending_page = None;
-    match result {
-        Ok(page) => {
-            let previous = state.selected_message();
-            let previous_message_id = previous.and_then(|m| m.message_id.clone());
-            let previous_id = previous.map(|m| m.id.clone());
-            state.messages = page.clone();
-            let len = state.messages.items.len();
-            state.selection = state
-                .messages
-                .items
-                .iter()
-                .position(|m| {
-                    previous_message_id
-                        .as_ref()
-                        .is_some_and(|id| m.message_id.as_ref() == Some(id))
-                        || previous_id.as_ref().is_some_and(|id| &m.id == id)
-                })
-                .unwrap_or(0)
-                .min(len.saturating_sub(1));
-            state.list_scroll = state.list_scroll.min(len.saturating_sub(1));
-            keep_selection_visible(state);
-        }
-        Err(err) => {
-            // Phase 3 replaces this with the Retry/Dismiss modal; for now
-            // the last coherent page stays visible and the failure is
-            // reported in the status area.
-            state.set_status(format!("Could not load messages: {err}"));
-        }
-    }
-    Vec::new()
-}
-
-/// Apply the mailbox listing: select the Inbox, or the first mailbox when
-/// no Inbox exists, and load its first page.
-fn mailboxes_loaded(state: &mut AppState, result: &Result<Vec<Mailbox>, String>) -> Vec<Effect> {
-    match result {
-        Ok(mailboxes) => {
-            state.mailboxes = Loadable::Loaded(mailboxes.clone());
-            let chosen = mailboxes
-                .iter()
-                .position(|m| m.role == Some(MailboxRole::Inbox))
-                .or_else(|| (!mailboxes.is_empty()).then_some(0));
-            match chosen {
-                Some(index) => {
-                    let mailbox_id = mailboxes[index].id.clone();
-                    state.routes = vec![Route::Mailbox(MailboxRoute { mailbox_id })];
-                    state.mailbox_selection = index;
-                    state.selection = 0;
-                    state.list_scroll = 0;
-                    state.messages = Page::empty(state.messages.limit);
-                    state.set_status("Mailboxes loaded");
-                    request_page(state, 0)
-                }
-                None => {
-                    // The account genuinely has no mailboxes; an empty list
-                    // is a valid state, not an error (plan §16).
-                    state.routes.clear();
-                    state.messages = Page::empty(state.messages.limit);
-                    state.pending_page = None;
-                    Vec::new()
-                }
-            }
-        }
-        Err(err) => {
-            state.mailboxes = Loadable::Failed(err.clone());
-            state.set_status(format!("Could not load mailboxes: {err}"));
-            Vec::new()
-        }
-    }
+    vec![state.operations.start(OperationKind::LoadPage(request))]
 }
 
 fn activate(state: &mut AppState) -> Vec<Effect> {
@@ -286,6 +414,7 @@ fn activate(state: &mut AppState) -> Vec<Effect> {
             Vec::new()
         }
         Focus::SearchField => reduce(state, &Action::SubmitSearch),
+        Focus::ErrorModal => Vec::new(),
     }
 }
 
@@ -314,10 +443,19 @@ fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Vec<Effect> {
     request_page(state, 0)
 }
 
+/// `Esc`: cancel foreground work, close an overlay, or go back — in that
+/// order (plan §10). Cancelling returns to the prior stable state: the
+/// displayed page/list was never cleared while the request ran.
 fn back_or_cancel(state: &mut AppState) {
-    // Order per plan §10: cancel work, close overlay, go back. Neither
-    // cancellable work nor overlays exist until Phase 3, so Phase 2 has:
-    // leave the search field first, otherwise back/quit.
+    if let Some(op) = state.operations.cancel_foreground() {
+        tracing::info!(id = %op.id, kind = ?op.kind, "cancelled foreground operation");
+        state.set_status(format!("{} — cancelled", op.kind.summary()));
+        return;
+    }
+    if let Some(Overlay::Error(dialog)) = state.overlay.take() {
+        state.focus = dialog.previous_focus;
+        return;
+    }
     if state.focus == Focus::SearchField {
         state.focus = Focus::MessageList;
         return;
@@ -344,8 +482,16 @@ fn search_edit(state: &mut AppState, edit: &SearchEdit) {
     }
 }
 
+/// Manual refresh (`Ctrl+R`): (re)load the mailbox listing while startup
+/// has not completed, otherwise refresh the visible page.
 fn refresh(state: &mut AppState) -> Vec<Effect> {
-    if !matches!(state.mailboxes, Loadable::Loaded(_)) || state.active_route().is_none() {
+    if !matches!(state.mailboxes, Loadable::Loaded(_)) {
+        if state.operations.is_loading_mailboxes() {
+            return Vec::new();
+        }
+        return vec![state.operations.start(OperationKind::LoadMailboxes)];
+    }
+    if state.active_route().is_none() {
         return Vec::new();
     }
     state.set_status("Refreshing…");

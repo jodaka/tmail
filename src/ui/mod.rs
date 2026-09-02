@@ -49,6 +49,9 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, ctx: &Rend
     let mode = layout::mode_for(state.size.0, state.size.1);
     if mode == LayoutMode::TooSmall {
         render_too_small(frame, area, state, theme);
+        // The modal still opens even in too-small terminals: failures must
+        // stay visible and recoverable (plan §12).
+        components::error_modal::render(frame, state, theme);
         return;
     }
     let (topbar, body, statusbar) = layout::split_vertical(area);
@@ -59,6 +62,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, ctx: &Rend
     }
     screens::mailbox::render(frame, list, state, mode, theme, ctx.now);
     components::statusbar::render(frame, statusbar, state, theme);
+    components::error_modal::render(frame, state, theme);
 }
 
 /// Too-small mode: a clear centered message, nothing overlapping (plan §18).

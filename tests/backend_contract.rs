@@ -13,10 +13,20 @@ use std::path::{Path, PathBuf};
 
 use fake_himalaya::FakeHimalaya;
 use tokio::runtime::Runtime;
+use tokio_util::sync::CancellationToken;
 
+use tmail::app::operation::OperationId;
 use tmail::backend::himalaya::HimalayaCliBackend;
-use tmail::backend::{BackendError, MailBackend};
+use tmail::backend::{BackendError, MailBackend, RequestContext};
 use tmail::domain::{MailboxId, MailboxRole, PageRequest};
+
+/// A live request context; tests that do not cancel share one token.
+fn ctx() -> RequestContext {
+    RequestContext {
+        operation: OperationId(1),
+        cancellation: CancellationToken::new(),
+    }
+}
 
 /// Backend pointed at a fake executable with a config path and account.
 fn backend(fake: &FakeHimalaya, account: Option<&str>) -> HimalayaCliBackend {
@@ -50,7 +60,7 @@ fn page_request(mailbox: &str, offset: usize) -> PageRequest {
 #[test]
 fn mailbox_list_argv_is_exact() {
     let fake = FakeHimalaya::spawn_ok();
-    let result = block(backend(&fake, Some("probe")).list_mailboxes());
+    let result = block(backend(&fake, Some("probe")).list_mailboxes(ctx()));
     let mailboxes = result.expect("list succeeds");
     assert_eq!(mailboxes.len(), 3);
     assert_eq!(
@@ -70,7 +80,7 @@ fn mailbox_list_argv_is_exact() {
 #[test]
 fn mailbox_list_roles_resolve_through_aliases() {
     let fake = FakeHimalaya::spawn_ok();
-    let mailboxes = block(backend(&fake, Some("probe")).list_mailboxes()).unwrap();
+    let mailboxes = block(backend(&fake, Some("probe")).list_mailboxes(ctx())).unwrap();
     // INBOX → Inbox via alias; Archive → Trash via the probe's trash alias
     // (not the name heuristic); Sent → Sent via the name fallback.
     assert_eq!(mailboxes[0].role, Some(MailboxRole::Inbox));
@@ -84,7 +94,8 @@ fn mailbox_list_roles_resolve_through_aliases() {
 #[test]
 fn envelope_list_argv_is_exact_and_maps_1based_pages() {
     let fake = FakeHimalaya::spawn_ok();
-    let result = block(backend(&fake, Some("probe")).list_messages(page_request("INBOX", 40)));
+    let result =
+        block(backend(&fake, Some("probe")).list_messages(ctx(), page_request("INBOX", 40)));
     let page = result.expect("list succeeds");
     assert_eq!(
         fake.argv(),
@@ -112,8 +123,8 @@ fn envelope_list_argv_is_exact_and_maps_1based_pages() {
 #[test]
 fn envelope_rows_map_to_domain_summaries() {
     let fake = FakeHimalaya::spawn_ok();
-    let page =
-        block(backend(&fake, Some("probe")).list_messages(page_request("INBOX", 0))).unwrap();
+    let page = block(backend(&fake, Some("probe")).list_messages(ctx(), page_request("INBOX", 0)))
+        .unwrap();
     assert_eq!(page.items.len(), 3);
 
     let first = &page.items[0];
@@ -139,8 +150,8 @@ fn envelope_rows_map_to_domain_summaries() {
 #[test]
 fn read_only_commands_receive_no_stdin() {
     let fake = FakeHimalaya::spawn_ok();
-    block(backend(&fake, Some("probe")).list_mailboxes()).unwrap();
-    block(backend(&fake, None).list_messages(page_request("INBOX", 0))).unwrap();
+    block(backend(&fake, Some("probe")).list_mailboxes(ctx())).unwrap();
+    block(backend(&fake, None).list_messages(ctx(), page_request("INBOX", 0))).unwrap();
     assert_eq!(fake.argv().len(), 2);
     assert!(fake.stdin_bytes().is_empty(), "stdin must stay empty");
 }
@@ -154,7 +165,7 @@ fn argv_without_config_or_account_is_minimal() {
         None,
         aliases(&[]),
     );
-    block(bare.list_mailboxes()).unwrap();
+    block(bare.list_mailboxes(ctx())).unwrap();
     assert_eq!(
         fake.argv(),
         vec![vec![
@@ -169,7 +180,7 @@ fn argv_without_config_or_account_is_minimal() {
 fn mailbox_ids_with_spaces_stay_single_argv_entries() {
     let fake = FakeHimalaya::spawn_ok();
     let request = page_request("My Folder", 0);
-    block(backend(&fake, None).list_messages(request)).unwrap();
+    block(backend(&fake, None).list_messages(ctx(), request)).unwrap();
     let argv = &fake.argv()[0];
     assert!(
         argv.windows(2)
@@ -186,7 +197,7 @@ fn zero_page_limit_is_rejected_without_spawning() {
         offset: 0,
         limit: 0,
     };
-    let result = block(backend(&fake, None).list_messages(request));
+    let result = block(backend(&fake, None).list_messages(ctx(), request));
     assert!(matches!(result, Err(BackendError::InvalidRequest(_))));
     assert!(fake.argv().is_empty(), "no child process may be spawned");
 }
@@ -196,8 +207,8 @@ fn empty_and_out_of_range_pages_are_valid_empty_results() {
     // Mirrors the verified real behavior: `envelope list -p 99` exits 0
     // with `{"envelopes":[]}`.
     let fake = FakeHimalaya::spawn("ok", "empty");
-    let page =
-        block(backend(&fake, Some("probe")).list_messages(page_request("INBOX", 80))).unwrap();
+    let page = block(backend(&fake, Some("probe")).list_messages(ctx(), page_request("INBOX", 80)))
+        .unwrap();
     assert!(page.items.is_empty());
     assert_eq!(page.offset, 80);
     assert!(!page.has_next(), "an empty page never has a successor");
@@ -207,8 +218,8 @@ fn empty_and_out_of_range_pages_are_valid_empty_results() {
 #[test]
 fn partial_envelope_maps_to_safe_defaults() {
     let fake = FakeHimalaya::spawn("ok", "partial");
-    let page =
-        block(backend(&fake, Some("probe")).list_messages(page_request("INBOX", 0))).unwrap();
+    let page = block(backend(&fake, Some("probe")).list_messages(ctx(), page_request("INBOX", 0)))
+        .unwrap();
     let message = &page.items[0];
     assert_eq!(message.id.0, "only-id");
     assert_eq!(message.subject, "");
@@ -221,7 +232,8 @@ fn partial_envelope_maps_to_safe_defaults() {
 #[test]
 fn malformed_output_fails_as_invalid_output() {
     let fake = FakeHimalaya::spawn("ok", "malformed");
-    let result = block(backend(&fake, Some("probe")).list_messages(page_request("INBOX", 0)));
+    let result =
+        block(backend(&fake, Some("probe")).list_messages(ctx(), page_request("INBOX", 0)));
     match result {
         Err(BackendError::InvalidOutput(detail)) => {
             assert!(detail.contains("invalid JSON"), "detail: {detail}");
@@ -233,7 +245,8 @@ fn malformed_output_fails_as_invalid_output() {
 #[test]
 fn non_utf8_output_fails_safely_without_panicking() {
     let fake = FakeHimalaya::spawn("ok", "non-utf8");
-    let result = block(backend(&fake, Some("probe")).list_messages(page_request("INBOX", 0)));
+    let result =
+        block(backend(&fake, Some("probe")).list_messages(ctx(), page_request("INBOX", 0)));
     match result {
         Err(BackendError::InvalidOutput(_)) => {}
         other => panic!("expected InvalidOutput, got {other:?}"),
@@ -243,7 +256,8 @@ fn non_utf8_output_fails_safely_without_panicking() {
 #[test]
 fn json_error_on_stdout_becomes_command_error() {
     let fake = FakeHimalaya::spawn("ok", "error-json");
-    let result = block(backend(&fake, Some("probe")).list_messages(page_request("INBOX", 0)));
+    let result =
+        block(backend(&fake, Some("probe")).list_messages(ctx(), page_request("INBOX", 0)));
     match result {
         Err(BackendError::Command { code, detail }) => {
             assert_eq!(code, Some(1));
@@ -257,7 +271,8 @@ fn json_error_on_stdout_becomes_command_error() {
 #[test]
 fn stderr_only_error_becomes_command_error() {
     let fake = FakeHimalaya::spawn("ok", "error-stderr");
-    let result = block(backend(&fake, Some("probe")).list_messages(page_request("INBOX", 0)));
+    let result =
+        block(backend(&fake, Some("probe")).list_messages(ctx(), page_request("INBOX", 0)));
     match result {
         Err(BackendError::Command { code, detail }) => {
             assert_eq!(code, Some(4));
@@ -270,7 +285,7 @@ fn stderr_only_error_becomes_command_error() {
 #[test]
 fn mailbox_list_error_is_typed_too() {
     let fake = FakeHimalaya::spawn("error-json", "ok");
-    let result = block(backend(&fake, Some("probe")).list_mailboxes());
+    let result = block(backend(&fake, Some("probe")).list_mailboxes(ctx()));
     match result {
         Err(BackendError::Command { code, detail }) => {
             assert_eq!(code, Some(1));
@@ -278,6 +293,70 @@ fn mailbox_list_error_is_typed_too() {
         }
         other => panic!("expected Command, got {other:?}"),
     }
+}
+
+/// Phase 3.2 acceptance: cancelling an in-flight request terminates the
+/// owned child quickly (the fake would hang for 30s otherwise) and the
+/// adapter reports a distinct cancelled outcome (plan §11).
+#[test]
+fn cancel_terminates_the_child_and_reports_cancelled() {
+    let fake = FakeHimalaya::spawn("ok", "slow");
+    let rt = Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let backend = backend(&fake, Some("probe"));
+        let token = CancellationToken::new();
+        let task_token = token.clone();
+        let task = tokio::spawn(async move {
+            backend
+                .list_messages(
+                    RequestContext {
+                        operation: OperationId(9),
+                        cancellation: task_token,
+                    },
+                    page_request("INBOX", 0),
+                )
+                .await
+        });
+        // Let the child start, then cancel while it hangs.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        token.cancel();
+        let started = std::time::Instant::now();
+        let result = task.await.expect("request task joins");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "cancellation took too long: {elapsed:?}"
+        );
+        assert!(
+            matches!(result, Err(BackendError::Cancelled)),
+            "expected Cancelled, got {result:?}"
+        );
+    });
+}
+
+/// The mailbox listing path cancels identically: the slow fake is killed
+/// and the outcome is `Cancelled`, never a success payload (plan §11).
+#[test]
+fn cancel_during_mailbox_list_reports_cancelled_not_output() {
+    let fake = FakeHimalaya::spawn("slow", "ok");
+    let rt = Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let backend = backend(&fake, Some("probe"));
+        let token = CancellationToken::new();
+        let task_token = token.clone();
+        let task = tokio::spawn(async move {
+            backend
+                .list_mailboxes(RequestContext {
+                    operation: OperationId(10),
+                    cancellation: task_token,
+                })
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        token.cancel();
+        let result = task.await.expect("request task joins");
+        assert!(matches!(result, Err(BackendError::Cancelled)));
+    });
 }
 
 #[test]

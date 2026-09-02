@@ -2,14 +2,13 @@
 //! (Phase 10), timers, backend completions — map into these actions.
 //!
 //! Deviations from plan §9, all intentional and temporary:
-//! - `BackendCompleted(OperationResult)` stays deferred to Phase 3 with the
-//!   operation registry it depends on. Until then, Phase 2 carries backend
-//!   results in the two dedicated `…Loaded` actions below; errors are plain
-//!   strings (typed operation results arrive with the registry).
-//! - `SearchChar`/`SearchBackspace` are added because editing the search
-//!   field needs character-level actions, which §9's enum lacks.
+//! - `SearchChar`/`SearchBackspace` are collapsed into `SearchEdit` because
+//!   editing the search field needs character-level actions.
+//! - Results return as `BackendCompleted(OperationResult)` per plan §9;
+//!   `OperationResult` carries the `OperationId` the registry allocated,
+//!   and its failure payloads are already sanitized (plan §12).
 
-use crate::domain::{Mailbox, MessageSummary, Page, PageRequest};
+use crate::app::operation::OperationResult;
 
 /// Character-level edit of the search field.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,14 +44,9 @@ pub enum Action {
     DiscardDraft,
     RetryError,
     DismissError,
-    /// Backend result: the mailbox listing (startup load; refresh comes
-    /// with Phase 9).
-    MailboxesLoaded(Result<Vec<Mailbox>, String>),
-    /// Backend result: one page of message summaries for `request`.
-    PageLoaded {
-        request: PageRequest,
-        result: Result<Page<MessageSummary>, String>,
-    },
+    /// Backend result for one operation. Results for unknown, cancelled,
+    /// or superseded ids are rejected by the reducer (plan §11).
+    BackendCompleted(OperationResult),
     Tick,
     Resize {
         width: u16,

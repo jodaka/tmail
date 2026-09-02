@@ -2,8 +2,9 @@ use super::mailbox::MailboxId;
 
 /// An explicit page request against one mailbox (plan §7). `offset` is
 /// 0-based and `limit` is the fixed page size; the Himalaya adapter maps
-/// this onto its 1-based `-p`/`-s` flags (ADR 0001 finding 8).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// this onto its 1-based `-p`/`-s` flags (ADR 0001 finding 8). Serializable
+/// so typed retry intents (plan §12) can be stored.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PageRequest {
     pub mailbox_id: MailboxId,
     pub offset: usize,

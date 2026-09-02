@@ -10,4 +10,4 @@
 pub mod himalaya;
 pub mod traits;
 
-pub use traits::{BackendError, BackendResult, MailBackend};
+pub use traits::{BackendError, BackendResult, MailBackend, RequestContext};

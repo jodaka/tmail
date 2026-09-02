@@ -52,6 +52,19 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
         " NORMAL ",
         theme.mode_badge().add_modifier(Modifier::empty()),
     )];
+    // Foreground work never blocks input, but it is announced here so the
+    // user knows what `Esc` would cancel (plan §11).
+    if let Some(operation) = state.operations.foreground() {
+        spans.push(Span::styled("  ", Style::new().bg(theme.background)));
+        spans.push(Span::styled(
+            super::spinner::frame(state.ticks),
+            Style::new().fg(theme.accent).bg(theme.background),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", operation.kind.summary()),
+            Style::new().fg(theme.muted).bg(theme.background),
+        ));
+    }
     for (key, label) in hints {
         spans.push(Span::styled("  ", Style::new().bg(theme.background)));
         spans.push(Span::styled(

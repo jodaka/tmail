@@ -39,9 +39,9 @@ pub struct FakeHimalaya {
 impl FakeHimalaya {
     /// Spawn the fake with per-subcommand behavior modes:
     ///
-    /// mailbox: `ok` | `error-json` | `error-stderr`
+    /// mailbox: `ok` | `error-json` | `error-stderr` | `slow`
     /// envelope: `ok` | `empty` | `partial` | `malformed` | `non-utf8`
-    ///           | `error-json` | `error-stderr`
+    ///           | `error-json` | `error-stderr` | `slow`
     pub fn spawn(mailbox_mode: &'static str, envelope_mode: &'static str) -> Self {
         let dir = TempDir::new().expect("temp dir");
         let program = dir.path().join("himalaya");
@@ -145,6 +145,11 @@ if [ "$SUB" = "mailbox" ]; then
       printf '%s' 'disk on fire' >&2
       exit 3
       ;;
+    slow)
+      # Long-running invocation for cancellation tests: hangs for 30s
+      # unless killed. It never gets to print.
+      sleep 30
+      ;;
   esac
   exit 0
 fi
@@ -173,6 +178,11 @@ if [ "$SUB" = "envelope" ]; then
     error-stderr)
       printf '%s' 'boom' >&2
       exit 4
+      ;;
+    slow)
+      # Long-running invocation for cancellation tests: hangs for 30s
+      # unless killed. It never gets to print.
+      sleep 30
       ;;
   esac
   exit 0

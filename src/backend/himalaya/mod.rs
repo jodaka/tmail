@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 
-use crate::backend::traits::{BackendError, BackendResult, MailBackend};
+use crate::backend::traits::{BackendError, BackendResult, MailBackend, RequestContext};
 use crate::config::Config;
 use crate::domain::{Mailbox, MessageSummary, Page, PageRequest};
 
@@ -64,14 +64,20 @@ impl HimalayaCliBackend {
 
 #[async_trait]
 impl MailBackend for HimalayaCliBackend {
-    async fn list_mailboxes(&self) -> BackendResult<Vec<Mailbox>> {
+    async fn list_mailboxes(&self, ctx: RequestContext) -> BackendResult<Vec<Mailbox>> {
+        tracing::debug!(operation = %ctx.operation, "list_mailboxes");
         let argv = command::mailbox_list_argv(self.config_path.as_deref(), self.account.as_deref());
-        let output = process::run(&self.program, &argv).await?;
+        let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
         let dto: dto::MailboxesDto = process::decode(output)?;
         Ok(map::mailboxes(dto, &self.aliases))
     }
 
-    async fn list_messages(&self, page: PageRequest) -> BackendResult<Page<MessageSummary>> {
+    async fn list_messages(
+        &self,
+        ctx: RequestContext,
+        page: PageRequest,
+    ) -> BackendResult<Page<MessageSummary>> {
+        tracing::debug!(operation = %ctx.operation, "list_messages");
         if page.limit == 0 {
             return Err(BackendError::InvalidRequest(String::from(
                 "page limit must be non-zero",
@@ -89,7 +95,7 @@ impl MailBackend for HimalayaCliBackend {
             page_number,
             page.limit,
         );
-        let output = process::run(&self.program, &argv).await?;
+        let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
         let dto: dto::EnvelopesDto = process::decode(output)?;
         Ok(map::envelopes(
             dto,

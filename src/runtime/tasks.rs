@@ -1,0 +1,288 @@
+//! The operation manager (plan §11): spawns one task per typed effect,
+//! hands each request its `OperationId` and cancellation token, and feeds
+//! results back into the reducer through the task result channel as
+//! `Action::BackendCompleted`.
+//!
+//! Responsibilities:
+//! - launch effects against the backend without blocking the UI loop;
+//! - map typed [`BackendError`]s into modal-ready [`OperationFailure`]s,
+//!   sanitizing every detail before it can reach logs or the UI (plan §12);
+//! - suppress results of cancelled operations — cancellation also
+//!   terminates the child process the adapter owns (Phase 3.2), and the
+//!   reducer rejects results for removed operation ids.
+
+use std::sync::Arc;
+
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::app::effect::Effect;
+use crate::app::operation::{OperationFailure, OperationKind, OperationOutcome, OperationResult};
+use crate::app::sanitize::sanitize;
+use crate::backend::{BackendError, MailBackend, RequestContext};
+
+/// Spawns backend tasks for the effects the reducer emits.
+pub struct OperationManager {
+    backend: Arc<dyn MailBackend>,
+    results: UnboundedSender<OperationResult>,
+}
+
+impl OperationManager {
+    pub fn new(backend: Arc<dyn MailBackend>, results: UnboundedSender<OperationResult>) -> Self {
+        Self { backend, results }
+    }
+
+    /// Launch one effect. The cancellation token comes from the operation
+    /// registry (`AppState.operations`), so `Esc` reaches the child process.
+    pub fn launch(&self, effect: Effect, ctx: RequestContext) {
+        let backend = Arc::clone(&self.backend);
+        let results = self.results.clone();
+        let id = effect.id;
+        tokio::spawn(async move {
+            tracing::debug!(id = %id, "operation launched");
+            match run_effect(&backend, effect, ctx).await {
+                Some(outcome) => {
+                    // The channel lives for the whole session; a send
+                    // failure means the loop is shutting down and the
+                    // result can be dropped.
+                    let _ = results.send(OperationResult { id, outcome });
+                }
+                None => {
+                    // Cancelled before completion: no result, no modal
+                    // (plan §11: cancelled work never mutates state).
+                    tracing::debug!(id = %id, "operation cancelled; result suppressed");
+                }
+            }
+        });
+    }
+}
+
+/// Execute one effect and translate the backend result. `None` means the
+/// operation was cancelled — there is nothing to report.
+async fn run_effect(
+    backend: &Arc<dyn MailBackend>,
+    effect: Effect,
+    ctx: RequestContext,
+) -> Option<Result<OperationOutcome, OperationFailure>> {
+    match effect.kind.clone() {
+        OperationKind::LoadMailboxes => match backend.list_mailboxes(ctx).await {
+            Ok(mailboxes) => Some(Ok(OperationOutcome::Mailboxes(mailboxes))),
+            Err(err) => operation_failure(&effect, err).map(Err),
+        },
+        OperationKind::LoadPage(request) => match backend.list_messages(ctx, request).await {
+            Ok(page) => Some(Ok(OperationOutcome::Page(page))),
+            Err(err) => operation_failure(&effect, err).map(Err),
+        },
+    }
+}
+
+/// Map a backend error into a modal-ready failure (plan §12): exit status,
+/// sanitized detail, and the typed retry intent. Cancelled operations
+/// produce no failure at all.
+fn operation_failure(effect: &Effect, err: BackendError) -> Option<OperationFailure> {
+    if matches!(err, BackendError::Cancelled) {
+        return None;
+    }
+    let (code, detail) = match &err {
+        BackendError::Command { code, detail } => (*code, detail.clone()),
+        BackendError::InvalidOutput(detail) | BackendError::InvalidRequest(detail) => {
+            (None, detail.clone())
+        }
+        BackendError::Io(err) => (None, err.to_string()),
+        BackendError::Cancelled => unreachable!("matched above"),
+    };
+    tracing::debug!(id = %effect.id, ?code, "operation failed");
+    Some(OperationFailure {
+        code,
+        // Sanitized before entering state/UI or logs (plan §12).
+        detail: sanitize(&detail),
+        retry: Some(effect.retry_spec()),
+        // Send ambiguity is wired when send lands (Phase 7); list/flag
+        // operations are never ambiguous.
+        ambiguous: false,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::operation::OperationId;
+    use crate::backend::BackendResult;
+    use crate::domain::{Mailbox, MailboxId, MessageSummary, Page, PageRequest};
+    use std::time::Duration;
+    use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+    use tokio_util::sync::CancellationToken;
+
+    fn ctx(id: u64, token: &CancellationToken) -> RequestContext {
+        RequestContext {
+            operation: OperationId(id),
+            cancellation: token.clone(),
+        }
+    }
+
+    fn page_request(mailbox: &str) -> PageRequest {
+        PageRequest {
+            mailbox_id: MailboxId(String::from(mailbox)),
+            offset: 0,
+            limit: 20,
+        }
+    }
+
+    /// Fake backend: per-operation latency and optional failure, honoring
+    /// cancellation the way the real adapter does.
+    struct FakeBackend {
+        mailboxes_delay: Duration,
+        messages_delay: Duration,
+        /// `(exit code, detail)` of a failed command.
+        error: Option<(Option<i32>, String)>,
+    }
+
+    impl FakeBackend {
+        fn ok() -> Self {
+            Self {
+                mailboxes_delay: Duration::ZERO,
+                messages_delay: Duration::ZERO,
+                error: None,
+            }
+        }
+
+        fn failing(code: Option<i32>, detail: &str) -> Self {
+            Self {
+                mailboxes_delay: Duration::ZERO,
+                messages_delay: Duration::ZERO,
+                error: Some((code, String::from(detail))),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MailBackend for FakeBackend {
+        async fn list_mailboxes(&self, req: RequestContext) -> BackendResult<Vec<Mailbox>> {
+            tokio::select! {
+                _ = tokio::time::sleep(self.mailboxes_delay) => match &self.error {
+                    Some((code, detail)) => Err(BackendError::Command {
+                        code: *code,
+                        detail: detail.clone(),
+                    }),
+                    None => Ok(Vec::new()),
+                },
+                _ = req.cancellation.cancelled() => Err(BackendError::Cancelled),
+            }
+        }
+
+        async fn list_messages(
+            &self,
+            req: RequestContext,
+            _page: PageRequest,
+        ) -> BackendResult<Page<MessageSummary>> {
+            tokio::select! {
+                _ = tokio::time::sleep(self.messages_delay) => match &self.error {
+                    Some((code, detail)) => Err(BackendError::Command {
+                        code: *code,
+                        detail: detail.clone(),
+                    }),
+                    None => Ok(Page::empty(20)),
+                },
+                _ = req.cancellation.cancelled() => Err(BackendError::Cancelled),
+            }
+        }
+    }
+
+    fn manager(
+        backend: Arc<dyn MailBackend>,
+    ) -> (OperationManager, UnboundedReceiver<OperationResult>) {
+        let (tx, rx) = unbounded_channel();
+        (OperationManager::new(backend, tx), rx)
+    }
+
+    fn effect(kind: OperationKind) -> (Effect, CancellationToken) {
+        (
+            Effect {
+                id: OperationId(7),
+                kind,
+            },
+            CancellationToken::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn launches_effects_and_delivers_results() {
+        let (manager, mut rx) = manager(Arc::new(FakeBackend::ok()));
+        let (effect, token) = effect(OperationKind::LoadMailboxes);
+        manager.launch(effect.clone(), ctx(7, &token));
+        let result = rx.recv().await.expect("result");
+        assert_eq!(result.id, effect.id);
+        assert!(result.outcome.is_ok());
+    }
+
+    #[tokio::test]
+    async fn slow_operations_do_not_block_following_work() {
+        // One 400 ms operation plus one instant one: the fast result must
+        // arrive well before the slow one (plan §3: the UI never blocks).
+        // Mailbox listing is slow; page loads are instant.
+        let backend = Arc::new(FakeBackend {
+            mailboxes_delay: Duration::from_millis(400),
+            messages_delay: Duration::ZERO,
+            error: None,
+        });
+        let (manager, mut rx) = manager(backend);
+        let (slow, slow_token) = effect(OperationKind::LoadMailboxes);
+        let slow_id = slow.id;
+        manager.launch(slow, ctx(1, &slow_token));
+        let (fast, fast_token) = effect(OperationKind::LoadPage(page_request("inbox")));
+        let fast_id = fast.id;
+        manager.launch(fast, ctx(2, &fast_token));
+
+        let started = std::time::Instant::now();
+        let first = rx.recv().await.expect("fast result");
+        assert_eq!(first.id, fast_id, "fast operation finishes first");
+        assert!(started.elapsed() < Duration::from_millis(300));
+        let second = rx.recv().await.expect("slow result");
+        assert_eq!(second.id, slow_id);
+    }
+
+    #[tokio::test]
+    async fn cancelled_operations_produce_no_result() {
+        let backend = Arc::new(FakeBackend {
+            mailboxes_delay: Duration::from_secs(30),
+            messages_delay: Duration::ZERO,
+            error: None,
+        });
+        let (manager, mut rx) = manager(backend);
+        let (effect, token) = effect(OperationKind::LoadMailboxes);
+        manager.launch(effect, ctx(7, &token));
+        // Give the task time to start sleeping, then cancel.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        token.cancel();
+        let result = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+        assert!(result.is_err(), "cancelled operations must be silent");
+    }
+
+    #[tokio::test]
+    async fn failures_carry_code_retry_and_sanitized_detail() {
+        let detail = "password=hunter2 token=abc connect refused";
+        let backend = Arc::new(FakeBackend::failing(Some(3), detail));
+        let (manager, mut rx) = manager(backend);
+        let (effect, token) = effect(OperationKind::LoadMailboxes);
+        let retry_spec = effect.retry_spec();
+        manager.launch(effect, ctx(7, &token));
+
+        let result = rx.recv().await.expect("result");
+        let Err(failure) = result.outcome else {
+            panic!("expected failure");
+        };
+        assert_eq!(failure.code, Some(3));
+        assert_eq!(failure.retry, Some(retry_spec));
+        assert!(!failure.ambiguous);
+        assert!(
+            !failure.detail.contains("hunter2"),
+            "detail: {}",
+            failure.detail
+        );
+        assert!(
+            !failure.detail.contains("abc"),
+            "detail: {}",
+            failure.detail
+        );
+        assert!(failure.detail.contains("connect refused"));
+    }
+}

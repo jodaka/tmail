@@ -1,11 +1,11 @@
-//! Post — application entry point (Phase 2: real backend vertical slice).
+//! Post — application entry point.
 //!
-//! Wires config → backend → event loop. The reducer stays I/O-free: state
-//! transitions return [`Effect`]s, this runtime spawns the typed backend
-//! requests, and their results flow back through the result channel into
-//! the same reducer. The Phase 3 operation manager replaces this minimal
-//! dispatch loop with the operation registry, cancellation, and the
-//! Retry/Dismiss modal.
+//! Wires config → backend → operation manager → event loop. The reducer
+//! stays I/O-free: state transitions register operations and return
+//! [`Effect`]s; the operation manager ([`OperationManager`]) spawns the
+//! typed backend requests with their cancellation tokens, and results flow
+//! back through the task result channel into the same reducer as
+//! `Action::BackendCompleted` (plan §11).
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -15,9 +15,10 @@ use chrono::Local;
 use tokio::sync::mpsc;
 
 use tmail::app::{Action, AppState, Effect, reducer};
-use tmail::backend::{MailBackend, himalaya::HimalayaCliBackend};
+use tmail::backend::{MailBackend, RequestContext, himalaya::HimalayaCliBackend};
 use tmail::config::Config;
 use tmail::input::keyboard;
+use tmail::runtime::tasks::OperationManager;
 use tmail::runtime::{events, logging, terminal};
 use tmail::ui::dates::format_clock;
 use tmail::ui::{RenderContext, Theme};
@@ -72,9 +73,15 @@ async fn run() -> anyhow::Result<()> {
     let mut events = events::spawn();
     let theme = Theme::default_dark();
 
-    // Backend results re-enter the reducer as actions.
-    let (result_tx, mut result_rx) = mpsc::unbounded_channel::<Action>();
-    dispatch(&backend, &[Effect::LoadMailboxes], &result_tx);
+    // Backend results re-enter the reducer as actions; the manager spawns
+    // one cancellable task per effect.
+    let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+    let manager = OperationManager::new(Arc::clone(&backend), result_tx);
+
+    // Startup work flows through the same reducer path as everything else:
+    // with no mailboxes loaded yet, Refresh starts the mailbox listing.
+    let effects = reducer::reduce(&mut state, &Action::Refresh);
+    launch(&manager, &state, effects);
 
     loop {
         let now = Local::now().fixed_offset();
@@ -101,7 +108,7 @@ async fn run() -> anyhow::Result<()> {
                     if let Some(action) = keyboard::to_action(key, state.focus) {
                         tracing::debug!(?action, "dispatch");
                         let effects = reducer::reduce(&mut state, &action);
-                        dispatch(&backend, &effects, &result_tx);
+                        launch(&manager, &state, effects);
                     }
                 }
                 Some(events::Event::Resize { width, height }) => {
@@ -109,7 +116,7 @@ async fn run() -> anyhow::Result<()> {
                         &mut state,
                         &Action::Resize { width, height },
                     );
-                    dispatch(&backend, &effects, &result_tx);
+                    launch(&manager, &state, effects);
                 }
                 Some(events::Event::Tick) => {
                     reducer::reduce(&mut state, &Action::Tick);
@@ -120,11 +127,14 @@ async fn run() -> anyhow::Result<()> {
                 }
             },
             action = result_rx.recv() => match action {
-                Some(action) => {
-                    let effects = reducer::reduce(&mut state, &action);
-                    dispatch(&backend, &effects, &result_tx);
+                Some(result) => {
+                    let effects = reducer::reduce(
+                        &mut state,
+                        &Action::BackendCompleted(result),
+                    );
+                    launch(&manager, &state, effects);
                 }
-                // The runtime holds a sender for the whole session.
+                // The manager holds a sender for the whole session.
                 None => bail!("backend result channel closed unexpectedly"),
             },
         }
@@ -132,37 +142,19 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Spawn one task per effect; results re-enter the loop as actions.
-fn dispatch(
-    backend: &Arc<dyn MailBackend>,
-    effects: &[Effect],
-    result_tx: &mpsc::UnboundedSender<Action>,
-) {
+/// Launch the effects a state transition produced: each one gets its
+/// cancellation token from the registry, so a later `Esc` can cancel
+/// exactly that work.
+fn launch(manager: &OperationManager, state: &AppState, effects: Vec<Effect>) {
     for effect in effects {
-        match effect {
-            Effect::LoadMailboxes => {
-                let backend = Arc::clone(backend);
-                let result_tx = result_tx.clone();
-                tokio::spawn(async move {
-                    let result = backend
-                        .list_mailboxes()
-                        .await
-                        .map_err(|err| err.to_string());
-                    let _ = result_tx.send(Action::MailboxesLoaded(result));
-                });
-            }
-            Effect::LoadPage(request) => {
-                let backend = Arc::clone(backend);
-                let result_tx = result_tx.clone();
-                let request = request.clone();
-                tokio::spawn(async move {
-                    let result = backend
-                        .list_messages(request.clone())
-                        .await
-                        .map_err(|err| err.to_string());
-                    let _ = result_tx.send(Action::PageLoaded { request, result });
-                });
-            }
-        }
+        let Some(token) = state.operations.cancellation(effect.id) else {
+            tracing::warn!(id = %effect.id, "effect without a registered operation");
+            continue;
+        };
+        let ctx = RequestContext {
+            operation: effect.id,
+            cancellation: token,
+        };
+        manager.launch(effect, ctx);
     }
 }

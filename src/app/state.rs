@@ -1,11 +1,14 @@
-//! Application state (plan §9) — Phase 2 subset.
+//! Application state (plan §9).
 //!
-//! `operations: OperationRegistry` and `overlay: Option<Overlay>` arrive with
-//! Phase 3. Everything here is plain data mutated only by the reducer.
+//! Everything here is plain data mutated only by the reducer. In-flight
+//! backend work is tracked in `operations` (the operation registry); the
+//! `overlay` stack currently holds only the error modal.
 
 use crate::app::focus::Focus;
+use crate::app::operation::OperationRegistry;
+use crate::app::overlay::Overlay;
 use crate::app::route::Route;
-use crate::domain::{Mailbox, MessageSummary, Page, PageRequest};
+use crate::domain::{Mailbox, MessageSummary, Page};
 
 /// Async load lifecycle for backend-fed collections (mock-fed in Phase 1).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,10 +56,12 @@ pub struct AppState {
     /// the selection always stays on screen across movement and resize
     /// (Phase 2 acceptance).
     pub list_scroll: usize,
-    /// The page request currently in flight. A result is applied only when
-    /// it still matches, so a slow older fetch can never overwrite a newer
-    /// one; the Phase 3 operation registry supersedes this scalar guard.
-    pub pending_page: Option<PageRequest>,
+    /// In-flight backend operations with their ids, retry intents, and
+    /// cancellation tokens (plan §9/§11). Results only apply while their
+    /// operation is still registered here.
+    pub operations: OperationRegistry,
+    /// Modal overlay above every screen; `Some` intercepts all input.
+    pub overlay: Option<Overlay>,
     pub search_query: String,
     pub focus: Focus,
     /// Last known terminal size; drives the responsive layout (plan §18).
@@ -79,7 +84,8 @@ impl AppState {
             messages: Page::empty(page_size.max(1)),
             selection: 0,
             list_scroll: 0,
-            pending_page: None,
+            operations: OperationRegistry::default(),
+            overlay: None,
             search_query: String::new(),
             focus: Focus::MessageList,
             size: (152, 40),

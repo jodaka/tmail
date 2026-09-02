@@ -1,8 +1,10 @@
 //! Render tests on Ratatui's `TestBackend`: the mock mailbox screen must
-//! render at full, compact, and too-small sizes (plan §19 Phase 1), and the
-//! status bar must never show `j`/`k` or a help hint (plan §4).
+//! render at full, compact, and too-small sizes (plan §19 Phase 1), the
+//! status bar must never show `j`/`k` or a help hint (plan §4), and Phase 3
+//! adds spinner + Retry/Dismiss modal render checks (plan §19 Phase 3).
 
 use tmail::app::mock::{self, mock_initial_state};
+use tmail::app::operation::{OperationFailure, OperationKind, OperationResult};
 use tmail::app::{Action, reducer};
 use tmail::ui::{RenderContext, Theme, dates, render};
 
@@ -198,4 +200,176 @@ fn resize_through_actions_switches_modes() {
     let full = draw_state(&state, 152, 40);
     assert!(full.contains("Compose"));
 }
-// temp debug helper appended below
+
+/// Drive the reducer like the runtime does and render; returns the text.
+fn draw_after(
+    state: &mut tmail::app::AppState,
+    actions: &[Action],
+    width: u16,
+    height: u16,
+) -> String {
+    let theme = Theme::default_dark();
+    let now = mock::now();
+    let ctx = RenderContext::new(now, dates::format_clock(now));
+    for action in actions {
+        reducer::reduce(state, action);
+    }
+    state.size = (width, height);
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("test backend");
+    terminal
+        .draw(|frame| render(frame, state, &theme, &ctx))
+        .expect("draw");
+    text_of(terminal.backend().buffer())
+}
+
+/// A failure action with a sanitized detail (what the operation manager
+/// hands the reducer after Phase 3.5 redaction).
+fn sanitized_failure(id: tmail::app::OperationId, kind: OperationKind, detail: &str) -> Action {
+    Action::BackendCompleted(OperationResult {
+        id,
+        outcome: Err(OperationFailure {
+            code: Some(4),
+            detail: String::from(detail),
+            retry: Some(kind.retry_spec()),
+            ambiguous: false,
+        }),
+    })
+}
+
+#[test]
+fn spinner_shows_foreground_work_without_blocking_the_frame() {
+    let mut state = mock_initial_state();
+    // A page request starts an operation; the spinner appears in the
+    // status bar with the operation summary (plan §11).
+    let actions = vec![Action::PageNext];
+    let text = draw_after(&mut state, &actions, 152, 40);
+    assert!(text.contains("⠋"), "spinner frame missing:\n{text}");
+    assert!(
+        text.contains("Loading messages"),
+        "summary missing:\n{text}"
+    );
+    // The list underneath still rendered — work never blocks the frame.
+    assert!(
+        text.contains("INBOX"),
+        "list hidden behind spinner:\n{text}"
+    );
+}
+
+#[test]
+fn no_spinner_when_idle() {
+    let mut state = mock_initial_state();
+    let text = draw_after(&mut state, &[], 152, 40);
+    assert!(!text.contains("⠋"), "spinner leaked while idle:\n{text}");
+}
+
+#[test]
+fn error_modal_renders_summary_code_buttons_and_sanitized_detail() {
+    let mut state = mock_initial_state();
+    let (id, req) = match reducer::reduce(&mut state, &Action::PageNext).as_slice() {
+        [effect] => (
+            effect.id,
+            match &effect.kind {
+                OperationKind::LoadPage(request) => request.clone(),
+                other => panic!("unexpected kind {other:?}"),
+            },
+        ),
+        other => panic!("expected one effect, got {other:?}"),
+    };
+    let detail = "himalaya exited: password = \"███████\" token=██████ connect refused";
+    let actions = vec![sanitized_failure(id, OperationKind::LoadPage(req), detail)];
+    let text = draw_after(&mut state, &actions, 152, 40);
+
+    // Title from the operation summary; exit code; both buttons; detail.
+    assert!(text.contains("Loading messages failed"), "title:\n{text}");
+    assert!(
+        text.contains("himalaya exited with code 4"),
+        "code:\n{text}"
+    );
+    assert!(text.contains("[ Retry ]"), "retry button:\n{text}");
+    assert!(text.contains("[ Dismiss ]"), "dismiss button:\n{text}");
+    assert!(
+        text.contains("connect refused"),
+        "safe detail must show:\n{text}"
+    );
+    // Fixture secrets never appear (acceptance: no fixture secrets).
+    assert!(!text.contains("hunter2"), "secret leaked:\n{text}");
+    assert!(!text.contains("hunter"), "secret fragment leaked:\n{text}");
+    assert!(text.contains("███████"), "redaction marks missing:\n{text}");
+    // Modal chrome.
+    assert!(text.contains("Tab switch"), "hints missing:\n{text}");
+}
+
+#[test]
+fn error_modal_detail_scrolls() {
+    let mut state = mock_initial_state();
+    let (id, req) = match reducer::reduce(&mut state, &Action::PageNext).as_slice() {
+        [effect] => (
+            effect.id,
+            match &effect.kind {
+                OperationKind::LoadPage(request) => request.clone(),
+                other => panic!("unexpected kind {other:?}"),
+            },
+        ),
+        other => panic!("expected one effect, got {other:?}"),
+    };
+    let kind = OperationKind::LoadPage(req);
+    let lines: Vec<String> = (0..60).map(|i| format!("detail-line-{i:02}")).collect();
+    let actions = vec![
+        sanitized_failure(id, kind, &lines.join("\n")),
+        // Scroll to the very end (the reducer clamps).
+        Action::PageNext,
+        Action::PageNext,
+        Action::PageNext,
+        Action::PageNext,
+    ];
+    let text = draw_after(&mut state, &actions, 152, 40);
+    assert!(
+        text.contains("detail-line-59"),
+        "bottom of detail missing:\n{text}"
+    );
+    assert!(
+        !text.contains("detail-line-00"),
+        "top of detail should be scrolled away:\n{text}"
+    );
+    // Scrolling back to the top shows the first line again.
+    let mut actions = actions;
+    for _ in 0..80 {
+        actions.push(Action::MoveUp);
+    }
+    let text = draw_after(&mut state, &actions, 152, 40);
+    assert!(text.contains("detail-line-00"), "top missing:\n{text}");
+    assert!(
+        !text.contains("detail-line-59"),
+        "bottom should be scrolled away:\n{text}"
+    );
+}
+
+#[test]
+fn ambiguous_failure_shows_duplicate_warning() {
+    let mut state = mock_initial_state();
+    let (id, req) = match reducer::reduce(&mut state, &Action::PageNext).as_slice() {
+        [effect] => (
+            effect.id,
+            match &effect.kind {
+                OperationKind::LoadPage(request) => request.clone(),
+                other => panic!("unexpected kind {other:?}"),
+            },
+        ),
+        other => panic!("expected one effect, got {other:?}"),
+    };
+    let action = Action::BackendCompleted(OperationResult {
+        id,
+        outcome: Err(OperationFailure {
+            code: Some(1),
+            detail: String::from("SMTP DATA failed: reached unexpected EOF"),
+            retry: Some(OperationKind::LoadPage(req).retry_spec()),
+            ambiguous: true,
+        }),
+    });
+    let text = draw_after(&mut state, &[action], 152, 40);
+    assert!(
+        text.contains("duplicate"),
+        "ambiguity warning missing:\n{text}"
+    );
+}

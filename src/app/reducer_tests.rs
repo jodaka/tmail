@@ -1,12 +1,14 @@
 //! Reducer unit tests (plan §9: invalid/empty selections, stale inputs,
-//! route behavior, resize; plan §19 Phase 2: effect-based page loads,
-//! stale-result rejection, page boundaries, selection visibility).
+//! route behavior, resize; plan §19 Phase 3: operation registry semantics,
+//! stale/superseded-result rejection, cancellation, Retry/Dismiss modal).
 
 use super::*;
 use crate::app::action::SearchEdit;
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::mock::{self, mock_initial_state};
+use crate::app::operation::{OperationId, RetrySpec};
+use crate::app::overlay::Overlay;
 use crate::app::state::AppState;
 use crate::domain::{Mailbox, MailboxId, MailboxRole, MessageId, PageRequest};
 
@@ -18,47 +20,57 @@ fn inbox_id() -> MailboxId {
     MailboxId(String::from("inbox"))
 }
 
-fn request(offset: usize) -> PageRequest {
-    PageRequest {
-        mailbox_id: inbox_id(),
-        offset,
-        limit: mock::PAGE_SIZE,
+fn mailboxes_kind() -> OperationKind {
+    OperationKind::LoadMailboxes
+}
+
+fn page_kind(req: &PageRequest) -> OperationKind {
+    OperationKind::LoadPage(req.clone())
+}
+
+/// Destructure an effect into `(id, kind)` for assertions.
+fn effect_parts(effects: &[Effect]) -> (OperationId, OperationKind) {
+    match effects {
+        [effect] => (effect.id, effect.kind.clone()),
+        other => panic!("expected exactly one effect, got {other:?}"),
     }
 }
 
-/// Feed the reducer the result it expects for a pending `LoadPage`.
-fn load_page(state: &mut AppState, offset: usize) {
-    let page = mock::mock_page(&inbox_id(), offset, mock::PAGE_SIZE);
-    reduce(
-        state,
-        &Action::PageLoaded {
-            request: request(offset),
-            result: Ok(page),
-        },
-    );
-}
-
-/// Apply an `Ok` result for `request` as the runtime would.
-fn apply_ok(state: &mut AppState, req: PageRequest, offset: usize) {
-    let page = mock::mock_page(&req.mailbox_id, offset, req.limit);
-    reduce(
-        state,
-        &Action::PageLoaded {
-            request: req,
-            result: Ok(page),
-        },
-    );
-}
-
-fn page_effect(effects: &[Effect]) -> PageRequest {
-    match effects {
-        [Effect::LoadPage(req)] => req.clone(),
-        other => panic!("expected exactly one LoadPage effect, got {other:?}"),
+fn expect_page(effects: &[Effect]) -> (OperationId, PageRequest) {
+    let (id, kind) = effect_parts(effects);
+    match kind {
+        OperationKind::LoadPage(request) => (id, request),
+        other => panic!("expected a LoadPage effect, got {other:?}"),
     }
 }
 
 fn no_effects(effects: &[Effect]) {
     assert!(effects.is_empty(), "expected no effects, got {effects:?}");
+}
+
+/// Complete `id` with an `Ok` page payload for `req` at `offset`.
+fn complete_page_ok(state: &mut AppState, id: OperationId, req: &PageRequest, offset: usize) {
+    let page = mock::mock_page(&req.mailbox_id, offset, req.limit);
+    reduce(
+        state,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Page(page)),
+        }),
+    );
+}
+
+/// A failure action matching `kind`, as the operation manager builds it.
+fn failure(id: OperationId, kind: &OperationKind, detail: &str) -> Action {
+    Action::BackendCompleted(OperationResult {
+        id,
+        outcome: Err(OperationFailure {
+            code: Some(1),
+            detail: String::from(detail),
+            retry: Some(kind.retry_spec()),
+            ambiguous: false,
+        }),
+    })
 }
 
 #[test]
@@ -83,15 +95,15 @@ fn selection_moves_down_up_and_clamps() {
 fn page_next_requests_next_page_and_applies_result() {
     let mut s = state();
     s.selection = 3;
-    let effects = reduce(&mut s, &Action::PageNext);
-    let req = page_effect(&effects);
+    let (id, req) = expect_page(&reduce(&mut s, &Action::PageNext));
     assert_eq!(req.offset, mock::PAGE_SIZE);
-    assert_eq!(s.pending_page.as_ref(), Some(&req));
+    // The request is registered and in flight for the active mailbox.
+    assert_eq!(s.operations.page_in_flight(&inbox_id()), Some(req.clone()));
     // The old page and selection stay visible until the result lands.
     assert_eq!(s.messages.offset, 0);
     assert_eq!(s.selection, 3);
-    load_page(&mut s, mock::PAGE_SIZE);
-    assert_eq!(s.pending_page, None);
+    complete_page_ok(&mut s, id, &req, mock::PAGE_SIZE);
+    assert_eq!(s.operations.page_in_flight(&inbox_id()), None);
     assert_eq!(s.messages.offset, mock::PAGE_SIZE);
     assert_eq!(s.messages.items.len(), 5);
     // The previous selection's message is not on this page.
@@ -104,13 +116,13 @@ fn page_boundaries_never_issue_requests() {
     // No page -1.
     no_effects(&reduce(&mut s, &Action::PagePrevious));
     // Advance to page 2 the way the runtime does: request, then result.
-    let req = page_effect(&reduce(&mut s, &Action::PageNext));
-    apply_ok(&mut s, req, mock::PAGE_SIZE);
+    let (id, req) = expect_page(&reduce(&mut s, &Action::PageNext));
+    complete_page_ok(&mut s, id, &req, mock::PAGE_SIZE);
     // No page past the known total (25 items, 2 pages).
     no_effects(&reduce(&mut s, &Action::PageNext));
-    let req = page_effect(&reduce(&mut s, &Action::PagePrevious));
+    let (id, req) = expect_page(&reduce(&mut s, &Action::PagePrevious));
     assert_eq!(req.offset, 0);
-    apply_ok(&mut s, req, 0);
+    complete_page_ok(&mut s, id, &req, 0);
     no_effects(&reduce(&mut s, &Action::PagePrevious));
 }
 
@@ -124,99 +136,129 @@ fn unknown_total_short_page_blocks_next_request() {
     // A full page may have a successor, so the request is issued.
     s.messages.items = mock::mock_page(&inbox_id(), 0, mock::PAGE_SIZE).items;
     assert_eq!(
-        page_effect(&reduce(&mut s, &Action::PageNext)).offset,
+        expect_page(&reduce(&mut s, &Action::PageNext)).1.offset,
         mock::PAGE_SIZE
     );
 }
 
 #[test]
-fn rapid_page_next_advances_from_the_pending_request() {
+fn rapid_page_next_supersedes_the_older_request() {
     let mut s = state();
     s.messages.total = None;
-    let first = page_effect(&reduce(&mut s, &Action::PageNext));
-    let second = page_effect(&reduce(&mut s, &Action::PageNext));
+    let (first_id, first) = expect_page(&reduce(&mut s, &Action::PageNext));
+    let first_token = s.operations.cancellation(first_id).unwrap();
+    let (second_id, second) = expect_page(&reduce(&mut s, &Action::PageNext));
     assert_eq!(second.offset, first.offset + mock::PAGE_SIZE);
-    // The older result is now stale and must never apply.
+    // Superseding cancelled the older operation and removed it, so its
+    // result — however late — can never apply (plan §11).
+    assert!(first_token.is_cancelled());
+    assert!(s.operations.get(first_id).is_none());
     reduce(
         &mut s,
-        &Action::PageLoaded {
-            request: first,
-            result: Ok(mock::mock_page(&inbox_id(), 0, mock::PAGE_SIZE)),
-        },
+        &Action::BackendCompleted(OperationResult {
+            id: first_id,
+            outcome: Ok(OperationOutcome::Page(mock::mock_page(
+                &inbox_id(),
+                first.offset,
+                mock::PAGE_SIZE,
+            ))),
+        }),
     );
     assert_eq!(s.messages.offset, 0);
-    reduce(
-        &mut s,
-        &Action::PageLoaded {
-            request: second.clone(),
-            result: Ok(mock::mock_page(&inbox_id(), second.offset, mock::PAGE_SIZE)),
-        },
-    );
+    complete_page_ok(&mut s, second_id, &second, second.offset);
     assert_eq!(s.messages.offset, second.offset);
 }
 
 #[test]
-fn stale_page_result_is_dropped() {
+fn unknown_operation_result_is_ignored() {
     let mut s = state();
-    let req = page_effect(&reduce(&mut s, &Action::PageNext));
-    // A result for a different offset than the pending request is stale.
+    let before = s.clone();
     reduce(
         &mut s,
-        &Action::PageLoaded {
-            request: request(40),
-            result: Ok(mock::mock_page(&inbox_id(), 40, mock::PAGE_SIZE)),
-        },
-    );
-    assert_eq!(s.messages.offset, 0);
-    assert_eq!(s.pending_page.as_ref(), Some(&req));
-    load_page(&mut s, mock::PAGE_SIZE);
-    assert_eq!(s.messages.offset, mock::PAGE_SIZE);
-}
-
-#[test]
-fn stale_result_for_other_mailbox_is_dropped() {
-    let mut s = state();
-    let req = page_effect(&reduce(&mut s, &Action::PageNext));
-    let sent = PageRequest {
-        mailbox_id: MailboxId(String::from("sent")),
-        offset: 0,
-        limit: mock::PAGE_SIZE,
-    };
-    reduce(
-        &mut s,
-        &Action::PageLoaded {
-            request: sent,
-            result: Ok(mock::mock_page(
-                &MailboxId(String::from("sent")),
-                0,
+        &Action::BackendCompleted(OperationResult {
+            id: OperationId(999),
+            outcome: Ok(OperationOutcome::Page(mock::mock_page(
+                &inbox_id(),
+                40,
                 mock::PAGE_SIZE,
-            )),
-        },
+            ))),
+        }),
     );
-    assert_eq!(s.messages.offset, 0);
-    assert_eq!(s.pending_page.as_ref(), Some(&req));
+    assert_eq!(s.messages, before.messages);
+    assert_eq!(s.overlay, None);
 }
 
 #[test]
-fn page_load_failure_keeps_last_page_and_reports() {
+fn payload_kind_mismatch_is_ignored() {
     let mut s = state();
-    let req = page_effect(&reduce(&mut s, &Action::PageNext));
+    let (id, _req) = expect_page(&reduce(&mut s, &Action::PageNext));
+    // A page payload for a mailbox operation (defensive: manager routes by
+    // kind) must not crash or mutate state.
     reduce(
         &mut s,
-        &Action::PageLoaded {
-            request: req,
-            result: Err(String::from("himalaya exploded")),
-        },
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Mailboxes(mock::mock_mailboxes())),
+        }),
     );
-    assert_eq!(s.pending_page, None);
     assert_eq!(s.messages.offset, 0);
-    assert_eq!(s.messages.items.len(), mock::PAGE_SIZE);
-    assert!(
-        s.status
-            .message
-            .as_deref()
-            .is_some_and(|m| m.contains("himalaya exploded"))
+    assert!(s.operations.get(id).is_none(), "operation completed");
+}
+
+#[test]
+fn page_result_for_other_mailbox_is_dropped() {
+    let mut s = state();
+    // An inbox page load is in flight…
+    let (inbox_op, inbox_req) = expect_page(&reduce(&mut s, &Action::PageNext));
+    // …then the user switches to Sent, which starts its own request.
+    s.mailbox_selection = s
+        .mailboxes
+        .as_loaded()
+        .unwrap()
+        .iter()
+        .position(|m| m.id.0 == "sent")
+        .unwrap();
+    s.focus = Focus::Sidebar;
+    let (sent_op, sent_req) = expect_page(&reduce(&mut s, &Action::Activate));
+    assert_eq!(sent_req.mailbox_id.0, "sent");
+    // The slower inbox result arrives after the switch: it must never
+    // replace what the Sent view is loading (plan §11).
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id: inbox_op,
+            outcome: Ok(OperationOutcome::Page(mock::mock_page(
+                &inbox_id(),
+                inbox_req.offset,
+                mock::PAGE_SIZE,
+            ))),
+        }),
     );
+    assert!(s.messages.items.is_empty(), "sent page not loaded yet");
+    complete_page_ok(&mut s, sent_op, &sent_req, 0);
+    assert_eq!(s.messages.items.len(), 4, "sent page applied");
+}
+
+#[test]
+fn page_load_failure_opens_the_retry_modal_and_keeps_last_page() {
+    let mut s = state();
+    let (id, req) = expect_page(&reduce(&mut s, &Action::PageNext));
+    reduce(&mut s, &failure(id, &page_kind(&req), "himalaya exploded"));
+    assert_eq!(s.messages.offset, 0, "last coherent page stays");
+    assert_eq!(s.messages.items.len(), mock::PAGE_SIZE);
+    let Some(Overlay::Error(dialog)) = &s.overlay else {
+        panic!("error modal must open on failure");
+    };
+    assert_eq!(dialog.code, Some(1));
+    assert!(dialog.detail.contains("himalaya exploded"));
+    assert_eq!(
+        dialog.retry,
+        Some(RetrySpec {
+            kind: page_kind(&req)
+        })
+    );
+    assert_eq!(s.focus, Focus::ErrorModal);
+    assert_eq!(s.status.message.as_deref(), Some("Operation failed"));
 }
 
 #[test]
@@ -225,11 +267,10 @@ fn selection_identity_survives_refresh() {
     reduce(&mut s, &Action::MoveDown);
     reduce(&mut s, &Action::MoveDown);
     let selected: MessageId = s.selected_message().expect("selection").id.clone();
-    let effects = reduce(&mut s, &Action::Refresh);
-    let req = page_effect(&effects);
+    let (id, req) = expect_page(&reduce(&mut s, &Action::Refresh));
     assert_eq!(req.offset, 0);
     assert_eq!(s.status.message.as_deref(), Some("Refreshing…"));
-    load_page(&mut s, 0);
+    complete_page_ok(&mut s, id, &req, 0);
     assert_eq!(
         s.selected_message().expect("selection after refresh").id,
         selected
@@ -239,25 +280,15 @@ fn selection_identity_survives_refresh() {
 #[test]
 fn refresh_on_second_page_keeps_page_and_selection() {
     let mut s = state();
-    let req = page_effect(&reduce(&mut s, &Action::PageNext));
-    reduce(
-        &mut s,
-        &Action::PageLoaded {
-            request: req,
-            result: Ok(mock::mock_page(
-                &inbox_id(),
-                mock::PAGE_SIZE,
-                mock::PAGE_SIZE,
-            )),
-        },
-    );
+    let (id, req) = expect_page(&reduce(&mut s, &Action::PageNext));
+    complete_page_ok(&mut s, id, &req, mock::PAGE_SIZE);
     s.selection = 2;
-    let id = s.selected_message().unwrap().id.clone();
-    let effects = reduce(&mut s, &Action::Refresh);
-    assert_eq!(page_effect(&effects).offset, mock::PAGE_SIZE);
-    load_page(&mut s, mock::PAGE_SIZE);
+    let selected = s.selected_message().unwrap().id.clone();
+    let (id, req) = expect_page(&reduce(&mut s, &Action::Refresh));
+    assert_eq!(req.offset, mock::PAGE_SIZE);
+    complete_page_ok(&mut s, id, &req, mock::PAGE_SIZE);
     assert_eq!(s.messages.offset, mock::PAGE_SIZE);
-    assert_eq!(s.selected_message().unwrap().id, id);
+    assert_eq!(s.selected_message().unwrap().id, selected);
 }
 
 fn switch_to(s: &mut AppState, mailbox: &str) {
@@ -269,18 +300,10 @@ fn switch_to(s: &mut AppState, mailbox: &str) {
         .position(|m| m.id.0 == mailbox)
         .unwrap();
     s.focus = Focus::Sidebar;
-    let effects = reduce(s, &Action::Activate);
-    let req = page_effect(&effects);
+    let (id, req) = expect_page(&reduce(s, &Action::Activate));
     assert_eq!(req.mailbox_id.0, mailbox);
     assert_eq!(req.offset, 0);
-    let page = mock::mock_page(&MailboxId(String::from(mailbox)), 0, mock::PAGE_SIZE);
-    reduce(
-        s,
-        &Action::PageLoaded {
-            request: req,
-            result: Ok(page),
-        },
-    );
+    complete_page_ok(s, id, &req, 0);
 }
 
 #[test]
@@ -319,22 +342,48 @@ fn activate_on_same_mailbox_is_noop() {
     assert_eq!(s.messages.offset, 0);
 }
 
+// ── Startup: mailbox listing via the operation registry ──────────────────
+
+fn boot(s: &mut AppState) -> (OperationId, OperationKind) {
+    effect_parts(&reduce(s, &Action::Refresh))
+}
+
+#[test]
+fn refresh_before_mailboxes_load_starts_the_listing() {
+    let mut s = AppState::initial(mock::PAGE_SIZE);
+    let (id, kind) = boot(&mut s);
+    assert_eq!(kind, mailboxes_kind());
+    assert!(s.operations.get(id).is_some());
+    // A second refresh while loading must not stack a duplicate request.
+    no_effects(&reduce(&mut s, &Action::Refresh));
+    assert_eq!(s.operations.len(), 1);
+}
+
 #[test]
 fn mailboxes_loaded_selects_inbox_role() {
     let mut s = AppState::initial(mock::PAGE_SIZE);
     assert_eq!(s.routes.len(), 0);
-    let effects = reduce(&mut s, &Action::MailboxesLoaded(Ok(mock::mock_mailboxes())));
-    let req = page_effect(&effects);
+    let (id, kind) = boot(&mut s);
+    assert_eq!(kind, mailboxes_kind());
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Mailboxes(mock::mock_mailboxes())),
+        }),
+    );
+    let (_, req) = expect_page(&reduce(&mut s, &Action::Refresh));
     assert_eq!(req.mailbox_id.0, "inbox");
     assert_eq!(req.offset, 0);
     assert_eq!(s.routes.len(), 1);
     assert_eq!(s.mailbox_selection, 0);
-    assert_eq!(s.mailboxes, Loadable::Loaded(mock::mock_mailboxes()));
+    assert!(s.mailboxes.as_loaded().is_some());
 }
 
 #[test]
 fn mailboxes_loaded_falls_back_to_first_mailbox() {
     let mut s = AppState::initial(mock::PAGE_SIZE);
+    let (id, _) = boot(&mut s);
     let mailboxes = vec![
         Mailbox {
             id: MailboxId(String::from("notes")),
@@ -351,38 +400,280 @@ fn mailboxes_loaded_falls_back_to_first_mailbox() {
             total_count: None,
         },
     ];
-    let effects = reduce(&mut s, &Action::MailboxesLoaded(Ok(mailboxes)));
-    assert_eq!(page_effect(&effects).mailbox_id.0, "notes");
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Mailboxes(mailboxes)),
+        }),
+    );
+    let (_, req) = expect_page(&reduce(&mut s, &Action::Refresh));
+    assert_eq!(req.mailbox_id.0, "notes");
     assert_eq!(s.mailbox_selection, 0);
 }
 
 #[test]
 fn mailboxes_loaded_empty_is_valid_not_an_error() {
     let mut s = AppState::initial(mock::PAGE_SIZE);
-    no_effects(&reduce(&mut s, &Action::MailboxesLoaded(Ok(Vec::new()))));
+    let (id, _) = boot(&mut s);
+    no_effects(&reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Mailboxes(Vec::new())),
+        }),
+    ));
     assert_eq!(s.routes.len(), 0);
     assert!(s.messages.items.is_empty());
     assert!(!s.quit_requested);
 }
 
 #[test]
-fn mailboxes_loaded_failure_is_reported() {
+fn mailboxes_failure_opens_modal_and_retry_reloads() {
     let mut s = AppState::initial(mock::PAGE_SIZE);
-    no_effects(&reduce(
-        &mut s,
-        &Action::MailboxesLoaded(Err(String::from("no such account"))),
-    ));
-    assert_eq!(
-        s.mailboxes,
-        Loadable::Failed(String::from("no such account"))
-    );
+    let (id, kind) = boot(&mut s);
+    reduce(&mut s, &failure(id, &kind, "no such account"));
+    assert!(matches!(s.mailboxes, Loadable::Failed(_)));
+    assert!(s.overlay.is_some());
+    // Retry replays the typed mailbox-load intent under a new id.
+    let effects = reduce(&mut s, &Action::RetryError);
+    let (retry_id, retry_kind) = effect_parts(&effects);
+    assert_eq!(retry_kind, mailboxes_kind());
+    assert_ne!(retry_id, id, "retry gets a fresh operation id");
+    assert!(s.overlay.is_none(), "modal closed on retry");
+    assert!(matches!(s.mailboxes, Loadable::Loading));
+    assert!(s.operations.get(retry_id).is_some());
+}
+
+#[test]
+fn input_and_ticks_keep_working_while_an_operation_is_in_flight() {
+    let mut s = state();
+    let _ = expect_page(&reduce(&mut s, &Action::PageNext));
+    // Foreground work never blocks rendering or input (plan §3): movement
+    // and ticks apply while the request is in flight.
+    reduce(&mut s, &Action::Tick);
+    assert_eq!(s.ticks, 1);
+    reduce(&mut s, &Action::MoveDown);
+    assert_eq!(s.selection, 1);
+    assert!(s.operations.page_in_flight(&inbox_id()).is_some());
+}
+
+// ── Esc cancellation (plan §10/§11) ──────────────────────────────────────
+
+#[test]
+fn esc_cancels_foreground_work_and_returns_to_stable_state() {
+    let mut s = state();
+    let (id, req) = expect_page(&reduce(&mut s, &Action::PageNext));
+    let token = s.operations.cancellation(id).unwrap();
+    reduce(&mut s, &Action::BackOrCancel);
+    // The operation is gone and its token fired: the backend kills the
+    // child it owns (Phase 3.2).
+    assert!(token.is_cancelled());
+    assert!(s.operations.get(id).is_none());
+    assert_eq!(s.operations.page_in_flight(&req.mailbox_id), None);
+    // The prior stable state stands: old page still displayed, no modal,
+    // no route change, no quit.
+    assert_eq!(s.messages.offset, 0);
+    assert_eq!(s.messages.items.len(), mock::PAGE_SIZE);
+    assert_eq!(s.overlay, None);
+    assert_eq!(s.active_route().unwrap().mailbox_id().unwrap().0, "inbox");
+    assert!(!s.quit_requested);
     assert!(
         s.status
             .message
             .as_deref()
-            .is_some_and(|m| m.contains("no such account"))
+            .is_some_and(|m| m.contains("cancelled"))
     );
 }
+
+#[test]
+fn esc_during_startup_load_cancels_then_second_esc_quits() {
+    let mut s = AppState::initial(mock::PAGE_SIZE);
+    let (id, _) = boot(&mut s);
+    let token = s.operations.cancellation(id).unwrap();
+    reduce(&mut s, &Action::BackOrCancel);
+    assert!(token.is_cancelled());
+    assert!(!s.quit_requested, "first Esc cancels, does not quit");
+    // Nothing left to cancel: the next Esc quits as before.
+    reduce(&mut s, &Action::BackOrCancel);
+    assert!(s.quit_requested);
+}
+
+#[test]
+fn esc_with_open_modal_dismisses_it() {
+    let mut s = state();
+    let (id, req) = expect_page(&reduce(&mut s, &Action::PageNext));
+    reduce(&mut s, &failure(id, &page_kind(&req), "boom"));
+    reduce(&mut s, &Action::BackOrCancel);
+    assert!(s.overlay.is_none(), "Esc closes the modal");
+    assert_eq!(s.focus, Focus::MessageList);
+}
+
+// ── Modal interactions (plan §12) ────────────────────────────────────────
+
+fn open_modal(s: &mut AppState, detail: &str) -> (OperationId, PageRequest) {
+    let (id, req) = expect_page(&reduce(s, &Action::PageNext));
+    reduce(
+        s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Err(OperationFailure {
+                code: Some(4),
+                detail: String::from(detail),
+                retry: Some(page_kind(&req).retry_spec()),
+                ambiguous: false,
+            }),
+        }),
+    );
+    (id, req)
+}
+
+#[test]
+fn retry_replays_equivalent_intent_with_new_operation_id() {
+    let mut s = state();
+    let (id, req) = open_modal(&mut s, "himalaya exploded");
+    let effects = reduce(&mut s, &Action::RetryError);
+    let (retry_id, retry_kind) = effect_parts(&effects);
+    assert_ne!(retry_id, id, "retry must allocate a new operation id");
+    assert_eq!(retry_kind, page_kind(&req), "same typed intent");
+    assert!(s.operations.get(retry_id).is_some());
+    assert!(s.operations.get(id).is_none());
+    assert!(s.overlay.is_none());
+    assert_eq!(s.focus, Focus::MessageList);
+}
+
+#[test]
+fn dismiss_closes_modal_without_side_effects() {
+    let mut s = state();
+    open_modal(&mut s, "himalaya exploded");
+    no_effects(&reduce(&mut s, &Action::DismissError));
+    assert!(s.overlay.is_none());
+    assert_eq!(s.focus, Focus::MessageList);
+    // The last coherent page is untouched by dismiss.
+    assert_eq!(s.messages.offset, 0);
+}
+
+#[test]
+fn modal_enter_activates_the_focused_button() {
+    let mut s = state();
+    open_modal(&mut s, "himalaya exploded");
+    // Default button is Dismiss: Enter dismisses without new work.
+    no_effects(&reduce(&mut s, &Action::Activate));
+    assert!(s.overlay.is_none());
+    // Focus Retry first: Enter replays the intent.
+    let (_, req) = open_modal(&mut s, "himalaya exploded");
+    reduce(&mut s, &Action::FocusNext);
+    let effects = reduce(&mut s, &Action::Activate);
+    let (_, kind) = effect_parts(&effects);
+    assert_eq!(kind, page_kind(&req));
+}
+
+#[test]
+fn modal_buttons_toggle_with_tab() {
+    let mut s = state();
+    open_modal(&mut s, "boom");
+    let Some(Overlay::Error(dialog)) = &s.overlay else {
+        panic!("modal open");
+    };
+    assert_eq!(dialog.button, crate::app::overlay::ModalButton::Dismiss);
+    reduce(&mut s, &Action::FocusNext);
+    let Some(Overlay::Error(dialog)) = &s.overlay else {
+        panic!("modal open");
+    };
+    assert_eq!(dialog.button, crate::app::overlay::ModalButton::Retry);
+    reduce(&mut s, &Action::FocusPrevious);
+    let Some(Overlay::Error(dialog)) = &s.overlay else {
+        panic!("modal open");
+    };
+    assert_eq!(dialog.button, crate::app::overlay::ModalButton::Dismiss);
+}
+
+#[test]
+fn modal_scroll_clamps_to_content() {
+    let long_detail = "line\n".repeat(60);
+    let mut s = state();
+    open_modal(&mut s, long_detail.trim_end());
+    let max = match &s.overlay {
+        Some(Overlay::Error(dialog)) => {
+            crate::ui::components::error_modal::max_scroll(dialog, s.size)
+        }
+        None => panic!("modal open"),
+    };
+    assert!(max > 0, "long detail must overflow the viewport");
+    for _ in 0..(max + 20) {
+        reduce(&mut s, &Action::MoveDown);
+    }
+    let Some(Overlay::Error(dialog)) = &s.overlay else {
+        panic!("modal open");
+    };
+    assert_eq!(dialog.scroll, max, "scroll clamps at the end");
+    for _ in 0..(max + 5) {
+        reduce(&mut s, &Action::MoveUp);
+    }
+    let Some(Overlay::Error(dialog)) = &s.overlay else {
+        panic!("modal open");
+    };
+    assert_eq!(dialog.scroll, 0, "scroll clamps at the start");
+    // Page-style scrolling moves in viewport steps and clamps the same way.
+    reduce(&mut s, &Action::PageNext);
+    let Some(Overlay::Error(dialog)) = &s.overlay else {
+        panic!("modal open");
+    };
+    assert!(dialog.scroll > 0);
+}
+
+#[test]
+fn modal_restores_previous_focus_on_dismiss() {
+    let mut s = state();
+    let (_, _) = open_modal(&mut s, "boom");
+    // Simulate having been in the sidebar when the failure hit.
+    if let Some(Overlay::Error(dialog)) = s.overlay.as_mut() {
+        dialog.previous_focus = Focus::Sidebar;
+    }
+    assert_eq!(s.focus, Focus::ErrorModal);
+    reduce(&mut s, &Action::DismissError);
+    assert_eq!(s.focus, Focus::Sidebar, "focus restored");
+}
+
+#[test]
+fn modal_swallows_unrelated_input() {
+    let mut s = state();
+    open_modal(&mut s, "boom");
+    let before = s.clone();
+    reduce(&mut s, &Action::SearchEdit(SearchEdit::Char('x')));
+    reduce(&mut s, &Action::SubmitSearch);
+    reduce(&mut s, &Action::OpenSearch);
+    reduce(&mut s, &Action::Compose);
+    reduce(&mut s, &Action::Quit);
+    assert_eq!(s.search_query, before.search_query);
+    assert_eq!(s.focus, before.focus);
+    assert_eq!(s.quit_requested, before.quit_requested);
+    assert!(s.overlay.is_some(), "modal stays open");
+}
+
+#[test]
+fn ambiguous_failure_is_flagged_for_the_modal() {
+    let mut s = state();
+    let (id, req) = expect_page(&reduce(&mut s, &Action::PageNext));
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Err(OperationFailure {
+                code: Some(1),
+                detail: String::from("SMTP DATA failed: reached unexpected EOF"),
+                retry: Some(page_kind(&req).retry_spec()),
+                ambiguous: true,
+            }),
+        }),
+    );
+    let Some(Overlay::Error(dialog)) = &s.overlay else {
+        panic!("modal open");
+    };
+    assert!(dialog.ambiguous, "ambiguity must reach the modal");
+}
+
+// ── Focus, search, routes, resize (Phase 1/2 behavior) ───────────────────
 
 #[test]
 fn focus_cycles_tab_shift_tab() {
@@ -396,6 +687,14 @@ fn focus_cycles_tab_shift_tab() {
     assert_eq!(s.focus, Focus::MessageList);
     reduce(&mut s, &Action::FocusPrevious);
     assert_eq!(s.focus, Focus::Sidebar);
+}
+
+#[test]
+fn modal_focus_is_outside_the_tab_cycle() {
+    // The modal focus is transitory and never cycles into screen focuses.
+    assert_eq!(Focus::ErrorModal.next(), Focus::ErrorModal);
+    assert_eq!(Focus::ErrorModal.previous(), Focus::ErrorModal);
+    assert!(!Focus::ErrorModal.accepts_shortcuts());
 }
 
 #[test]
@@ -619,9 +918,15 @@ fn mailbox_switch_updates_route_only_via_activate() {
 fn reducer_is_free_of_io_by_construction() {
     // Structural guard: reduce takes &mut state and returns plain effects;
     // it cannot spawn, read files, or touch the network itself. Backend
-    // work is only described as effects (Phase 2).
+    // work is only described as effects.
     let mut s = state();
     let effects = reduce(&mut s, &Action::Refresh);
-    assert!(matches!(effects.as_slice(), [Effect::LoadPage(_)]));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect {
+            kind: OperationKind::LoadPage(_),
+            ..
+        }]
+    ));
     assert!(s.mailboxes.as_loaded().is_some());
 }
