@@ -620,3 +620,33 @@ fn composer_flags_invalid_addresses_in_the_warning_color() {
     let warned = buffer.content.iter().any(|cell| cell.fg == theme.warning);
     assert!(!warned, "valid address must not warn");
 }
+
+#[test]
+fn discard_dialog_renders_with_keep_as_the_safe_default() {
+    let mut state = mock_initial_state();
+    let actions: Vec<Action> = [
+        Action::Compose,
+        Action::ComposerEdit(tmail::app::action::ComposerEdit::Char('x')),
+        Action::DiscardDraft,
+    ]
+    .into_iter()
+    .collect();
+    let text = draw_after(&mut state, &actions, 152, 40);
+    assert!(text.contains("Discard draft?"), "title missing:\n{text}");
+    assert!(
+        text.contains("deleted permanently"),
+        "body missing:\n{text}"
+    );
+    assert!(
+        text.contains("[ Discard ]"),
+        "discard button missing:\n{text}"
+    );
+    assert!(
+        text.contains("[ Keep editing ]"),
+        "keep button missing:\n{text}"
+    );
+    assert!(
+        text.contains("(no subject)"),
+        "empty subject preview:\n{text}"
+    );
+}

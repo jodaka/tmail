@@ -18,5 +18,5 @@ pub use operation::{
     Operation, OperationFailure, OperationId, OperationKind, OperationOutcome, OperationRegistry,
     OperationResult, RetrySpec,
 };
-pub use overlay::{ErrorDialog, ModalButton, Overlay};
+pub use overlay::{ConfirmButton, DiscardDialog, ErrorDialog, ModalButton, Overlay};
 pub use state::AppState;

@@ -326,6 +326,26 @@ impl OperationRegistry {
         })
     }
 
+    /// Cancel every in-flight save of `local_id` (confirmed discard): the
+    /// tokens fire so the backend stops its children, and the operations
+    /// are removed so their results can never re-apply.
+    pub fn cancel_draft_saves(&mut self, local_id: &crate::domain::DraftId) {
+        let ids: Vec<OperationId> = self
+            .entries
+            .values()
+            .filter(|op| match &op.kind {
+                OperationKind::SaveDraft { draft } => draft.local_id == *local_id,
+                _ => false,
+            })
+            .map(|op| op.id)
+            .collect();
+        for id in ids {
+            if let Some(op) = self.cancel(id) {
+                tracing::debug!(id = %op.id, "draft save cancelled for discard");
+            }
+        }
+    }
+
     /// Whether nothing is in flight (spinner hidden).
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()

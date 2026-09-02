@@ -1,10 +1,11 @@
 //! Overlays (plan §9): modals rendered above every screen.
 //!
-//! Phase 3 adds the error overlay only; the confirm-discard and
-//! attachment-path dialogs arrive with their phases and extend this enum.
+//! Phase 3 added the error overlay; the composer adds the confirm-discard
+//! dialog (plan §14). The attachment-path dialog arrives with Phase 8.
 
 use crate::app::focus::Focus;
 use crate::app::operation::RetrySpec;
+use crate::domain::DraftSnapshot;
 
 /// Which modal button the keyboard targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +20,27 @@ impl ModalButton {
         match self {
             ModalButton::Retry => ModalButton::Dismiss,
             ModalButton::Dismiss => ModalButton::Retry,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        self.next()
+    }
+}
+
+/// Which button the confirm-discard dialog targets. The safe default is
+/// Keep (plan §14: discard happens only after explicit confirmation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmButton {
+    Discard,
+    Keep,
+}
+
+impl ConfirmButton {
+    pub fn next(self) -> Self {
+        match self {
+            ConfirmButton::Discard => ConfirmButton::Keep,
+            ConfirmButton::Keep => ConfirmButton::Discard,
         }
     }
 
@@ -53,4 +75,18 @@ pub struct ErrorDialog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlay {
     Error(ErrorDialog),
+    /// Composer discard confirmation (plan §14): deleting local and remote
+    /// draft state happens only after explicit confirmation.
+    ConfirmDiscard(DiscardDialog),
+}
+
+/// The composer's confirm-discard dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardDialog {
+    /// The draft that would be deleted (journal entry + remote copies).
+    pub draft: DraftSnapshot,
+    /// Keyboard-targeted button; defaults to the safe `Keep`.
+    pub button: ConfirmButton,
+    /// Focus to restore when the dialog closes (always the composer).
+    pub previous_focus: Focus,
 }

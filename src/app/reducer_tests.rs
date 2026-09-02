@@ -605,7 +605,7 @@ fn modal_scroll_clamps_to_content() {
         Some(Overlay::Error(dialog)) => {
             crate::ui::components::error_modal::max_scroll(dialog, s.size)
         }
-        None => panic!("modal open"),
+        other => panic!("error modal open, got {other:?}"),
     };
     assert!(max > 0, "long detail must overflow the viewport");
     for _ in 0..(max + 20) {
@@ -1284,7 +1284,6 @@ fn unimplemented_actions_are_safe_noops() {
         Action::Forward,
         Action::Send,
         Action::LeaveComposer,
-        Action::DiscardDraft,
         Action::RetryError,
         Action::DismissError,
         Action::SubmitSearch,
@@ -1932,4 +1931,151 @@ fn edit_without_a_clock_still_autosaves_once_the_clock_arrives() {
     no_effects(&tick(&mut s, 0)); // arms the window
     let (_, snapshot) = expect_save(&tick(&mut s, 2));
     assert_eq!(snapshot.to, "x");
+}
+
+// ── Confirmed discard (plan §14 Phase 6.6) ───────────────────────────────
+
+fn open_discard_dialog(s: &mut AppState) {
+    compose(s);
+    tick(s, 0);
+    reduce(s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    no_effects(&reduce(s, &Action::DiscardDraft));
+    assert!(matches!(s.overlay, Some(Overlay::ConfirmDiscard(_))));
+    assert_eq!(s.focus, Focus::ErrorModal);
+}
+
+#[test]
+fn discard_requires_confirmation_and_defaults_to_keep() {
+    let mut s = state();
+    open_discard_dialog(&mut s);
+    // The draft is untouched until confirmation.
+    assert!(s.composer.is_some());
+    assert_eq!(s.routes.len(), 2);
+    // Enter activates the focused button: Keep (the safe default).
+    no_effects(&reduce(&mut s, &Action::Activate));
+    assert!(s.composer.is_some(), "keep preserves the draft");
+    assert!(s.overlay.is_none());
+    assert_eq!(s.focus, Focus::Composer);
+    assert_eq!(s.routes.len(), 2);
+}
+
+#[test]
+fn esc_on_the_discard_dialog_keeps_the_draft() {
+    let mut s = state();
+    open_discard_dialog(&mut s);
+    reduce(&mut s, &Action::BackOrCancel);
+    assert!(s.overlay.is_none());
+    assert!(s.composer.is_some());
+    assert_eq!(s.focus, Focus::Composer, "focus returns to the composer");
+}
+
+#[test]
+fn confirmed_discard_deletes_local_and_remote_state() {
+    let mut s = state();
+    open_discard_dialog(&mut s);
+    reduce(&mut s, &Action::FocusNext); // Discard button
+    let effects = reduce(&mut s, &Action::Activate);
+    let (id, kind) = effect_parts(&effects);
+    let crate::app::operation::OperationKind::DeleteDraft { draft } = &kind else {
+        panic!("expected DeleteDraft, got {kind:?}");
+    };
+    assert_eq!(
+        draft.local_id,
+        crate::domain::DraftId(String::from("local-unsaved"))
+    );
+    assert_eq!(draft.to, "x");
+    // Local state is gone immediately; the remote sweep runs in the op.
+    assert!(s.composer.is_none(), "local draft removed on confirmation");
+    assert_eq!(s.routes.len(), 1);
+    assert_eq!(s.focus, Focus::MessageList);
+    assert!(s.operations.get(id).is_some());
+    assert_eq!(s.status.message.as_deref(), Some("Draft discarded"));
+    // Confirmation completes without further state change.
+    complete_done(&mut s, id);
+    assert!(s.composer.is_none());
+    // Composing starts fresh.
+    compose(&mut s);
+    let composer = s.composer.as_ref().unwrap();
+    assert_eq!(composer.draft.to, "");
+    assert_eq!(composer.draft.revision, 0);
+}
+
+#[test]
+fn discard_cancels_an_in_flight_save_of_the_same_draft() {
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    let (save_id, _) = expect_save(&tick(&mut s, 2));
+    let save_token = s.operations.cancellation(save_id).unwrap();
+    // Discard while that save is in flight.
+    reduce(&mut s, &Action::DiscardDraft);
+    reduce(&mut s, &Action::FocusNext);
+    let effects = reduce(&mut s, &Action::Activate);
+    assert!(
+        save_token.is_cancelled(),
+        "the in-flight save must not resurrect the discarded draft"
+    );
+    assert!(s.operations.get(save_id).is_none());
+    let (delete_id, kind) = effect_parts(&effects);
+    assert!(matches!(kind, OperationKind::DeleteDraft { .. }));
+    assert!(s.operations.get(delete_id).is_some());
+    // The cancelled save's (suppressed) result can never apply.
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id: save_id,
+            outcome: Ok(OperationOutcome::DraftSaved {
+                remote_id: MessageId(String::from("late-remote")),
+            }),
+        }),
+    );
+    assert!(s.composer.is_none());
+}
+
+#[test]
+fn discard_dialog_swallows_unrelated_input() {
+    let mut s = state();
+    open_discard_dialog(&mut s);
+    let draft_before = s.composer.as_ref().unwrap().draft.to.clone();
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('y')));
+    reduce(&mut s, &Action::SearchEdit(SearchEdit::Char('z')));
+    reduce(&mut s, &Action::Refresh);
+    reduce(&mut s, &Action::MoveDown);
+    reduce(&mut s, &Action::Quit);
+    let composer = s.composer.as_ref().unwrap();
+    assert_eq!(composer.draft.to, draft_before);
+    assert!(!s.quit_requested);
+    assert!(s.overlay.is_some(), "dialog stays open");
+}
+
+#[test]
+fn discard_of_a_never_saved_draft_still_needs_confirmation() {
+    let mut s = state();
+    compose(&mut s);
+    no_effects(&reduce(&mut s, &Action::DiscardDraft));
+    assert!(matches!(s.overlay, Some(Overlay::ConfirmDiscard(_))));
+    reduce(&mut s, &Action::FocusNext);
+    let effects = reduce(&mut s, &Action::Activate);
+    let (_, kind) = effect_parts(&effects);
+    assert!(matches!(kind, OperationKind::DeleteDraft { .. }));
+    assert!(s.composer.is_none());
+}
+
+#[test]
+fn discard_delete_failure_opens_the_error_modal() {
+    let mut s = state();
+    compose(&mut s);
+    reduce(&mut s, &Action::DiscardDraft);
+    reduce(&mut s, &Action::FocusNext);
+    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    // The draft is already gone locally; a remote sweep failure surfaces.
+    reduce(&mut s, &failure(id, &kind, "imap refused"));
+    let Some(Overlay::Error(_)) = &s.overlay else {
+        panic!("error modal must open");
+    };
+    assert!(
+        s.composer.is_none(),
+        "the discard itself is not rolled back"
+    );
 }

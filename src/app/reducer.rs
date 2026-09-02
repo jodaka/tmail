@@ -12,7 +12,7 @@ use crate::app::composer::{ComposerField, ComposerState};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::operation::{OperationFailure, OperationKind, OperationOutcome, OperationResult};
-use crate::app::overlay::{ErrorDialog, ModalButton, Overlay};
+use crate::app::overlay::{ConfirmButton, DiscardDialog, ErrorDialog, ModalButton, Overlay};
 use crate::app::route::{MailboxRoute, MessageRoute, Route};
 use crate::app::state::{AppState, Loadable};
 use crate::domain::{
@@ -96,15 +96,15 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         | Action::ReplyAll
         | Action::Forward
         | Action::Send
-        | Action::LeaveComposer
-        | Action::DiscardDraft => {
-            // Vocabulary is complete (plan §9); the composer phases own
-            // these actions. No-op, never a crash.
+        | Action::LeaveComposer => {
+            // Vocabulary is complete (plan §9); Phase 7 owns reply/forward/
+            // send, and Esc handles leaving. No-op, never a crash.
             tracing::debug!(?action, "action not yet implemented");
             Vec::new()
         }
+        Action::DiscardDraft => open_discard_confirm(state),
         Action::RetryError | Action::DismissError => {
-            // Only meaningful with the error overlay open (handled above).
+            // Only meaningful with the error modal open (handled above).
             Vec::new()
         }
         Action::BackendCompleted(result) => backend_completed(state, result),
@@ -129,12 +129,20 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
     }
 }
 
-// ── Modal overlay (plan §9/§12) ──────────────────────────────────────────
+// ── Modal overlays (plan §9/§12) ─────────────────────────────────────────
 
-/// Handle `action` while the error modal is open. Returns `None` when no
-/// modal is open (the caller falls through to normal handling).
+/// Handle `action` while any modal is open. Returns `None` when no modal
+/// is open (the caller falls through to normal handling).
 fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
-    state.overlay.as_ref()?;
+    match state.overlay {
+        Some(Overlay::Error(_)) => Some(error_modal_reduce(state, action)),
+        Some(Overlay::ConfirmDiscard(_)) => Some(discard_modal_reduce(state, action)),
+        None => None,
+    }
+}
+
+/// Error modal handling (plan §12).
+fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
     // Scroll budget from the same layout math the renderer uses, so the
     // reducer and the drawn modal always agree on the clamp.
     let (max_scroll, viewport) = match &state.overlay {
@@ -149,10 +157,12 @@ fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
                 layout.viewport_lines,
             )
         }
-        None => (0, 1),
+        // Only the error modal scrolls; this arm is unreachable in
+        // practice (discard_modal_reduce handles its own overlay).
+        _ => (0, 1),
     };
     let Some(Overlay::Error(dialog)) = state.overlay.as_mut() else {
-        return None;
+        return Vec::new();
     };
     match action {
         Action::MoveUp => dialog.scroll = dialog.scroll.saturating_sub(1),
@@ -196,9 +206,9 @@ fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
                             && let Some(now) = state.clock
                         {
                             let fresh = composer.draft.start_save(now);
-                            return Some(vec![state.operations.start(OperationKind::SaveDraft {
+                            return vec![state.operations.start(OperationKind::SaveDraft {
                                 draft: Box::new(fresh),
-                            })]);
+                            })];
                         }
                         // No live draft (or no clock yet): replay the
                         // stored snapshot unchanged — the safe direction
@@ -206,7 +216,7 @@ fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
                     }
                     _ => {}
                 }
-                return Some(vec![state.operations.start(spec.kind)]);
+                return vec![state.operations.start(spec.kind)];
             }
             if !wants_retry {
                 // Enter on Dismiss: close without new work.
@@ -214,12 +224,62 @@ fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
                 state.focus = focus;
             }
             // `RetryError` on a non-retryable failure keeps the modal open.
-            return Some(Vec::new());
+            return Vec::new();
         }
         // Everything else is swallowed while the modal is open.
         _ => {}
     }
-    Some(Vec::new())
+    Vec::new()
+}
+
+/// Confirm-discard dialog handling (plan §14). Every input is swallowed
+/// except button switching, keep (Esc/Keep button), and confirm.
+fn discard_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
+    let Some(Overlay::ConfirmDiscard(dialog)) = state.overlay.as_mut() else {
+        return Vec::new();
+    };
+    match action {
+        Action::FocusNext => dialog.button = dialog.button.next(),
+        Action::FocusPrevious => dialog.button = dialog.button.previous(),
+        // Esc keeps the draft: closing the dialog is not a discard.
+        Action::BackOrCancel => {
+            let focus = dialog.previous_focus;
+            state.overlay = None;
+            state.focus = focus;
+        }
+        Action::Activate => {
+            let confirm = dialog.button == ConfirmButton::Discard;
+            let focus = dialog.previous_focus;
+            let dialog = state.overlay.take().expect("dialog open");
+            let Overlay::ConfirmDiscard(dialog) = dialog else {
+                unreachable!("checked above")
+            };
+            state.focus = focus;
+            if confirm {
+                return confirm_discard(state, dialog.draft);
+            }
+        }
+        // Error-modal-only actions do nothing here.
+        _ => {}
+    }
+    Vec::new()
+}
+
+/// Confirmed discard (plan §14): remove the local draft immediately, then
+/// delete its journal entry and remote copies via one best-effort backend
+/// operation. Any in-flight save of the same draft is cancelled first so
+/// it cannot resurrect the draft after the sweep ran.
+fn confirm_discard(state: &mut AppState, draft: crate::domain::DraftSnapshot) -> Vec<Effect> {
+    state.composer = None;
+    if let Some(Route::Composer) = state.active_route() {
+        state.routes.pop();
+        state.focus = Focus::MessageList;
+    }
+    state.operations.cancel_draft_saves(&draft.local_id);
+    state.set_status("Draft discarded");
+    vec![state.operations.start(OperationKind::DeleteDraft {
+        draft: Box::new(draft),
+    })]
 }
 
 /// Open the Retry/Dismiss modal for a failed operation (plan §12).
@@ -998,6 +1058,22 @@ fn load_drafts(state: &mut AppState) -> Vec<Effect> {
         return Vec::new();
     }
     vec![state.operations.start(OperationKind::LoadDrafts)]
+}
+
+/// Open the confirm-discard dialog (plan §14: discard only after explicit
+/// confirmation). A no-op without a draft.
+fn open_discard_confirm(state: &mut AppState) -> Vec<Effect> {
+    let Some(composer) = state.composer.as_ref() else {
+        return Vec::new();
+    };
+    let draft = composer.draft.snapshot();
+    state.overlay = Some(Overlay::ConfirmDiscard(DiscardDialog {
+        draft,
+        button: ConfirmButton::Keep,
+        previous_focus: state.focus,
+    }));
+    state.focus = Focus::ErrorModal;
+    Vec::new()
 }
 
 /// Leave the composer (plan §14): pop the route, return to the prior
