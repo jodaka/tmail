@@ -15,7 +15,9 @@ use crate::app::operation::{OperationFailure, OperationKind, OperationOutcome, O
 use crate::app::overlay::{ErrorDialog, ModalButton, Overlay};
 use crate::app::route::{MailboxRoute, MessageRoute, Route};
 use crate::app::state::{AppState, Loadable};
-use crate::domain::{Mailbox, MailboxId, MailboxRole, Message, MessageLocator, Page, PageRequest};
+use crate::domain::{
+    DraftSaveState, Mailbox, MailboxId, MailboxRole, Message, MessageLocator, Page, PageRequest,
+};
 
 /// Apply `action` to `state`, returning backend work to spawn. Never
 /// performs I/O, never panics on odd input.
@@ -30,10 +32,7 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::PagePrevious => page_step(state, -1),
         Action::PageNext => page_step(state, 1),
         Action::Activate => activate(state),
-        Action::BackOrCancel => {
-            back_or_cancel(state);
-            Vec::new()
-        }
+        Action::BackOrCancel => back_or_cancel(state),
         Action::FocusNext => {
             if state.focus == Focus::Composer {
                 if let Some(composer) = state.composer.as_mut() {
@@ -1001,13 +1000,35 @@ fn load_drafts(state: &mut AppState) -> Vec<Effect> {
     vec![state.operations.start(OperationKind::LoadDrafts)]
 }
 
-/// Leave the composer (plan §14: "Leaving returns to the prior route and
-/// preserves the draft"). The route pops; the draft data stays so compose
-/// reopens it. Forcing a save before leaving lands with Phase 6.5.
-fn leave_composer(state: &mut AppState) {
-    if matches!(state.active_route(), Some(Route::Composer)) {
-        state.routes.pop();
-        state.focus = Focus::MessageList;
+/// Leave the composer (plan §14): pop the route, return to the prior
+/// route, and FORCE a save of any unsaved revision — no debounce, never a
+/// silent discard. The draft data stays in `AppState.composer` so compose
+/// reopens it, and the save completes in the background. A save of the
+/// current revision already in flight is not duplicated; an in-flight save
+/// of an older revision is superseded by the forced one.
+fn leave_composer(state: &mut AppState) -> Vec<Effect> {
+    if !matches!(state.active_route(), Some(Route::Composer)) {
+        return Vec::new();
+    }
+    state.routes.pop();
+    state.focus = Focus::MessageList;
+    let Some(composer) = state.composer.as_ref() else {
+        return Vec::new();
+    };
+    let dirty = composer.draft.is_dirty();
+    let in_flight = composer.draft.local_id.as_ref().is_some_and(|local_id| {
+        state
+            .operations
+            .is_saving_draft(local_id, composer.draft.revision)
+    });
+    if dirty && !in_flight {
+        tracing::debug!(
+            revision = composer.draft.revision,
+            "forcing draft save on leave"
+        );
+        draft_save_effect(state).into_iter().collect()
+    } else {
+        Vec::new()
     }
 }
 
@@ -1019,6 +1040,15 @@ fn autosave_tick(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset
     let Some(composer) = state.composer.as_mut() else {
         return Vec::new();
     };
+    if composer.draft.save != DraftSaveState::Debouncing {
+        return Vec::new();
+    }
+    // An edit made before the first tick (no clock yet) arms now, so the
+    // debounce can never stall on a missing timestamp.
+    if composer.draft.last_edit_at.is_none() {
+        composer.draft.last_edit_at = Some(now);
+        return Vec::new();
+    }
     if !composer.draft.autosave_due(now) {
         return Vec::new();
     }
@@ -1080,25 +1110,28 @@ fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Vec<Effect> {
 /// `Esc`: cancel foreground work, close an overlay, or go back — in that
 /// order (plan §10). Cancelling returns to the prior stable state: the
 /// displayed page/list was never cleared while the request ran.
-fn back_or_cancel(state: &mut AppState) {
-    if let Some(op) = state.operations.cancel_foreground() {
-        tracing::info!(id = %op.id, kind = ?op.kind, "cancelled foreground operation");
-        state.set_status(format!("{} — cancelled", op.kind.summary()));
-        return;
-    }
+///
+/// The composer overrides the cancel step (plan §10 composer contract:
+/// "`Esc` save/leave; never silently discard"): leaving forces a save of
+/// the draft instead of cancelling the in-flight autosave.
+fn back_or_cancel(state: &mut AppState) -> Vec<Effect> {
     if let Some(Overlay::Error(dialog)) = state.overlay.take() {
         state.focus = dialog.previous_focus;
-        return;
+        return Vec::new();
     }
     if state.focus == Focus::SearchField {
         state.focus = Focus::MessageList;
-        return;
+        return Vec::new();
     }
     if matches!(state.active_route(), Some(Route::Composer)) {
         // The composer may sit at the root (no mailbox loaded yet); Esc
         // leaves it either way, preserving the draft (plan §14).
-        leave_composer(state);
-        return;
+        return leave_composer(state);
+    }
+    if let Some(op) = state.operations.cancel_foreground() {
+        tracing::info!(id = %op.id, kind = ?op.kind, "cancelled foreground operation");
+        state.set_status(format!("{} — cancelled", op.kind.summary()));
+        return Vec::new();
     }
     if state.routes.len() > 1 {
         // Pop the reader: the mailbox route underneath still holds the
@@ -1107,11 +1140,12 @@ fn back_or_cancel(state: &mut AppState) {
         state.open_message = Loadable::Idle;
         state.reader_scroll = 0;
         state.focus = Focus::MessageList;
-        return;
+        return Vec::new();
     }
     // Root route with nothing to cancel or close: exit cleanly (plan §19
     // Phase 1 acceptance: app exits with Esc/quit).
     state.quit_requested = true;
+    Vec::new()
 }
 
 fn search_edit(state: &mut AppState, edit: &SearchEdit) {

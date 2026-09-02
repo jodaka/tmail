@@ -314,6 +314,18 @@ impl OperationRegistry {
             .any(|op| matches!(op.kind, OperationKind::LoadDrafts))
     }
 
+    /// Whether a save of exactly `revision` of `local_id` is in flight —
+    /// used to avoid duplicating an already-running push when forcing a
+    /// save on leave (plan §14).
+    pub fn is_saving_draft(&self, local_id: &crate::domain::DraftId, revision: u64) -> bool {
+        self.entries.values().any(|op| match &op.kind {
+            OperationKind::SaveDraft { draft } => {
+                draft.local_id == *local_id && draft.revision == revision
+            }
+            _ => false,
+        })
+    }
+
     /// Whether nothing is in flight (spinner hidden).
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()

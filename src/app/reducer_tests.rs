@@ -1838,3 +1838,98 @@ fn an_empty_journal_restores_nothing() {
     complete_restore(&mut s, Vec::new());
     assert!(s.composer.is_none());
 }
+
+// ── Force save on leave (plan §14 Phase 6.5) ─────────────────────────────
+
+#[test]
+fn esc_mid_debounce_forces_the_save_without_waiting() {
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    // Esc before the debounce elapses: the save happens NOW.
+    let effects = reduce(&mut s, &Action::BackOrCancel);
+    let (id, snapshot) = expect_save(&effects);
+    assert_eq!(snapshot.revision, 1);
+    assert_eq!(snapshot.to, "x");
+    assert!(s.operations.get(id).is_some());
+    // Leaving returned to the list; the draft (and its in-flight save)
+    // survive in state for reopening.
+    assert_eq!(s.routes.len(), 1);
+    assert_eq!(s.focus, Focus::MessageList);
+    assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
+    assert!(s.composer.as_ref().unwrap().draft.is_dirty());
+    assert_eq!(
+        s.composer.as_ref().unwrap().draft.save,
+        crate::domain::DraftSaveState::Saving
+    );
+}
+
+#[test]
+fn esc_with_a_clean_draft_saves_nothing() {
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    let (id, snapshot) = expect_save(&tick(&mut s, 2));
+    complete_save_ok(&mut s, id, snapshot.revision, "remote-1");
+    // Clean draft: leaving is silent.
+    no_effects(&reduce(&mut s, &Action::BackOrCancel));
+    assert_eq!(s.routes.len(), 1);
+    assert_eq!(s.focus, Focus::MessageList);
+}
+
+#[test]
+fn esc_while_the_current_revision_saves_does_not_duplicate_it() {
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    let (id, snapshot) = expect_save(&tick(&mut s, 2));
+    let token = s.operations.cancellation(id).unwrap();
+    // Esc during the in-flight autosave: it is NOT cancelled and NOT
+    // duplicated — leaving just lets it finish.
+    no_effects(&reduce(&mut s, &Action::BackOrCancel));
+    assert!(!token.is_cancelled(), "in-flight save must survive leaving");
+    assert!(s.operations.get(id).is_some());
+    assert_eq!(s.routes.len(), 1);
+    // Its result still applies to the preserved draft.
+    complete_save_ok(&mut s, id, snapshot.revision, "remote-1");
+    let draft = &s.composer.as_ref().unwrap().draft;
+    assert!(!draft.is_dirty());
+    assert_eq!(draft.save, crate::domain::DraftSaveState::Saved);
+}
+
+#[test]
+fn esc_with_newer_edits_supersedes_an_in_flight_older_save() {
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('a')));
+    let (id1, _snap1) = expect_save(&tick(&mut s, 2));
+    let token1 = s.operations.cancellation(id1).unwrap();
+    // Edits during the save, then Esc.
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('b')));
+    let effects = reduce(&mut s, &Action::BackOrCancel);
+    assert!(token1.is_cancelled(), "the older save is superseded");
+    let (id2, snap2) = expect_save(&effects);
+    assert_eq!(
+        snap2.revision, 2,
+        "the forced save carries the newest revision"
+    );
+    assert_eq!(snap2.to, "ab");
+    complete_save_ok(&mut s, id2, snap2.revision, "remote-2");
+    assert!(!s.composer.as_ref().unwrap().draft.is_dirty());
+}
+
+#[test]
+fn edit_without_a_clock_still_autosaves_once_the_clock_arrives() {
+    // Defensive edge: an edit before the first tick arms the debounce at
+    // the next tick instead of stalling forever.
+    let mut s = state();
+    compose(&mut s);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    no_effects(&tick(&mut s, 0)); // arms the window
+    let (_, snapshot) = expect_save(&tick(&mut s, 2));
+    assert_eq!(snapshot.to, "x");
+}
