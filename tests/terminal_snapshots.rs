@@ -650,3 +650,125 @@ fn discard_dialog_renders_with_keep_as_the_safe_default() {
         "empty subject preview:\n{text}"
     );
 }
+
+// ── Composer autosave status line (plan §14 Phase 6.7) ───────────────────
+
+use tmail::app::operation::OperationOutcome;
+
+#[test]
+fn composer_shows_unsaved_changes_while_debouncing() {
+    let mut state = mock_initial_state();
+    let actions: Vec<Action> = [
+        Action::Compose,
+        Action::ComposerEdit(tmail::app::action::ComposerEdit::Char('x')),
+    ]
+    .into_iter()
+    .collect();
+    let text = draw_after(&mut state, &actions, 152, 40);
+    assert!(
+        text.contains("Unsaved changes"),
+        "debouncing draft must show Unsaved changes:\n{text}"
+    );
+}
+
+#[test]
+fn composer_shows_draft_saved_with_the_time_after_success() {
+    let mut state = mock_initial_state();
+    // Compose, edit, let the debounce elapse, and confirm the save.
+    let mut actions: Vec<Action> = vec![Action::Compose];
+    actions.push(Action::Tick {
+        now: Box::new(mock::now()),
+    });
+    actions.push(Action::ComposerEdit(
+        tmail::app::action::ComposerEdit::Char('x'),
+    ));
+    actions.push(Action::Tick {
+        now: Box::new(mock::now() + chrono::Duration::seconds(2)),
+    });
+    // Find the save operation and confirm it.
+    let mut pending = None;
+    for action in &actions {
+        for effect in reducer::reduce(&mut state, action) {
+            pending = Some(effect.id);
+        }
+    }
+    let id = pending.expect("a save was started");
+    reducer::reduce(
+        &mut state,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::DraftSaved {
+                remote_id: MessageId(String::from("remote-1")),
+            }),
+        }),
+    );
+    let text = draw_after(&mut state, &[], 152, 40);
+    assert!(
+        text.contains("Draft saved · 10:47"),
+        "mock now is 10:47 +03:\n{text}"
+    );
+}
+
+#[test]
+fn composer_shows_save_failed_after_a_failure() {
+    let mut state = mock_initial_state();
+    let mut actions: Vec<Action> = vec![Action::Compose];
+    actions.push(Action::Tick {
+        now: Box::new(mock::now()),
+    });
+    actions.push(Action::ComposerEdit(
+        tmail::app::action::ComposerEdit::Char('x'),
+    ));
+    actions.push(Action::Tick {
+        now: Box::new(mock::now() + chrono::Duration::seconds(2)),
+    });
+    let mut pending = None;
+    for action in &actions {
+        for effect in reducer::reduce(&mut state, action) {
+            pending = Some(effect.id);
+        }
+    }
+    let id = pending.expect("a save was started");
+    reducer::reduce(
+        &mut state,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Err(OperationFailure {
+                code: Some(1),
+                detail: String::from("imap down"),
+                retry: None,
+                ambiguous: false,
+            }),
+        }),
+    );
+    // Dismiss the modal: the composer header must keep flagging the failure.
+    reducer::reduce(&mut state, &Action::DismissError);
+    let text = draw_after(&mut state, &[], 152, 40);
+    assert!(
+        text.contains("Save failed"),
+        "failure must stay visible:\n{text}"
+    );
+}
+
+#[test]
+fn composer_shows_saving_while_the_save_is_in_flight() {
+    let mut state = mock_initial_state();
+    let mut actions: Vec<Action> = vec![Action::Compose];
+    actions.push(Action::Tick {
+        now: Box::new(mock::now()),
+    });
+    actions.push(Action::ComposerEdit(
+        tmail::app::action::ComposerEdit::Char('x'),
+    ));
+    actions.push(Action::Tick {
+        now: Box::new(mock::now() + chrono::Duration::seconds(2)),
+    });
+    for action in &actions {
+        reducer::reduce(&mut state, action);
+    }
+    let text = draw_after(&mut state, &[], 152, 40);
+    assert!(
+        text.contains("Saving…"),
+        "in-flight save must show Saving…:\n{text}"
+    );
+}

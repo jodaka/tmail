@@ -18,6 +18,7 @@ use crate::app::composer::{ComposerField, ComposerState};
 use crate::app::focus::Focus;
 use crate::app::route::Route;
 use crate::app::state::AppState;
+use crate::domain::DraftSaveState;
 use crate::ui::theme::Theme;
 
 /// Label column width (mockup `grid-template-columns: 8ch`).
@@ -52,11 +53,16 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
             "New message",
             Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
         )];
-        if let Some(status) = draft_status(composer) {
+        if let Some((status, failed)) = draft_status(composer) {
             let w = status.width();
             if w + 14 < inner_w {
                 spans.push(Span::raw(" ".repeat(inner_w - 12 - w)));
-                spans.push(Span::styled(status, Style::new().fg(theme.dim)));
+                let style = if failed {
+                    Style::new().fg(theme.warning)
+                } else {
+                    Style::new().fg(theme.dim)
+                };
+                spans.push(Span::styled(status, style));
             }
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), header);
@@ -311,9 +317,20 @@ fn action_spans<'a>(composer: &'a ComposerState, focused: bool, theme: &'a Theme
     vec![send, Span::raw("   "), discard]
 }
 
-/// Autosave status line (mockup `.draft-status`); the states fill in with
-/// Phase 6.7.
-fn draft_status(composer: &ComposerState) -> Option<String> {
-    let _ = composer;
-    None
+/// Autosave status line (mockup `.draft-status`, plan §14): `Unsaved
+/// changes`, `Saving…`, `Draft saved · HH:MM`, `Save failed`. Dirty wins
+/// over failure when edits land again; a never-edited draft shows nothing.
+/// The second tuple element marks failure tone (warning color).
+fn draft_status(composer: &ComposerState) -> Option<(String, bool)> {
+    let draft = &composer.draft;
+    if draft.is_dirty() {
+        return match draft.save {
+            DraftSaveState::Saving => Some((String::from("Saving…"), false)),
+            DraftSaveState::Failed => Some((String::from("Save failed"), true)),
+            _ => Some((String::from("Unsaved changes"), false)),
+        };
+    }
+    draft
+        .saved_at
+        .map(|at| (format!("Draft saved · {}", at.format("%H:%M")), false))
 }
