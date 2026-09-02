@@ -208,6 +208,15 @@ fn draw_after(
     width: u16,
     height: u16,
 ) -> String {
+    text_of(&buffer_after(state, actions, width, height))
+}
+
+fn buffer_after(
+    state: &mut tmail::app::AppState,
+    actions: &[Action],
+    width: u16,
+    height: u16,
+) -> ratatui::buffer::Buffer {
     let theme = Theme::default_dark();
     let now = mock::now();
     let ctx = RenderContext::new(now, dates::format_clock(now));
@@ -220,7 +229,7 @@ fn draw_after(
     terminal
         .draw(|frame| render(frame, state, &theme, &ctx))
         .expect("draw");
-    text_of(terminal.backend().buffer())
+    terminal.backend().buffer().clone()
 }
 
 /// A failure action with a sanitized detail (what the operation manager
@@ -586,4 +595,28 @@ fn composer_focused_field_draws_a_caret_cell() {
         text.contains("x "),
         "typed text + caret must render:\n{text}"
     );
+}
+
+#[test]
+fn composer_flags_invalid_addresses_in_the_warning_color() {
+    use tmail::app::action::ComposerEdit;
+    let theme = Theme::default_dark();
+    let mut state = mock_initial_state();
+    let mut actions = vec![Action::Compose];
+    for c in "broken".chars() {
+        actions.push(Action::ComposerEdit(ComposerEdit::Char(c)));
+    }
+    let buffer = buffer_after(&mut state, &actions, 152, 40);
+    let warned = buffer.content.iter().any(|cell| cell.fg == theme.warning);
+    assert!(warned, "invalid address must render in warning color");
+
+    // A fully valid address shows no warning anywhere.
+    let mut state = mock_initial_state();
+    let mut actions = vec![Action::Compose];
+    for c in "max@example.com".chars() {
+        actions.push(Action::ComposerEdit(ComposerEdit::Char(c)));
+    }
+    let buffer = buffer_after(&mut state, &actions, 152, 40);
+    let warned = buffer.content.iter().any(|cell| cell.fg == theme.warning);
+    assert!(!warned, "valid address must not warn");
 }

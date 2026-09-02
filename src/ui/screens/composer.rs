@@ -18,7 +18,6 @@ use crate::app::composer::{ComposerField, ComposerState};
 use crate::app::focus::Focus;
 use crate::app::route::Route;
 use crate::app::state::AppState;
-use crate::ui::text;
 use crate::ui::theme::Theme;
 
 /// Label column width (mockup `grid-template-columns: 8ch`).
@@ -168,12 +167,63 @@ fn field_row<'a>(
         Span::styled(format!("{label:>LABEL_WIDTH$}"), Style::new().fg(theme.dim)),
         Span::styled("  ", Style::new()),
     ];
-    let value_spans = if is_focused {
-        caret_spans(text, cursor, value_w, theme)
-    } else {
-        vec![Span::styled(text::clip(text, value_w), Style::new())]
-    };
+    let is_address = matches!(
+        field,
+        ComposerField::To | ComposerField::Cc | ComposerField::Bcc
+    );
+    let value_spans = value_spans(text, cursor, is_focused, is_address, value_w, theme);
     (label_spans, value_spans)
+}
+
+/// Value spans of one field. Address fields (To/Cc/Bcc) validate on the
+/// fly (plan §14): invalid entries render in the warning color, valid ones
+/// in the normal text color. The focused field additionally draws an
+/// inline caret (reversed cell); the terminal cursor stays hidden
+/// app-wide.
+fn value_spans<'a>(
+    text: &'a str,
+    cursor: usize,
+    focused: bool,
+    address_field: bool,
+    value_w: usize,
+    theme: &'a Theme,
+) -> Vec<Span<'a>> {
+    let caret_style = Style::new()
+        .fg(theme.background)
+        .bg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let normal = Style::new().fg(theme.text);
+    let invalid = Style::new().fg(theme.warning);
+    let entries = if address_field {
+        crate::domain::address::address_entries(text)
+    } else {
+        Vec::new()
+    };
+    let char_count = text.chars().count();
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+    for (index, (byte, ch)) in text.char_indices().enumerate() {
+        let width = ch.to_string().width();
+        if used + width > value_w {
+            break;
+        }
+        let style = if entries.iter().any(|e| e.range.contains(&byte) && !e.valid) {
+            invalid
+        } else {
+            normal
+        };
+        if focused && index == cursor {
+            spans.push(Span::styled(ch.to_string(), caret_style));
+        } else {
+            spans.push(Span::styled(ch.to_string(), style));
+        }
+        used += width;
+    }
+    if focused && cursor >= char_count && used < value_w {
+        // Caret past the end of the text: a reversed space.
+        spans.push(Span::styled(" ", caret_style));
+    }
+    spans
 }
 
 /// `Cc`/`Bcc` buttons on the To row; hidden while their field is revealed.
@@ -193,37 +243,6 @@ fn toggle_spans<'a>(composer: &'a ComposerState, focused: bool, theme: &'a Theme
     if !composer.show_bcc {
         spans.push(button("Bcc", composer.field == ComposerField::BccToggle));
     }
-    spans
-}
-
-/// The caret as a reversed-character span; at the end of the text a
-/// reversed space (the terminal cursor stays hidden app-wide).
-fn caret_spans<'a>(
-    text: &'a str,
-    cursor: usize,
-    value_w: usize,
-    theme: &'a Theme,
-) -> Vec<Span<'a>> {
-    let caret_style = Style::new()
-        .fg(theme.background)
-        .bg(theme.accent)
-        .add_modifier(Modifier::BOLD);
-    let chars: Vec<char> = text.chars().collect();
-    let before: String = chars.iter().take(cursor).collect();
-    let at: String = chars.get(cursor).map(|c| c.to_string()).unwrap_or_default();
-    let after: String = chars.iter().skip(cursor + 1).collect();
-    let before = text::clip(&before, value_w.saturating_sub(1));
-    let after = text::clip(
-        &after,
-        value_w.saturating_sub(before.width() + at.width() + 1),
-    );
-    let mut spans = vec![Span::raw(before)];
-    if at.is_empty() {
-        spans.push(Span::styled(" ", caret_style));
-    } else {
-        spans.push(Span::styled(at, caret_style));
-    }
-    spans.push(Span::raw(after));
     spans
 }
 
