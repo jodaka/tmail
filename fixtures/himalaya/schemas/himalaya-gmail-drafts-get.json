@@ -1,0 +1,50 @@
+{
+  "$defs": {
+    "GmailDraftMessageOutput": {
+      "description": "The message a Gmail draft carries.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "snippet": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thread-id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Gmail draft, rendered as aligned text or, under `--json`, as a\nstructured object instead of a wrapped human string.",
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "message": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GmailDraftMessageOutput"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "GmailDraftGetOutput",
+  "type": "object"
+}

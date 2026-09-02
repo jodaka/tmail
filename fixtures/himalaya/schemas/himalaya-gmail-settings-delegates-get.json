@@ -1,0 +1,60 @@
+{
+  "$defs": {
+    "GmailDelegate": {
+      "description": "Delegate granted access to a Gmail account.",
+      "properties": {
+        "delegateEmail": {
+          "default": "",
+          "description": "Email address of the delegate.",
+          "type": "string"
+        },
+        "verificationStatus": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GmailVerificationStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Verification status of the delegate."
+        }
+      },
+      "type": "object"
+    },
+    "GmailVerificationStatus": {
+      "description": "Verification state of an email address owned by a Gmail account.",
+      "oneOf": [
+        {
+          "const": "verificationStatusUnspecified",
+          "description": "No verification status specified.",
+          "type": "string"
+        },
+        {
+          "const": "accepted",
+          "description": "The address is verified and usable.",
+          "type": "string"
+        },
+        {
+          "const": "pending",
+          "description": "The verification request is awaiting a response.",
+          "type": "string"
+        },
+        {
+          "const": "rejected",
+          "description": "The verification request was rejected.",
+          "type": "string"
+        },
+        {
+          "const": "expired",
+          "description": "The verification request expired without a response.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$ref": "#/$defs/GmailDelegate",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A Gmail delegate, rendered as aligned text or, under `--json`, as\nthe delegate resource itself instead of a wrapped human string.\n\nThe resource is emitted verbatim so that one delegate read with `get`\nhas the very same shape as a row of `list`.",
+  "title": "GmailSettingsDelegateGetOutput"
+}

@@ -1,0 +1,71 @@
+{
+  "$defs": {
+    "GmailMessageHeaderOutput": {
+      "description": "A single RFC 5322 header of a Gmail message.\n\nHeaders are a list rather than a map because a message may repeat a\nname (Received, References) and their order is meaningful. They are\nabsent with the minimal format, narrowed by `--header` when it is\ngiven, and complete otherwise.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "type": "object"
+    },
+    "GmailThreadMessageOutput": {
+      "description": "One message of a Gmail thread.\n\nThe thread id is left out, since it is the id of the enclosing\n[`GmailThreadGetOutput`].",
+      "properties": {
+        "headers": {
+          "items": {
+            "$ref": "#/$defs/GmailMessageHeaderOutput"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label-ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "snippet": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label-ids",
+        "headers"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Gmail thread and its messages, rendered as an indented list or,\nunder `--json`, as a structured object instead of a wrapped human\nstring.",
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "messages": {
+      "items": {
+        "$ref": "#/$defs/GmailThreadMessageOutput"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "id",
+    "messages"
+  ],
+  "title": "GmailThreadGetOutput",
+  "type": "object"
+}

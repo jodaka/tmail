@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Gmail IMAP access settings, rendered as aligned text or, under\n`--json`, as a structured object instead of a wrapped human string.\n\nThe booleans stay booleans in JSON, where the text rendering spells\nthem yes and no; the expunge behavior keeps its Gmail wire spelling,\nso a value read with `get` is a value `set` accepts back.",
+  "properties": {
+    "auto-expunge": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "expunge-behavior": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "max-folder-size": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "enabled"
+  ],
+  "title": "GmailSettingsImapGetOutput",
+  "type": "object"
+}

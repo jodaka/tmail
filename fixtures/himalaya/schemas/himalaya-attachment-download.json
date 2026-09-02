@@ -1,0 +1,65 @@
+{
+  "$defs": {
+    "Attachment": {
+      "description": "One row of the `attachments list` / `attachments download` output.",
+      "properties": {
+        "filename": {
+          "description": "Filename from `Content-Disposition: filename=` (or\n`Content-Type: name=`), RFC 2231-decoded. `None` when the\nsource provides no name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "1-based position of the MIME part in the message's part list, the\nsame id `message read` prints. Sparse (attachments only) and\nstable across the `--inline` filter.",
+          "type": "string"
+        },
+        "inline": {
+          "description": "`true` when the part carries `Content-Disposition: inline`.",
+          "type": "boolean"
+        },
+        "mime": {
+          "description": "MIME type (e.g. `\"application/pdf\"`). `None` when the source\nomits the `Content-Type` header.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Destination path the bytes were written to (set by\n`attachments download`; `None` for `attachments list`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "Size in bytes of the decoded part body.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "size",
+        "inline"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Table of attachment rows rendered to the terminal or as JSON.",
+  "properties": {
+    "attachments": {
+      "items": {
+        "$ref": "#/$defs/Attachment"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "attachments"
+  ],
+  "title": "Attachments",
+  "type": "object"
+}

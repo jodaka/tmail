@@ -1,0 +1,82 @@
+{
+  "$defs": {
+    "GmailForwardingAddress": {
+      "description": "Forwarding address registered on a Gmail account.",
+      "properties": {
+        "forwardingEmail": {
+          "default": "",
+          "description": "Email address messages can be forwarded to.",
+          "type": "string"
+        },
+        "verificationStatus": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GmailVerificationStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Verification status of the forwarding address."
+        }
+      },
+      "type": "object"
+    },
+    "GmailForwardingAddressesListResponse": {
+      "description": "Response wrapping the forwarding addresses of a Gmail account.",
+      "properties": {
+        "forwardingAddresses": {
+          "default": [],
+          "description": "Forwarding addresses of the Gmail account.",
+          "items": {
+            "$ref": "#/$defs/GmailForwardingAddress"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "GmailVerificationStatus": {
+      "description": "Verification state of an email address owned by a Gmail account.",
+      "oneOf": [
+        {
+          "const": "verificationStatusUnspecified",
+          "description": "No verification status specified.",
+          "type": "string"
+        },
+        {
+          "const": "accepted",
+          "description": "The address is verified and usable.",
+          "type": "string"
+        },
+        {
+          "const": "pending",
+          "description": "The verification request is awaiting a response.",
+          "type": "string"
+        },
+        {
+          "const": "rejected",
+          "description": "The verification request was rejected.",
+          "type": "string"
+        },
+        {
+          "const": "expired",
+          "description": "The verification request expired without a response.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of Gmail forwarding addresses.",
+  "properties": {
+    "response": {
+      "$ref": "#/$defs/GmailForwardingAddressesListResponse"
+    }
+  },
+  "required": [
+    "response"
+  ],
+  "title": "ForwardingAddressesTable",
+  "type": "object"
+}

@@ -1,0 +1,101 @@
+{
+  "$defs": {
+    "JmapEmailAddress": {
+      "description": "An email address (name + email pair).",
+      "properties": {
+        "email": {
+          "description": "The address itself (local@domain).",
+          "type": "string"
+        },
+        "name": {
+          "description": "The display name, when present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "email"
+      ],
+      "type": "object"
+    },
+    "JmapIdentity": {
+      "description": "A JMAP Identity object (RFC 8621 §6.1).\n\nAn Identity describes a sender identity the user can send email\nfrom (name, email address, signature, etc.).",
+      "properties": {
+        "bcc": {
+          "description": "`Bcc` addresses to add to all outgoing email.",
+          "items": {
+            "$ref": "#/$defs/JmapEmailAddress"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "email": {
+          "description": "The email address for the sender.",
+          "type": "string"
+        },
+        "htmlSignature": {
+          "description": "HTML signature to append to outgoing email.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The server-assigned ID.",
+          "type": "string"
+        },
+        "mayDelete": {
+          "default": false,
+          "description": "Whether the user may delete this identity.",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "The display name for the sender.",
+          "type": "string"
+        },
+        "replyTo": {
+          "description": "`Reply-To` addresses to set on outgoing email.",
+          "items": {
+            "$ref": "#/$defs/JmapEmailAddress"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "textSignature": {
+          "description": "Plaintext signature to append to outgoing email.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "email"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of sender identities.",
+  "properties": {
+    "identities": {
+      "items": {
+        "$ref": "#/$defs/JmapIdentity"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "identities"
+  ],
+  "title": "IdentitiesTable",
+  "type": "object"
+}

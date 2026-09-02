@@ -1,0 +1,83 @@
+{
+  "$defs": {
+    "MsgraphMailFolder": {
+      "description": "A mail folder in a user's mailbox. Doubles as the create body, where\nonly `display_name` (and optionally `is_hidden`) is serialized.",
+      "properties": {
+        "childFolderCount": {
+          "description": "The number of immediate child folders.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "displayName": {
+          "description": "The display name of the folder.",
+          "type": "string"
+        },
+        "id": {
+          "description": "The unique identifier of the folder.",
+          "type": "string"
+        },
+        "isHidden": {
+          "description": "Whether the folder is hidden from folder listings.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "parentFolderId": {
+          "description": "The identifier of the parent folder.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sizeInBytes": {
+          "description": "The size of the folder in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "totalItemCount": {
+          "description": "The total number of items in the folder.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unreadItemCount": {
+          "description": "The number of unread items in the folder.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of Microsoft Graph mail folders.",
+  "properties": {
+    "folders": {
+      "items": {
+        "$ref": "#/$defs/MsgraphMailFolder"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "folders"
+  ],
+  "title": "MailFoldersTable",
+  "type": "object"
+}

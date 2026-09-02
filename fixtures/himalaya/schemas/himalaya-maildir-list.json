@@ -1,0 +1,35 @@
+{
+  "$defs": {
+    "MaildirRow": {
+      "description": "One row of the Maildir folders table: name and path.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of Maildir folders.",
+  "properties": {
+    "maildirs": {
+      "items": {
+        "$ref": "#/$defs/MaildirRow"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "maildirs"
+  ],
+  "title": "MaildirsTable",
+  "type": "object"
+}

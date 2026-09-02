@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of the IMAP server ID parameters.",
+  "properties": {
+    "server-id": {
+      "additionalProperties": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "server-id"
+  ],
+  "title": "ServerIdTable",
+  "type": "object"
+}

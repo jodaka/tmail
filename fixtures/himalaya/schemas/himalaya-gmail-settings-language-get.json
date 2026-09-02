@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Gmail display language settings, rendered as text or, under `--json`,\nas a structured object instead of a wrapped human string.",
+  "properties": {
+    "display-language": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "display-language"
+  ],
+  "title": "GmailSettingsLanguageGetOutput",
+  "type": "object"
+}

@@ -1,0 +1,42 @@
+{
+  "$defs": {
+    "AccountRow": {
+      "description": "One account row in the account list: name, backends, default flag.",
+      "properties": {
+        "backends": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "default": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "default",
+        "backends"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table for the account list command.",
+  "properties": {
+    "accounts": {
+      "items": {
+        "$ref": "#/$defs/AccountRow"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "accounts"
+  ],
+  "title": "AccountsTable",
+  "type": "object"
+}

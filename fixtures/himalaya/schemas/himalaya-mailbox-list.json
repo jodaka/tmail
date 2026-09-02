@@ -1,0 +1,57 @@
+{
+  "$defs": {
+    "Mailbox": {
+      "description": "A mailbox (a.k.a. folder).\n\nStrict least-common-denominator shape: only fields that are\nfirst-class in every protocol the CLI targets (IMAP, JMAP, Maildir,\nm2dir). Protocol-specific data (IMAP delimiter and SPECIAL-USE\nattributes, JMAP role and rights, Maildir path, …) is intentionally\nabsent; for these, use the protocol-specific subcommands.",
+      "properties": {
+        "id": {
+          "description": "Backend-specific identifier.\n\nJMAP exposes a real opaque ID; for IMAP, Maildir and m2dir this\nis the same as [`Self::name`]. Use this when issuing follow-up\ncommands that refer to the mailbox.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Human-readable mailbox name.",
+          "type": "string"
+        },
+        "total": {
+          "default": null,
+          "description": "Total number of messages, when the caller requested counts.\n`None` when the backend was not asked or cannot answer cheaply.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unread": {
+          "default": null,
+          "description": "Number of unread messages, when the caller requested counts.\n`None` when the backend was not asked or cannot answer cheaply.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Table of mailbox rows rendered to the terminal or as JSON.",
+  "properties": {
+    "mailboxes": {
+      "items": {
+        "$ref": "#/$defs/Mailbox"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "mailboxes"
+  ],
+  "title": "Mailboxes",
+  "type": "object"
+}

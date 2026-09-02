@@ -1,0 +1,161 @@
+{
+  "$defs": {
+    "JmapMailbox": {
+      "description": "A JMAP Mailbox object (RFC 8621 §2.1): a named container for emails.",
+      "properties": {
+        "id": {
+          "description": "The server-assigned mailbox id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isSubscribed": {
+          "default": false,
+          "description": "Whether the user is subscribed to the mailbox.",
+          "type": "boolean"
+        },
+        "myRights": {
+          "$ref": "#/$defs/JmapMailboxRights",
+          "default": {
+            "mayAddItems": false,
+            "mayCreateChild": false,
+            "mayDelete": false,
+            "mayReadItems": false,
+            "mayRemoveItems": false,
+            "mayRename": false,
+            "maySetKeywords": false,
+            "maySetSeen": false,
+            "maySubmit": false
+          },
+          "description": "The user's rights on the mailbox."
+        },
+        "name": {
+          "description": "The user-visible mailbox name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentId": {
+          "description": "`None` for a top-level mailbox.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "description": "The special-use role of the mailbox, when any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sortOrder": {
+          "default": 0,
+          "description": "Position hint for display ordering (lower first).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "totalEmails": {
+          "default": 0,
+          "description": "The number of emails in the mailbox.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "totalThreads": {
+          "default": 0,
+          "description": "The number of threads with at least one email in the mailbox.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unreadEmails": {
+          "default": 0,
+          "description": "The number of unread emails in the mailbox.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unreadThreads": {
+          "default": 0,
+          "description": "The number of threads with at least one unread email in the mailbox.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "JmapMailboxRights": {
+      "description": "Access rights on a mailbox (RFC 8621 §2.1).",
+      "properties": {
+        "mayAddItems": {
+          "description": "May add items to the mailbox.",
+          "type": "boolean"
+        },
+        "mayCreateChild": {
+          "description": "May create child mailboxes.",
+          "type": "boolean"
+        },
+        "mayDelete": {
+          "description": "May delete this mailbox.",
+          "type": "boolean"
+        },
+        "mayReadItems": {
+          "description": "May read items in the mailbox.",
+          "type": "boolean"
+        },
+        "mayRemoveItems": {
+          "description": "May remove items from the mailbox.",
+          "type": "boolean"
+        },
+        "mayRename": {
+          "description": "May rename this mailbox.",
+          "type": "boolean"
+        },
+        "maySetKeywords": {
+          "description": "May set/unset any keyword other than `$seen`.",
+          "type": "boolean"
+        },
+        "maySetSeen": {
+          "description": "May set/unset the `$seen` keyword on items.",
+          "type": "boolean"
+        },
+        "maySubmit": {
+          "description": "May submit email from this mailbox.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "mayReadItems",
+        "mayAddItems",
+        "mayRemoveItems",
+        "maySetSeen",
+        "maySetKeywords",
+        "mayCreateChild",
+        "mayRename",
+        "mayDelete",
+        "maySubmit"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of mailboxes.",
+  "properties": {
+    "mailboxes": {
+      "items": {
+        "$ref": "#/$defs/JmapMailbox"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "mailboxes"
+  ],
+  "title": "MailboxesTable",
+  "type": "object"
+}

@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>post — TUI mail client · inbox</title>
+<style>
+  :root{
+    --bg:        oklch(0.140 0.006 260);
+    --term:      oklch(0.175 0.008 258);
+    --chrome:    oklch(0.205 0.010 258);
+    --surface:   oklch(0.215 0.010 258);
+    --surface-2: oklch(0.245 0.012 258);
+    --hover:     oklch(0.235 0.011 258);
+    --fg:        oklch(0.930 0.012 95);
+    --fg-soft:   oklch(0.780 0.012 258);
+    --muted:     oklch(0.640 0.014 258);
+    --dim:       oklch(0.600 0.012 258);
+    --border:    oklch(0.300 0.012 258);
+    --accent:    oklch(0.680 0.150 250);
+    --accent-bg: oklch(0.680 0.150 250 / 0.13);
+    --amber:     oklch(0.790 0.130 85);
+    --green:     oklch(0.740 0.140 150);
+    --violet:    oklch(0.700 0.130 305);
+    --mono: ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    font-family:var(--mono);
+    background:radial-gradient(1100px 760px at 50% 36%, oklch(0.165 0.008 258), var(--bg) 72%);
+    color:var(--fg);
+    min-height:100vh;
+    display:grid;
+    place-items:center;
+    padding:32px 24px;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:oklch(0.680 0.150 250 / 0.35)}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:4px}
+  input:focus-visible{outline:none}
+
+  .stage{display:flex;flex-direction:column;align-items:center;gap:14px;max-width:100%}
+
+  /* ── terminal window ─────────────────────────────────────── */
+  .terminal{
+    width:min(1240px,96vw);
+    height:min(800px,86vh);
+    min-height:620px;
+    background:var(--term);
+    border:1px solid var(--border);
+    border-radius:12px;
+    box-shadow:0 40px 90px oklch(0 0 0 / 0.55), 0 6px 18px oklch(0 0 0 / 0.40);
+    overflow:hidden;
+    display:flex;
+    flex-direction:column;
+  }
+  .titlebar{
+    height:40px;flex:0 0 40px;
+    display:flex;align-items:center;gap:14px;
+    padding:0 14px;
+    background:var(--chrome);
+    border-bottom:1px solid var(--border);
+  }
+  .lights{display:flex;gap:8px}
+  .lights i{width:12px;height:12px;border-radius:50%}
+  .l-r{background:oklch(0.640 0.190 25)}
+  .l-y{background:oklch(0.800 0.150 88)}
+  .l-g{background:oklch(0.720 0.160 145)}
+  .tb-title{font-size:12.5px;color:var(--fg-soft);letter-spacing:.02em}
+  .tb-meta{margin-left:auto;font-size:11.5px;color:var(--dim)}
+
+  /* ── top bar: brand · search · clock ─────────────────────── */
+  .topbar{
+    flex:0 0 auto;
+    display:grid;
+    grid-template-columns:minmax(200px,232px) minmax(0,1fr) minmax(150px,auto);
+    gap:18px;align-items:center;
+    padding:12px 16px;
+    border-bottom:1px solid var(--border);
+  }
+  .brand{display:flex;align-items:baseline;gap:8px;padding-left:6px}
+  .brand-name{font-size:15px;font-weight:700;letter-spacing:.02em}
+  .brand-ver{font-size:11.5px;color:var(--dim)}
+  .search{
+    display:flex;align-items:center;gap:10px;
+    height:34px;padding:0 12px;
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:6px;
+  }
+  .search:focus-within{border-color:var(--accent);background:var(--surface-2)}
+  .search-prompt{color:var(--dim);user-select:none}
+  .search input{
+    flex:1;min-width:0;
+    background:none;border:0;outline:0;
+    color:var(--fg);font:inherit;font-size:13.5px;
+    caret-color:var(--accent);
+  }
+  .search input::placeholder{color:var(--dim)}
+  .search input::-webkit-search-cancel-button{display:none}
+  .clock{justify-self:end;font-size:12.5px;color:var(--dim);white-space:nowrap}
+
+  /* ── body: sidebar + list ────────────────────────────────── */
+  .tui-body{flex:1;display:flex;min-height:0}
+
+  .sidebar{
+    width:232px;flex:0 0 232px;
+    border-right:1px solid var(--border);
+    padding:14px 0 14px;
+    display:flex;flex-direction:column;gap:18px;
+    overflow-y:auto;
+  }
+  .compose{
+    margin:0 14px;
+    display:flex;align-items:center;gap:8px;
+    height:36px;padding:0 12px;
+    font:inherit;font-size:13.5px;font-weight:600;
+    color:var(--fg);
+    background:var(--surface);
+    border:1px solid oklch(0.380 0.014 258);
+    border-radius:6px;
+    cursor:pointer;
+  }
+  .compose:hover{background:var(--surface-2);border-color:oklch(0.440 0.016 258)}
+  .compose kbd{margin-left:auto}
+  kbd{
+    font:inherit;font-size:11px;line-height:1;
+    color:var(--fg-soft);
+    background:var(--surface-2);
+    border:1px solid var(--border);
+    border-radius:3px;
+    padding:3px 5px;
+  }
+  .folders ul,.labels-block ul{list-style:none;margin:0;padding:0}
+  .folder{
+    display:flex;align-items:baseline;gap:10px;
+    padding:7px 14px 7px 20px;
+    font-size:13.5px;color:var(--fg-soft);
+    text-decoration:none;
+  }
+  .folder:hover{background:var(--hover);color:var(--fg)}
+  .folder.active{
+    background:var(--surface);
+    color:var(--fg);font-weight:600;
+    box-shadow:inset 2px 0 0 var(--accent);
+  }
+  .f-count{margin-left:auto;font-size:12px;color:var(--dim)}
+  .folder.active .f-count{color:var(--fg-soft);font-weight:600}
+
+  .labels-block .block-title{
+    padding:0 14px 6px 20px;
+    font-size:11px;letter-spacing:.10em;text-transform:uppercase;
+    color:var(--dim);
+  }
+  .label-row{
+    display:flex;align-items:baseline;gap:10px;
+    padding:6px 14px 6px 20px;
+    font-size:13px;color:var(--fg-soft);
+  }
+  .dot{width:7px;height:7px;border-radius:50%;flex:0 0 7px;align-self:center}
+  .d-blue{background:var(--accent)}
+  .d-green{background:var(--green)}
+  .d-amber{background:var(--amber)}
+  .d-violet{background:var(--violet)}
+  .l-count{margin-left:auto;font-size:11.5px;color:var(--dim)}
+
+  .sidebar-foot{margin-top:auto;padding:12px 20px 0;font-size:11.5px;color:var(--dim)}
+  .storage{height:2px;margin-top:8px;background:var(--border);border-radius:1px;overflow:hidden}
+  .storage i{display:block;height:100%;width:28%;background:var(--muted)}
+
+  /* ── mail list ───────────────────────────────────────────── */
+  .list{flex:1;min-width:0;display:flex;flex-direction:column}
+  .list-head{
+    display:flex;align-items:baseline;gap:12px;
+    padding:13px 18px 11px;
+    border-bottom:1px solid var(--border);
+  }
+  .select-all{color:var(--dim);font-size:12.5px}
+  .pane-title{
+    margin:0;font-size:13px;font-weight:700;
+    letter-spacing:.10em;text-transform:uppercase;
+  }
+  .pane-sub{font-size:12px;color:var(--dim)}
+  .pane-range{margin-left:auto;font-size:12px;color:var(--dim);white-space:nowrap}
+
+  .mails{
+    flex:1;overflow-y:auto;
+    margin:0;padding:0 0 12px;
+    list-style:none;
+    scrollbar-width:thin;
+    scrollbar-color:var(--border) transparent;
+  }
+  .mails::-webkit-scrollbar{width:8px}
+  .mails::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+
+  .mail{
+    display:grid;
+    grid-template-columns:2ch 20ch minmax(0,1fr) auto 6ch;
+    gap:0 14px;align-items:baseline;
+    padding:10px 18px 10px 0;
+    border-top:1px solid oklch(0.300 0.012 258 / 0.45);
+    font-size:13.5px;
+    color:var(--muted);
+    cursor:default;
+  }
+  .mails .mail:first-child{border-top:0}
+  .mail:hover{background:var(--hover)}
+  .mail:focus-visible{outline-offset:-2px}
+
+  .c-star{text-align:center;padding-left:16px;color:var(--amber);font-size:12.5px}
+  .c-star.empty{visibility:hidden}
+  .c-from{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg-soft)}
+  .c-subject{
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    min-width:0;color:var(--fg-soft);
+  }
+  .snippet{color:var(--dim)}
+  .c-tag{
+    font-size:11.5px;white-space:nowrap;
+    color:var(--fg-soft);
+  }
+  .c-tag:empty{visibility:hidden}
+  .c-tag::before{content:"[";color:var(--dim)}
+  .c-tag::after{content:"]";color:var(--dim)}
+  .t-blue{color:var(--accent)}
+  .t-green{color:var(--green)}
+  .t-amber{color:var(--amber)}
+  .t-violet{color:var(--violet)}
+  .c-date{text-align:right;font-size:12.5px;color:var(--dim);white-space:nowrap}
+
+  .mail.unread{color:var(--fg-soft)}
+  .mail.unread .c-from,
+  .mail.unread .c-subject{color:var(--fg);font-weight:600}
+  .mail.unread .c-date{color:var(--fg-soft)}
+
+  .mail.selected{
+    background:var(--accent-bg);
+    box-shadow:inset 2px 0 0 var(--accent);
+  }
+
+  /* ── status bar ──────────────────────────────────────────── */
+  .statusbar{
+    flex:0 0 38px;
+    display:flex;align-items:center;gap:18px;
+    padding:0 14px;
+    background:var(--chrome);
+    border-top:1px solid var(--border);
+    font-size:12.5px;color:var(--dim);
+  }
+  .mode{
+    background:var(--accent);
+    color:oklch(0.160 0.010 258);
+    font-size:11.5px;font-weight:700;letter-spacing:.06em;
+    padding:3px 8px;border-radius:3px;
+  }
+  .keys{display:flex;gap:16px;list-style:none;margin:0;padding:0;white-space:nowrap}
+  .keys kbd{padding:2px 4px}
+  .status-right{margin-left:auto;white-space:nowrap}
+
+  .mail,.folder,.label-row,.compose{transition:background .08s ease}
+
+  .caption{font-size:12px;color:var(--dim);letter-spacing:.04em;margin:0}
+
+  @media (max-width:960px){
+    .sidebar{display:none}
+    .topbar{grid-template-columns:auto minmax(0,1fr) auto}
+    .mail{grid-template-columns:2ch 14ch minmax(0,1fr) 6ch}
+    .c-tag{display:none}
+    body{padding:16px 10px}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *{transition:none !important}
+  }
+</style>
+</head>
+<body>
+<main class="stage">
+  <section class="terminal" data-od-id="tui-terminal" aria-label="post — TUI mail client, inbox mockup">
+
+    <header class="titlebar" data-od-id="tui-titlebar">
+      <span class="lights" aria-hidden="true"><i class="l-r"></i><i class="l-y"></i><i class="l-g"></i></span>
+      <span class="tb-title">anton@studio — post</span>
+      <span class="tb-meta">zsh · 152×40</span>
+    </header>
+
+    <header class="topbar" data-od-id="tui-topbar">
+      <div class="brand" data-od-id="tui-brand">
+        <span class="brand-name">post</span>
+        <span class="brand-ver">v0.4.1</span>
+      </div>
+      <form class="search" role="search" data-od-id="tui-search" onsubmit="return false">
+        <span class="search-prompt" aria-hidden="true">/</span>
+        <input id="search-input" type="search" placeholder="Search mail"
+               autocomplete="off" spellcheck="false" aria-label="Search mail">
+        <kbd aria-hidden="true">/</kbd>
+      </form>
+      <div class="clock" data-od-id="tui-clock">Wed Sep 2 · 10:47</div>
+    </header>
+
+    <div class="tui-body">
+
+      <aside class="sidebar" data-od-id="tui-sidebar">
+        <button class="compose" type="button" data-od-id="compose-button">
+          <span aria-hidden="true">+</span> Compose <kbd>c</kbd>
+        </button>
+
+        <nav class="folders" aria-label="Mailboxes" data-od-id="folder-nav">
+          <ul>
+            <li><a class="folder active" href="#" aria-current="page" data-od-id="folder-inbox"><span>Inbox</span><span class="f-count">24</span></a></li>
+            <li><a class="folder" href="#" data-od-id="folder-starred"><span>Starred</span><span class="f-count">7</span></a></li>
+            <li><a class="folder" href="#" data-od-id="folder-important"><span>Important</span><span class="f-count">12</span></a></li>
+            <li><a class="folder" href="#" data-od-id="folder-snoozed"><span>Snoozed</span><span class="f-count">2</span></a></li>
+            <li><a class="folder" href="#" data-od-id="folder-sent"><span>Sent</span><span class="f-count"></span></a></li>
+            <li><a class="folder" href="#" data-od-id="folder-drafts"><span>Drafts</span><span class="f-count">3</span></a></li>
+            <li><a class="folder" href="#" data-od-id="folder-scheduled"><span>Scheduled</span><span class="f-count"></span></a></li>
+            <li><a class="folder" href="#" data-od-id="folder-all"><span>All Mail</span><span class="f-count"></span></a></li>
+            <li><a class="folder" href="#" data-od-id="folder-spam"><span>Spam</span><span class="f-count">5</span></a></li>
+            <li><a class="folder" href="#" data-od-id="folder-trash"><span>Trash</span><span class="f-count"></span></a></li>
+          </ul>
+        </nav>
+
+        <div class="labels-block" data-od-id="label-block">
+          <div class="block-title">Labels</div>
+          <ul>
+            <li class="label-row" data-od-id="label-customers"><span class="dot d-blue" aria-hidden="true"></span><span>Customers</span><span class="l-count">12</span></li>
+            <li class="label-row" data-od-id="label-suppliers"><span class="dot d-green" aria-hidden="true"></span><span>Suppliers</span><span class="l-count">8</span></li>
+            <li class="label-row" data-od-id="label-orders"><span class="dot d-amber" aria-hidden="true"></span><span>Orders</span><span class="l-count">21</span></li>
+            <li class="label-row" data-od-id="label-kkf"><span class="dot d-violet" aria-hidden="true"></span><span>KKF</span><span class="l-count">96</span></li>
+          </ul>
+        </div>
+
+        <div class="sidebar-foot" data-od-id="storage-meter">
+          <span>4.2 GB of 15 GB used</span>
+          <span class="storage" aria-hidden="true"><i></i></span>
+        </div>
+      </aside>
+
+      <section class="list" aria-label="Message list">
+        <header class="list-head" data-od-id="mail-list-header">
+          <span class="select-all" aria-hidden="true">[ ]</span>
+          <h1 class="pane-title">Inbox</h1>
+          <span class="pane-sub">24 unread</span>
+          <span class="pane-range">1–20 of 312</span>
+        </header>
+
+        <ol class="mails" role="listbox" aria-label="Emails" data-od-id="mail-list">
+
+          <li class="mail unread selected" role="option" aria-selected="true" tabindex="0"
+              data-od-id="mail-row-gyuto-wip"
+              title="KKF Notifications — Re: WIP — 240 mm stainless-clad gyuto — quench done at 760 °C, first edge tests tonight">
+            <span class="c-star empty" aria-hidden="true">*</span>
+            <span class="c-from">KKF Notifications</span>
+            <span class="c-subject">Re: WIP — 240 mm stainless-clad gyuto<span class="snippet"> — quench done at 760 °C, first edge tests tonight</span></span>
+            <span class="c-tag t-violet">kkf</span>
+            <span class="c-date">10:42</span>
+          </li>
+
+          <li class="mail unread" role="option" aria-selected="false" tabindex="0"
+              data-od-id="mail-row-gyuto-september"
+              title="Maksim Orlov — Re: gyuto for September — no rush, a stabilized birch handle would be perfect">
+            <span class="c-star empty" aria-hidden="true">*</span>
+            <span class="c-from">Maksim Orlov</span>
+            <span class="c-subject">Re: gyuto for September<span class="snippet"> — no rush, a stabilized birch handle would be perfect</span></span>
+            <span class="c-tag t-blue">customers</span>
+            <span class="c-date">09:15</span>
+          </li>
+
+          <li class="mail unread" role="option" aria-selected="false" tabindex="0"
+              data-od-id="mail-row-shirogami-shipment"
+              title="Takefu Special Steel — Shipment #TF-8841 · Shirogami #2, 3.5 mm — customs clearance in Rotterdam, ETA Friday">
+            <span class="c-star empty" aria-hidden="true">*</span>
+            <span class="c-from">Takefu Special Steel</span>
+            <span class="c-subject">Shipment #TF-8841 · Shirogami #2, 3.5 mm<span class="snippet"> — customs clearance in Rotterdam, ETA Friday</span></span>
+            <span class="c-tag t-green">suppliers</span>
+            <span class="c-date">08:03</span>
+          </li>
+
+          <li class="mail" role="option" aria-selected="false" tabindex="0"
+              data-od-id="mail-row-paypal-deposit"
+              title="PayPal — Payment received · $650.00 from M. Orlov — order #214, 50% deposit, thank you">
+            <span class="c-star" aria-hidden="true">*</span>
+            <span class="c-from">PayPal</span>
+            <span class="c-subject">Payment received · $650.00 from M. Orlov<span class="snippet"> — order #214, 50% deposit, thank you</span></span>
+            <span class="c-tag t-amber">orders</span>
+            <span class="c-date">Yest</span>
+          </li>
+
+          <li class="mail" role="option" aria-selected="false" tabindex="0"
+              data-od-id="mail-row-ito-thread"
+              title="Stefan Keller — Re: tsukamaki thread source — ito in dark silk, 8 mm, sending you the shop link">
+            <span class="c-star" aria-hidden="true">*</span>
+            <span class="c-from">Stefan Keller</span>
+            <span class="c-subject">Re: tsukamaki thread source<span class="snippet"> — ito in dark silk, 8 mm, sending you the shop link</span></span>
+            <span class="c-tag" aria-hidden="true"></span>
+            <span class="c-date">Yest</span>
+          </li>
+
+          <li class="mail" role="option" aria-selected="false" tabindex="0"
+              data-od-id="mail-row-birch-blocks"
+              title="Ilya Semyonov — Stabilized Karelian birch blocks — two blocks left from the batch, 32 × 40 × 150 mm">
+            <span class="c-star empty" aria-hidden="true">*</span>
+            <span class="c-from">Ilya Semyonov</span>
+            <span class="c-subject">Stabilized Karelian birch blocks<span class="snippet"> — two blocks left from the batch · 32 × 40 × 150 mm</span></span>
+            <span class="c-tag t-green">suppliers</span>
+            <span class="c-date">Yest</span>
+          </li>
+
+          <li class="mail" role="option" aria-selected="false" tabindex="0"
+              data-od-id="mail-row-edge-retention"
+              title="KKF Notifications — New posts in Edge retention · AEB-L vs ginsan — +14 replies since your last visit">
+            <span class="c-star empty" aria-hidden="true">*</span>
+            <span class="c-from">KKF Notifications</span>
+            <span class="c-subject">New posts in “Edge retention · AEB-L vs ginsan”<span class="snippet"> — +14 replies since your last visit</span></span>
+            <span class="c-tag t-violet">kkf</span>
+            <span class="c-date">Yest</span>
+          </li>
+
+          <li class="mail" role="option" aria-selected="false" tabindex="0"
+              data-od-id="mail-row-dhl-delivered"
+              title="DHL Express — Delivered · 2× diamond plates, #320 / #1200 — signed by A. KUDRIS, tracking archived">
+            <span class="c-star empty" aria-hidden="true">*</span>
+            <span class="c-from">DHL Express</span>
+            <span class="c-subject">Delivered · 2× diamond plates, #320 / #1200<span class="snippet"> — signed by A. KUDRIS · tracking archived</span></span>
+            <span class="c-tag t-green">suppliers</span>
+            <span class="c-date">Sep 1</span>
+          </li>
+
+          <li class="mail" role="option" aria-selected="false" tabindex="0"
+              data-od-id="mail-row-coa-proof"
+              title="Anna Koroleva — COA cards — proof attached — letterpress proof, 125 × 85 mm, awaiting your sign-off">
+            <span class="c-star empty" aria-hidden="true">*</span>
+            <span class="c-from">Anna Koroleva</span>
+            <span class="c-subject">COA cards — proof attached<span class="snippet"> — letterpress proof, 125 × 85 mm, awaiting your sign-off</span></span>
+            <span class="c-tag t-amber">orders</span>
+            <span class="c-date">Aug 31</span>
+          </li>
+
+          <li class="mail" role="option" aria-selected="false" tabindex="0"
+              data-od-id="mail-row-google-security"
+              title="Google — Security alert · new sign-in on MacBook Pro — if this was you, you can ignore this email">
+            <span class="c-star empty" aria-hidden="true">*</span>
+            <span class="c-from">Google</span>
+            <span class="c-subject">Security alert · new sign-in on MacBook Pro<span class="snippet"> — if this was you, you can ignore this email</span></span>
+            <span class="c-tag" aria-hidden="true"></span>
+            <span class="c-date">Aug 30</span>
+          </li>
+
+          <li class="mail" role="option" aria-selected="false" tabindex="0"
+              data-od-id="mail-row-damascus-care"
+              title="Maria Ivanova — Question about damascus steel care — does the etched pattern fade after years of use?">
+            <span class="c-star empty" aria-hidden="true">*</span>
+            <span class="c-from">Maria Ivanova</span>
+            <span class="c-subject">Question about damascus steel care<span class="snippet"> — does the etched pattern fade after years of use?</span></span>
+            <span class="c-tag t-blue">customers</span>
+            <span class="c-date">Aug 29</span>
+          </li>
+
+          <li class="mail" role="option" aria-selected="false" tabindex="0"
+              data-od-id="mail-row-github-pr"
+              title="GitHub — [anton/post] PR #42 · add vi-style j/k navigation — opened by @akudris · 2 files changed">
+            <span class="c-star empty" aria-hidden="true">*</span>
+            <span class="c-from">GitHub</span>
+            <span class="c-subject">[anton/post] PR #42 · add vi-style j/k navigation<span class="snippet"> — opened by @akudris · 2 files changed</span></span>
+            <span class="c-tag" aria-hidden="true"></span>
+            <span class="c-date">Aug 28</span>
+          </li>
+
+        </ol>
+      </section>
+    </div>
+
+    <footer class="statusbar" data-od-id="tui-statusbar">
+      <span class="mode">NORMAL</span>
+      <ul class="keys" aria-label="Keyboard shortcuts">
+        <li><kbd>j</kbd><kbd>k</kbd> move</li>
+        <li><kbd>↵</kbd> open</li>
+        <li><kbd>s</kbd> star</li>
+        <li><kbd>e</kbd> archive</li>
+        <li><kbd>c</kbd> compose</li>
+        <li><kbd>/</kbd> search</li>
+        <li><kbd>?</kbd> help</li>
+      </ul>
+      <span class="status-right">UTF-8 · 152×40</span>
+    </footer>
+
+  </section>
+
+  <p class="caption" data-od-id="stage-caption">post · TUI mail client — inbox concept · sep 2026</p>
+</main>
+
+<script>
+  (function () {
+    var rows = Array.prototype.slice.call(document.querySelectorAll('.mail'));
+    var input = document.getElementById('search-input');
+    var current = Math.max(0, rows.findIndex(function (r) { return r.classList.contains('selected'); }));
+
+    function select(n) {
+      if (!rows.length) return;
+      rows[current].classList.remove('selected');
+      rows[current].setAttribute('aria-selected', 'false');
+      current = (n + rows.length) % rows.length;
+      rows[current].classList.add('selected');
+      rows[current].setAttribute('aria-selected', 'true');
+      rows[current].focus({ preventScroll: true });
+    }
+
+    rows.forEach(function (row, n) {
+      row.addEventListener('click', function () { select(n); });
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === '/' && document.activeElement !== input) {
+        e.preventDefault();
+        input.focus();
+        return;
+      }
+      if (document.activeElement === input) {
+        if (e.key === 'Escape') input.blur();
+        return;
+      }
+      if (e.key === 'j') { e.preventDefault(); select(current + 1); }
+      if (e.key === 'k') { e.preventDefault(); select(current - 1); }
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll('.folder'), function (a) {
+      a.addEventListener('click', function (e) { e.preventDefault(); });
+    });
+  })();
+</script>
+</body>
+</html>

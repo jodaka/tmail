@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of flags set on an m2dir message.",
+  "properties": {
+    "flags": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "flags"
+  ],
+  "title": "FlagsTable",
+  "type": "object"
+}

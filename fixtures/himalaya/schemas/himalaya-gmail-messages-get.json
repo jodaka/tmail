@@ -1,0 +1,72 @@
+{
+  "$defs": {
+    "GmailMessageHeaderOutput": {
+      "description": "A single RFC 5322 header of a Gmail message.\n\nHeaders are a list rather than a map because a message may repeat a\nname (Received, References) and their order is meaningful. They are\nabsent with the minimal format, narrowed by `--header` when it is\ngiven, and complete otherwise.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Gmail message metadata, rendered as aligned text or, under `--json`,\nas a structured object instead of a wrapped human string.\n\nOnly the metadata is exposed, never the whole Gmail resource: the\npayload of a message fetched with the full format is a recursive MIME\ntree carrying base64-encoded bodies, which belongs on the `--format\nraw` path rather than in a `--json` object. Bodies stay reachable\nthrough `messages get --format raw` and `attachments get`.",
+  "properties": {
+    "headers": {
+      "items": {
+        "$ref": "#/$defs/GmailMessageHeaderOutput"
+      },
+      "type": "array"
+    },
+    "id": {
+      "type": "string"
+    },
+    "internal-date": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "label-ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "size-estimate": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "snippet": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "thread-id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "label-ids",
+    "headers"
+  ],
+  "title": "GmailMessageGetOutput",
+  "type": "object"
+}

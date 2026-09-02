@@ -1,0 +1,5 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Parsed message rendered for reading: a minimal header block followed\nby a per-part walk (one summary line each, plus the decoded contents\nof plain-text parts), or the raw parsed message as JSON.",
+  "title": "MessageView"
+}

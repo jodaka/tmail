@@ -1,0 +1,192 @@
+{
+  "$defs": {
+    "GmailSecurityMode": {
+      "description": "Transport security mode of an SMTP relay service.",
+      "oneOf": [
+        {
+          "const": "securityModeUnspecified",
+          "description": "Unspecified security mode.",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "Unsecured communication with the SMTP service.",
+          "type": "string"
+        },
+        {
+          "const": "ssl",
+          "description": "Communication secured using SSL from connection start.",
+          "type": "string"
+        },
+        {
+          "const": "starttls",
+          "description": "Communication upgraded to a secure channel using STARTTLS.",
+          "type": "string"
+        }
+      ]
+    },
+    "GmailSendAs": {
+      "description": "Send-as alias of a Gmail account.",
+      "properties": {
+        "displayName": {
+          "description": "Display name used in the From header of sent mail.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isDefault": {
+          "description": "Whether this alias is the default From address.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "isPrimary": {
+          "description": "Whether this alias is the primary address of the account.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "replyToAddress": {
+          "description": "Email address put in the Reply-To header of sent mail.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sendAsEmail": {
+          "default": "",
+          "description": "Email address that appears in the From header of sent mail.",
+          "type": "string"
+        },
+        "signature": {
+          "description": "HTML signature appended to messages composed with this alias.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "smtpMsa": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GmailSmtpMsa"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional SMTP service used as outbound relay for this alias."
+        },
+        "treatAsAlias": {
+          "description": "Whether Gmail treats this address as an alias of the primary address.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "verificationStatus": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GmailVerificationStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Verification status of the alias."
+        }
+      },
+      "type": "object"
+    },
+    "GmailSmtpMsa": {
+      "description": "SMTP relay configuration used to send mail for a send-as alias.",
+      "properties": {
+        "host": {
+          "default": "",
+          "description": "Hostname of the SMTP service.",
+          "type": "string"
+        },
+        "password": {
+          "description": "Password used for authentication against the SMTP service.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "port": {
+          "default": 0,
+          "description": "Port of the SMTP service.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "securityMode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GmailSecurityMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Transport security used to connect to the SMTP service."
+        },
+        "username": {
+          "description": "Username used for authentication against the SMTP service.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GmailVerificationStatus": {
+      "description": "Verification state of an email address owned by a Gmail account.",
+      "oneOf": [
+        {
+          "const": "verificationStatusUnspecified",
+          "description": "No verification status specified.",
+          "type": "string"
+        },
+        {
+          "const": "accepted",
+          "description": "The address is verified and usable.",
+          "type": "string"
+        },
+        {
+          "const": "pending",
+          "description": "The verification request is awaiting a response.",
+          "type": "string"
+        },
+        {
+          "const": "rejected",
+          "description": "The verification request was rejected.",
+          "type": "string"
+        },
+        {
+          "const": "expired",
+          "description": "The verification request expired without a response.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of Gmail send-as aliases.",
+  "properties": {
+    "send_as": {
+      "items": {
+        "$ref": "#/$defs/GmailSendAs"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "send_as"
+  ],
+  "title": "SendAsTable",
+  "type": "object"
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Microsoft Graph user profile, rendered as aligned text or, under\n`--json`, as a structured object (`{id, display-name, mail,\nuser-principal-name}`) instead of a wrapped human string.",
+  "properties": {
+    "display-name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "type": "string"
+    },
+    "mail": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "user-principal-name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "MsgraphProfileOutput",
+  "type": "object"
+}

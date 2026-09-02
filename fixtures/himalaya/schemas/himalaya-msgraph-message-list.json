@@ -1,0 +1,324 @@
+{
+  "$defs": {
+    "MsgraphBodyType": {
+      "description": "Format of a message body.",
+      "oneOf": [
+        {
+          "const": "text",
+          "description": "Plain text body.",
+          "type": "string"
+        },
+        {
+          "const": "html",
+          "description": "HTML body.",
+          "type": "string"
+        }
+      ]
+    },
+    "MsgraphEmailAddress": {
+      "description": "A named email address (`recipient.emailAddress`).",
+      "properties": {
+        "address": {
+          "description": "The email address itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The display name paired with the address.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "MsgraphFlagStatus": {
+      "description": "Status of a follow-up flag.",
+      "oneOf": [
+        {
+          "const": "notFlagged",
+          "description": "The message is not flagged.",
+          "type": "string"
+        },
+        {
+          "const": "complete",
+          "description": "The follow-up is completed.",
+          "type": "string"
+        },
+        {
+          "const": "flagged",
+          "description": "The message is flagged for follow-up.",
+          "type": "string"
+        }
+      ]
+    },
+    "MsgraphFollowupFlag": {
+      "description": "Follow-up flag set on a message.",
+      "properties": {
+        "flagStatus": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MsgraphFlagStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The status of the follow-up flag."
+        }
+      },
+      "type": "object"
+    },
+    "MsgraphImportance": {
+      "description": "Importance of a message.",
+      "oneOf": [
+        {
+          "const": "low",
+          "description": "Low importance.",
+          "type": "string"
+        },
+        {
+          "const": "normal",
+          "description": "Normal importance, the default.",
+          "type": "string"
+        },
+        {
+          "const": "high",
+          "description": "High importance.",
+          "type": "string"
+        }
+      ]
+    },
+    "MsgraphItemBody": {
+      "description": "The body of a message, in text or HTML format.",
+      "properties": {
+        "content": {
+          "description": "The body content itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contentType": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MsgraphBodyType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The format of the body content."
+        }
+      },
+      "type": "object"
+    },
+    "MsgraphMessage": {
+      "description": "A message in a mail folder. Doubles as the create/update body, where\nonly the set (non-empty) fields are serialized.",
+      "properties": {
+        "bccRecipients": {
+          "description": "The Bcc recipients of the message.",
+          "items": {
+            "$ref": "#/$defs/MsgraphRecipient"
+          },
+          "type": "array"
+        },
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MsgraphItemBody"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The body of the message, in text or HTML format."
+        },
+        "bodyPreview": {
+          "description": "The first bytes of the body, in text format.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "categories": {
+          "description": "The categories associated with the message.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ccRecipients": {
+          "description": "The Cc recipients of the message.",
+          "items": {
+            "$ref": "#/$defs/MsgraphRecipient"
+          },
+          "type": "array"
+        },
+        "conversationId": {
+          "description": "The identifier of the conversation the message belongs to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flag": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MsgraphFollowupFlag"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The follow-up flag set on the message."
+        },
+        "from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MsgraphRecipient"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The mailbox owner displayed as the author."
+        },
+        "hasAttachments": {
+          "description": "Whether the message carries attachments.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The unique identifier of the message.",
+          "type": "string"
+        },
+        "importance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MsgraphImportance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The importance of the message."
+        },
+        "internetMessageId": {
+          "description": "The RFC 5322 Message-ID header of the message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isDraft": {
+          "description": "Whether the message is a draft.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "isRead": {
+          "description": "Whether the message has been read.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "parentFolderId": {
+          "description": "The identifier of the containing mail folder.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "receivedDateTime": {
+          "description": "The reception date, as an ISO 8601 date-time.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replyTo": {
+          "description": "The addresses replies should be sent to.",
+          "items": {
+            "$ref": "#/$defs/MsgraphRecipient"
+          },
+          "type": "array"
+        },
+        "sender": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MsgraphRecipient"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The account actually used to send the message."
+        },
+        "sentDateTime": {
+          "description": "The send date, as an ISO 8601 date-time.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subject": {
+          "description": "The subject of the message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "toRecipients": {
+          "description": "The To recipients of the message.",
+          "items": {
+            "$ref": "#/$defs/MsgraphRecipient"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "MsgraphRecipient": {
+      "description": "A message recipient, wrapping an email address.",
+      "properties": {
+        "emailAddress": {
+          "$ref": "#/$defs/MsgraphEmailAddress",
+          "description": "The email address of the recipient."
+        }
+      },
+      "required": [
+        "emailAddress"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Wraps a renderable listing with an optional pagination cursor so the\n\"next page\" hint is part of the command output: a trailing footer\nline in text mode, an extra `next_page` field in JSON. This keeps\nthe cursor visible to scripts, unlike logging it to stderr.",
+  "properties": {
+    "messages": {
+      "items": {
+        "$ref": "#/$defs/MsgraphMessage"
+      },
+      "type": "array"
+    },
+    "next_page": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "messages"
+  ],
+  "title": "Paginated",
+  "type": "object"
+}

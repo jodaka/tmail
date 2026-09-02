@@ -1,0 +1,45 @@
+{
+  "$defs": {
+    "GmailMessageId": {
+      "description": "A lightweight Gmail message resource carrying only its ids.",
+      "properties": {
+        "id": {
+          "description": "The immutable id of the message.",
+          "type": "string"
+        },
+        "threadId": {
+          "description": "The id of the thread the message belongs to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Wraps a renderable listing with an optional pagination cursor so the\n\"next page\" hint is part of the command output: a trailing footer\nline in text mode, an extra `next_page` field in JSON. This keeps\nthe cursor visible to scripts, unlike logging it to stderr.",
+  "properties": {
+    "ids": {
+      "items": {
+        "$ref": "#/$defs/GmailMessageId"
+      },
+      "type": "array"
+    },
+    "next_page": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "ids"
+  ],
+  "title": "Paginated",
+  "type": "object"
+}

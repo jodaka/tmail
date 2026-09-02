@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of SORT result message ids.",
+  "properties": {
+    "ids": {
+      "items": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "uid_mode": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "uid_mode",
+    "ids"
+  ],
+  "title": "SortResultsTable",
+  "type": "object"
+}

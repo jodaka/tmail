@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Gmail vacation responder settings, rendered as aligned text or, under\n`--json`, as a structured object instead of a wrapped human string.\n\nThe booleans stay booleans in JSON, where the text rendering spells\nthem enabled and disabled, or yes and no.",
+  "properties": {
+    "enable-auto-reply": {
+      "type": "boolean"
+    },
+    "end-time": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "response-body-html": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "response-body-plain-text": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "response-subject": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "restrict-to-contacts": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "restrict-to-domain": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "start-time": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "enable-auto-reply"
+  ],
+  "title": "GmailSettingsVacationGetOutput",
+  "type": "object"
+}

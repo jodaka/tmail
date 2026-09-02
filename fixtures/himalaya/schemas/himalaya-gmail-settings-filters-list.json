@@ -1,0 +1,190 @@
+{
+  "$defs": {
+    "GmailFilter": {
+      "description": "Mail filter of a Gmail account.",
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GmailFilterAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Action applied to messages matching the criteria."
+        },
+        "criteria": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GmailFilterCriteria"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Matching criteria of the filter."
+        },
+        "id": {
+          "description": "Server-assigned identifier of the filter.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "GmailFilterAction": {
+      "description": "Action applied by a Gmail filter to a matching message.",
+      "properties": {
+        "addLabelIds": {
+          "description": "Identifiers of labels to add to the message.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "forward": {
+          "description": "Email address the message is forwarded to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "removeLabelIds": {
+          "description": "Identifiers of labels to remove from the message.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GmailFilterCriteria": {
+      "description": "Conditions matched by a Gmail filter against incoming messages.",
+      "properties": {
+        "excludeChats": {
+          "description": "Whether chat messages are excluded from matching.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "from": {
+          "description": "Sender display name or email address to match.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hasAttachment": {
+          "description": "Whether the message must have an attachment.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "negatedQuery": {
+          "description": "Gmail search query the message must not match.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "query": {
+          "description": "Gmail search query the message must match.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "Message size in bytes compared with `size_comparison`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sizeComparison": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GmailFilterSizeComparison"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the message size relates to the `size` field."
+        },
+        "subject": {
+          "description": "Case-insensitive phrase matched in the message subject.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to": {
+          "description": "Recipient display name or email address to match.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GmailFilterSizeComparison": {
+      "description": "Comparison applied to the message size in a filter criterion.",
+      "oneOf": [
+        {
+          "const": "unspecified",
+          "description": "No size comparison specified.",
+          "type": "string"
+        },
+        {
+          "const": "smaller",
+          "description": "Matches messages smaller than the given size.",
+          "type": "string"
+        },
+        {
+          "const": "larger",
+          "description": "Matches messages larger than the given size.",
+          "type": "string"
+        }
+      ]
+    },
+    "GmailFiltersListResponse": {
+      "description": "Response wrapping the filters of a Gmail account.",
+      "properties": {
+        "filter": {
+          "default": [],
+          "description": "Filters of the Gmail account.",
+          "items": {
+            "$ref": "#/$defs/GmailFilter"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of Gmail filters.",
+  "properties": {
+    "response": {
+      "$ref": "#/$defs/GmailFiltersListResponse"
+    }
+  },
+  "required": [
+    "response"
+  ],
+  "title": "FiltersTable",
+  "type": "object"
+}

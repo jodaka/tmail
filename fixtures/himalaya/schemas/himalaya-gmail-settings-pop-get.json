@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Gmail POP access settings, rendered as aligned text or, under\n`--json`, as a structured object instead of a wrapped human string.\n\nThe enums keep their Gmail wire spelling, so a value read with `get`\nis a value `set` accepts back.",
+  "properties": {
+    "access-window": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "disposition": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "GmailSettingsPopGetOutput",
+  "type": "object"
+}

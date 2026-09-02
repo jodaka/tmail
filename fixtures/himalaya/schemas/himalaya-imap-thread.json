@@ -1,0 +1,43 @@
+{
+  "$defs": {
+    "ThreadEntry": {
+      "description": "One flattened THREAD node: a message id with its subject and depth.",
+      "properties": {
+        "depth": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "subject",
+        "depth"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Mirrors the JSON shape produced by [`ThreadResultsTable`]'s manual\n[`Serialize`] impl (a single `threads` field), used only to derive\nthe JSON Schema for the `imap thread` command.",
+  "properties": {
+    "threads": {
+      "items": {
+        "$ref": "#/$defs/ThreadEntry"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "threads"
+  ],
+  "title": "ThreadResultsTableSchema",
+  "type": "object"
+}

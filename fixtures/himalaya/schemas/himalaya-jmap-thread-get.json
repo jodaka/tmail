@@ -1,0 +1,40 @@
+{
+  "$defs": {
+    "JmapThread": {
+      "description": "A JMAP Thread object (RFC 8621 §3.1).\n\nA Thread is a set of Email objects that share the same root\n`Message-ID` and in-reply-to chain.",
+      "properties": {
+        "emailIds": {
+          "description": "Ordered list of email IDs in this thread, oldest first.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "The server-assigned ID for this thread.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "emailIds"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of threads and their email IDs.",
+  "properties": {
+    "threads": {
+      "items": {
+        "$ref": "#/$defs/JmapThread"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "threads"
+  ],
+  "title": "ThreadsTable",
+  "type": "object"
+}

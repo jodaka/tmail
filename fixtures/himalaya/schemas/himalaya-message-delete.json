@@ -1,0 +1,30 @@
+{
+  "$defs": {
+    "DeleteAction": {
+      "enum": [
+        "moved-to-trash",
+        "deleted",
+        "flagged"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Structured result of `messages delete`: which action was taken and how\nmany messages it affected.",
+  "properties": {
+    "action": {
+      "$ref": "#/$defs/DeleteAction"
+    },
+    "count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "action",
+    "count"
+  ],
+  "title": "DeleteReport",
+  "type": "object"
+}

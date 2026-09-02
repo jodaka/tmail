@@ -1,0 +1,42 @@
+{
+  "$defs": {
+    "MailboxRow": {
+      "description": "One row of the mailboxes table: name, delimiter and attributes.",
+      "properties": {
+        "attributes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "delimiter": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "delimiter",
+        "attributes"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of LIST/LSUB mailboxes.",
+  "properties": {
+    "mailboxes": {
+      "items": {
+        "$ref": "#/$defs/MailboxRow"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "mailboxes"
+  ],
+  "title": "MailboxesTable",
+  "type": "object"
+}

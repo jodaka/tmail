@@ -15,9 +15,9 @@ Post contains no provider-specific protocol or Gmail API code.
 
 The three HTML files supplied with this plan are visual references:
 
-- `tui-mail-mockup.html`: mailbox/message-list layout
-- `viewer.html`: reader layout; treat it as a **single-message** reader in v1
-- `new-mail.html`: composer layout
+- `./mockups/list.html`: mailbox/message-list layout
+- `./mockups/viewer.html`: reader layout; treat it as a **single-message** reader in v1
+- `./mockups/new-mail.html`: composer layout
 
 Mockups are visual direction, not literal behavior. Section 4 lists the intentional overrides.
 
@@ -1045,4 +1045,3 @@ Execute **Phase 0 only**:
 - characterize ambiguous send outcomes;
 - write the backend and draft ADRs;
 - run tests and report findings before starting Phase 1.
-

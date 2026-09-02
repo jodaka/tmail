@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Wraps the raw method_responses for display.",
+  "properties": {
+    "method_responses": {
+      "items": {
+        "maxItems": 3,
+        "minItems": 3,
+        "prefixItems": [
+          {
+            "type": "string"
+          },
+          true,
+          {
+            "type": "string"
+          }
+        ],
+        "type": "array"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "method_responses"
+  ],
+  "title": "RawResponse",
+  "type": "object"
+}

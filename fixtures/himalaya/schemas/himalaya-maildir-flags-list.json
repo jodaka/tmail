@@ -1,0 +1,35 @@
+{
+  "$defs": {
+    "FlagRow": {
+      "description": "One row of the Maildir flags table: code and name.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of the standard Maildir flags.",
+  "properties": {
+    "flags": {
+      "items": {
+        "$ref": "#/$defs/FlagRow"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "flags"
+  ],
+  "title": "FlagsTable",
+  "type": "object"
+}

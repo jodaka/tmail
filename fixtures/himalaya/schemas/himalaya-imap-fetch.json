@@ -1,0 +1,191 @@
+{
+  "$defs": {
+    "BodyPart": {
+      "description": "One node of a fetched MIME body structure tree.",
+      "properties": {
+        "content_type": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parts": {
+          "items": {
+            "$ref": "#/$defs/BodyPart"
+          },
+          "type": "array"
+        },
+        "size": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "content_type",
+        "parts"
+      ],
+      "type": "object"
+    },
+    "EnvelopeView": {
+      "description": "Display view of a fetched message envelope.",
+      "properties": {
+        "bcc": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cc": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "date": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "in_reply_to": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reply_to": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sender": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "subject": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "from",
+        "sender",
+        "reply_to",
+        "to",
+        "cc",
+        "bcc"
+      ],
+      "type": "object"
+    },
+    "FetchedMessage": {
+      "description": "The fetched data items of a single message.",
+      "properties": {
+        "envelope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvelopeView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "flags": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "internal_date": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seq": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "size": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "structure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BodyPart"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "seq"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable list of FETCH results, one block per message.",
+  "properties": {
+    "messages": {
+      "items": {
+        "$ref": "#/$defs/FetchedMessage"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "messages"
+  ],
+  "title": "FetchedMessages",
+  "type": "object"
+}

@@ -1,0 +1,60 @@
+{
+  "$defs": {
+    "GmailForwardingAddress": {
+      "description": "Forwarding address registered on a Gmail account.",
+      "properties": {
+        "forwardingEmail": {
+          "default": "",
+          "description": "Email address messages can be forwarded to.",
+          "type": "string"
+        },
+        "verificationStatus": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GmailVerificationStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Verification status of the forwarding address."
+        }
+      },
+      "type": "object"
+    },
+    "GmailVerificationStatus": {
+      "description": "Verification state of an email address owned by a Gmail account.",
+      "oneOf": [
+        {
+          "const": "verificationStatusUnspecified",
+          "description": "No verification status specified.",
+          "type": "string"
+        },
+        {
+          "const": "accepted",
+          "description": "The address is verified and usable.",
+          "type": "string"
+        },
+        {
+          "const": "pending",
+          "description": "The verification request is awaiting a response.",
+          "type": "string"
+        },
+        {
+          "const": "rejected",
+          "description": "The verification request was rejected.",
+          "type": "string"
+        },
+        {
+          "const": "expired",
+          "description": "The verification request expired without a response.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$ref": "#/$defs/GmailForwardingAddress",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A Gmail forwarding address, rendered as aligned text or, under\n`--json`, as the forwarding address resource itself instead of a\nwrapped human string.\n\nThe resource is emitted verbatim so that one address read with `get`\nhas the very same shape as a row of `list`.",
+  "title": "GmailSettingsForwardingAddressGetOutput"
+}

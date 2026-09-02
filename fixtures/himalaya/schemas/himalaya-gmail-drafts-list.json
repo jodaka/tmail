@@ -1,0 +1,220 @@
+{
+  "$defs": {
+    "GmailDraft": {
+      "description": "Gmail REST draft resource (an id plus its draft message).",
+      "properties": {
+        "id": {
+          "description": "Immutable identifier of the draft.",
+          "type": "string"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GmailMessage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Message content of the draft."
+        }
+      },
+      "type": "object"
+    },
+    "GmailMessage": {
+      "description": "A Gmail message resource.\n\nPopulated fields depend on the requested [`GmailMessageFormat`]:\n`payload` comes with the full format, `raw` with the raw format.",
+      "properties": {
+        "historyId": {
+          "description": "The id of the last history record that modified the message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The immutable id of the message.",
+          "type": "string"
+        },
+        "internalDate": {
+          "description": "The internal message creation timestamp (epoch milliseconds),\nwhich determines ordering in the inbox.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "labelIds": {
+          "description": "The ids of the labels applied to the message.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GmailMessagePayload"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The parsed email structure in the message parts."
+        },
+        "raw": {
+          "description": "The entire message as a base64url-encoded RFC 5322 string.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sizeEstimate": {
+          "description": "The estimated size of the message in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "snippet": {
+          "description": "A short part of the message text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "description": "The id of the thread the message belongs to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GmailMessageHeader": {
+      "description": "A single header of a Gmail message part.",
+      "properties": {
+        "name": {
+          "description": "The name of the header.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The value of the header.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "type": "object"
+    },
+    "GmailMessagePartBody": {
+      "description": "The body of a single MIME part of a Gmail message.",
+      "properties": {
+        "attachmentId": {
+          "default": null,
+          "description": "The id of an external attachment, retrievable via a separate\n`users.messages.attachments.get` request.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "data": {
+          "default": null,
+          "description": "The body data as a base64url-encoded string; absent when the\ndata lives in an external attachment.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "default": 0,
+          "description": "The number of bytes of the message part data.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "GmailMessagePayload": {
+      "description": "A single MIME part of a Gmail message.\n\nThe top-level part is exposed as the payload of a [`GmailMessage`];\nmultipart containers nest their children in `parts`.",
+      "properties": {
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GmailMessagePartBody"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The body of the part, which may be empty for container MIME\nparts."
+        },
+        "filename": {
+          "default": "",
+          "description": "The filename of the attachment; empty when the part is not an\nattachment.",
+          "type": "string"
+        },
+        "headers": {
+          "default": [],
+          "description": "The headers of the part, such as To, From or Subject.",
+          "items": {
+            "$ref": "#/$defs/GmailMessageHeader"
+          },
+          "type": "array"
+        },
+        "mimeType": {
+          "default": null,
+          "description": "The MIME type of the part.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "partId": {
+          "default": null,
+          "description": "The immutable id of the message part.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parts": {
+          "default": [],
+          "description": "The child parts of a container MIME part.",
+          "items": {
+            "$ref": "#/$defs/GmailMessagePayload"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Wraps a renderable listing with an optional pagination cursor so the\n\"next page\" hint is part of the command output: a trailing footer\nline in text mode, an extra `next_page` field in JSON. This keeps\nthe cursor visible to scripts, unlike logging it to stderr.",
+  "properties": {
+    "drafts": {
+      "items": {
+        "$ref": "#/$defs/GmailDraft"
+      },
+      "type": "array"
+    },
+    "next_page": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "drafts"
+  ],
+  "title": "Paginated",
+  "type": "object"
+}

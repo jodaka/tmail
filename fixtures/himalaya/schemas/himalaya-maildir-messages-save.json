@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Output of a saved Maildir message: its id and file path.",
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "path": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "path"
+  ],
+  "title": "StoredMessage",
+  "type": "object"
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "sent": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "id",
+    "sent"
+  ],
+  "title": "MessageAddOutput",
+  "type": "object"
+}

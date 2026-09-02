@@ -1,0 +1,47 @@
+# Post v1 configuration (Phase 0 reference shape)
+#
+# Post and Himalaya share ONE file: this is the same config the Himalaya CLI
+# reads (verified: himalaya 2.1.0 tolerates unknown root tables like [post]).
+# Himalaya account/credential blocks stay untouched and keep their format:
+# https://github.com/pimalaya/himalaya/blob/master/config.sample.toml
+
+# ── Himalaya accounts (example below is the disposable Maildir probe) ──────
+[accounts.probe]
+email = "probe@post.local"
+display-name = "Post Probe"
+
+[accounts.probe.maildir]
+root = "~/tmp/post-probe-maildir"
+
+[accounts.probe.mailbox.alias]
+inbox = "INBOX"
+sent = "Sent"
+drafts = "Drafts"
+trash = "Archive"
+archive = "Archive"
+
+# ── Post-owned settings ────────────────────────────────────────────────────
+[post]
+# Name of the account (root table in this file) Post drives.
+account = "probe"
+# Basic mouse support (click mailbox/rows, wheel scroll).
+mouse = true
+
+[post.mail]
+# Message list page size (explicit pagination).
+page_size = 20
+# Periodic background refresh, 0 disables. Foreground work is never preempted.
+refresh_interval_seconds = 60
+
+[post.composer]
+# "builtin", "$EDITOR", or an explicit command like "nvim".
+editor = "builtin"
+# Debounce for draft autosave in the builtin editor.
+autosave_delay_ms = 2000
+
+[post.attachments]
+# Directory used by "save attachment" (expanded in Post, never via a shell).
+downloads_dir = "~/Downloads"
+
+[post.theme]
+name = "default"

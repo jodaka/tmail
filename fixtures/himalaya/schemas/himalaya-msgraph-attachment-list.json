@@ -1,0 +1,72 @@
+{
+  "$defs": {
+    "MsgraphAttachment": {
+      "description": "A message attachment.\n\nGraph models several subtypes (`fileAttachment`, `itemAttachment`,\n`referenceAttachment`); this captures the common fields plus the\n`fileAttachment` content bytes (base64) when present.",
+      "properties": {
+        "contentBytes": {
+          "description": "The base64-encoded content, for the `fileAttachment` subtype.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contentType": {
+          "description": "The MIME type of the attachment content.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The unique identifier of the attachment.",
+          "type": "string"
+        },
+        "isInline": {
+          "description": "Whether the attachment is displayed inline in the body.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "lastModifiedDateTime": {
+          "description": "The last modification date, as an ISO 8601 date-time.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The file name of the attachment.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "The size of the attachment in bytes.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of Microsoft Graph message attachments.",
+  "properties": {
+    "attachments": {
+      "items": {
+        "$ref": "#/$defs/MsgraphAttachment"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "attachments"
+  ],
+  "title": "AttachmentsTable",
+  "type": "object"
+}

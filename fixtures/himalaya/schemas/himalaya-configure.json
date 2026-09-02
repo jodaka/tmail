@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The generated account, as the printer takes it.",
+  "properties": {
+    "default": {
+      "description": "Whether the account claims the default.",
+      "type": "boolean"
+    },
+    "document": {
+      "description": "The rendered TOML document.",
+      "type": "string"
+    },
+    "name": {
+      "description": "The account name, which is the `[accounts.<name>]` table key.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "default",
+    "document"
+  ],
+  "title": "GeneratedConfig",
+  "type": "object"
+}

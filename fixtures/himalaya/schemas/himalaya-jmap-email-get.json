@@ -1,0 +1,423 @@
+{
+  "$defs": {
+    "JmapEmail": {
+      "description": "A JMAP Email object (RFC 8621 §4.1).",
+      "properties": {
+        "attachments": {
+          "description": "The parts to display as attachments.",
+          "items": {
+            "$ref": "#/$defs/JmapEmailBodyPart"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "bcc": {
+          "description": "The `Bcc` header addresses.",
+          "items": {
+            "$ref": "#/$defs/JmapEmailAddress"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "blobId": {
+          "description": "Blob ID for the raw RFC 5322 message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bodyStructure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JmapEmailBodyPart"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The full MIME structure of the message."
+        },
+        "bodyValues": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JmapEmailBodyValue"
+          },
+          "description": "`{ part-id -> body }` for text parts.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "cc": {
+          "description": "The `Cc` header addresses.",
+          "items": {
+            "$ref": "#/$defs/JmapEmailAddress"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "from": {
+          "description": "The `From` header addresses.",
+          "items": {
+            "$ref": "#/$defs/JmapEmailAddress"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "hasAttachment": {
+          "description": "Whether any part is an attachment.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "headers": {
+          "description": "Raw headers in order of appearance.",
+          "items": {
+            "$ref": "#/$defs/JmapEmailHeader"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "htmlBody": {
+          "description": "The text/html parts to display as the message body.",
+          "items": {
+            "$ref": "#/$defs/JmapEmailBodyPart"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The server-assigned email id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inReplyTo": {
+          "description": "The `In-Reply-To` header values.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "keywords": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "description": "`{ keyword -> true }`. Standard: `$seen`, `$flagged`, `$answered`,\n`$draft`.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "mailboxIds": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "description": "`{ mailbox-id -> true }` for each mailbox containing the email.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "messageId": {
+          "description": "The `Message-ID` header values.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "preview": {
+          "description": "Short plaintext preview (up to 256 chars).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "receivedAt": {
+          "description": "RFC 3339 receive time.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "references": {
+          "description": "The `References` header values.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "replyTo": {
+          "description": "The `Reply-To` header addresses.",
+          "items": {
+            "$ref": "#/$defs/JmapEmailAddress"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "sender": {
+          "description": "The `Sender` header addresses.",
+          "items": {
+            "$ref": "#/$defs/JmapEmailAddress"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "sentAt": {
+          "description": "`Date` header as an RFC 3339 string.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "Size of the raw RFC 5322 message, in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "subject": {
+          "description": "The `Subject` header value.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "textBody": {
+          "description": "The text/plain parts to display as the message body.",
+          "items": {
+            "$ref": "#/$defs/JmapEmailBodyPart"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "threadId": {
+          "description": "The id of the thread the email belongs to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to": {
+          "description": "The `To` header addresses.",
+          "items": {
+            "$ref": "#/$defs/JmapEmailAddress"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "JmapEmailAddress": {
+      "description": "An email address (name + email pair).",
+      "properties": {
+        "email": {
+          "description": "The address itself (local@domain).",
+          "type": "string"
+        },
+        "name": {
+          "description": "The display name, when present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "email"
+      ],
+      "type": "object"
+    },
+    "JmapEmailBodyPart": {
+      "description": "A MIME body part descriptor.",
+      "properties": {
+        "blobId": {
+          "description": "Blob id to download the decoded part content.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "charset": {
+          "description": "The `Content-Type` charset parameter.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cid": {
+          "description": "The `Content-Id` value, without angle brackets.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disposition": {
+          "description": "`inline` or `attachment`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "description": "Raw headers of the part.",
+          "items": {
+            "$ref": "#/$defs/JmapEmailHeader"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "language": {
+          "description": "The `Content-Language` values.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "location": {
+          "description": "The `Content-Location` value.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Filename from `Content-Disposition` or `Content-Type`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "partId": {
+          "description": "Part id, scoped to the message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "Size of the decoded part content, in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "subParts": {
+          "description": "Sub-parts (multipart only).",
+          "items": {
+            "$ref": "#/$defs/JmapEmailBodyPart"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "type": {
+          "description": "The `Content-Type` media type.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "JmapEmailBodyValue": {
+      "description": "The text content of a body part.",
+      "properties": {
+        "isEncodingProblem": {
+          "description": "Charset or encoding problem during decode.",
+          "type": "boolean"
+        },
+        "isTruncated": {
+          "description": "Whether the value was truncated.",
+          "type": "boolean"
+        },
+        "value": {
+          "description": "The decoded text content.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "isEncodingProblem",
+        "isTruncated"
+      ],
+      "type": "object"
+    },
+    "JmapEmailHeader": {
+      "description": "A raw email header name-value pair.",
+      "properties": {
+        "name": {
+          "description": "Field name, without trailing colon.",
+          "type": "string"
+        },
+        "value": {
+          "description": "Raw value, with leading whitespace preserved.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of email envelopes.",
+  "properties": {
+    "emails": {
+      "items": {
+        "$ref": "#/$defs/JmapEmail"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "emails"
+  ],
+  "title": "EmailsTable",
+  "type": "object"
+}

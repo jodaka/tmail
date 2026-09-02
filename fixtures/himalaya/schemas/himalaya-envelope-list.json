@@ -1,0 +1,169 @@
+{
+  "$defs": {
+    "Address": {
+      "description": "A single email address with an optional display name.\n\nCommon shape used by every protocol-specific envelope and message\nrepresentation.",
+      "properties": {
+        "email": {
+          "description": "Email address (e.g. `alice@example.org`).",
+          "type": "string"
+        },
+        "name": {
+          "description": "Display name (e.g. `Alice`), if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "email"
+      ],
+      "type": "object"
+    },
+    "Envelope": {
+      "description": "Lightweight summary of a message: enough to display in a list\nwithout fetching the full body.",
+      "properties": {
+        "date": {
+          "default": null,
+          "description": "Author-claimed send time, taken from the `Date:` header (IMAP\n`ENVELOPE.date`, JMAP `sentAt`, parsed `Date:` for Maildir).\n`None` when the header is missing or unparseable.",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flags": {
+          "default": [],
+          "description": "Flags set on the message. Stored as a sorted set since wire\norder is not meaningful and duplicates are nonsensical.",
+          "items": {
+            "$ref": "#/$defs/Flag"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "from": {
+          "default": [],
+          "description": "Sender(s).",
+          "items": {
+            "$ref": "#/$defs/Address"
+          },
+          "type": "array"
+        },
+        "has-attachment": {
+          "default": null,
+          "description": "Whether the message has at least one attachment, when the caller\nopted in. `None` when not requested or when detection is not\nimplemented for the active backend.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Backend-specific identifier of the message.\n\nIMAP UID, JMAP email ID or Maildir filename id.",
+          "type": "string"
+        },
+        "in-reply-to": {
+          "default": [],
+          "description": "`In-Reply-To:` header value (RFC 5322 §3.6.4), the message(s)\nthis one replies to, empty when the header is missing or the\nbackend did not surface it.\n\nA list because the grammar is `1*msg-id`: one id is the common\ncase and a reply to a merged thread is not. Each id is\nnormalised like [`Envelope::message_id`], so the two compare\nbyte-for-byte and a client can pair a reply with its parent\nfrom a listing alone.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "message-id": {
+          "default": null,
+          "description": "`Message-ID:` header value (RFC 5322 §3.6.4), `None` when the\nheader is missing or the backend did not surface it. Stable\nacross every backend that stores the message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "default": 0,
+          "description": "Size of the raw RFC 5322 message in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "subject": {
+          "default": "",
+          "description": "Subject header value.",
+          "type": "string"
+        },
+        "to": {
+          "default": [],
+          "description": "Primary recipient(s).",
+          "items": {
+            "$ref": "#/$defs/Address"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "Flag": {
+      "description": "A flag attached to an envelope or message.\n\nConstructed via [`Flag::from_raw`] (wire spelling in, IANA lookup\nderived) or [`Flag::from_iana`] (IANA tag in, canonical wire\nspelling synthesised).",
+      "properties": {
+        "iana": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IanaFlag"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "raw": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "raw"
+      ],
+      "type": "object"
+    },
+    "IanaFlag": {
+      "description": "IANA-registered email keywords supported by the shared API.\n\nListed in the canonical wire-spelling table at\n<https://www.iana.org/assignments/imap-jmap-keywords/>. Variant\norder is the lookup order; [`Ord`] is derived from declaration\norder to give stable per-IANA-key sorting.",
+      "oneOf": [
+        {
+          "enum": [
+            "seen",
+            "answered",
+            "flagged",
+            "draft",
+            "forwarded",
+            "junk",
+            "not-junk",
+            "phishing",
+            "important",
+            "mdn-sent"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "deleted",
+          "description": "Sync verb. Adapters round-trip `\\Deleted` so single-side\nworkflows behave, but a sync engine should translate\n\"one side has Deleted\" into `delete_message` on the other\nside rather than propagating the flag.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Table of envelope rows rendered to the terminal or as JSON.",
+  "properties": {
+    "envelopes": {
+      "items": {
+        "$ref": "#/$defs/Envelope"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "envelopes"
+  ],
+  "title": "Envelopes",
+  "type": "object"
+}

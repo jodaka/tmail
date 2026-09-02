@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of a mailbox's flags and permanent flags.",
+  "properties": {
+    "flags": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "permanent_flags": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "flags",
+    "permanent_flags"
+  ],
+  "title": "FlagsTable",
+  "type": "object"
+}

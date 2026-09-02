@@ -1,0 +1,35 @@
+{
+  "$defs": {
+    "M2dirRow": {
+      "description": "One row of the m2dir folders table: name and path.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of m2dir folders.",
+  "properties": {
+    "m2dirs": {
+      "items": {
+        "$ref": "#/$defs/M2dirRow"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "m2dirs"
+  ],
+  "title": "M2dirsTable",
+  "type": "object"
+}

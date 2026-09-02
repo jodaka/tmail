@@ -1,0 +1,90 @@
+{
+  "$defs": {
+    "GmailHistoryLabelOutput": {
+      "description": "Labels added to or removed from one message in a history record.",
+      "properties": {
+        "label-ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "message-id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message-id",
+        "label-ids"
+      ],
+      "type": "object"
+    },
+    "GmailHistoryRecordOutput": {
+      "description": "A single change to the mailbox since the requested history id.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "labels-added": {
+          "items": {
+            "$ref": "#/$defs/GmailHistoryLabelOutput"
+          },
+          "type": "array"
+        },
+        "labels-removed": {
+          "items": {
+            "$ref": "#/$defs/GmailHistoryLabelOutput"
+          },
+          "type": "array"
+        },
+        "messages-added": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "messages-deleted": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "messages-added",
+        "messages-deleted",
+        "labels-added",
+        "labels-removed"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Wraps a renderable listing with an optional pagination cursor so the\n\"next page\" hint is part of the command output: a trailing footer\nline in text mode, an extra `next_page` field in JSON. This keeps\nthe cursor visible to scripts, unlike logging it to stderr.",
+  "properties": {
+    "history": {
+      "items": {
+        "$ref": "#/$defs/GmailHistoryRecordOutput"
+      },
+      "type": "array"
+    },
+    "history-id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "next_page": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "history"
+  ],
+  "title": "Paginated",
+  "type": "object"
+}

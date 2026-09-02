@@ -1,0 +1,61 @@
+{
+  "$defs": {
+    "JmapVacationResponse": {
+      "description": "A JMAP VacationResponse object (RFC 8621 §8.1).\n\nThere is exactly one VacationResponse object per account. Its `id`\nis always `\"singleton\"`.",
+      "properties": {
+        "fromDate": {
+          "description": "Date/time (RFC 3339) from which the vacation response is active.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "htmlBody": {
+          "description": "HTML body of the auto-reply message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Always `\"singleton\"`.",
+          "type": "string"
+        },
+        "isEnabled": {
+          "description": "Whether the vacation response is currently enabled.",
+          "type": "boolean"
+        },
+        "subject": {
+          "description": "Subject of the auto-reply message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "textBody": {
+          "description": "Plaintext body of the auto-reply message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "toDate": {
+          "description": "Date/time (RFC 3339) until which the vacation response is active.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "isEnabled"
+      ],
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/JmapVacationResponse",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Renderable table of the vacation response settings.",
+  "title": "VacationTable"
+}

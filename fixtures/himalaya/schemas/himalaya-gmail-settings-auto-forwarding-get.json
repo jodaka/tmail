@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Gmail auto-forwarding settings, rendered as aligned text or, under\n`--json`, as a structured object instead of a wrapped human string.\n\nThe disposition keeps its Gmail wire spelling, so a value read with\n`get` is a value `set` accepts back.",
+  "properties": {
+    "disposition": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "email-address": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "enabled": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "enabled"
+  ],
+  "title": "GmailSettingsAutoForwardingGetOutput",
+  "type": "object"
+}

@@ -1,0 +1,54 @@
+{
+  "$defs": {
+    "GmailThreadSummary": {
+      "description": "A Gmail thread summary, as returned by `users.threads.list`.\n\nA summary carries the thread metadata without its messages; fetch\nthe full [`GmailThread`] with `users.threads.get`.",
+      "properties": {
+        "historyId": {
+          "default": null,
+          "description": "Id of the last history record that modified the thread.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Immutable identifier of the thread.",
+          "type": "string"
+        },
+        "snippet": {
+          "default": null,
+          "description": "Short part of the message text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Wraps a renderable listing with an optional pagination cursor so the\n\"next page\" hint is part of the command output: a trailing footer\nline in text mode, an extra `next_page` field in JSON. This keeps\nthe cursor visible to scripts, unlike logging it to stderr.",
+  "properties": {
+    "next_page": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "threads": {
+      "items": {
+        "$ref": "#/$defs/GmailThreadSummary"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "threads"
+  ],
+  "title": "Paginated",
+  "type": "object"
+}
