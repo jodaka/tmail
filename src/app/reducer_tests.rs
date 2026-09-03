@@ -4593,7 +4593,10 @@ fn space_advances_to_the_next_row_after_toggling() {
 fn cached_page_serves_instantly_and_the_fresh_load_still_runs() {
     let mut s = state();
     let dir = tempfile::TempDir::new().expect("tempdir");
-    let cache = crate::app::page_cache::PageCache::open(dir.path().to_path_buf());
+    let cache = crate::app::page_cache::PageCache::open(
+        dir.path().to_path_buf(),
+        crate::app::page_cache::CacheLimits::default(),
+    );
     // A cached page for the Sent mailbox (offset 0, limit 20).
     let cached = crate::domain::Page {
         items: vec![
@@ -4644,4 +4647,77 @@ fn cached_page_serves_instantly_and_the_fresh_load_still_runs() {
         .load(&MailboxId(String::from("sent")), None, 0, 20)
         .expect("cache refreshed");
     assert_eq!(cached.items.len(), expected.items.len());
+}
+
+#[test]
+fn cold_start_serves_cached_mailboxes_and_first_page_instantly() {
+    let mut s = state();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let cache = crate::app::page_cache::PageCache::open(
+        dir.path().to_path_buf(),
+        crate::app::page_cache::CacheLimits::default(),
+    );
+    // The cached world: a mailbox listing and its first page.
+    cache.store_mailboxes(crate::app::mock::mock_mailboxes().as_slice());
+    let page = crate::app::mock::mock_page(&inbox_id(), 0, crate::app::mock::PAGE_SIZE);
+    cache.store(&inbox_id(), None, &page);
+    s.page_cache = Some(cache);
+
+    // Cold start: mailboxes are not loaded yet.
+    s.mailboxes = crate::app::state::Loadable::Loading;
+    // Startup Refresh: mailboxes render from cache, but the fresh listing
+    // still loads.
+    let effects = reduce(&mut s, &Action::Refresh);
+    assert!(matches!(
+        s.mailboxes,
+        crate::app::state::Loadable::Loaded(_)
+    ));
+    let request_effects = effects.len();
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e.kind, OperationKind::LoadMailboxes)),
+        "the fresh mailbox listing still loads"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e.kind, OperationKind::LoadPage(_))),
+        "the fresh first page still loads"
+    );
+    let _ = request_effects;
+    // The cached first page is visible without waiting.
+    assert_eq!(s.messages.items.len(), crate::app::mock::PAGE_SIZE);
+}
+
+#[test]
+fn opening_a_message_serves_the_cached_copy_instantly() {
+    let mut s = state();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let cache = crate::app::page_cache::PageCache::open(
+        dir.path().to_path_buf(),
+        crate::app::page_cache::CacheLimits::default(),
+    );
+    s.page_cache = Some(cache);
+    s.selection = 0;
+    let summary = s.selected_message().unwrap().clone();
+    // A previously viewed copy of this exact message.
+    let seen = crate::app::mock::mock_message(&summary);
+    s.page_cache
+        .as_ref()
+        .unwrap()
+        .store_message(&summary.mailbox_id, &summary.id.0, &seen);
+
+    let effects = reduce(&mut s, &Action::Activate);
+    // The cached body renders immediately…
+    assert!(matches!(
+        s.open_message,
+        crate::app::state::Loadable::Loaded(_)
+    ));
+    // …and the fresh load still runs.
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e.kind, OperationKind::LoadMessage(_)))
+    );
 }

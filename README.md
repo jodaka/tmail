@@ -85,6 +85,8 @@ any other file are ignored.**
 | `[post.attachments].downloads_dir` | string | `$HOME/Downloads` | Directory used by *save attachment*. Must be absolute or start with `~/` (Post expands `~` itself, never via a shell). May not exist yet; must not be an existing file. |
 | `[post.theme].name` | string | `"default"` | Theme name: `"default"` (dark) or `"light"` (ticket wrs7). Set the `NO_COLOR` environment variable (non-empty) to render without any colors at all — it also ignores theme overrides. |
 | `[post.ui].clock` | bool | `false` | Show the date/time clock in the top-right corner (ticket w7f5). Off by default. |
+| `[post.cache].max_messages` | integer | `50` | How many viewed messages to keep in Post's on-disk cache (ticket haeb) so previously opened mail renders instantly. Least-recently-used entries are evicted first; `0` disables message caching. |
+| `[post.cache].max_bytes` | integer | `10485760` | Total size cap in bytes for the viewed-message cache (default 10 MiB, ticket haeb). Messages larger than the whole budget are never cached. |
 
 ### Example
 
@@ -218,6 +220,26 @@ your own editor:
    imports nothing and the draft stays intact.
 
 With the default `editor = "builtin"`, `Ctrl+E` does nothing.
+
+## Cache
+
+Post keeps a small on-disk cache (in its data directory, scoped per
+account) so warm starts and mailbox switches render instantly and refresh
+in the background:
+
+- **Mailbox listing** — the sidebar renders from the last known listing;
+- **Message-list pages** — the last loaded page per mailbox (and per
+  search query);
+- **Viewed messages** — full messages you have opened render instantly on
+  re-open.
+
+Cache reads are conservative: only exact-identity hits are used, unparsable
+entries are ignored, and every successful backend load overwrites the
+cached data — the fresh value always wins. The viewed-message cache is
+limited by `[post.cache].max_messages` and `[post.cache].max_bytes`
+(least-recently-used eviction; see [Configuration](#configuration)). For
+slow IMAP hosts, [sirup](https://github.com/pimalaya/sirup) can additionally
+amortize the per-invocation connection cost; see `cache.md` for details.
 
 ## Bulk selection
 

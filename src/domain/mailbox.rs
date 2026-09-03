@@ -4,7 +4,8 @@ pub struct MailboxId(pub String);
 
 /// Well-known mailbox roles resolved by the backend adapter (ADR 0001:
 /// the UI never guesses folder names). Unknown mailboxes carry `None`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Serializable for the summary cache (ticket haeb).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MailboxRole {
     Inbox,
     Sent,
@@ -14,8 +15,9 @@ pub enum MailboxRole {
     Trash,
 }
 
-/// A mailbox as shown in the sidebar.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A mailbox as shown in the sidebar. Serializable for the summary cache
+/// (ticket haeb).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Mailbox {
     pub id: MailboxId,
     pub name: String,

@@ -89,8 +89,9 @@ with the §22 decision gate (measure first, extend only on evidence).
 
 ## 4. Follow-ups
 
-- [ ] Implement the summary cache (§2) behind a `[post.mail].cache` toggle
-      if validation UX warrants one; default on once proven.
+- [x] Implement the summary cache (§2) — shipped with ticket haeb:
+      `src/app/page_cache.rs` covers pages, the mailbox listing, and
+      viewed messages, bounded by `[post.cache]` limits (LRU eviction).
 - [ ] Add sirup configuration guidance to the README troubleshooting
       section if IMAP latency reports come in.
 - [ ] Re-measure with a real IMAP account before and after (plan §22

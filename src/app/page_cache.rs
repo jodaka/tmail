@@ -1,25 +1,28 @@
-//! Post-owned summary cache (ticket haeb, cache.md §2): the last loaded
-//! page of message summaries per mailbox, persisted so warm starts and
-//! mailbox switches render instantly and refresh in the background.
+//! Post-owned cache (ticket haeb, cache.md §2): the last loaded page of
+//! message summaries per mailbox, the mailbox listing, and viewed full
+//! messages — persisted so warm starts and mailbox switches render
+//! instantly and refresh in the background.
 //!
-//! Conservative by design: a page is overwritten by every successful load
-//! (never written on failures), a read is validated against the identity
-//! recorded inside the file (mailbox, offset, limit, query), and anything
-//! unparsable or mismatched is ignored — a stale cache degrades to today's
-//! spinner, never to wrong mail. Summaries contain no credentials (plan
-//! §21: nothing secret is stored or logged).
+//! Conservative by design: an entry is overwritten by every successful
+//! load (never written on failures), a read is validated against the
+//! identity recorded inside the file (mailbox, offset, limit, query /
+//! message id), and anything unparsable or mismatched is ignored — a
+//! stale cache degrades to today's spinner, never to wrong mail.
+//! Summaries and rendered messages contain no credentials (plan §21:
+//! nothing secret is stored or logged).
 //!
-//! Only the pages the reducer asks for are stored, and per-mailbox storage
-//! is bounded: the oldest files beyond [`MAX_FILES_PER_MAILBOX`] are
-//! pruned after each write.
+//! Storage is bounded: per-mailbox pages are capped at
+//! [`MAX_FILES_PER_MAILBOX`] files; the viewed-message cache is capped by
+//! [`CacheLimits`] (entry count and total bytes, from `[post.cache]`).
+//! The oldest modifications are evicted first.
 
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{MailboxId, MessageSummary, Page};
+use crate::domain::{Mailbox, MailboxId, Message, MessageSummary, Page};
 
 /// Version of the on-disk format; bumping it invalidates old caches.
 const CACHE_VERSION: u32 = 1;
@@ -36,9 +39,57 @@ struct CachedPage {
     items: Vec<MessageSummary>,
 }
 
+/// The on-disk mailbox listing (ticket haeb: instant start needs the
+/// sidebar before the first backend round trip).
+#[derive(Serialize, Deserialize)]
+struct CachedMailboxes {
+    version: u32,
+    mailboxes: Vec<Mailbox>,
+}
+
+/// The on-disk viewed message, keyed by its locator. `last_used_ms`
+/// drives least-recently-used eviction (ticket haeb).
+#[derive(Serialize, Deserialize)]
+struct CachedMessage {
+    version: u32,
+    mailbox: String,
+    id: String,
+    last_used_ms: u64,
+    message: Message,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Upper bound on stored pages per mailbox (offset/limit/query variants
 /// share the quota; the oldest by modification time go first).
 const MAX_FILES_PER_MAILBOX: usize = 8;
+
+/// Caps for the viewed-message cache (ticket haeb): entries and total
+/// bytes, both configurable via `[post.cache]`. When either is exceeded,
+/// the oldest modifications are evicted first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheLimits {
+    /// Maximum number of cached viewed messages; `0` disables message
+    /// caching entirely.
+    pub max_messages: usize,
+    /// Maximum total size of the viewed-message cache in bytes.
+    pub max_bytes: u64,
+}
+
+impl Default for CacheLimits {
+    fn default() -> Self {
+        Self {
+            max_messages: crate::config::DEFAULT_CACHE_MAX_MESSAGES,
+            // 10 MiB: roughly hundreds of typical mail bodies.
+            max_bytes: crate::config::DEFAULT_CACHE_MAX_BYTES,
+        }
+    }
+}
 
 /// A `mailbox`/`query` string reduced to a filesystem-safe key: safe
 /// characters kept (bounded), everything else (including `/` in maildir
@@ -54,17 +105,19 @@ fn key_part(value: &str) -> String {
     format!("{safe}-{:016x}", hasher.finish())
 }
 
-/// The summary cache rooted at a per-account directory. `None` disables
-/// caching (unknown data dir) — every call site treats that as a miss.
+/// The summary + mailbox + message cache rooted at a per-account
+/// directory. `None` disables caching (unknown data dir) — every call
+/// site treats that as a miss.
 #[derive(Debug, Clone)]
 pub struct PageCache {
     root: PathBuf,
+    limits: CacheLimits,
 }
 
 impl PageCache {
     /// Cache rooted at an explicit directory (tests, explicit wiring).
-    pub fn open(root: PathBuf) -> Self {
-        Self { root }
+    pub fn open(root: PathBuf, limits: CacheLimits) -> Self {
+        Self { root, limits }
     }
 
     /// The default cache root, scoped to the driven account (or
@@ -72,9 +125,13 @@ impl PageCache {
     /// platform user-data dir (`~/Library/Application Support/post/cache`
     /// on macOS, `~/.local/share/post/cache` elsewhere). `None` when no
     /// home is known — caching stays off.
-    pub fn open_default(account: Option<&str>) -> Option<Self> {
+    pub fn open_default(account: Option<&str>, limits: CacheLimits) -> Option<Self> {
         if let Some(dir) = std::env::var_os("POST_DATA_DIR") {
-            return Some(Self::scoped(PathBuf::from(dir).join("cache"), account));
+            return Some(Self::scoped(
+                PathBuf::from(dir).join("cache"),
+                account,
+                limits,
+            ));
         }
         let home = std::env::var_os("HOME")?;
         let mut dir = PathBuf::from(home);
@@ -85,13 +142,14 @@ impl PageCache {
         });
         dir.push("post");
         dir.push("cache");
-        Some(Self::scoped(dir, account))
+        Some(Self::scoped(dir, account, limits))
     }
 
     /// Root plus the account scope segment.
-    fn scoped(root: PathBuf, account: Option<&str>) -> Self {
+    fn scoped(root: PathBuf, account: Option<&str>, limits: CacheLimits) -> Self {
         Self {
             root: root.join(key_part(account.unwrap_or("default"))),
+            limits,
         }
     }
 
@@ -150,27 +208,7 @@ impl PageCache {
             total: page.total,
             items: page.items.clone(),
         };
-        if let Some(parent) = path.parent()
-            && let Err(err) = fs::create_dir_all(parent)
-        {
-            tracing::debug!(%err, "summary cache: mkdir failed");
-            return;
-        }
-        // Atomic-ish: write to a sibling temp name, then rename over.
-        let tmp = path.with_extension("json.tmp");
-        let payload = match serde_json::to_vec(&cached) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                tracing::debug!(%err, "summary cache: serialize failed");
-                return;
-            }
-        };
-        if fs::write(&tmp, &payload)
-            .and_then(|()| fs::rename(&tmp, &path))
-            .is_err()
-        {
-            tracing::debug!(path = %path.display(), "summary cache: write failed");
-        }
+        self.write_json(&path, &cached);
         self.prune(mailbox);
     }
 
@@ -197,6 +235,156 @@ impl PageCache {
         let excess = files.len() - MAX_FILES_PER_MAILBOX;
         for (_, path) in files.into_iter().take(excess) {
             let _ = fs::remove_file(&path);
+        }
+    }
+
+    // ── Mailbox listing (ticket haeb: instant start) ────────────────────
+
+    /// Load the cached mailbox listing, or `None` when absent/unparsable.
+    pub fn load_mailboxes(&self) -> Option<Vec<Mailbox>> {
+        let bytes = fs::read(self.root.join("mailboxes.json")).ok()?;
+        let cached: CachedMailboxes = serde_json::from_slice(&bytes).ok()?;
+        (cached.version == CACHE_VERSION).then_some(cached.mailboxes)
+    }
+
+    /// Persist the mailbox listing after a successful load.
+    pub fn store_mailboxes(&self, mailboxes: &[Mailbox]) {
+        let cached = CachedMailboxes {
+            version: CACHE_VERSION,
+            mailboxes: mailboxes.to_vec(),
+        };
+        self.write_json(&self.root.join("mailboxes.json"), &cached);
+    }
+
+    // ── Viewed messages (ticket haeb: instant reader) ───────────────────
+
+    /// Where a viewed message lives on disk.
+    fn message_path(&self, mailbox: &MailboxId, id: &str) -> PathBuf {
+        self.root
+            .join("messages")
+            .join(key_part(&mailbox.0))
+            .join(format!("{}.json", key_part(id)))
+    }
+
+    /// Load a cached viewed message, or `None` when absent/unparsable/
+    /// for a different identity. A hit refreshes the entry's LRU stamp.
+    pub fn load_message(&self, mailbox: &MailboxId, id: &str) -> Option<Message> {
+        let path = self.message_path(mailbox, id);
+        let bytes = fs::read(&path).ok()?;
+        let mut cached: CachedMessage = serde_json::from_slice(&bytes).ok()?;
+        if cached.version != CACHE_VERSION || cached.mailbox != mailbox.0 || cached.id != id {
+            return None;
+        }
+        // LRU bookkeeping: rewrite with a fresh stamp so recently viewed
+        // messages outlive older ones under the size caps.
+        cached.last_used_ms = now_ms();
+        self.write_json(&path, &cached);
+        Some(cached.message)
+    }
+
+    /// Persist a viewed message after a successful load, enforcing the
+    /// configured limits: messages larger than the total byte budget are
+    /// skipped entirely; otherwise the least-recently-used entries beyond
+    /// the caps are evicted.
+    pub fn store_message(&self, mailbox: &MailboxId, id: &str, message: &Message) {
+        if self.limits.max_messages == 0 {
+            return;
+        }
+        let path = self.message_path(mailbox, id);
+        let cached = CachedMessage {
+            version: CACHE_VERSION,
+            mailbox: mailbox.0.clone(),
+            id: String::from(id),
+            last_used_ms: now_ms(),
+            message: message.clone(),
+        };
+        let payload = match serde_json::to_vec(&cached) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::debug!(%err, "message cache: serialize failed");
+                return;
+            }
+        };
+        if payload.len() as u64 > self.limits.max_bytes {
+            tracing::debug!(
+                bytes = payload.len(),
+                "message cache: message exceeds the total byte budget; not cached"
+            );
+            return;
+        }
+        self.write_bytes(&path, &payload);
+        self.prune_messages();
+    }
+
+    /// Enforce [`CacheLimits`] across all mailboxes' viewed messages
+    /// (`<root>/messages/<mailbox>/<id>.json`): evict the
+    /// least-recently-used entries until the entry count and total byte
+    /// size fit. Entries without a parsable LRU stamp are evicted first.
+    fn prune_messages(&self) {
+        let dir = self.root.join("messages");
+        let Ok(mailbox_dirs) = fs::read_dir(&dir) else {
+            return;
+        };
+        let mut files: Vec<(u64, PathBuf, u64)> = mailbox_dirs
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+            .filter_map(|entry| fs::read_dir(entry.path()).ok())
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .map(|path| {
+                let stamp = fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<CachedMessage>(&bytes).ok())
+                    .map(|cached| cached.last_used_ms)
+                    .unwrap_or(0);
+                let len = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+                (stamp, path, len)
+            })
+            .collect();
+        // Least recently used first.
+        files.sort_by(|(astamp, apath, _), (bstamp, bpath, _)| {
+            astamp.cmp(bstamp).then_with(|| apath.cmp(bpath))
+        });
+        let mut total: u64 = files.iter().map(|(_, _, len)| *len).sum();
+        let mut remaining = files.len();
+        for (_, path, len) in &files {
+            if remaining <= self.limits.max_messages && total <= self.limits.max_bytes {
+                break;
+            }
+            if fs::remove_file(path).is_ok() {
+                remaining -= 1;
+                total -= len;
+            }
+        }
+    }
+
+    /// Best-effort atomic JSON write: sibling temp file, then rename.
+    fn write_json<T: serde::Serialize>(&self, path: &Path, value: &T) {
+        let payload = match serde_json::to_vec(value) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::debug!(%err, "cache: serialize failed");
+                return;
+            }
+        };
+        self.write_bytes(path, &payload);
+    }
+
+    fn write_bytes(&self, path: &Path, payload: &[u8]) {
+        if let Some(parent) = path.parent()
+            && let Err(err) = fs::create_dir_all(parent)
+        {
+            tracing::debug!(%err, "cache: mkdir failed");
+            return;
+        }
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, payload)
+            .and_then(|()| fs::rename(&tmp, path))
+            .is_err()
+        {
+            tracing::debug!(path = %path.display(), "cache: write failed");
         }
     }
 }
@@ -235,7 +423,7 @@ mod tests {
     #[test]
     fn store_then_load_round_trips_the_page() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let cache = PageCache::open(dir.path().to_path_buf());
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
         let mailbox = MailboxId(String::from("/root/maildir/INBOX"));
 
         assert!(cache.load(&mailbox, None, 0, 20).is_none(), "empty cache");
@@ -250,7 +438,7 @@ mod tests {
     #[test]
     fn a_page_for_one_identity_is_not_served_for_another() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let cache = PageCache::open(dir.path().to_path_buf());
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
         let inbox = MailboxId(String::from("/root/maildir/INBOX"));
         let archive = MailboxId(String::from("/root/maildir/Archive"));
 
@@ -265,7 +453,7 @@ mod tests {
     #[test]
     fn maildir_ids_with_slashes_stay_distinct_keys() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let cache = PageCache::open(dir.path().to_path_buf());
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
         let a = MailboxId(String::from("/root/maildir/INBOX"));
         let b = MailboxId(String::from("/root/maildir/INBOX/sub"));
 
@@ -279,7 +467,7 @@ mod tests {
     #[test]
     fn unparsable_files_are_ignored() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let cache = PageCache::open(dir.path().to_path_buf());
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
         let mailbox = MailboxId(String::from("inbox"));
         cache.store(&mailbox, None, &page(0));
         // Corrupt the file in place.
@@ -291,7 +479,7 @@ mod tests {
     #[test]
     fn storage_is_bounded_per_mailbox() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let cache = PageCache::open(dir.path().to_path_buf());
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
         let mailbox = MailboxId(String::from("inbox"));
         // Far more distinct pages than the cap.
         for offset in (0..MAX_FILES_PER_MAILBOX * 3).step_by(20) {
@@ -303,5 +491,136 @@ mod tests {
             count <= MAX_FILES_PER_MAILBOX,
             "{count} files exceeds the bound"
         );
+    }
+}
+
+#[cfg(test)]
+mod mailbox_message_tests {
+    use super::*;
+    use crate::domain::{MailboxRole, MessageId};
+
+    fn mailbox(name: &str) -> Mailbox {
+        Mailbox {
+            id: MailboxId(String::from("/root/maildir/INBOX")),
+            name: String::from(name),
+            role: Some(MailboxRole::Inbox),
+            unread_count: Some(3),
+            total_count: None,
+        }
+    }
+
+    fn message(subject: &str) -> Message {
+        Message {
+            id: MessageId(String::from("env-1")),
+            mailbox_id: MailboxId(String::from("/root/maildir/INBOX")),
+            headers: crate::domain::MessageHeaders {
+                subject: String::from(subject),
+                ..Default::default()
+            },
+            plain_body: Some(String::from("body\n")),
+            html_body: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mailboxes_round_trip() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
+        assert!(cache.load_mailboxes().is_none(), "empty cache");
+        let listing = vec![mailbox("INBOX"), mailbox("Second")];
+        cache.store_mailboxes(&listing);
+        let loaded = cache.load_mailboxes().expect("cached listing");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].name, "INBOX");
+        assert_eq!(loaded[0].role, Some(MailboxRole::Inbox));
+    }
+
+    #[test]
+    fn viewed_messages_round_trip_and_validate_identity() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
+        let inbox = MailboxId(String::from("/root/maildir/INBOX"));
+        let archive = MailboxId(String::from("/root/maildir/Archive"));
+
+        assert!(cache.load_message(&inbox, "env-1").is_none(), "empty cache");
+        cache.store_message(&inbox, "env-1", &message("Hello again"));
+        let loaded = cache.load_message(&inbox, "env-1").expect("cached message");
+        assert_eq!(loaded.headers.subject, "Hello again");
+        assert_eq!(loaded.plain_body.as_deref(), Some("body\n"));
+
+        // A different mailbox or id is a miss even if a file existed.
+        assert!(cache.load_message(&archive, "env-1").is_none());
+        assert!(cache.load_message(&inbox, "env-2").is_none());
+    }
+
+    #[test]
+    fn zero_message_limit_disables_message_caching() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = PageCache::open(
+            dir.path().to_path_buf(),
+            CacheLimits {
+                max_messages: 0,
+                max_bytes: 1024,
+            },
+        );
+        let inbox = MailboxId(String::from("INBOX"));
+        cache.store_message(&inbox, "env-1", &message("X"));
+        assert!(cache.load_message(&inbox, "env-1").is_none());
+    }
+
+    #[test]
+    fn message_count_limit_evicts_oldest() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = PageCache::open(
+            dir.path().to_path_buf(),
+            CacheLimits {
+                max_messages: 2,
+                max_bytes: u64::MAX,
+            },
+        );
+        let inbox = MailboxId(String::from("INBOX"));
+        for id in ["a", "b", "c"] {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            cache.store_message(&inbox, id, &message(id));
+        }
+        // "a" is the oldest write and must have been evicted.
+        assert!(cache.load_message(&inbox, "a").is_none());
+        assert!(cache.load_message(&inbox, "b").is_some());
+        assert!(cache.load_message(&inbox, "c").is_some());
+    }
+
+    #[test]
+    fn byte_budget_evicts_oldest_until_it_fits() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = PageCache::open(
+            dir.path().to_path_buf(),
+            CacheLimits {
+                max_messages: usize::MAX,
+                max_bytes: 4096,
+            },
+        );
+        let inbox = MailboxId(String::from("INBOX"));
+        for id in ["a", "b", "c"] {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            cache.store_message(&inbox, id, &message(id));
+        }
+        // Each entry is small, all three fit — nothing evicted.
+        assert!(cache.load_message(&inbox, "a").is_some());
+    }
+
+    #[test]
+    fn oversized_messages_are_skipped_entirely() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = PageCache::open(
+            dir.path().to_path_buf(),
+            CacheLimits {
+                max_messages: 10,
+                max_bytes: 16,
+            },
+        );
+        let inbox = MailboxId(String::from("INBOX"));
+        cache.store_message(&inbox, "big", &message("way beyond sixteen bytes"));
+        assert!(cache.load_message(&inbox, "big").is_none());
     }
 }

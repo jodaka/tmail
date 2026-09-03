@@ -100,7 +100,13 @@ async fn run() -> anyhow::Result<()> {
     state.editor_command = config.editor_command.clone();
     // Post-owned summary cache (ticket haeb): instant warm starts, the
     // fresh page always loads in the background afterwards.
-    state.page_cache = tmail::app::page_cache::PageCache::open_default(config.account.as_deref());
+    state.page_cache = tmail::app::page_cache::PageCache::open_default(
+        config.account.as_deref(),
+        tmail::app::page_cache::CacheLimits {
+            max_messages: config.cache_max_messages,
+            max_bytes: config.cache_max_bytes,
+        },
+    );
     // Mouse capture starts in the configured mode (Phase 10.4); `m`
     // toggles it at runtime via `Action::ToggleMouseCapture`.
     state.mouse_capture = config.mouse;

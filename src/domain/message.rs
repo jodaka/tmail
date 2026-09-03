@@ -23,7 +23,8 @@ pub struct MessageLocator {
 }
 
 /// Header block of one full message (plan §7 `MessageHeaders`).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Serializable for the viewed-message cache (ticket haeb).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct MessageHeaders {
     pub subject: String,
     pub from: Vec<Address>,
@@ -42,7 +43,8 @@ pub struct MessageHeaders {
 
 /// Metadata for one message attachment (plan §7/§15). Bytes are fetched by
 /// the attachment phase (Phase 8); the reader lists metadata only.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Serializable for the viewed-message cache (ticket haeb).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
     /// Filename from `Content-Disposition`/`Content-Type` when provided.
     pub name: Option<String>,
@@ -74,8 +76,9 @@ pub struct AttachmentRequest {
 /// One full message (plan §7 `Message`), as fetched by `message read`.
 /// `raw` stays unset for now: the parsed content suffices for the reader,
 /// and keeping raw bytes out of state avoids duplicating payloads (plan
-/// §13.4 logs are already sanitized).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// §13.4 logs are already sanitized). Serializable for the viewed-message
+/// cache (ticket haeb).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     pub id: MessageId,
     pub mailbox_id: MailboxId,

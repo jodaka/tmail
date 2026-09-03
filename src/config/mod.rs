@@ -59,6 +59,11 @@ pub const THEME_TOKENS: [&str; 14] = [
     "selection",
 ];
 
+/// Defaults for `[post.cache]` (ticket haeb): 50 viewed messages, 10 MiB
+/// total. The page/mailbox caches are tiny and not user-limited.
+pub const DEFAULT_CACHE_MAX_MESSAGES: usize = 50;
+pub const DEFAULT_CACHE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
 /// Parse a config-file color: `#rgb` or `#rrggbb` (case-insensitive hex).
 /// Returns the normalized `#rrggbb` form, or `None` when the value is not
 /// a color Post can use.
@@ -139,6 +144,12 @@ pub struct Config {
     /// `[post.ui].clock` (ticket w7f5): show the top-right date/time
     /// clock. Off by default.
     pub ui_clock: bool,
+    /// `[post.cache].max_messages` (ticket haeb): maximum number of cached
+    /// viewed messages (LRU-evicted). `0` disables message caching.
+    pub cache_max_messages: usize,
+    /// `[post.cache].max_bytes` (ticket haeb): total size cap in bytes for
+    /// the viewed-message cache.
+    pub cache_max_bytes: u64,
     /// `[post.composer].editor` (plan §14/§17): `"builtin"`, `"$EDITOR"`,
     /// or an explicit command. The external-editor flow itself is Phase 11;
     /// v1 validates the value so a broken entry is reported up front.
@@ -173,6 +184,8 @@ impl Default for Config {
             downloads_dir: None,
             mouse: false,
             ui_clock: false,
+            cache_max_messages: DEFAULT_CACHE_MAX_MESSAGES,
+            cache_max_bytes: DEFAULT_CACHE_MAX_BYTES,
             editor: String::from("builtin"),
             editor_command: None,
             autosave_delay_ms: DEFAULT_AUTOSAVE_DELAY_MS,
@@ -301,6 +314,7 @@ pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssu
     parse_theme(post, &mut config, &mut issues);
     parse_downloads_dir(post, &mut config, &mut issues);
     parse_ui_clock(post, &mut config, &mut issues);
+    parse_cache_limits(post, &mut config, &mut issues);
 
     // Without `[post].account`, drive the account himalaya itself would
     // pick (no `-a` is forwarded): the one marked `default = true`, else
@@ -393,6 +407,37 @@ fn parse_autosave_delay(post: Option<&toml::Value>, config: &mut Config, issues:
         None => issues.push(format!(
             "[post.composer].autosave_delay_ms must be an integer{fallback}"
         )),
+    }
+}
+
+/// `[post.cache]` (ticket haeb): limits for the viewed-message cache.
+/// `max_messages = 0` disables message caching; the summary/page cache
+/// itself is tiny and always on.
+fn parse_cache_limits(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(table) = post
+        .and_then(|post| post.get("cache"))
+        .and_then(|c| c.as_table())
+    else {
+        return;
+    };
+    for (key, value) in table {
+        match key.as_str() {
+            "max_messages" => match value.as_integer() {
+                Some(count) if count >= 0 => config.cache_max_messages = count as usize,
+                _ => issues.push(String::from(
+                    "[post.cache].max_messages must be a non-negative integer",
+                )),
+            },
+            "max_bytes" => match value.as_integer() {
+                Some(bytes) if bytes >= 0 => config.cache_max_bytes = bytes as u64,
+                _ => issues.push(String::from(
+                    "[post.cache].max_bytes must be a non-negative integer",
+                )),
+            },
+            other => issues.push(format!(
+                "[post.cache].{other} is unknown (known: max_messages, max_bytes)"
+            )),
+        }
     }
 }
 
@@ -1120,5 +1165,51 @@ mod ui_clock_tests {
         let (_, issues) = parse_with_issues("[post.ui]\nclock = \"yes\"\n", None);
         assert_eq!(issues.items.len(), 1);
         assert!(issues.items[0].contains("clock"), "{issues:?}");
+    }
+}
+
+#[cfg(test)]
+mod cache_limit_tests {
+    use super::*;
+
+    #[test]
+    fn cache_limits_have_sane_defaults_and_are_configurable() {
+        let (config, issues) = parse_with_issues("", None);
+        assert!(issues.is_empty());
+        assert_eq!(config.cache_max_messages, DEFAULT_CACHE_MAX_MESSAGES);
+        assert_eq!(config.cache_max_bytes, DEFAULT_CACHE_MAX_BYTES);
+        assert!(
+            config.cache_max_messages > 0 && config.cache_max_bytes > 0,
+            "defaults are sane, not disabled"
+        );
+
+        let (config, issues) = parse_with_issues(
+            "[post.cache]\nmax_messages = 10\nmax_bytes = 1048576\n",
+            None,
+        );
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(config.cache_max_messages, 10);
+        assert_eq!(config.cache_max_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn invalid_cache_limits_report() {
+        let (_, issues) = parse_with_issues(
+            "[post.cache]\nmax_messages = -1\nmax_bytes = \"big\"\n",
+            None,
+        );
+        assert_eq!(issues.items.len(), 2, "{issues:?}");
+        assert!(
+            issues.items.iter().any(|i| i.contains("max_messages")),
+            "{issues:?}"
+        );
+        assert!(
+            issues.items.iter().any(|i| i.contains("max_bytes")),
+            "{issues:?}"
+        );
+
+        let (_, issues) = parse_with_issues("[post.cache]\nflavor = \"vanilla\"\n", None);
+        assert_eq!(issues.items.len(), 1);
+        assert!(issues.items[0].contains("flavor"), "{issues:?}");
     }
 }

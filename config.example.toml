@@ -49,3 +49,9 @@ name = "default"
 # background = "#0f1014"
 # accent = "#8ab4f8"
 # name = "light"  # or switch to the built-in light theme
+
+[post.cache]
+# Viewed-message cache limits (ticket haeb). Least-recently-used entries
+# are evicted first; max_messages = 0 disables message caching.
+# max_messages = 50
+# max_bytes = 10485760  # 10 MiB

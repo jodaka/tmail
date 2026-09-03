@@ -1153,6 +1153,11 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             state.operations.finish(result.id);
             match &result.outcome {
                 Ok(OperationOutcome::Mailboxes(mailboxes)) => {
+                    // Ticket haeb: every successful listing refreshes the
+                    // cached sidebar.
+                    if let Some(cache) = &state.page_cache {
+                        cache.store_mailboxes(mailboxes);
+                    }
                     mailboxes_loaded(state, mailboxes.clone())
                 }
                 Ok(OperationOutcome::Page(_)) => {
@@ -1694,6 +1699,12 @@ fn selected_attachment(state: &AppState) -> Option<(usize, &crate::domain::Attac
 fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
     let snippet = message.snippet();
     let message_id = message.id.clone();
+    // Ticket haeb: cache the viewed message (bounded by [post.cache]).
+    if let Some(cache) = &state.page_cache
+        && let Some(Route::Message(route)) = state.active_route()
+    {
+        cache.store_message(&route.mailbox_id, &message_id.0, &message);
+    }
     state.open_message = Loadable::Loaded(message);
     if let Some(snippet) = snippet {
         if let Some(Route::Message(route)) = state.routes.last_mut()
@@ -1774,6 +1785,14 @@ fn message_moved(state: &mut AppState, locator: &MessageLocator) -> Vec<Effect> 
 /// no Inbox exists, and load its first page.
 fn mailboxes_loaded(state: &mut AppState, mailboxes: Vec<Mailbox>) -> Vec<Effect> {
     state.mailboxes = Loadable::Loaded(mailboxes.clone());
+    apply_mailbox_listing(state, mailboxes)
+}
+
+/// Shared body of the mailbox application (plan §19 Phase 2): pick the
+/// inbox (or first usable), root the route stack there, and request its
+/// first page. Used by the fresh listing and by the cached listing at
+/// cold start (ticket haeb).
+fn apply_mailbox_listing(state: &mut AppState, mailboxes: Vec<Mailbox>) -> Vec<Effect> {
     let chosen = mailboxes
         .iter()
         .position(|m| m.role == Some(MailboxRole::Inbox))
@@ -2197,6 +2216,14 @@ fn open_message(state: &mut AppState, summary: crate::domain::MessageSummary) ->
     state.open_message = Loadable::Loading;
     state.reader_scroll = 0;
     state.reader_attachment = None;
+    // Ticket haeb: a previously viewed message renders instantly from the
+    // cache; the fresh load still runs and replaces it (so read/unread
+    // state and any remote changes converge).
+    if let Some(cache) = &state.page_cache
+        && let Some(message) = cache.load_message(&locator.mailbox, &locator.id.0)
+    {
+        state.open_message = Loadable::Loaded(message);
+    }
     vec![state.operations.start(OperationKind::LoadMessage(locator))]
 }
 
@@ -2605,7 +2632,19 @@ fn refresh(state: &mut AppState) -> Vec<Effect> {
         if state.operations.is_loading_mailboxes() {
             return Vec::new();
         }
-        return vec![state.operations.start(OperationKind::LoadMailboxes)];
+        let mut effects = Vec::new();
+        // Ticket haeb: the cached mailbox listing renders the sidebar
+        // (and, through the page cache, the first page) instantly; the
+        // fresh listing still loads and replaces it.
+        if let Some(cache) = &state.page_cache
+            && let Some(mailboxes) = cache.load_mailboxes()
+            && !mailboxes.is_empty()
+        {
+            state.mailboxes = Loadable::Loaded(mailboxes.clone());
+            effects = apply_mailbox_listing(state, mailboxes);
+        }
+        effects.push(state.operations.start(OperationKind::LoadMailboxes));
+        return effects;
     }
     if state.active_route().is_none() {
         return Vec::new();
