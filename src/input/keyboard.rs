@@ -5,7 +5,7 @@
 //! while a text field is focused; `j`/`k` and `?` are deliberately absent
 //! (plan §4 overrides).
 
-use crate::app::action::{Action, ComposerEdit, SearchEdit};
+use crate::app::action::{Action, ComposerEdit, DialogEdit, SearchEdit};
 use crate::app::focus::Focus;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -19,14 +19,21 @@ pub fn to_action(key: KeyEvent, focus: Focus) -> Option<Action> {
         Enter => Some(enter_action(key.modifiers)),
         Tab => Some(Action::FocusNext),
         BackTab => Some(Action::FocusPrevious),
+        Left if focus == Focus::Dialog => Some(Action::DialogEdit(DialogEdit::CursorLeft)),
+        Right if focus == Focus::Dialog => Some(Action::DialogEdit(DialogEdit::CursorRight)),
+        Up if focus == Focus::Dialog => None,
+        Down if focus == Focus::Dialog => None,
         Up => Some(move_action(key.modifiers, focus, ComposerEdit::CursorUp)),
         Down => Some(move_action(key.modifiers, focus, ComposerEdit::CursorDown)),
         Left => Some(move_action(key.modifiers, focus, ComposerEdit::CursorLeft)),
         Right => Some(move_action(key.modifiers, focus, ComposerEdit::CursorRight)),
         Backspace if focus == Focus::SearchField => Some(Action::SearchEdit(SearchEdit::Backspace)),
+        Backspace if focus == Focus::Dialog => Some(Action::DialogEdit(DialogEdit::Backspace)),
         Backspace if focus == Focus::Composer => {
             Some(Action::ComposerEdit(ComposerEdit::Backspace))
         }
+        Delete if focus == Focus::SearchField => None,
+        Delete if focus == Focus::Dialog => Some(Action::DialogEdit(DialogEdit::Delete)),
         Delete if focus == Focus::Composer => Some(Action::ComposerEdit(ComposerEdit::Delete)),
         Delete if focus != Focus::SearchField => Some(Action::Trash),
         Char('/') if focus.accepts_shortcuts() => Some(Action::OpenSearch),
@@ -65,6 +72,14 @@ fn char_action(c: char, modifiers: KeyModifiers, focus: Focus) -> Option<Action>
     if focus == Focus::SearchField {
         // Any printable character goes into the field; no shortcuts fire.
         return Some(Action::SearchEdit(SearchEdit::Char(c)));
+    }
+    if focus == Focus::Dialog {
+        // Any printable character goes into the dialog entry; no shortcuts
+        // fire while a modal text field is focused (plan §10).
+        return match modifiers {
+            m if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::ALT) => None,
+            _ => Some(Action::DialogEdit(DialogEdit::Char(c))),
+        };
     }
     if focus == Focus::Composer {
         // Any printable character (including '/' and letters) is composed

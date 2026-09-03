@@ -97,16 +97,33 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
         y += 1;
     }
 
-    // Body fills the remaining space above the action row (mockup
-    // `.msg-body` textarea).
-    if bottom > y + 1 {
+    // Body fills the remaining space above the attach and action rows
+    // (mockup `.msg-body` textarea).
+    let attach_y = bottom.saturating_sub(2);
+    if attach_y > y {
         let body = Rect {
             x,
             y,
             width: inner_w as u16,
-            height: bottom - y - 1,
+            height: attach_y - y,
         };
         frame.render_widget(&composer.body, body);
+    }
+
+    // Attach row (mockup `.attach-row`): one chip per attached file with
+    // its human-readable size, then the `+ attach` control. Enter removes
+    // a focused chip; Enter on `+ attach` opens the path dialog (plan §15).
+    if bottom > y + 1 {
+        let attach_row = Rect {
+            x,
+            y: attach_y,
+            width: inner_w as u16,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(attach_spans(composer, focused, theme))),
+            attach_row,
+        );
     }
 
     // Action row: Send (accent) and Discard (warning), mockup
@@ -123,6 +140,32 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
             actions,
         );
     }
+}
+
+/// Attachment chips + the `+ attach` control (mockup `.attach-row` / `.att`
+/// / `.att.add`). The focused chip gets the badge fill.
+fn attach_spans<'a>(composer: &'a ComposerState, focused: bool, theme: &'a Theme) -> Vec<Span<'a>> {
+    let mut spans = Vec::new();
+    let chip = |name: &'a str, size: u64, selected: bool| {
+        let label = format!(" {name} · {} ", crate::ui::text::human_size(size));
+        if selected {
+            Span::styled(label, theme.mode_badge().add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(label, Style::new().fg(theme.text_soft).bg(theme.surface))
+        }
+    };
+    for (index, attachment) in composer.draft.attachments.iter().enumerate() {
+        let selected = focused && composer.field == ComposerField::Attachment(index);
+        spans.push(chip(&attachment.name, attachment.size, selected));
+        spans.push(Span::raw(" "));
+    }
+    let add = " [ + attach ] ";
+    if focused && composer.field == ComposerField::Attach {
+        spans.push(Span::styled(add, theme.mode_badge()));
+    } else {
+        spans.push(Span::styled(add, Style::new().fg(theme.dim)));
+    }
+    spans
 }
 
 /// The fields drawn as rows, in order (toggle controls are buttons on the

@@ -55,6 +55,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, ctx: &Rend
         // confirmations must stay visible and recoverable (plan §12/§14).
         components::error_modal::render(frame, state, theme);
         components::confirm_modal::render(frame, state, theme);
+        components::attachment_dialog::render(frame, state, theme);
         return;
     }
     let (topbar, body, statusbar) = layout::split_vertical(area);
@@ -76,6 +77,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, ctx: &Rend
     components::statusbar::render(frame, statusbar, state, theme);
     components::error_modal::render(frame, state, theme);
     components::confirm_modal::render(frame, state, theme);
+    components::attachment_dialog::render(frame, state, theme);
 }
 
 /// Too-small mode: a clear centered message, nothing overlapping (plan §18).

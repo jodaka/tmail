@@ -242,6 +242,58 @@ fn global_shortcuts_still_work_from_the_composer() {
     );
 }
 
+// ── Attachment path dialog (plan §15, Phase 8.1) ─────────────────────────
+
+#[test]
+fn dialog_letters_are_text_never_shortcuts() {
+    let f = Focus::Dialog;
+    for c in "cafesu/?~".chars() {
+        assert_eq!(
+            to_action(plain(KeyCode::Char(c)), f),
+            Some(Action::DialogEdit(DialogEdit::Char(c))),
+            "{c} must be dialog text"
+        );
+    }
+    // Ctrl/Alt chords stay unbound (global Ctrl+C/Ctrl+R matched earlier).
+    assert_eq!(
+        to_action(key(KeyCode::Char('c'), KeyModifiers::ALT), f),
+        None
+    );
+}
+
+#[test]
+fn dialog_edits_and_caret_but_no_vertical_movement() {
+    let f = Focus::Dialog;
+    assert_eq!(
+        to_action(plain(KeyCode::Backspace), f),
+        Some(Action::DialogEdit(DialogEdit::Backspace))
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Delete), f),
+        Some(Action::DialogEdit(DialogEdit::Delete))
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Left), f),
+        Some(Action::DialogEdit(DialogEdit::CursorLeft))
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Right), f),
+        Some(Action::DialogEdit(DialogEdit::CursorRight))
+    );
+    assert_eq!(to_action(plain(KeyCode::Up), f), None);
+    assert_eq!(to_action(plain(KeyCode::Down), f), None);
+}
+
+#[test]
+fn dialog_enter_activates_esc_cancels() {
+    let f = Focus::Dialog;
+    assert_eq!(to_action(plain(KeyCode::Enter), f), Some(Action::Activate));
+    assert_eq!(
+        to_action(plain(KeyCode::Esc), f),
+        Some(Action::BackOrCancel)
+    );
+}
+
 #[test]
 fn unbound_keys_return_none() {
     let f = Focus::MessageList;

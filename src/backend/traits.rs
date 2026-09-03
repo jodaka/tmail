@@ -7,14 +7,16 @@
 //! cancellation token: cancelling the token terminates the child process the
 //! adapter owns (Phase 3.2) and fails the request as cancelled.
 
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::operation::OperationId;
 use crate::domain::{
-    DraftSnapshot, Mailbox, Message, MessageId, MessageLocator, MessageSummary, OutboundMessage,
-    Page, PageRequest, RestoredDraft, SendOutcome,
+    DraftAttachment, DraftSnapshot, Mailbox, Message, MessageId, MessageLocator, MessageSummary,
+    OutboundMessage, Page, PageRequest, RestoredDraft, SendOutcome,
 };
 
 /// Per-request context handed to every backend call (plan §8).
@@ -58,6 +60,13 @@ pub enum BackendError {
     /// The child process could not be spawned (missing executable, I/O).
     #[error("himalaya executable could not be run: {0}")]
     Io(#[from] std::io::Error),
+
+    /// A file the user asked to attach could not be used. The detail names
+    /// the path and the cause, so the entry stays fixable and retryable
+    /// (plan §15, Phase 8 acceptance: "missing/unreadable files produce
+    /// retryable detailed errors").
+    #[error("file error: {0}")]
+    File(String),
 }
 
 pub type BackendResult<T> = Result<T, BackendError>;
@@ -143,4 +152,15 @@ pub trait MailBackend: Send + Sync {
         ctx: RequestContext,
         message: OutboundMessage,
     ) -> BackendResult<SendOutcome>;
+
+    /// Validate one attachment source for the composer (plan §15, Phase 8):
+    /// expand `~` in Post (never a shell), confirm the path is a regular
+    /// readable file within the acceptable size, and return its metadata.
+    /// No bytes are held — the file is re-read when the message is
+    /// serialized for sending.
+    async fn read_attachment(
+        &self,
+        ctx: RequestContext,
+        path: PathBuf,
+    ) -> BackendResult<DraftAttachment>;
 }

@@ -183,7 +183,7 @@ pub(crate) fn content(state: &AppState, width: usize) -> Vec<ReaderLine> {
             let name = attachment.name.as_deref().unwrap_or("(unnamed attachment)");
             let size = attachment
                 .size
-                .map(human_size)
+                .map(crate::ui::text::human_size)
                 .unwrap_or_else(|| String::from("unknown size"));
             let mime = attachment.mime_type.as_deref().unwrap_or("unknown type");
             lines.push(ReaderLine::chrome(
@@ -328,23 +328,6 @@ fn date_label(timestamp: chrono::DateTime<chrono::FixedOffset>) -> String {
 
 fn first_line(detail: &str) -> &str {
     detail.lines().next().unwrap_or("no detail")
-}
-
-/// Human-readable size (mockup attachment chips: `1.2 MB`, `940 KB`).
-fn human_size(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    let size = bytes as f64;
-    if size >= GB {
-        format!("{:.1} GB", size / GB)
-    } else if size >= MB {
-        format!("{:.1} MB", size / MB)
-    } else if size >= KB {
-        format!("{:.0} KB", size / KB)
-    } else {
-        format!("{bytes} B")
-    }
 }
 
 #[cfg(test)]

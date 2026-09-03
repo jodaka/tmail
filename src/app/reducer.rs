@@ -7,14 +7,16 @@
 //! registered, so stale, cancelled, or superseded results never win
 //! (plan §11). Reducers never perform I/O themselves.
 
-use crate::app::action::{Action, SearchEdit};
+use crate::app::action::{Action, DialogEdit, SearchEdit};
 use crate::app::composer::{ComposerField, ComposerState};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::operation::{
     DraftRemovalReason, OperationFailure, OperationKind, OperationOutcome, OperationResult,
 };
-use crate::app::overlay::{ConfirmButton, DiscardDialog, ErrorDialog, ModalButton, Overlay};
+use crate::app::overlay::{
+    AttachmentPathDialog, ConfirmButton, DiscardDialog, ErrorDialog, ModalButton, Overlay,
+};
 use crate::app::route::{MailboxRoute, MessageRoute, Route};
 use crate::app::sanitize::sanitize;
 use crate::app::state::{AppState, Loadable};
@@ -111,8 +113,8 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             leave_composer(state)
         }
         Action::DiscardDraft => open_discard_confirm(state),
-        Action::RetryError | Action::DismissError => {
-            // Only meaningful with the error modal open (handled above).
+        Action::RetryError | Action::DismissError | Action::DialogEdit(_) => {
+            // Only meaningful with their modal open (handled above).
             Vec::new()
         }
         Action::BackendCompleted(result) => backend_completed(state, result),
@@ -140,11 +142,17 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
 // ── Modal overlays (plan §9/§12) ─────────────────────────────────────────
 
 /// Handle `action` while any modal is open. Returns `None` when no modal
-/// is open (the caller falls through to normal handling).
+/// is open (the caller falls through to normal handling). The attachment
+/// dialog likewise falls through for `BackendCompleted`: the pending
+/// validation result must land while the dialog is up.
 fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
     match state.overlay {
         Some(Overlay::Error(_)) => Some(error_modal_reduce(state, action)),
         Some(Overlay::ConfirmDiscard(_)) => Some(discard_modal_reduce(state, action)),
+        Some(Overlay::AttachmentPath(_)) => match action {
+            Action::BackendCompleted(_) => None,
+            _ => Some(attachment_dialog_reduce(state, action)),
+        },
         None => None,
     }
 }
@@ -298,6 +306,107 @@ fn confirm_discard(state: &mut AppState, draft: crate::domain::DraftSnapshot) ->
         draft: Box::new(draft),
         reason: DraftRemovalReason::Discard,
     })]
+}
+
+/// Attachment path-entry dialog handling (plan §15, Phase 8). The entry is
+/// plain data: edits move the caret, Enter submits the raw path for
+/// backend validation, Esc cancels. Rejections keep the dialog open with
+/// the detail inline — the retry surface for missing/unreadable files.
+fn attachment_dialog_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
+    let Some(Overlay::AttachmentPath(dialog)) = state.overlay.as_mut() else {
+        return Vec::new();
+    };
+    match action {
+        Action::DialogEdit(edit) => {
+            apply_dialog_edit(dialog, edit);
+            Vec::new()
+        }
+        // Esc closes without attaching (plan §10: Esc cancels overlays).
+        Action::BackOrCancel => {
+            let focus = dialog.previous_focus;
+            state.overlay = None;
+            state.focus = focus;
+            Vec::new()
+        }
+        Action::Activate => {
+            let Some(raw) = nonempty_entry(dialog) else {
+                return Vec::new();
+            };
+            // Validation is backend work (fs access): the entry stays open
+            // and untouched until the result arrives.
+            dialog.error = None;
+            vec![
+                state
+                    .operations
+                    .start(OperationKind::ReadAttachment { path: raw }),
+            ]
+        }
+        // Everything else is swallowed while the dialog is open.
+        _ => Vec::new(),
+    }
+}
+
+/// The trimmed, non-empty dialog entry, or `None` after setting the
+/// inline error (an empty submission is an input problem, not an
+/// operation).
+fn nonempty_entry(dialog: &mut AttachmentPathDialog) -> Option<std::path::PathBuf> {
+    let trimmed = dialog.input.trim();
+    if trimmed.is_empty() {
+        dialog.error = Some(String::from("Enter a file path"));
+        return None;
+    }
+    Some(std::path::PathBuf::from(trimmed))
+}
+
+/// One character-level edit of the dialog entry (caret editing like the
+/// composer's single-line fields).
+fn apply_dialog_edit(dialog: &mut AttachmentPathDialog, edit: &DialogEdit) {
+    match edit {
+        DialogEdit::Char(c) => {
+            let cursor = dialog.cursor;
+            let offset = dialog
+                .input
+                .char_indices()
+                .nth(cursor)
+                .map(|(offset, _)| offset)
+                .unwrap_or(dialog.input.len());
+            dialog.input.insert(offset, *c);
+            dialog.cursor = cursor + 1;
+        }
+        DialogEdit::Backspace => {
+            if dialog.cursor > 0 {
+                let offset = dialog
+                    .input
+                    .char_indices()
+                    .nth(dialog.cursor - 1)
+                    .map(|(offset, _)| offset)
+                    .unwrap_or(dialog.input.len());
+                dialog.input.remove(offset);
+                dialog.cursor -= 1;
+            }
+        }
+        DialogEdit::Delete => {
+            let cursor = dialog.cursor;
+            if cursor < dialog.input.chars().count() {
+                let offset = dialog
+                    .input
+                    .char_indices()
+                    .nth(cursor)
+                    .map(|(offset, _)| offset)
+                    .unwrap_or(dialog.input.len());
+                dialog.input.remove(offset);
+            }
+        }
+        DialogEdit::CursorLeft => dialog.cursor = dialog.cursor.saturating_sub(1),
+        DialogEdit::CursorRight => {
+            dialog.cursor = dialog
+                .cursor
+                .saturating_add(1)
+                .min(dialog.input.chars().count());
+        }
+    }
+    // A fresh edit supersedes the stale complaint about the old entry.
+    dialog.error = None;
 }
 
 /// Open the Retry/Dismiss modal for a failed operation (plan §12).
@@ -806,6 +915,10 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                 }
             }
         }
+        OperationKind::ReadAttachment { path } => {
+            state.operations.finish(result.id);
+            attachment_validated(state, path, result)
+        }
     }
 }
 
@@ -837,6 +950,7 @@ fn drafts_restored(state: &mut AppState, drafts: &[crate::domain::RestoredDraft]
         bcc: snapshot.bcc,
         subject: snapshot.subject,
         body: snapshot.body,
+        attachments: snapshot.attachments,
         revision: snapshot.revision,
         saved_revision: restored.saved_revision,
         saved_at: None,
@@ -908,6 +1022,68 @@ fn save_draft_completed(
         }
         Ok(_) => {
             tracing::warn!(id = %result.id, "unexpected payload for a draft save");
+            Vec::new()
+        }
+    }
+}
+
+/// Apply a finished attachment validation (plan §15, Phase 8). Currency:
+/// the dialog must still be open, still showing the entry that was
+/// submitted — an Esc or an edit in the meantime drops the result. A
+/// validated file becomes a chip and a content edit (autosave carries the
+/// attachment list into the journal); a rejection keeps the dialog open
+/// with the detail inline, retryable in place.
+fn attachment_validated(
+    state: &mut AppState,
+    path: &std::path::Path,
+    result: &OperationResult,
+) -> Vec<Effect> {
+    let Some(Overlay::AttachmentPath(dialog)) = state.overlay.as_ref() else {
+        tracing::debug!(id = %result.id, "dropping attachment validation for a closed dialog");
+        return Vec::new();
+    };
+    if dialog.input.trim() != path.to_string_lossy() {
+        tracing::debug!(id = %result.id, "dropping attachment validation for an edited entry");
+        return Vec::new();
+    }
+    match &result.outcome {
+        Ok(OperationOutcome::Attachment(att)) => {
+            let att = att.clone();
+            let focus = dialog.previous_focus;
+            state.overlay = None;
+            state.focus = focus;
+            let Some(composer) = state.composer.as_mut() else {
+                tracing::debug!("validated attachment ignored: no composer");
+                return Vec::new();
+            };
+            let name = att.name.clone();
+            let size = att.size;
+            if composer.add_attachment(att) {
+                let last = composer.draft.attachments.len() - 1;
+                composer.field = ComposerField::Attachment(last);
+                // Attaching is a content edit: the revision bumps and the
+                // autosave journal carries the new attachment list.
+                composer.draft.note_edit(state.clock);
+                state.set_status(format!(
+                    "Attached {name} ({})",
+                    crate::ui::text::human_size(size)
+                ));
+            } else {
+                state.set_status(format!("{name} is already attached"));
+            }
+            Vec::new()
+        }
+        Err(failure) => {
+            // Detailed and retryable in place: the entry stays editable
+            // (plan §15, Phase 8 acceptance).
+            let detail = failure.detail.clone();
+            if let Some(Overlay::AttachmentPath(dialog)) = state.overlay.as_mut() {
+                dialog.error = Some(detail);
+            }
+            Vec::new()
+        }
+        Ok(_) => {
+            tracing::warn!(id = %result.id, "unexpected payload for an attachment validation");
             Vec::new()
         }
     }
@@ -1095,7 +1271,7 @@ fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
             // the query is edited append/backspace only (Phase 1).
         }
         Focus::Reader => scroll_reader(state, delta),
-        Focus::Composer | Focus::ErrorModal => {}
+        Focus::Composer | Focus::Dialog | Focus::ErrorModal => {}
     }
     Vec::new()
 }
@@ -1224,7 +1400,8 @@ fn activate(state: &mut AppState) -> Vec<Effect> {
             None => Vec::new(),
         },
         Focus::Composer => activate_composer(state),
-        Focus::Reader | Focus::SearchField | Focus::ErrorModal => {
+        // The dialog intercepts Enter itself; unreachable in practice.
+        Focus::Reader | Focus::Dialog | Focus::SearchField | Focus::ErrorModal => {
             if state.focus == Focus::SearchField {
                 reduce(state, &Action::SubmitSearch)
             } else {
@@ -1235,8 +1412,10 @@ fn activate(state: &mut AppState) -> Vec<Effect> {
 }
 
 /// Enter on a composer control (plan §10): newline in the body, reveal a
-/// hidden Cc/Bcc field, or activate the focused action. Enter on To/Cc/
-/// Bcc/Subject itself does nothing (single-line fields have no activation).
+/// hidden Cc/Bcc field, open the attachment path dialog (plan §15), remove
+/// the focused attachment chip, or activate the focused action. Enter on
+/// To/Cc/Bcc/Subject itself does nothing (single-line fields have no
+/// activation).
 fn activate_composer(state: &mut AppState) -> Vec<Effect> {
     let Some(field) = state.composer.as_ref().map(|c| c.field) else {
         return Vec::new();
@@ -1262,12 +1441,50 @@ fn activate_composer(state: &mut AppState) -> Vec<Effect> {
             }
             Vec::new()
         }
+        ComposerField::Attach => open_attachment_dialog(state),
+        ComposerField::Attachment(index) => remove_attachment(state, index),
         ComposerField::Send => reduce(state, &Action::Send),
         ComposerField::Discard => reduce(state, &Action::DiscardDraft),
         ComposerField::To | ComposerField::Cc | ComposerField::Bcc | ComposerField::Subject => {
             Vec::new()
         }
     }
+}
+
+/// Open the attachment path-entry overlay (plan §15: path entry, no file
+/// browser in v1). No-op without a composer.
+fn open_attachment_dialog(state: &mut AppState) -> Vec<Effect> {
+    if state.composer.is_none() {
+        return Vec::new();
+    }
+    state.overlay = Some(Overlay::AttachmentPath(AttachmentPathDialog {
+        input: String::new(),
+        cursor: 0,
+        error: None,
+        previous_focus: state.focus,
+    }));
+    state.focus = Focus::Dialog;
+    Vec::new()
+}
+
+/// Remove the focused attachment chip (plan §15: "allow removal before
+/// send"). Removal is a content edit: the revision bumps and autosave
+/// journals the shorter attachment list.
+fn remove_attachment(state: &mut AppState, index: usize) -> Vec<Effect> {
+    let Some(composer) = state.composer.as_mut() else {
+        return Vec::new();
+    };
+    let removed = composer
+        .draft
+        .attachments
+        .get(index)
+        .map(|att| att.name.clone());
+    composer.remove_attachment(index);
+    if let Some(name) = removed {
+        composer.draft.note_edit(state.clock);
+        state.set_status(format!("Removed {name}"));
+    }
+    Vec::new()
 }
 
 /// Open the selected message: push the reader route, snapshot the summary,

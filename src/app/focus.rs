@@ -20,6 +20,9 @@ pub enum Focus {
     /// lives in `AppState.composer`; single-letter shortcuts never fire
     /// while a text field is focused (plan §10).
     Composer,
+    /// The attachment path-entry dialog is open (plan §15): a modal text
+    /// field that intercepts all input like the error modal.
+    Dialog,
     /// The Retry/Dismiss error modal is open; it intercepts all input.
     ErrorModal,
 }
@@ -30,8 +33,8 @@ pub const FOCUS_ORDER: [Focus; 3] = [Focus::SearchField, Focus::Sidebar, Focus::
 impl Focus {
     pub fn next(self) -> Self {
         match self {
-            // The modal focus never cycles; the modal handles Tab itself.
-            Focus::ErrorModal => self,
+            // The modal foci never cycle; the modal handles Tab itself.
+            Focus::ErrorModal | Focus::Dialog => self,
             // The reader screen has a single focusable area (the scrolling
             // document); Tab is inert there in v1 (plan §10).
             Focus::Reader => self,
@@ -50,7 +53,7 @@ impl Focus {
 
     pub fn previous(self) -> Self {
         match self {
-            Focus::ErrorModal => self,
+            Focus::ErrorModal | Focus::Dialog => self,
             Focus::Reader => self,
             Focus::Composer => self,
             _ => {
@@ -69,7 +72,7 @@ impl Focus {
     pub fn accepts_shortcuts(self) -> bool {
         !matches!(
             self,
-            Focus::SearchField | Focus::ErrorModal | Focus::Composer
+            Focus::SearchField | Focus::ErrorModal | Focus::Dialog | Focus::Composer
         )
     }
 }
@@ -82,6 +85,7 @@ impl fmt::Display for Focus {
             Focus::MessageList => write!(f, "list"),
             Focus::Reader => write!(f, "reader"),
             Focus::Composer => write!(f, "composer"),
+            Focus::Dialog => write!(f, "dialog"),
             Focus::ErrorModal => write!(f, "modal"),
         }
     }
@@ -118,8 +122,15 @@ mod tests {
     fn shortcuts_gated_in_search_field() {
         assert!(!Focus::SearchField.accepts_shortcuts());
         assert!(!Focus::Composer.accepts_shortcuts());
+        assert!(!Focus::Dialog.accepts_shortcuts());
         assert!(Focus::Sidebar.accepts_shortcuts());
         assert!(Focus::MessageList.accepts_shortcuts());
+    }
+
+    #[test]
+    fn dialog_focus_is_self_cycle() {
+        assert_eq!(Focus::Dialog.next(), Focus::Dialog);
+        assert_eq!(Focus::Dialog.previous(), Focus::Dialog);
     }
 
     #[test]

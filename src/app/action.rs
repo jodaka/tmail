@@ -33,7 +33,6 @@ pub enum ComposerEdit {
     CursorUp,
     CursorDown,
 }
-
 impl ComposerEdit {
     /// Whether this edit changes draft content (caret moves do not): only
     /// content edits bump the draft revision and re-arm autosave.
@@ -46,6 +45,17 @@ impl ComposerEdit {
                 | ComposerEdit::Newline
         )
     }
+}
+
+/// Character-level edit of a modal text field (Phase 8: the attachment
+/// path-entry dialog, plan §15). Single-line, so no vertical movement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogEdit {
+    Char(char),
+    Backspace,
+    Delete,
+    CursorLeft,
+    CursorRight,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +73,8 @@ pub enum Action {
     SubmitSearch,
     /// Composer text editing / caret movement (Phase 6).
     ComposerEdit(ComposerEdit),
+    /// Modal text-field editing (Phase 8: attachment path dialog).
+    DialogEdit(DialogEdit),
     /// Restore drafts from the crash-safe journal (startup, Phase 6).
     LoadDrafts,
     Compose,

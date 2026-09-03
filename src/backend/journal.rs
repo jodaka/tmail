@@ -208,6 +208,7 @@ mod tests {
             bcc: String::new(),
             subject: String::from("draft"),
             body: String::from(body),
+            attachments: Vec::new(),
             revision,
         }
     }

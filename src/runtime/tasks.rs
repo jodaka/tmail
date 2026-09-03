@@ -117,6 +117,10 @@ async fn run_effect(
             Ok(outcome) => Some(Ok(OperationOutcome::SendOutcome(outcome))),
             Err(err) => operation_failure(&effect, err).map(Err),
         },
+        OperationKind::ReadAttachment { path } => match backend.read_attachment(ctx, path).await {
+            Ok(attachment) => Some(Ok(OperationOutcome::Attachment(attachment))),
+            Err(err) => operation_failure(&effect, err).map(Err),
+        },
     }
 }
 
@@ -144,6 +148,7 @@ fn operation_failure(effect: &Effect, err: BackendError) -> Option<OperationFail
         BackendError::InvalidOutput(detail) | BackendError::InvalidRequest(detail) => {
             (None, detail.clone())
         }
+        BackendError::File(detail) => (None, detail.clone()),
         BackendError::Io(err) => (None, err.to_string()),
         BackendError::Cancelled => unreachable!("matched above"),
     };
@@ -325,6 +330,18 @@ mod tests {
             _message: crate::domain::OutboundMessage,
         ) -> BackendResult<crate::domain::SendOutcome> {
             Ok(crate::domain::SendOutcome::Sent)
+        }
+
+        async fn read_attachment(
+            &self,
+            _req: RequestContext,
+            _path: std::path::PathBuf,
+        ) -> BackendResult<crate::domain::DraftAttachment> {
+            Ok(crate::domain::DraftAttachment {
+                path: std::path::PathBuf::from("/tmp/validated.pdf"),
+                name: String::from("validated.pdf"),
+                size: 10,
+            })
         }
     }
 

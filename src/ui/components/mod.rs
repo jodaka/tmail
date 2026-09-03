@@ -1,5 +1,6 @@
-//! UI components (error modal, sidebar, spinner, statusbar, topbar).
+//! UI components (modals, sidebar, spinner, statusbar, topbar).
 
+pub mod attachment_dialog;
 pub mod confirm_modal;
 pub mod error_modal;
 pub mod sidebar;

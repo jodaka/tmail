@@ -632,6 +632,7 @@ fn draft_snapshot(revision: u64, remote_id: Option<&str>) -> DraftSnapshot {
         bcc: String::new(),
         subject: String::from("Gyuto — progress"),
         body: String::from("first line\nsecond line"),
+        attachments: Vec::new(),
         revision,
     }
 }

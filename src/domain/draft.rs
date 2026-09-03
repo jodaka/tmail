@@ -19,6 +19,8 @@
 //! arguments supplied by the reducer from `Action::Tick { now }`, keeping
 //! the model deterministic and unit-testable.
 
+use std::path::PathBuf;
+
 use chrono::{DateTime, Duration, FixedOffset};
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +50,20 @@ pub enum DraftSaveState {
     Failed,
 }
 
+/// One file attached to an outgoing draft (plan §15). Metadata only: the
+/// bytes are read from `path` when the message is serialized for sending,
+/// so neither app state nor the journal ever hold attachment payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftAttachment {
+    /// Absolute, `~`-expanded source path; validated when attached
+    /// (exists, regular, readable, within the size limit).
+    pub path: PathBuf,
+    /// File name shown on the chip and used as the MIME filename.
+    pub name: String,
+    /// Size in bytes at attach time (chip display only).
+    pub size: u64,
+}
+
 /// One draft: fields, revision tracking, and save state. Plain data; the
 /// reducer is its only writer.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -57,6 +73,10 @@ pub struct Draft {
     pub bcc: String,
     pub subject: String,
     pub body: String,
+    /// Files attached for the outgoing message (plan §15). Paths and names
+    /// only, never bytes; included in the journal so a crash cannot lose
+    /// the attachment list.
+    pub attachments: Vec<DraftAttachment>,
     /// Bumped on every content edit; the identity of "what is on screen".
     pub revision: u64,
     /// The newest revision confirmed saved (journal + remote).
@@ -101,6 +121,10 @@ pub struct DraftSnapshot {
     pub bcc: String,
     pub subject: String,
     pub body: String,
+    /// Attached files (plan §15): paths and names only. `default` keeps
+    /// journals from earlier revisions loadable.
+    #[serde(default)]
+    pub attachments: Vec<DraftAttachment>,
     /// The revision this snapshot carries.
     pub revision: u64,
 }
@@ -203,6 +227,7 @@ impl Draft {
             bcc: self.bcc.clone(),
             subject: self.subject.clone(),
             body: self.body.clone(),
+            attachments: self.attachments.clone(),
             revision: self.revision,
         }
     }
@@ -389,5 +414,30 @@ mod tests {
         let snap: DraftSnapshot = serde_json::from_str(legacy).expect("legacy journal entry");
         assert_eq!(snap.in_reply_to, None);
         assert_eq!(snap.references, None);
+        assert!(
+            snap.attachments.is_empty(),
+            "pre-Phase-8 journals have none"
+        );
+    }
+
+    #[test]
+    fn snapshots_carry_attachments_without_bytes() {
+        let mut d = Draft {
+            body: String::from("see attached"),
+            ..Draft::default()
+        };
+        d.attachments.push(DraftAttachment {
+            path: PathBuf::from("/tmp/report final.pdf"),
+            name: String::from("report final.pdf"),
+            size: 1234,
+        });
+        d.note_edit(Some(at(0)));
+        let snap = d.start_save(at(2));
+        assert_eq!(snap.attachments.len(), 1);
+        assert_eq!(snap.attachments[0].name, "report final.pdf");
+        // Serializable for the crash-safe journal (ADR 0002 §D.1).
+        let json = serde_json::to_string(&snap).expect("snapshot json");
+        let back: DraftSnapshot = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back.attachments, snap.attachments);
     }
 }

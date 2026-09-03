@@ -78,6 +78,10 @@ pub enum OperationKind {
     /// replay the exact bytes under a new operation id. Boxed, as with the
     /// draft payloads.
     Send { message: Box<OutboundMessage> },
+    /// Validate one composer attachment source (plan §15, Phase 8): the
+    /// path as typed (`~` unexpanded); the backend expands and checks it.
+    /// No bytes travel — only the resulting metadata.
+    ReadAttachment { path: std::path::PathBuf },
 }
 
 /// Why a draft is being removed (Phase 7.6): it selects the failure UX.
@@ -109,6 +113,7 @@ impl OperationKind {
                 DraftRemovalReason::Sent => "Cleaning up sent draft",
             },
             OperationKind::Send { .. } => "Sending message",
+            OperationKind::ReadAttachment { .. } => "Checking file",
         }
     }
 
@@ -155,6 +160,12 @@ impl OperationKind {
                 OperationKind::DeleteDraft { draft: newer, .. },
                 OperationKind::DeleteDraft { draft: older, .. },
             ) => newer.local_id == older.local_id,
+            // A repeated validation of the same entry supersedes the one in
+            // flight: only the newest submit can win.
+            (
+                OperationKind::ReadAttachment { path: newer },
+                OperationKind::ReadAttachment { path: older },
+            ) => newer == older,
             // Sends never supersede anything and are never superseded:
             // every delivery attempt must run to its classified outcome.
             _ => false,
@@ -203,6 +214,9 @@ pub enum OperationOutcome {
     /// ambiguous/failed deliveries both arrive here; the reducer decides
     /// between "sent" and the (possibly duplicate-warning) modal.
     SendOutcome(SendOutcome),
+    /// One validated attachment source (plan §15, Phase 8): metadata only,
+    /// never bytes.
+    Attachment(crate::domain::DraftAttachment),
 }
 
 /// A failure ready for the Retry/Dismiss modal (plan §12). Built by the

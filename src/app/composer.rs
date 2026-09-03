@@ -30,10 +30,31 @@ pub enum ComposerField {
     Bcc,
     Subject,
     Body,
+    /// One attached-file chip, by position in the draft (mockup `.att`).
+    /// Enter removes it (plan §15: "allow removal before send").
+    Attachment(usize),
+    /// The `+ attach` control (mockup `.att.add`); Enter opens the
+    /// path-entry overlay (plan §15: no file browser in v1).
+    Attach,
     /// The Send button (plan §10: `Ctrl+Enter` sends; Enter activates).
     Send,
     /// The explicit Discard action (plan §14; confirmation lands in 6.6).
     Discard,
+}
+
+impl ComposerField {
+    /// Whether text edits land in this control; chips and buttons take
+    /// none (plan §10: shortcut rows never receive composed text).
+    pub fn accepts_text(self) -> bool {
+        matches!(
+            self,
+            ComposerField::To
+                | ComposerField::Cc
+                | ComposerField::Bcc
+                | ComposerField::Subject
+                | ComposerField::Body
+        )
+    }
 }
 
 /// Everything visible in the composer. Lives in [`crate::app::state::AppState`]
@@ -81,6 +102,8 @@ impl ComposerState {
     }
 
     /// The focus cycle for the current toggle state, in visual order.
+    /// Attachment chips sit between the body and the `+ attach` control
+    /// (mockup `.attach-row`).
     fn cycle(&self) -> Vec<ComposerField> {
         let mut fields = vec![ComposerField::To];
         if self.show_cc {
@@ -93,9 +116,12 @@ impl ComposerState {
         } else {
             fields.push(ComposerField::BccToggle);
         }
+        fields.push(ComposerField::Subject);
+        fields.push(ComposerField::Body);
+        let chip_count = self.draft.attachments.len();
+        fields.extend((0..chip_count).map(ComposerField::Attachment));
         fields.extend([
-            ComposerField::Subject,
-            ComposerField::Body,
+            ComposerField::Attach,
             ComposerField::Send,
             ComposerField::Discard,
         ]);
@@ -162,6 +188,38 @@ impl ComposerState {
         self.enter_field(ComposerField::Bcc);
     }
 
+    /// Attach a validated file (plan §15). Same-path entries are ignored —
+    /// the deterministic duplicate rule is one chip per file — while two
+    /// files that merely share a basename both attach, in insertion order.
+    /// Returns whether the file was added.
+    pub fn add_attachment(&mut self, attachment: crate::domain::DraftAttachment) -> bool {
+        if self
+            .draft
+            .attachments
+            .iter()
+            .any(|a| a.path == attachment.path)
+        {
+            return false;
+        }
+        self.draft.attachments.push(attachment);
+        true
+    }
+
+    /// Remove the attachment chip at `index` (no-op when out of range) and
+    /// refocus: the next chip at the same position, the last chip when the
+    /// row shrank, or the `+ attach` control when none remain.
+    pub fn remove_attachment(&mut self, index: usize) {
+        if index >= self.draft.attachments.len() {
+            return;
+        }
+        self.draft.attachments.remove(index);
+        self.field = if self.draft.attachments.is_empty() {
+            ComposerField::Attach
+        } else {
+            ComposerField::Attachment(index.min(self.draft.attachments.len() - 1))
+        };
+    }
+
     /// The text of the focused single-line field; the body is not a string.
     fn focused_text(&self) -> &str {
         match self.field {
@@ -194,8 +252,12 @@ impl ComposerState {
 
     /// Apply one character-level edit to the focused field (plan §10:
     /// composer keys). Arrow navigation crosses field boundaries at the
-    /// body's top/bottom edge and between single-line fields.
+    /// body's top/bottom edge and between single-line fields. Content
+    /// edits are inert on chips and buttons (plan §10).
     pub fn apply(&mut self, edit: &ComposerEdit) {
+        if edit.is_content_edit() && !self.field.accepts_text() {
+            return;
+        }
         match edit {
             ComposerEdit::Char(c) => {
                 let cursor = self.cursor;
@@ -288,6 +350,8 @@ fn char_offset(text: &str, index: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::DraftAttachment;
+    use std::path::PathBuf;
 
     fn composer() -> ComposerState {
         ComposerState::new()
@@ -304,6 +368,7 @@ mod tests {
                 ComposerField::BccToggle,
                 ComposerField::Subject,
                 ComposerField::Body,
+                ComposerField::Attach,
                 ComposerField::Send,
                 ComposerField::Discard,
             ]
@@ -323,6 +388,37 @@ mod tests {
                 ComposerField::Bcc,
                 ComposerField::Subject,
                 ComposerField::Body,
+                ComposerField::Attach,
+                ComposerField::Send,
+                ComposerField::Discard,
+            ]
+        );
+    }
+
+    #[test]
+    fn attachment_chips_sit_between_body_and_attach() {
+        let mut c = composer();
+        assert!(c.add_attachment(DraftAttachment {
+            path: PathBuf::from("/tmp/a.pdf"),
+            name: String::from("a.pdf"),
+            size: 1,
+        }));
+        assert!(c.add_attachment(DraftAttachment {
+            path: PathBuf::from("/tmp/b.png"),
+            name: String::from("b.png"),
+            size: 2,
+        }));
+        assert_eq!(
+            c.cycle(),
+            vec![
+                ComposerField::To,
+                ComposerField::CcToggle,
+                ComposerField::BccToggle,
+                ComposerField::Subject,
+                ComposerField::Body,
+                ComposerField::Attachment(0),
+                ComposerField::Attachment(1),
+                ComposerField::Attach,
                 ComposerField::Send,
                 ComposerField::Discard,
             ]
@@ -338,6 +434,7 @@ mod tests {
             ComposerField::BccToggle,
             ComposerField::Subject,
             ComposerField::Body,
+            ComposerField::Attach,
             ComposerField::Send,
             ComposerField::Discard,
             ComposerField::To,
@@ -441,15 +538,82 @@ mod tests {
         assert_eq!(c.body.cursor().0, 1);
         // Down on the last row moves to the next field instead.
         c.apply(&ComposerEdit::CursorDown);
-        assert_eq!(c.field, ComposerField::Send);
+        assert_eq!(c.field, ComposerField::Attach);
         // Returning to the body keeps the body caret where it was (row 1),
         // so Up first moves within the body, then crosses into Subject.
-        c.apply(&ComposerEdit::CursorUp); // Send -> Body
+        c.apply(&ComposerEdit::CursorUp); // Attach -> Body
         assert_eq!(c.field, ComposerField::Body);
         c.apply(&ComposerEdit::CursorUp); // row 1 -> row 0, still in the body
         assert_eq!(c.body.cursor().0, 0);
         c.apply(&ComposerEdit::CursorUp); // top edge -> previous field
         assert_eq!(c.field, ComposerField::Subject);
+    }
+
+    #[test]
+    fn add_attachment_dedupes_by_path_and_keeps_order() {
+        let mut c = composer();
+        let pdf = DraftAttachment {
+            path: PathBuf::from("/tmp/report.pdf"),
+            name: String::from("report.pdf"),
+            size: 10,
+        };
+        let other = DraftAttachment {
+            path: PathBuf::from("/other/report.pdf"),
+            name: String::from("report.pdf"),
+            size: 20,
+        };
+        assert!(c.add_attachment(pdf.clone()));
+        assert!(!c.add_attachment(pdf), "same path attaches once");
+        assert!(c.add_attachment(other), "same basename, other path: kept");
+        assert_eq!(c.draft.attachments.len(), 2);
+        assert_eq!(
+            c.draft.attachments[0].path,
+            PathBuf::from("/tmp/report.pdf")
+        );
+        assert_eq!(c.draft.attachments[1].size, 20, "insertion order");
+    }
+
+    #[test]
+    fn remove_attachment_refocuses_sensibly() {
+        let mut c = composer();
+        for name in ["a.pdf", "b.pdf", "c.pdf"] {
+            assert!(c.add_attachment(DraftAttachment {
+                path: PathBuf::from(format!("/tmp/{name}")),
+                name: String::from(name),
+                size: 1,
+            }));
+        }
+        c.field = ComposerField::Attachment(1);
+        c.remove_attachment(1);
+        assert_eq!(c.draft.attachments.len(), 2);
+        assert_eq!(c.field, ComposerField::Attachment(1), "next chip");
+        c.remove_attachment(1);
+        assert_eq!(c.field, ComposerField::Attachment(0), "clamped to last");
+        c.remove_attachment(0);
+        assert_eq!(c.field, ComposerField::Attach, "row empty again");
+        // Out-of-range removals are inert.
+        c.remove_attachment(5);
+        assert_eq!(c.field, ComposerField::Attach);
+    }
+
+    #[test]
+    fn chips_and_buttons_take_no_text_edits() {
+        let mut c = composer();
+        c.field = ComposerField::Body;
+        c.apply(&ComposerEdit::Char('b'));
+        c.apply(&ComposerEdit::Newline);
+        c.apply(&ComposerEdit::Char('x'));
+        c.field = ComposerField::Attach;
+        c.apply(&ComposerEdit::Char('a'));
+        c.apply(&ComposerEdit::Backspace);
+        c.apply(&ComposerEdit::Delete);
+        c.apply(&ComposerEdit::Newline);
+        assert_eq!(c.body.lines(), ["b", "x"], "body untouched");
+        assert_eq!(c.draft.attachments.len(), 0);
+        c.field = ComposerField::Attachment(0);
+        c.apply(&ComposerEdit::Char('a'));
+        c.apply(&ComposerEdit::Backspace);
+        assert_eq!(c.body.lines(), ["b", "x"], "chips take no text either");
     }
 
     #[test]

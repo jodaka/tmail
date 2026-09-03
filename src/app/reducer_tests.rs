@@ -1386,6 +1386,7 @@ fn composer_focus_cycles_fields_and_actions() {
         ComposerField::BccToggle,
         ComposerField::Subject,
         ComposerField::Body,
+        ComposerField::Attach,
         ComposerField::Send,
         ComposerField::Discard,
         ComposerField::To,
@@ -1527,6 +1528,268 @@ fn composer_edits_without_composer_open_are_inert() {
     reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
     assert!(s.composer.is_none());
     assert!(!matches!(s.active_route(), Some(Route::Composer)));
+}
+
+// ── Attachment path dialog (plan §15, Phase 8.1) ─────────────────────────
+
+use crate::app::action::DialogEdit;
+use crate::app::overlay::AttachmentPathDialog;
+use crate::domain::DraftAttachment;
+use std::path::PathBuf;
+
+/// Enter on the `+ attach` control and return the open dialog.
+fn open_attach_dialog(s: &mut AppState) -> &mut AttachmentPathDialog {
+    compose(s);
+    while s.composer.as_ref().unwrap().field != ComposerField::Attach {
+        reduce(s, &Action::FocusNext);
+    }
+    no_effects(&reduce(s, &Action::Activate));
+    assert_eq!(s.focus, Focus::Dialog);
+    match s.overlay.as_mut() {
+        Some(Overlay::AttachmentPath(dialog)) => dialog,
+        other => panic!("expected the attachment dialog, got {other:?}"),
+    }
+}
+
+/// Complete the in-flight `ReadAttachment` for `raw` with `attachment`.
+fn complete_read_ok(s: &mut AppState, id: OperationId, attachment: DraftAttachment) {
+    reduce(
+        s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Attachment(attachment)),
+        }),
+    );
+}
+
+fn attachment(name: &str) -> DraftAttachment {
+    DraftAttachment {
+        path: PathBuf::from(format!("/tmp/{name}")),
+        name: String::from(name),
+        size: 1234,
+    }
+}
+
+#[test]
+fn enter_on_attach_opens_the_dialog_and_esc_closes_it() {
+    let mut s = state();
+    open_attach_dialog(&mut s);
+    // BackOrCancel restores the composer focus.
+    reduce(&mut s, &Action::BackOrCancel);
+    assert!(s.overlay.is_none());
+    assert_eq!(s.focus, Focus::Composer);
+    assert!(s.composer.as_ref().unwrap().draft.attachments.is_empty());
+}
+
+#[test]
+fn dialog_entry_edits_with_caret_and_clears_errors() {
+    let mut s = state();
+    let dialog = open_attach_dialog(&mut s);
+    dialog.error = Some(String::from("stale failure"));
+    for c in "~/a.pdf".chars() {
+        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
+    }
+    {
+        let dialog = match s.overlay.as_ref().unwrap() {
+            Overlay::AttachmentPath(dialog) => dialog,
+            _ => panic!("dialog open"),
+        };
+        assert_eq!(dialog.input, "~/a.pdf");
+        assert_eq!(dialog.cursor, 7);
+        assert_eq!(dialog.error, None, "an edit clears the stale failure");
+    }
+    reduce(&mut s, &Action::DialogEdit(DialogEdit::Backspace));
+    reduce(&mut s, &Action::DialogEdit(DialogEdit::CursorLeft));
+    let dialog = match s.overlay.as_ref().unwrap() {
+        Overlay::AttachmentPath(dialog) => dialog,
+        _ => panic!("dialog open"),
+    };
+    assert_eq!(dialog.input, "~/a.pd");
+    assert_eq!(dialog.cursor, 5);
+}
+
+#[test]
+fn empty_entry_is_rejected_inline_without_an_operation() {
+    let mut s = state();
+    open_attach_dialog(&mut s);
+    reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(' ')));
+    no_effects(&reduce(&mut s, &Action::Activate));
+    let dialog = match s.overlay.as_ref().unwrap() {
+        Overlay::AttachmentPath(dialog) => dialog,
+        _ => panic!("dialog open"),
+    };
+    assert_eq!(dialog.error.as_deref(), Some("Enter a file path"));
+    assert!(s.operations.is_empty(), "nothing to validate");
+}
+
+#[test]
+fn submitting_starts_validation_and_keeps_the_dialog_open() {
+    let mut s = state();
+    open_attach_dialog(&mut s);
+    for c in "~/report final.pdf".chars() {
+        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
+    }
+    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    assert_eq!(
+        kind,
+        OperationKind::ReadAttachment {
+            path: PathBuf::from("~/report final.pdf"),
+        },
+        "the raw entry goes to the backend unexpanded"
+    );
+    assert!(
+        matches!(s.overlay.as_ref(), Some(Overlay::AttachmentPath(_))),
+        "the dialog stays open while validating"
+    );
+    assert_eq!(kind.summary(), "Checking file");
+    let _ = id;
+}
+
+#[test]
+fn validated_file_becomes_a_chip_and_dirties_the_draft() {
+    let mut s = state();
+    open_attach_dialog(&mut s);
+    for c in "~/report.pdf".chars() {
+        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
+    }
+    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    complete_read_ok(&mut s, id, attachment("report.pdf"));
+    // The dialog closed and the chip is focused.
+    assert!(s.overlay.is_none());
+    assert_eq!(s.focus, Focus::Composer);
+    let composer = s.composer.as_ref().unwrap();
+    assert_eq!(composer.field, ComposerField::Attachment(0));
+    let att = &composer.draft.attachments[0];
+    assert_eq!(att.name, "report.pdf");
+    assert_eq!(att.path, PathBuf::from("/tmp/report.pdf"));
+    assert!(composer.draft.is_dirty(), "attaching is a content edit");
+    assert_eq!(
+        s.status.message.as_deref(),
+        Some("Attached report.pdf (1 KB)")
+    );
+}
+
+#[test]
+fn validation_failure_stays_in_the_dialog_retryable() {
+    let mut s = state();
+    open_attach_dialog(&mut s);
+    for c in "~/gone.pdf".chars() {
+        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
+    }
+    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Err(OperationFailure {
+                code: None,
+                detail: String::from("`/home/u/gone.pdf` does not exist"),
+                retry: Some(kind.retry_spec()),
+                ambiguous: false,
+            }),
+        }),
+    );
+    // The dialog stays open with the detail; the entry is unchanged.
+    let dialog = match s.overlay.as_ref().unwrap() {
+        Overlay::AttachmentPath(dialog) => dialog,
+        _ => panic!("dialog open"),
+    };
+    assert_eq!(
+        dialog.error.as_deref(),
+        Some("`/home/u/gone.pdf` does not exist")
+    );
+    assert_eq!(dialog.input, "~/gone.pdf");
+    assert_eq!(s.focus, Focus::Dialog);
+    assert!(s.composer.as_ref().unwrap().draft.attachments.is_empty());
+}
+
+#[test]
+fn stale_validation_results_are_dropped() {
+    let mut s = state();
+    // Esc while validating: the result must not attach anything.
+    open_attach_dialog(&mut s);
+    for c in "~/a.pdf".chars() {
+        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
+    }
+    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    reduce(&mut s, &Action::BackOrCancel);
+    complete_read_ok(&mut s, id, attachment("a.pdf"));
+    assert!(s.composer.as_ref().unwrap().draft.attachments.is_empty());
+
+    // Editing the entry while validating: the older result is stale.
+    open_attach_dialog(&mut s);
+    for c in "~/b.pdf".chars() {
+        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
+    }
+    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    reduce(&mut s, &Action::DialogEdit(DialogEdit::Backspace));
+    complete_read_ok(&mut s, id, attachment("b.pdf"));
+    assert!(s.composer.as_ref().unwrap().draft.attachments.is_empty());
+}
+
+#[test]
+fn same_file_attaches_once() {
+    let mut s = state();
+    open_attach_dialog(&mut s);
+    for c in "~/a.pdf".chars() {
+        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
+    }
+    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    complete_read_ok(&mut s, id, attachment("a.pdf"));
+    assert_eq!(s.composer.as_ref().unwrap().draft.attachments.len(), 1);
+
+    // Re-adding the same path: no duplicate chip, no dirt.
+    let revision = s.composer.as_ref().unwrap().draft.revision;
+    open_attach_dialog(&mut s);
+    for c in "~/a.pdf".chars() {
+        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
+    }
+    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    complete_read_ok(
+        &mut s,
+        id,
+        DraftAttachment {
+            path: PathBuf::from("/tmp/a.pdf"),
+            name: String::from("a.pdf"),
+            size: 1234,
+        },
+    );
+    assert_eq!(s.composer.as_ref().unwrap().draft.attachments.len(), 1);
+    assert_eq!(
+        s.composer.as_ref().unwrap().draft.revision,
+        revision,
+        "no duplicate, no content edit"
+    );
+    assert_eq!(
+        s.status.message.as_deref(),
+        Some("a.pdf is already attached")
+    );
+}
+
+#[test]
+fn enter_on_a_chip_removes_it_and_autosave_follows() {
+    let mut s = state();
+    {
+        let composer = compose(&mut s);
+        composer.add_attachment(attachment("a.pdf"));
+        composer.add_attachment(attachment("b.pdf"));
+    }
+    // Tab to the first chip: To → … → Body → Attachment(0).
+    while s.composer.as_ref().unwrap().field != ComposerField::Attachment(0) {
+        reduce(&mut s, &Action::FocusNext);
+    }
+    no_effects(&reduce(&mut s, &Action::Activate));
+    let composer = s.composer.as_ref().unwrap();
+    assert_eq!(composer.draft.attachments.len(), 1);
+    assert_eq!(composer.draft.attachments[0].name, "b.pdf");
+    assert_eq!(composer.field, ComposerField::Attachment(0), "next chip");
+    assert!(composer.draft.is_dirty());
+    // Autosave journals the shorter attachment list: the first tick arms
+    // the debounce (no clock at edit time), the second one saves.
+    let _ = tick(&mut s, 0);
+    let (_, snap) = expect_save(&tick(&mut s, 3));
+    assert_eq!(snap.attachments.len(), 1);
+    assert_eq!(snap.attachments[0].name, "b.pdf");
 }
 
 // ── Draft autosave state machine (plan §14 Phase 6.3) ────────────────────
@@ -1762,6 +2025,7 @@ fn restored_draft(to: &str, revision: u64, saved_revision: u64) -> crate::domain
             bcc: String::new(),
             subject: String::from("after the crash"),
             body: String::from("typed before the crash\n"),
+            attachments: Vec::new(),
             revision,
         },
         saved_revision,

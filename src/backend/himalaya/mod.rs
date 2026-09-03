@@ -14,7 +14,7 @@ pub(crate) mod map;
 mod process;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -25,8 +25,8 @@ use crate::backend::journal::DraftJournal;
 use crate::backend::traits::{BackendError, BackendResult, MailBackend, RequestContext};
 use crate::config::Config;
 use crate::domain::{
-    DraftSnapshot, Mailbox, MailboxRole, Message, MessageId, MessageLocator, MessageSummary,
-    OutboundMessage, Page, PageRequest, RestoredDraft, SendOutcome,
+    DraftAttachment, DraftSnapshot, Mailbox, MailboxRole, Message, MessageId, MessageLocator,
+    MessageSummary, OutboundMessage, Page, PageRequest, RestoredDraft, SendOutcome,
 };
 
 /// Drives the `himalaya` executable with argv-only child processes.
@@ -338,6 +338,15 @@ impl MailBackend for HimalayaCliBackend {
         //    from "may already be delivered".
         Ok(classify_send(output))
     }
+
+    async fn read_attachment(
+        &self,
+        ctx: RequestContext,
+        path: PathBuf,
+    ) -> BackendResult<DraftAttachment> {
+        tracing::debug!(operation = %ctx.operation, path = %path.display(), "read_attachment");
+        Ok(validate_attachment_source(&path)?)
+    }
 }
 
 impl HimalayaCliBackend {
@@ -648,6 +657,71 @@ fn bare_message_id(message_id: &str) -> String {
         .to_string()
 }
 
+/// Validate one attachment source path (plan §15, Phase 8): expand `~` in
+/// Post (never a shell), then require an existing, regular, readable file
+/// within the acceptable size. Every refusal is detailed so the composer
+/// dialog can show it next to the still-editable entry (Phase 8
+/// acceptance: "missing/unreadable files produce retryable detailed
+/// errors").
+fn validate_attachment_source(raw: &Path) -> BackendResult<DraftAttachment> {
+    validate_attachment_source_inner(
+        raw,
+        crate::domain::paths::home_dir().as_deref(),
+        crate::domain::paths::MAX_DRAFT_ATTACHMENT_BYTES,
+    )
+}
+
+/// [`validate_attachment_source`] with injected home directory and size
+/// limit, so the checks are unit-testable without the environment.
+fn validate_attachment_source_inner(
+    raw: &Path,
+    home: Option<&Path>,
+    limit: u64,
+) -> BackendResult<DraftAttachment> {
+    let expanded = crate::domain::paths::expand_tilde(raw, home);
+    let display = expanded.display().to_string();
+    let meta = match std::fs::metadata(&expanded) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(BackendError::File(format!("`{display}` does not exist")));
+        }
+        Err(err) => {
+            return Err(BackendError::File(format!(
+                "`{display}` could not be read: {err}"
+            )));
+        }
+    };
+    if !meta.is_file() {
+        return Err(BackendError::File(format!(
+            "`{display}` is not a regular file"
+        )));
+    }
+    let size = meta.len();
+    if size > limit {
+        return Err(BackendError::File(format!(
+            "`{display}` is {} — the limit is {}",
+            crate::ui::text::human_size(size),
+            crate::ui::text::human_size(limit),
+        )));
+    }
+    if let Err(err) = std::fs::File::open(&expanded) {
+        return Err(BackendError::File(format!(
+            "`{display}` is not readable: {err}"
+        )));
+    }
+    let name = expanded
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| BackendError::File(format!("`{display}` has no usable file name")))?;
+    Ok(DraftAttachment {
+        path: expanded,
+        name,
+        size,
+    })
+}
+
 /// Classify one finished `message send` run into a [`SendOutcome`] (plan
 /// §12; characterization: `fixtures/himalaya/send-outcomes.md`).
 ///
@@ -796,6 +870,96 @@ async fn run_two_phase_delete(
             }
             Err(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn temp_file(name: &str, contents: &[u8]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join(name);
+        std::fs::write(&path, contents).expect("write fixture");
+        (dir, path)
+    }
+
+    #[test]
+    fn accepts_regular_readable_files_and_reports_metadata() {
+        let (_dir, path) = temp_file("report final.pdf", b"%PDF-1.4 bytes");
+        let att = validate_attachment_source(&path).expect("valid source");
+        assert_eq!(att.name, "report final.pdf");
+        assert_eq!(att.size, 14);
+        assert_eq!(att.path, path, "already absolute: unchanged");
+    }
+
+    #[test]
+    fn expands_tilde_against_home() {
+        let (_dir, path) = temp_file("doc.pdf", b"x");
+        // Point the injected home at the fixture's parent so `~/doc.pdf`
+        // resolves to it (the expansion itself is exercised in
+        // domain::paths; here we prove the backend consults it).
+        let home = path.parent().unwrap().to_path_buf();
+        let raw = PathBuf::from("~/doc.pdf");
+        let att = validate_attachment_source_inner(
+            &raw,
+            Some(&home),
+            crate::domain::paths::MAX_DRAFT_ATTACHMENT_BYTES,
+        )
+        .expect("valid");
+        assert_eq!(att.path, path);
+    }
+
+    #[test]
+    fn missing_files_name_the_path_in_the_error() {
+        let err =
+            validate_attachment_source(Path::new("/nonexistent/x y.pdf")).expect_err("missing");
+        match err {
+            BackendError::File(detail) => {
+                assert!(detail.contains("/nonexistent/x y.pdf"), "{detail}");
+                assert!(detail.contains("does not exist"), "{detail}");
+            }
+            other => panic!("expected a File error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn directories_are_rejected_as_not_regular() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let err = validate_attachment_source(dir.path()).expect_err("directory");
+        assert!(matches!(err, BackendError::File(_)));
+    }
+
+    #[test]
+    fn oversized_files_are_rejected_with_the_limit() {
+        let (_dir, path) = temp_file("big.bin", b"x");
+        let att = validate_attachment_source_inner(&path, None, 1000).expect("under limit ok");
+        assert_eq!(att.size, 1);
+        // A path larger than the limit is refused with both numbers.
+        let err = validate_attachment_source_inner(&path, None, 0)
+            .expect_err("zero limit refuses everything");
+        match err {
+            BackendError::File(detail) => {
+                assert!(detail.contains(&path.display().to_string()), "{detail}");
+                assert!(detail.contains("the limit"), "{detail}");
+            }
+            other => panic!("expected a File error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unreadable_files_are_rejected() {
+        let (_dir, path) = temp_file("secret.bin", b"x");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&path, perms).expect("chmod");
+        // Running as root would still read it; skip in that environment.
+        if std::env::var("USER").as_deref() == Ok("root") {
+            return;
+        }
+        let err = validate_attachment_source(&path).expect_err("unreadable");
+        assert!(matches!(err, BackendError::File(_)));
     }
 }
 
