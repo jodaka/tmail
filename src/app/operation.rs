@@ -84,10 +84,15 @@ pub enum OperationKind {
     ReadAttachment { path: std::path::PathBuf },
     /// Save one incoming attachment to disk (plan §15, Phase 8.4). The
     /// request freezes the target message, part, name, and directory;
-    /// retries replay it verbatim.
+    /// retries replay it verbatim. `open_after` chains the platform
+    /// opener on the saved path (Phase 8.5).
     SaveAttachment {
         request: crate::domain::AttachmentRequest,
+        open_after: bool,
     },
+    /// Open a saved file with the platform handler (`open`/`xdg-open`,
+    /// plan §15, Phase 8.5): spawned directly, never through a shell.
+    OpenPath { path: std::path::PathBuf },
 }
 
 /// Why a draft is being removed (Phase 7.6): it selects the failure UX.
@@ -121,6 +126,7 @@ impl OperationKind {
             OperationKind::Send { .. } => "Sending message",
             OperationKind::ReadAttachment { .. } => "Checking file",
             OperationKind::SaveAttachment { .. } => "Saving attachment",
+            OperationKind::OpenPath { .. } => "Opening attachment",
         }
     }
 
@@ -180,14 +186,18 @@ impl OperationKind {
     }
 
     /// Whether `Esc` may cancel this operation (plan §11: "cancel the
-    /// currently foregrounded cancellable operation"). Sends are never
-    /// cancellable: killing himalaya mid-DATA leaves the delivery state
-    /// unknown while the suppressed `Cancelled` result could claim neither
-    /// failure nor success — exactly the ambiguity plan §12 forbids
-    /// hiding. The user can still leave the composer; the send completes
-    /// (or is classified) in the background.
+    /// currently foregrounded cancellable operation"). Sends and opens are
+    /// never cancellable: killing himalaya mid-DATA leaves the delivery
+    /// state unknown while the suppressed `Cancelled` result could claim
+    /// neither failure nor success — exactly the ambiguity plan §12 forbids
+    /// hiding (an already-spawned handler app is likewise let alone). The
+    /// user can still leave the composer; the send completes (or is
+    /// classified) in the background.
     pub fn is_cancellable(&self) -> bool {
-        !matches!(self, OperationKind::Send { .. })
+        !matches!(
+            self,
+            OperationKind::Send { .. } | OperationKind::OpenPath { .. }
+        )
     }
 }
 

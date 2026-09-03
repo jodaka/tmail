@@ -85,6 +85,7 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::Archive => archive_message(state),
         Action::Trash => trash_message(state),
         Action::SaveAttachment => save_selected_attachment(state, false),
+        Action::OpenAttachment => open_selected_attachment(state),
         Action::ToggleStar => toggle_star(state),
         Action::MarkUnread => mark_unread(state),
         Action::Compose => open_composer(state),
@@ -578,9 +579,10 @@ fn mark_unread(state: &mut AppState) -> Vec<Effect> {
 /// Save the selected reader attachment (plan §15). Reader-only: the open
 /// message supplies the locator and the part id, the chip cursor supplies
 /// the attachment. `d` saves into the downloads directory; the backend
-/// owns collision handling and returns the path actually written.
+/// owns collision handling and returns the path actually written. `o`
+/// (open) reuses a path saved this session or saves first, then chains
+/// the platform opener (Phase 8.5).
 fn save_selected_attachment(state: &mut AppState, open_after: bool) -> Vec<Effect> {
-    let _ = open_after; // the open-with chain arrives with Phase 8.5
     if state.focus != Focus::Reader {
         tracing::debug!("save attachment ignored outside the reader");
         return Vec::new();
@@ -602,11 +604,33 @@ fn save_selected_attachment(state: &mut AppState, open_after: bool) -> Vec<Effec
         dir: None,
     };
     state.set_status("Saving attachment…");
-    vec![
-        state
-            .operations
-            .start(OperationKind::SaveAttachment { request }),
-    ]
+    vec![state.operations.start(OperationKind::SaveAttachment {
+        request,
+        open_after,
+    })]
+}
+
+/// Open the selected reader attachment with the platform handler (plan
+/// §15, Phase 8.5): a file already saved this session opens from where it
+/// landed (no duplicate downloads); otherwise the attachment is saved
+/// first and the opener chains on the confirmed path.
+fn open_selected_attachment(state: &mut AppState) -> Vec<Effect> {
+    if state.focus != Focus::Reader {
+        tracing::debug!("open attachment ignored outside the reader");
+        return Vec::new();
+    }
+    let Some(message) = state.open_message.as_loaded() else {
+        return Vec::new();
+    };
+    let Some((_, attachment)) = selected_attachment(state) else {
+        return Vec::new();
+    };
+    let key = (message.id.clone(), attachment.part_id);
+    if let Some(path) = state.saved_attachments.get(&key).cloned() {
+        tracing::debug!(path = %path.display(), "opening previously saved attachment");
+        return vec![state.operations.start(OperationKind::OpenPath { path })];
+    }
+    save_selected_attachment(state, true)
 }
 
 /// Apply a finished attachment save: record the path for `Open` reuse and
@@ -991,12 +1015,43 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             state.operations.finish(result.id);
             attachment_validated(state, path, result)
         }
-        OperationKind::SaveAttachment { .. } => {
+        OperationKind::SaveAttachment {
+            request: _,
+            open_after,
+        } => {
             state.operations.finish(result.id);
             match &result.outcome {
-                Ok(OperationOutcome::SavedPath(path)) => attachment_saved(state, path),
+                Ok(OperationOutcome::SavedPath(path)) => {
+                    attachment_saved(state, path);
+                    if *open_after {
+                        // Save-then-open (Phase 8.5): the opener chains on
+                        // the confirmed path — which may be a
+                        // collision-renamed name, so the chain uses exactly
+                        // what was written.
+                        return vec![
+                            state
+                                .operations
+                                .start(OperationKind::OpenPath { path: path.clone() }),
+                        ];
+                    }
+                    Vec::new()
+                }
                 Ok(_) => {
                     tracing::warn!(id = %result.id, "unexpected payload for an attachment save");
+                    Vec::new()
+                }
+                Err(failure) => open_error_modal(state, failure),
+            }
+        }
+        OperationKind::OpenPath { .. } => {
+            state.operations.finish(result.id);
+            match &result.outcome {
+                Ok(OperationOutcome::Done) => {
+                    state.set_status("Opened");
+                    Vec::new()
+                }
+                Ok(_) => {
+                    tracing::warn!(id = %result.id, "unexpected payload for an open");
                     Vec::new()
                 }
                 Err(failure) => open_error_modal(state, failure),

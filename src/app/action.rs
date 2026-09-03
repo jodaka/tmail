@@ -90,6 +90,10 @@ pub enum Action {
     /// Save the selected reader attachment to the downloads directory
     /// (plan §15, Phase 8.4).
     SaveAttachment,
+    /// Open the selected reader attachment with the platform handler
+    /// (plan §15, Phase 8.5): reuse a path saved this session or save
+    /// first, then open.
+    OpenAttachment,
     LeaveComposer,
     DiscardDraft,
     RetryError,

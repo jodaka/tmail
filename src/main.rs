@@ -15,7 +15,9 @@ use chrono::Local;
 use tokio::sync::mpsc;
 
 use tmail::app::{Action, AppState, Effect, reducer};
-use tmail::backend::{MailBackend, RequestContext, himalaya::HimalayaCliBackend};
+use tmail::backend::{
+    MailBackend, PathOpener, RequestContext, SystemOpener, himalaya::HimalayaCliBackend,
+};
 use tmail::config::Config;
 use tmail::input::keyboard;
 use tmail::runtime::tasks::OperationManager;
@@ -62,6 +64,8 @@ async fn run() -> anyhow::Result<()> {
         "configuration loaded"
     );
     let backend: Arc<dyn MailBackend> = Arc::new(HimalayaCliBackend::from_config(&config));
+    // Platform open-with adapter for saved attachments (plan §15).
+    let opener: Arc<dyn PathOpener> = Arc::new(SystemOpener);
 
     let mut guard = terminal::enable()?;
     let mut state = AppState::initial(config.page_size);
@@ -78,7 +82,7 @@ async fn run() -> anyhow::Result<()> {
     // Backend results re-enter the reducer as actions; the manager spawns
     // one cancellable task per effect.
     let (result_tx, mut result_rx) = mpsc::unbounded_channel();
-    let manager = OperationManager::new(Arc::clone(&backend), result_tx);
+    let manager = OperationManager::new(Arc::clone(&backend), opener, result_tx);
 
     // Startup work flows through the same reducer path as everything else:
     // with no mailboxes loaded yet, Refresh starts the mailbox listing;

@@ -18,28 +18,40 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::app::effect::Effect;
 use crate::app::operation::{OperationFailure, OperationKind, OperationOutcome, OperationResult};
 use crate::app::sanitize::sanitize;
-use crate::backend::{BackendError, MailBackend, RequestContext};
+use crate::backend::{BackendError, MailBackend, PathOpener, RequestContext};
 
 /// Spawns backend tasks for the effects the reducer emits.
 pub struct OperationManager {
     backend: Arc<dyn MailBackend>,
+    /// Platform open-with adapter for `OpenPath` effects (plan §15,
+    /// Phase 8.5): `open`/`xdg-open`, spawned directly.
+    opener: Arc<dyn PathOpener>,
     results: UnboundedSender<OperationResult>,
 }
 
 impl OperationManager {
-    pub fn new(backend: Arc<dyn MailBackend>, results: UnboundedSender<OperationResult>) -> Self {
-        Self { backend, results }
+    pub fn new(
+        backend: Arc<dyn MailBackend>,
+        opener: Arc<dyn PathOpener>,
+        results: UnboundedSender<OperationResult>,
+    ) -> Self {
+        Self {
+            backend,
+            opener,
+            results,
+        }
     }
 
     /// Launch one effect. The cancellation token comes from the operation
     /// registry (`AppState.operations`), so `Esc` reaches the child process.
     pub fn launch(&self, effect: Effect, ctx: RequestContext) {
         let backend = Arc::clone(&self.backend);
+        let opener = Arc::clone(&self.opener);
         let results = self.results.clone();
         let id = effect.id;
         tokio::spawn(async move {
             tracing::debug!(id = %id, "operation launched");
-            match run_effect(&backend, effect, ctx).await {
+            match run_effect(&backend, &opener, effect, ctx).await {
                 Some(outcome) => {
                     // The channel lives for the whole session; a send
                     // failure means the loop is shutting down and the
@@ -60,6 +72,7 @@ impl OperationManager {
 /// operation was cancelled — there is nothing to report.
 async fn run_effect(
     backend: &Arc<dyn MailBackend>,
+    opener: &Arc<dyn PathOpener>,
     effect: Effect,
     ctx: RequestContext,
 ) -> Option<Result<OperationOutcome, OperationFailure>> {
@@ -121,10 +134,30 @@ async fn run_effect(
             Ok(attachment) => Some(Ok(OperationOutcome::Attachment(attachment))),
             Err(err) => operation_failure(&effect, err).map(Err),
         },
-        OperationKind::SaveAttachment { request } => {
+        OperationKind::SaveAttachment { request, .. } => {
             match backend.save_attachment(ctx, request).await {
                 Ok(path) => Some(Ok(OperationOutcome::SavedPath(path))),
                 Err(err) => operation_failure(&effect, err).map(Err),
+            }
+        }
+        OperationKind::OpenPath { path } => {
+            tracing::debug!(path = %path.display(), "opening with platform handler");
+            // Spawned directly (argv, no shell); not cancellable, so no
+            // token dance here — the handler app owns its own lifetime.
+            match opener.open(&path) {
+                Ok(()) => Some(Ok(OperationOutcome::Done)),
+                Err(err) => {
+                    let failure = OperationFailure {
+                        code: None,
+                        detail: sanitize(&format!(
+                            "`{}` could not be opened: {err}",
+                            path.display()
+                        )),
+                        retry: Some(effect.retry_spec()),
+                        ambiguous: false,
+                    };
+                    Some(Err(failure))
+                }
             }
         }
     }
@@ -369,8 +402,37 @@ mod tests {
     fn manager(
         backend: Arc<dyn MailBackend>,
     ) -> (OperationManager, UnboundedReceiver<OperationResult>) {
+        manager_with_opener(backend, Arc::new(RecordingOpener::default()))
+    }
+
+    fn manager_with_opener(
+        backend: Arc<dyn MailBackend>,
+        opener: Arc<dyn PathOpener>,
+    ) -> (OperationManager, UnboundedReceiver<OperationResult>) {
         let (tx, rx) = unbounded_channel();
-        (OperationManager::new(backend, tx), rx)
+        (OperationManager::new(backend, opener, tx), rx)
+    }
+
+    /// A PathOpener double that records the paths it was asked to open.
+    #[derive(Default)]
+    struct RecordingOpener {
+        opened: std::sync::Mutex<Vec<std::path::PathBuf>>,
+    }
+
+    impl PathOpener for RecordingOpener {
+        fn open(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.opened
+                .lock()
+                .expect("opener lock")
+                .push(path.to_path_buf());
+            Ok(())
+        }
+    }
+
+    impl RecordingOpener {
+        fn opened(&self) -> Vec<std::path::PathBuf> {
+            self.opened.lock().expect("opener lock").clone()
+        }
     }
 
     fn effect(kind: OperationKind) -> (Effect, CancellationToken) {
@@ -465,5 +527,47 @@ mod tests {
             failure.detail
         );
         assert!(failure.detail.contains("connect refused"));
+    }
+
+    #[tokio::test]
+    async fn open_path_effects_spawn_the_platform_opener_directly() {
+        let backend = Arc::new(FakeBackend::ok());
+        let opener = Arc::new(RecordingOpener::default());
+        let (manager, mut rx) = manager_with_opener(backend, Arc::clone(&opener) as _);
+        let path = std::path::PathBuf::from("/tmp/report final (1).pdf");
+        let (effect, token) = effect(OperationKind::OpenPath { path: path.clone() });
+        assert!(!effect.kind.is_cancellable(), "opens are not cancellable");
+        manager.launch(effect, ctx(9, &token));
+        let result = rx.recv().await.expect("result");
+        assert_eq!(result.outcome, Ok(OperationOutcome::Done));
+        // The path traveled whole — spaces and parens intact, no shell.
+        assert_eq!(opener.opened(), vec![path]);
+    }
+
+    #[tokio::test]
+    async fn open_failures_name_the_path_and_stay_retryable() {
+        struct RefusingOpener;
+        impl PathOpener for RefusingOpener {
+            fn open(&self, _path: &std::path::Path) -> std::io::Result<()> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "no opener",
+                ))
+            }
+        }
+        let backend = Arc::new(FakeBackend::ok());
+        let (manager, mut rx) = manager_with_opener(backend, Arc::new(RefusingOpener));
+        let (effect, token) = effect(OperationKind::OpenPath {
+            path: std::path::PathBuf::from("/tmp/x.pdf"),
+        });
+        let retry = effect.retry_spec();
+        manager.launch(effect, ctx(9, &token));
+        let result = rx.recv().await.expect("result");
+        let Err(failure) = result.outcome else {
+            panic!("expected failure");
+        };
+        assert!(failure.detail.contains("/tmp/x.pdf"));
+        assert!(failure.detail.contains("no opener"));
+        assert_eq!(failure.retry, Some(retry));
     }
 }

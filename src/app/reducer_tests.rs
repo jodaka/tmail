@@ -918,7 +918,11 @@ fn d_saves_the_selected_attachment_with_a_frozen_request() {
     let effects = reduce(&mut s, &Action::SaveAttachment);
     let (id, kind) = effect_parts(&effects);
     assert_eq!(kind.summary(), "Saving attachment");
-    let OperationKind::SaveAttachment { request } = kind else {
+    let OperationKind::SaveAttachment {
+        request,
+        open_after: _,
+    } = kind
+    else {
         panic!("expected SaveAttachment");
     };
     assert_eq!(request, attachment_request(&s));
@@ -953,7 +957,11 @@ fn saving_targets_the_cursor_chip_by_part_id() {
     reduce(&mut s, &Action::FocusNext);
     let effects = reduce(&mut s, &Action::SaveAttachment);
     let (_, kind) = effect_parts(&effects);
-    let OperationKind::SaveAttachment { request } = kind else {
+    let OperationKind::SaveAttachment {
+        request,
+        open_after: _,
+    } = kind
+    else {
         panic!("expected SaveAttachment");
     };
     assert_eq!(request.part_id, 5);
@@ -1019,6 +1027,115 @@ fn keyboard_d_maps_to_save_attachment() {
         Focus::Reader,
     );
     assert_eq!(action, Some(Action::SaveAttachment));
+}
+
+#[test]
+fn keyboard_d_and_o_map_to_save_and_open() {
+    use crate::input::keyboard;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+    assert_eq!(
+        keyboard::to_action(key('d'), Focus::Reader),
+        Some(Action::SaveAttachment)
+    );
+    assert_eq!(
+        keyboard::to_action(key('o'), Focus::Reader),
+        Some(Action::OpenAttachment)
+    );
+}
+
+#[test]
+fn o_saves_first_then_chains_the_opener_on_the_confirmed_path() {
+    let mut s = reader_with_attachments();
+    let (id, kind) = effect_parts(&reduce(&mut s, &Action::OpenAttachment));
+    // Nothing saved yet: the save runs with the open-after chain armed.
+    let OperationKind::SaveAttachment {
+        request: _,
+        open_after,
+    } = kind
+    else {
+        panic!("expected SaveAttachment");
+    };
+    assert!(open_after);
+    let final_path = PathBuf::from("/home/u/Downloads/report (2).pdf");
+    let effects = reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::SavedPath(final_path.clone())),
+        }),
+    );
+    // The opener chains on the path that was actually written.
+    let (open_id, open_kind) = effect_parts(&effects);
+    assert_eq!(
+        open_kind,
+        OperationKind::OpenPath {
+            path: final_path.clone()
+        }
+    );
+    // Completing the open closes the loop.
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id: open_id,
+            outcome: Ok(OperationOutcome::Done),
+        }),
+    );
+    assert_eq!(s.status.message.as_deref(), Some("Opened"));
+}
+
+#[test]
+fn o_reuses_a_path_saved_this_session_without_a_second_save() {
+    let mut s = reader_with_attachments();
+    let saved = PathBuf::from("/home/u/Downloads/report.pdf");
+    let message_id = s.open_message.as_loaded().unwrap().id.clone();
+    s.saved_attachments.insert((message_id, 3), saved.clone());
+    let effects = reduce(&mut s, &Action::OpenAttachment);
+    // Straight to the opener — no download, no duplicate file.
+    let (_, kind) = effect_parts(&effects);
+    assert_eq!(
+        kind,
+        OperationKind::OpenPath { path: saved },
+        "no SaveAttachment was started"
+    );
+}
+
+#[test]
+fn open_is_reader_only_and_attachment_gated() {
+    let mut s = state();
+    no_effects(&reduce(&mut s, &Action::OpenAttachment));
+    assert!(s.operations.is_empty());
+}
+
+#[test]
+fn save_failure_keeps_the_open_chain_off() {
+    // A failed save-then-open opens the modal; no opener runs.
+    let mut s = reader_with_attachments();
+    let (id, kind) = effect_parts(&reduce(&mut s, &Action::OpenAttachment));
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Err(OperationFailure {
+                code: Some(1),
+                detail: String::from("disk full"),
+                retry: Some(kind.retry_spec()),
+                ambiguous: false,
+            }),
+        }),
+    );
+    assert!(matches!(s.overlay, Some(Overlay::Error(_))));
+    assert!(s.saved_attachments.is_empty());
+    // Retrying replays the save (with the chain armed) under a new id.
+    let replayed = reduce(&mut s, &Action::RetryError);
+    let (_, kind) = effect_parts(&replayed);
+    assert!(matches!(
+        kind,
+        OperationKind::SaveAttachment {
+            open_after: true,
+            ..
+        }
+    ));
 }
 
 #[test]
