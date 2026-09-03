@@ -19,6 +19,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::route::Route;
 use crate::app::state::AppState;
+use crate::input::mouse::HitMap;
 use crate::ui::layout::LayoutMode;
 
 /// Values injected at render time so neither the reducer nor snapshots
@@ -41,8 +42,16 @@ impl<'a> RenderContext<'a> {
     }
 }
 
-/// Render one frame.
-pub fn render(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, ctx: &RenderContext<'_>) {
+/// Render one frame. `hits` collects the interactive widget rectangles
+/// (plan §10, Phase 10.1): the mouse layer hit-tests the next click
+/// against the map of the frame currently on screen.
+pub fn render(
+    frame: &mut Frame<'_>,
+    state: &AppState,
+    theme: &Theme,
+    ctx: &RenderContext<'_>,
+    hits: &mut HitMap,
+) {
     let area = frame.area();
     frame.render_widget(
         ratatui::widgets::Block::new().style(theme.on_background()),
@@ -53,13 +62,13 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, ctx: &Rend
         render_too_small(frame, area, state, theme);
         // The modals still open even in too-small terminals: failures and
         // confirmations must stay visible and recoverable (plan §12/§14).
-        components::error_modal::render(frame, state, theme);
-        components::confirm_modal::render(frame, state, theme);
+        components::error_modal::render(frame, state, theme, hits);
+        components::confirm_modal::render(frame, state, theme, hits);
         components::attachment_dialog::render(frame, state, theme);
         return;
     }
     let (topbar, body, statusbar) = layout::split_vertical(area);
-    components::topbar::render(frame, topbar, state, theme, &ctx.clock);
+    components::topbar::render(frame, topbar, state, theme, &ctx.clock, hits);
     let (sidebar, list) = layout::split_body(mode, body);
     if let Some(sidebar) = sidebar {
         // The mockup's `.sidebar` carries a `border-right` hairline (list,
@@ -75,7 +84,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, ctx: &Rend
         };
         let mut inset = sidebar;
         inset.width -= 1;
-        components::sidebar::render(frame, inset, state, theme);
+        components::sidebar::render(frame, inset, state, theme, hits);
         frame.render_widget(
             Block::default()
                 .borders(Borders::RIGHT)
@@ -87,15 +96,15 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, ctx: &Rend
     // chrome stay (mockup `viewer.html`). The composer likewise replaces
     // the list (mockup `new-mail.html`).
     if matches!(state.active_route(), Some(Route::Message(_))) {
-        screens::reader::render(frame, list, state, theme);
+        screens::reader::render(frame, list, state, theme, hits);
     } else if matches!(state.active_route(), Some(Route::Composer)) {
-        screens::composer::render(frame, list, state, theme);
+        screens::composer::render(frame, list, state, theme, hits);
     } else {
-        screens::mailbox::render(frame, list, state, mode, theme, ctx.now);
+        screens::mailbox::render(frame, list, state, mode, theme, ctx.now, hits);
     }
     components::statusbar::render(frame, statusbar, state, theme);
-    components::error_modal::render(frame, state, theme);
-    components::confirm_modal::render(frame, state, theme);
+    components::error_modal::render(frame, state, theme, hits);
+    components::confirm_modal::render(frame, state, theme, hits);
     components::attachment_dialog::render(frame, state, theme);
 }
 

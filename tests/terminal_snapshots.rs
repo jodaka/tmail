@@ -6,12 +6,20 @@
 use tmail::app::mock::{self, mock_initial_state};
 use tmail::app::operation::{OperationFailure, OperationKind, OperationResult};
 use tmail::app::{Action, reducer};
+use tmail::input::mouse::HitMap;
 use tmail::ui::{RenderContext, Theme, dates, render};
 
 use ratatui::backend::TestBackend;
 use ratatui::{Terminal, style::Color};
 
 fn draw(width: u16, height: u16) -> ratatui::buffer::Buffer {
+    draw_with_hits(width, height).0
+}
+
+/// Draw the mock state and return the buffer together with the recorded
+/// widget rectangles, so tests can verify that hit-testing agrees with
+/// what was actually drawn (Phase 10.1).
+fn draw_with_hits(width: u16, height: u16) -> (ratatui::buffer::Buffer, HitMap) {
     let mut state = mock_initial_state();
     state.size = (width, height);
     let theme = Theme::default_dark();
@@ -19,10 +27,11 @@ fn draw(width: u16, height: u16) -> ratatui::buffer::Buffer {
     let ctx = RenderContext::new(now, dates::format_clock(now));
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend");
+    let mut hits = HitMap::default();
     terminal
-        .draw(|frame| render(frame, &state, &theme, &ctx))
+        .draw(|frame| render(frame, &state, &theme, &ctx, &mut hits))
         .expect("draw");
-    terminal.backend().buffer().clone()
+    (terminal.backend().buffer().clone(), hits)
 }
 
 /// Flatten the buffer into a plain string, one line per row.
@@ -256,8 +265,9 @@ fn resize_through_actions_switches_modes() {
     let draw_state = |state: &tmail::app::AppState, w: u16, h: u16| {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).expect("test backend");
+        let mut hits = HitMap::default();
         terminal
-            .draw(|frame| render(frame, state, &theme, &ctx))
+            .draw(|frame| render(frame, state, &theme, &ctx, &mut hits))
             .expect("draw");
         text_of(terminal.backend().buffer())
     };
@@ -318,8 +328,9 @@ fn buffer_after(
     state.size = (width, height);
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend");
+    let mut hits = HitMap::default();
     terminal
-        .draw(|frame| render(frame, state, &theme, &ctx))
+        .draw(|frame| render(frame, state, &theme, &ctx, &mut hits))
         .expect("draw");
     terminal.backend().buffer().clone()
 }
@@ -907,4 +918,384 @@ fn composer_shows_saving_while_the_save_is_in_flight() {
         text.contains("Saving…"),
         "in-flight save must show Saving…:\n{text}"
     );
+}
+
+// ── Phase 10: responsive snapshot sizes + mouse hit maps ─────────────────
+
+use tmail::app::action::ClickTarget;
+
+/// Draw an arbitrary reducer-driven state and return buffer + hit map.
+fn draw_state_hits(
+    state: &tmail::app::AppState,
+    width: u16,
+    height: u16,
+) -> (ratatui::buffer::Buffer, HitMap) {
+    let theme = Theme::default_dark();
+    let now = mock::now();
+    let ctx = RenderContext::new(now, dates::format_clock(now));
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("test backend");
+    let mut hits = HitMap::default();
+    terminal
+        .draw(|frame| render(frame, state, &theme, &ctx, &mut hits))
+        .expect("draw");
+    (terminal.backend().buffer().clone(), hits)
+}
+
+/// Plan §19 Phase 10 acceptance: snapshots cover 152×40, 120×30, 90×25,
+/// and too-small. 120×30 is the full-layout floor: the sidebar is present.
+#[test]
+fn snapshot_at_full_floor_120x30() {
+    let (buffer, _) = draw_with_hits(120, 30);
+    let text = text_of(&buffer);
+    assert!(text.contains("INBOX"), "pane title missing:\n{text}");
+    assert!(text.contains("Compose"), "full floor keeps the sidebar");
+    assert!(text.contains("UTF-8 · 120×30"), "env info missing");
+}
+
+/// 90×25 is the compact floor: the sidebar hides but rows still render.
+#[test]
+fn snapshot_at_compact_floor_90x25() {
+    let (buffer, _) = draw_with_hits(90, 25);
+    let text = text_of(&buffer);
+    assert!(text.contains("INBOX"), "pane title missing:\n{text}");
+    // The compact sender column clips to 14ch; the subject stays whole.
+    assert!(text.contains("Re: WIP — 240 mm"), "rows missing:\n{text}");
+    assert_absent(&text, "Compose", (90, 25));
+    assert!(text.contains("UTF-8 · 90×25"), "env info missing");
+}
+
+/// 89 wide is already too small (compact floor is 90): the message shows
+/// instead of overlapping widgets.
+#[test]
+fn snapshot_too_small_just_below_the_compact_floor() {
+    let (buffer, _) = draw_with_hits(89, 25);
+    let text = text_of(&buffer);
+    assert!(
+        text.contains("Terminal too small"),
+        "message missing:\n{text}"
+    );
+    assert!(text.contains("89×25"), "size report missing");
+    assert_absent(&text, "INBOX", (89, 25));
+}
+
+#[test]
+fn hit_map_matches_the_drawn_mailbox_screen() {
+    let (_, hits) = draw_with_hits(152, 40);
+    let _ = hits_is_sane(&hits);
+    // Chrome geometry: topbar 0..4, body 4..37, statusbar 37..40; list head
+    // 4..6, rows from y=6. Sidebar x=0..23, list x=24..152.
+    assert_eq!(hits.hit_test(40, 1, false), Some(ClickTarget::SearchField));
+    assert_eq!(
+        hits.hit_test(10, 6, false),
+        Some(ClickTarget::ComposeButton)
+    );
+    assert_eq!(hits.hit_test(10, 9, false), Some(ClickTarget::Mailbox(0)));
+    assert_eq!(hits.hit_test(10, 10, false), Some(ClickTarget::Mailbox(1)));
+    assert_eq!(
+        hits.hit_test(30, 6, false),
+        Some(ClickTarget::MessageRow(0))
+    );
+    assert_eq!(
+        hits.hit_test(30, 7, false),
+        Some(ClickTarget::MessageRow(1))
+    );
+    // Rows only exist where the page has items: 20 mock rows cover
+    // y=6..26; the empty tail records nothing.
+    assert_eq!(
+        hits.hit_test(30, 25, false),
+        Some(ClickTarget::MessageRow(19))
+    );
+    assert_eq!(hits.hit_test(30, 30, false), None);
+    assert_eq!(hits.hit_test(30, 35, false), None);
+    assert_eq!(hits.hit_test(200, 5, false), None);
+}
+
+fn hits_is_sane(hits: &HitMap) -> bool {
+    !hits.is_empty()
+}
+
+#[test]
+fn hit_map_records_modal_buttons_and_blocks_click_through() {
+    use tmail::app::overlay::ModalButton;
+    let mut state = mock_initial_state();
+    let failure = Action::BackendCompleted(OperationResult {
+        id: reducer_start_page(&mut state),
+        outcome: Err(OperationFailure {
+            code: Some(1),
+            detail: String::from("short detail"),
+            retry: Some(OperationKind::LoadMailboxes.retry_spec()),
+            ambiguous: false,
+        }),
+    });
+    reducer::reduce(&mut state, &failure);
+    let (_, hits) = draw_state_hits(&state, 152, 40);
+    // The modal geometry comes from the same layout the renderer uses.
+    let layout = tmail::ui::components::error_modal::layout((152, 40), Some(1), false);
+    let button_y = layout.area.y + layout.area.height - 3;
+    let retry_x = layout.area.x + 2;
+    assert_eq!(
+        hits.hit_test(retry_x + 2, button_y, true),
+        Some(ClickTarget::ErrorButton(ModalButton::Retry))
+    );
+    assert_eq!(
+        hits.hit_test(retry_x + 14, button_y, true),
+        Some(ClickTarget::ErrorButton(ModalButton::Dismiss))
+    );
+    // Clicking "through" the modal onto the list behind does nothing.
+    assert_eq!(hits.hit_test(30, 6, true), None);
+}
+
+/// Start a page request like the runtime would and return its id.
+fn reducer_start_page(state: &mut tmail::app::AppState) -> tmail::app::OperationId {
+    let effects = reducer::reduce(state, &Action::PageNext);
+    match &effects[..] {
+        [effect] => effect.id,
+        other => panic!("expected one effect, got {other:?}"),
+    }
+}
+
+#[test]
+fn hit_map_records_composer_controls() {
+    use tmail::app::action::ClickTarget as Target;
+    use tmail::app::composer::ComposerField;
+    let mut state = mock_initial_state();
+    reducer::reduce(&mut state, &Action::Compose);
+    let (_, hits) = draw_state_hits(&state, 152, 40);
+    // Chrome: body area y=4..37; the action row is its last line (y=36).
+    // Send sits first, Discard after the three-space gap.
+    assert_eq!(
+        hits.hit_test(28, 36, false),
+        Some(Target::ComposerField(ComposerField::Send))
+    );
+    assert_eq!(
+        hits.hit_test(42, 36, false),
+        Some(Target::ComposerField(ComposerField::Discard))
+    );
+    // The attach control is on the row above (y=35), after the chip area.
+    assert_eq!(
+        hits.hit_test(28, 35, false),
+        Some(Target::ComposerField(ComposerField::Attach))
+    );
+    // The To field row: the first field row under the header (y=5).
+    assert_eq!(
+        hits.hit_test(30, 5, false),
+        Some(Target::ComposerField(ComposerField::To))
+    );
+    // The Cc toggle rides the To row's right edge (inner width 124:
+    // value 0 + pad, then the two toggles at the far right).
+    assert_eq!(
+        hits.hit_test(139, 5, false),
+        Some(Target::ComposerField(ComposerField::CcToggle))
+    );
+    assert_eq!(
+        hits.hit_test(146, 5, false),
+        Some(Target::ComposerField(ComposerField::BccToggle))
+    );
+    // The body area focuses the body.
+    assert_eq!(
+        hits.hit_test(60, 20, false),
+        Some(Target::ComposerField(ComposerField::Body))
+    );
+}
+
+#[test]
+fn mouse_translation_end_to_end_uses_the_rendered_map() {
+    use tmail::input::mouse;
+    let mut state = mock_initial_state();
+    state.size = (152, 40);
+    let (_, hits) = draw_state_hits(&state, 152, 40);
+    // A wheel event over the list scrolls the focused list (plan §10).
+    let wheel = crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::ScrollDown,
+        column: 30,
+        row: 8,
+        modifiers: crossterm::event::KeyModifiers::empty(),
+    };
+    assert_eq!(
+        mouse::to_action(wheel, &hits, &state),
+        Some(Action::MoveDown)
+    );
+    // A click on the second row selects it through the same action
+    // vocabulary.
+    let click = crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        column: 30,
+        row: 7,
+        modifiers: crossterm::event::KeyModifiers::empty(),
+    };
+    assert_eq!(
+        mouse::to_action(click, &hits, &state),
+        Some(Action::Click(ClickTarget::MessageRow(1)))
+    );
+    // Motion events bind to nothing.
+    let motion = crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Moved,
+        column: 30,
+        row: 7,
+        modifiers: crossterm::event::KeyModifiers::empty(),
+    };
+    assert_eq!(mouse::to_action(motion, &hits, &state), None);
+}
+
+/// Plan §18: the app must render in no-color terminals. `Theme::monochrome`
+/// (selected by `NO_COLOR`) draws the same content with default colors and
+/// no emphasis modifiers, and the frame never panics.
+#[test]
+fn monochrome_theme_renders_the_same_content() {
+    let mut state = mock_initial_state();
+    state.size = (152, 40);
+    let theme = Theme::monochrome();
+    let now = mock::now();
+    let ctx = RenderContext::new(now, dates::format_clock(now));
+    let backend = TestBackend::new(152, 40);
+    let mut terminal = Terminal::new(backend).expect("test backend");
+    let mut hits = HitMap::default();
+    terminal
+        .draw(|frame| render(frame, &state, &theme, &ctx, &mut hits))
+        .expect("monochrome draw");
+    let text = text_of(terminal.backend().buffer());
+    assert!(text.contains("INBOX"), "content missing:\n{text}");
+    assert!(text.contains("KKF Notificati"), "rows missing:\n{text}");
+    assert!(text.contains("UTF-8 · 152×40"), "status bar missing");
+    // Hit maps still record in monochrome.
+    assert_eq!(
+        hits.hit_test(30, 6, false),
+        Some(ClickTarget::MessageRow(0))
+    );
+}
+
+/// Plan §18: no Nerd Font dependency — every rendered symbol is ordinary
+/// Unicode (box drawing, arrows, punctuation) or ASCII. This pins the
+/// symbol inventory so a Nerd-Font codepoint cannot sneak in unnoticed.
+#[test]
+fn rendered_symbols_stay_outside_the_nerd_font_plane() {
+    for (buffer, _) in [
+        draw_with_hits(152, 40),
+        draw_with_hits(90, 25),
+        draw_with_hits(60, 15),
+    ] {
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                for ch in buffer[(x, y)].symbol().chars() {
+                    let code = ch as u32;
+                    // Nerd Fonts use the Private Use Areas; ordinary
+                    // terminal symbols never live there.
+                    assert!(
+                        !(0xE000..=0xF8FF).contains(&code)
+                            && !(0xF0000..=0xFFFFD).contains(&code)
+                            && !(0x100000..=0x10FFFD).contains(&code),
+                        "private-use (Nerd Font) codepoint {ch:?} rendered"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ── Phase 10.5: mockup density and hierarchy (list/viewer/new-mail) ──────
+
+/// (line index, first display column) of the first occurrence of
+/// `needle`. Columns are char counts, not byte offsets, so lines holding
+/// multibyte box-drawing characters still compare by what the eye sees.
+fn position_of(text: &str, needle: &str) -> (usize, usize) {
+    for (line_index, line) in text.lines().enumerate() {
+        if let Some(col) = line.find(needle) {
+            return (line_index, line[..col].chars().count());
+        }
+    }
+    panic!("{needle:?} not found in:\n{text}");
+}
+
+/// Mockup `list.html`: the pane head keeps select-all + uppercase title +
+/// unread sub + right-aligned range on one row, and every message is one
+/// row of marker | star | from | subject(+snippet) | date.
+#[test]
+fn list_matches_mockup_density_and_hierarchy() {
+    let (buffer, _) = draw_with_hits(152, 40);
+    let text = text_of(&buffer);
+    // Head row: title, unread count, and the range share one line, with
+    // the range near the right edge (mockup `.pane-range` margin-left:auto).
+    let (head_y, title_x) = position_of(&text, "[ ]  INBOX");
+    let (_, unread_x) = position_of(&text, "24 unread");
+    let (_, range_x) = position_of(&text, "1–20 of 25");
+    assert_eq!(head_y, 4, "head sits under the topbar");
+    assert!(title_x < unread_x, "unread sub follows the title");
+    assert!(range_x > 120, "range is right-aligned, found at {range_x}");
+    // A starred row keeps the single-line grid: star | from | subject |
+    // snippet | date on one row (mockup `.mail` grid).
+    let (row_y, star_x) = position_of(&text, "*PayPal");
+    let (_, from_x) = position_of(&text, "PayPal");
+    let (_, subject_x) = position_of(&text, "Payment received");
+    let (_, date_x) = position_of(&text, "Yest");
+    assert_eq!(row_y, 9, "rows start under the head");
+    assert!(star_x < from_x && from_x < subject_x && subject_x < date_x);
+    // Full mode shows snippets inline after the subject (mockup `.snippet`).
+    assert!(
+        text.contains("order #214, 50% deposit"),
+        "snippet missing:\n{text}"
+    );
+}
+
+/// Mockup `viewer.html`: subject, then From/To/Cc/Date meta, then the
+/// action row, then a hairline, then the body — top to bottom, one
+/// message, no thread chrome.
+#[test]
+fn reader_matches_mockup_hierarchy() {
+    let mut state = reader_state(0);
+    let text = draw_after(&mut state, &[], 152, 40);
+    let (subject_y, _) = position_of(&text, "Re: WIP — 240 mm stainless-clad gyuto");
+    let (from_y, _) = position_of(&text, "From ");
+    let (to_y, _) = position_of(&text, "To   ");
+    let (date_y, _) = position_of(&text, "Date ");
+    let (actions_y, _) = position_of(&text, "Archive e");
+    let (body_y, _) = position_of(&text, "body line 01");
+    assert!(subject_y < from_y, "subject first");
+    assert!(from_y < to_y && to_y < date_y, "meta block in order");
+    assert!(date_y < actions_y, "actions follow the meta");
+    assert!(actions_y < body_y, "body follows the actions");
+    // A hairline separates actions from the body (mockup `.thread-actions`
+    // border-bottom).
+    assert!(
+        text.lines()
+            .nth(actions_y + 1)
+            .is_some_and(|l| l.contains('─')),
+        "hairline under the actions"
+    );
+}
+
+/// Mockup `new-mail.html`: right-aligned 8ch labels, Cc/Bcc toggles on the
+/// To row, the attach row above Send/Discard, and the header on top.
+#[test]
+fn composer_matches_mockup_hierarchy_and_density() {
+    let mut state = mock_initial_state();
+    reducer::reduce(&mut state, &Action::Compose);
+    let text = draw_after(&mut state, &[], 152, 40);
+    let (header_y, _) = position_of(&text, "New message");
+    let (to_y, _) = position_of(&text, "[Cc]");
+    let (subject_y, subject_x) = position_of(&text, " Subject");
+    let (attach_y, _) = position_of(&text, "[ + attach ]");
+    let (send_y, send_x) = position_of(&text, "[ Send");
+    let (_, discard_x) = position_of(&text, " Discard ");
+    // Vertical order: header, To row, Subject row, attach row, actions.
+    assert!(header_y < to_y && to_y < subject_y);
+    assert!(subject_y < attach_y && attach_y < send_y);
+    // The label column is right-aligned within 8ch starting at x=26
+    // (mockup `grid-template-columns: 8ch` + the 2ch body padding): on the
+    // To row "To" sits at 26+6, and the Cc/Bcc toggles ride the same row's
+    // right edge (mockup `.field-extra`).
+    let to_row = text.lines().nth(to_y).expect("To row");
+    let to_x = to_row
+        .find("To")
+        .map(|byte| to_row[..byte].chars().count())
+        .expect("To label on its row");
+    assert_eq!(to_x, 32, "To label right-aligned at 26+6");
+    assert_eq!(subject_x, 26, "Subject fills the 8ch label column");
+    let cc_x = to_row
+        .find("[Cc]")
+        .map(|byte| to_row[..byte].chars().count())
+        .expect("Cc toggle");
+    assert!(cc_x >= 130, "toggles are right-aligned, at {cc_x}");
+    // Action row: Send first, Discard after it (mockup `.compose-actions`).
+    assert!(send_x < discard_x, "Send precedes Discard");
 }

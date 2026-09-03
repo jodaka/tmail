@@ -145,6 +145,19 @@ impl ComposerState {
     }
 
     /// Focus `field` and put the caret where editing would continue: at the
+    /// end of single-line fields, wherever it was in the body. Returns
+    /// `false` when the field is not part of the current cycle (e.g. a
+    /// hidden Cc row), leaving the focus untouched — the guard the mouse
+    /// click path relies on (Phase 10.2).
+    pub fn focus_field(&mut self, field: ComposerField) -> bool {
+        if !self.cycle().contains(&field) {
+            return false;
+        }
+        self.enter_field(field);
+        true
+    }
+
+    /// Focus `field` and put the caret where editing would continue: at the
     /// end of single-line fields, wherever it was in the body.
     fn enter_field(&mut self, field: ComposerField) {
         self.field = field;

@@ -18,8 +18,7 @@ use tmail::app::{Action, AppState, Effect, reducer};
 use tmail::backend::{
     MailBackend, PathOpener, RequestContext, SystemOpener, himalaya::HimalayaCliBackend,
 };
-use tmail::config::Config;
-use tmail::input::keyboard;
+use tmail::input::{keyboard, mouse};
 use tmail::runtime::tasks::OperationManager;
 use tmail::runtime::{events, logging, terminal};
 use tmail::ui::dates::format_clock;
@@ -56,7 +55,24 @@ async fn run() -> anyhow::Result<()> {
     // Optional explicit config path: `post [path/to/config.toml]`. Without
     // one, `POST_CONFIG` or the well-known himalaya locations are used.
     let cli_config = std::env::args().nth(1).map(std::path::PathBuf::from);
-    let config = Config::load(cli_config.as_deref());
+    let (config, issues) = tmail::config::Config::load_with_issues(cli_config.as_deref());
+    // Startup validation reports every detected problem together, before
+    // the TUI starts: a broken config is fixed in the file, not navigated
+    // in the app (plan §17/§19 Phase 10). Details are actionable and
+    // sanitized; secrets never reach these messages.
+    let mut issues: Vec<String> = issues.iter().cloned().collect();
+    if !tmail::backend::himalaya::executable_available("himalaya") {
+        issues.push(String::from(
+            "the himalaya executable was not found on PATH; install it or point PATH at it",
+        ));
+    }
+    if !issues.is_empty() {
+        let mut message = String::from("configuration problems (fix the file, then start again):");
+        for issue in &issues {
+            message.push_str(&format!("\n  - {issue}"));
+        }
+        bail!("{}", message);
+    }
     tracing::info!(
         config = ?config.path,
         account = ?config.account,
@@ -67,19 +83,31 @@ async fn run() -> anyhow::Result<()> {
     // Platform open-with adapter for saved attachments (plan §15).
     let opener: Arc<dyn PathOpener> = Arc::new(SystemOpener);
 
-    let mut guard = terminal::enable()?;
+    // Mouse capture is opt-in (`[post].mouse`, plan §10): with capture off,
+    // terminal text selection keeps its native behavior and no mouse
+    // events arrive at all.
+    let mut guard = terminal::enable(config.mouse)?;
     let mut state = AppState::initial(config.page_size);
     // Reply-all excludes the configured account address (Phase 7.5).
     state.account_email = config.account_email.clone();
     // Periodic refresh timer (Phase 9.4); `0` disables it.
     state.refresh_interval_seconds = config.refresh_interval_seconds;
+    // Draft autosave debounce (Phase 10.4 wiring of
+    // `[post.composer].autosave_delay_ms`).
+    state.autosave_delay_ms = config.autosave_delay_ms;
     if let Ok((width, height)) = crossterm::terminal::size() {
         state.size = (width, height);
     }
     tracing::info!(size = ?state.size, "shell started (real backend)");
 
     let mut events = events::spawn();
-    let theme = Theme::default_dark();
+    // `[post.theme].name`, falling back to plain terminal colors when the
+    // environment asks for no color (plan §18).
+    let theme = if Theme::no_color_requested() {
+        Theme::monochrome()
+    } else {
+        Theme::from_name(&config.theme_name)
+    };
 
     // Backend results re-enter the reducer as actions; the manager spawns
     // one cancellable task per effect.
@@ -97,9 +125,12 @@ async fn run() -> anyhow::Result<()> {
     loop {
         let now = Local::now().fixed_offset();
         let ctx = RenderContext::new(now, format_clock(now));
+        // The hit map of the frame currently on screen: mouse events are
+        // hit-tested against exactly what the user sees (plan §10).
+        let mut hits = mouse::HitMap::default();
         guard
             .terminal_mut()
-            .draw(|frame| tmail::ui::render(frame, &state, &theme, &ctx))
+            .draw(|frame| tmail::ui::render(frame, &state, &theme, &ctx, &mut hits))
             .context("terminal draw failed")?;
 
         if state.quit_requested {
@@ -118,6 +149,15 @@ async fn run() -> anyhow::Result<()> {
                 Some(events::Event::Key(key)) => {
                     if let Some(action) = keyboard::to_action(key, state.focus) {
                         tracing::debug!(?action, "dispatch");
+                        let effects = reducer::reduce(&mut state, &action);
+                        launch(&manager, &state, effects);
+                    }
+                }
+                Some(events::Event::Mouse(mouse_event)) => {
+                    // Phase 10: hit-test against the frame on screen and
+                    // dispatch the same actions the keyboard produces.
+                    if let Some(action) = mouse::to_action(mouse_event, &hits, &state) {
+                        tracing::debug!(?action, "mouse dispatch");
                         let effects = reducer::reduce(&mut state, &action);
                         launch(&manager, &state, effects);
                     }

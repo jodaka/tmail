@@ -8,7 +8,9 @@
 //!   `OperationResult` carries the `OperationId` the registry allocated,
 //!   and its failure payloads are already sanitized (plan §12).
 
+use crate::app::composer::ComposerField;
 use crate::app::operation::OperationResult;
+use crate::app::overlay::{ConfirmButton, ModalButton};
 use chrono::{DateTime, FixedOffset};
 
 /// Character-level edit of the search field.
@@ -58,6 +60,31 @@ pub enum DialogEdit {
     CursorRight,
 }
 
+/// What a mouse click landed on (plan §10, Phase 10.1). Recorded during
+/// render as widget rectangles; the mouse layer translates a click into
+/// `Action::Click(target)` and the reducer — the only state writer —
+/// applies it with full context. Every target has a keyboard equivalent:
+/// rows via arrows + Enter, fields via Tab, buttons via Tab + Enter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickTarget {
+    /// The sidebar's Compose affordance (equivalent: `c`).
+    ComposeButton,
+    /// A sidebar mailbox row (equivalent: arrows + Enter).
+    Mailbox(usize),
+    /// The topbar search field (equivalent: `/`).
+    SearchField,
+    /// A message-list row (equivalent: arrows + Enter).
+    MessageRow(usize),
+    /// An attachment chip in the reader (equivalent: Tab + `d`/`o`).
+    ReaderAttachment(usize),
+    /// A composer control (equivalent: Tab; Enter activates buttons).
+    ComposerField(ComposerField),
+    /// Retry/Dismiss buttons of the error modal (equivalent: Tab + Enter).
+    ErrorButton(ModalButton),
+    /// Discard/Keep buttons of the confirm-discard dialog.
+    ConfirmButton(ConfirmButton),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     MoveUp,
@@ -98,6 +125,12 @@ pub enum Action {
     DiscardDraft,
     RetryError,
     DismissError,
+    /// A mouse click on a recorded widget rectangle (Phase 10.2). The
+    /// reducer applies it with full state context — selecting a row,
+    /// opening an already-selected one, focusing a composer control, or
+    /// pressing a modal button — so mouse behavior is exactly the keyboard
+    /// vocabulary, never mouse-only behavior (plan §10).
+    Click(ClickTarget),
     /// Backend result for one operation. Results for unknown, cancelled,
     /// or superseded ids are rejected by the reducer (plan §11).
     BackendCompleted(OperationResult),

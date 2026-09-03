@@ -1,4 +1,4 @@
-//! Post-owned configuration (plan §17) — Phase 2 subset.
+//! Post-owned configuration (plan §17).
 //!
 //! One canonical TOML file is shared with Himalaya (ADR 0001 finding 13:
 //! himalaya 2.1.0 tolerates the unknown `[post]` root table). Post reads its
@@ -6,13 +6,19 @@
 //! which the backend adapter uses to resolve mailbox roles (ADR 0001: the
 //! UI never guesses folder names).
 //!
-//! Phase 2 keeps loading forgiving: an unreadable or malformed file falls
-//! back to defaults (while still forwarding the path to himalaya with `-c`)
-//! and logs a warning. Startup validation with actionable errors arrives
-//! with the config-completion work (plan §17).
+//! Loading is forgiving in shape (an invalid value falls back to its
+//! default so the app can still run) but never silent: every detected
+//! problem — parse failure, missing account, invalid refresh/page/autosave
+//! values, unusable editor command, invalid downloads path — is collected
+//! as an actionable issue. `load_with_issues` reports them all together at
+//! startup (plan §17/§19 Phase 10); issues never echo file content, and any
+//! detail that could carry a secret is run through the sanitizer.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use crate::app::sanitize::sanitize;
+use crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS;
 
 /// Default page size when the config does not provide a usable one
 /// (plan §16/§17: explicit pagination, default 20).
@@ -22,7 +28,38 @@ pub const DEFAULT_PAGE_SIZE: usize = 20;
 /// `[post.mail].refresh_interval_seconds = 0` disables the timer.
 pub const DEFAULT_REFRESH_INTERVAL_SECONDS: u64 = 60;
 
-/// Resolved, validated Phase 2 configuration.
+/// Bounds of `[post.composer].autosave_delay_ms`: below the floor every
+/// keystroke would race a save; above the ceiling the debounce is not a
+/// debounce any more (plan §17: invalid autosave values are reported).
+pub const AUTOSAVE_DELAY_MIN_MS: u64 = 100;
+pub const AUTOSAVE_DELAY_MAX_MS: u64 = 600_000;
+
+/// The theme names Post knows (plan §17/§18); only the dark reference
+/// theme ships in v1.
+pub const THEME_NAMES: [&str; 1] = ["default"];
+
+/// A loaded configuration plus every problem found while reading it, in
+/// file order. Issues are user-facing, actionable, and secret-free.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LoadIssues {
+    pub items: Vec<String>,
+}
+
+impl LoadIssues {
+    fn push(&mut self, message: impl Into<String>) {
+        self.items.push(message.into());
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, String> {
+        self.items.iter()
+    }
+}
+
+/// Resolved, validated configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Config file forwarded to himalaya with `-c`, when one was resolved.
@@ -50,6 +87,19 @@ pub struct Config {
     /// leading `~` is expanded by the backend when the directory is used.
     /// `None` falls back to the platform default (`$HOME/Downloads`).
     pub downloads_dir: Option<PathBuf>,
+    /// `[post].mouse` (plan §10): enable mouse capture and click/wheel
+    /// translation. Off by default: capture changes what terminal text
+    /// selection does, so it stays opt-in.
+    pub mouse: bool,
+    /// `[post.composer].editor` (plan §14/§17): `"builtin"`, `"$EDITOR"`,
+    /// or an explicit command. The external-editor flow itself is Phase 11;
+    /// v1 validates the value so a broken entry is reported up front.
+    pub editor: String,
+    /// `[post.composer].autosave_delay_ms` (plan §14): the draft autosave
+    /// debounce for the builtin editor.
+    pub autosave_delay_ms: u64,
+    /// `[post.theme].name` (plan §17/§18); see [`THEME_NAMES`].
+    pub theme_name: String,
 }
 
 impl Default for Config {
@@ -63,6 +113,10 @@ impl Default for Config {
             account_email: None,
             account_display_name: None,
             downloads_dir: None,
+            mouse: false,
+            editor: String::from("builtin"),
+            autosave_delay_ms: DEFAULT_AUTOSAVE_DELAY_MS,
+            theme_name: String::from("default"),
         }
     }
 }
@@ -71,22 +125,35 @@ impl Config {
     /// Load the configuration: the CLI path wins, then `POST_CONFIG`, then
     /// the well-known himalaya config locations. A file that exists but
     /// cannot be parsed still pins `path` (himalaya must receive `-c` and
-    /// will report the real problem) while Post itself runs on defaults.
-    pub fn load(cli_path: Option<&Path>) -> Self {
+    /// will report the real problem) while Post itself runs on defaults —
+    /// and the parse failure is reported as an issue.
+    pub fn load_with_issues(cli_path: Option<&Path>) -> (Self, LoadIssues) {
         let path = resolve_path(cli_path);
         let Some(path) = path else {
-            return Config::default();
+            return (Config::default(), LoadIssues::default());
         };
         match std::fs::read_to_string(&path) {
-            Ok(text) => parse(&text, Some(path)),
+            Ok(text) => parse_with_issues(&text, Some(path)),
             Err(err) => {
-                tracing::warn!(path = %path.display(), %err, "config unreadable; using defaults");
-                Config {
-                    path: Some(path),
-                    ..Config::default()
-                }
+                let mut issues = LoadIssues::default();
+                issues.push(format!(
+                    "config file {} could not be read: {err}",
+                    path.display()
+                ));
+                (
+                    Config {
+                        path: Some(path),
+                        ..Config::default()
+                    },
+                    issues,
+                )
             }
         }
+    }
+
+    /// Load with the startup issues discarded (tests, the probe binary).
+    pub fn load(cli_path: Option<&Path>) -> Self {
+        Self::load_with_issues(cli_path).0
     }
 }
 
@@ -119,53 +186,60 @@ fn default_candidates() -> Vec<PathBuf> {
 /// Unknown tables are skipped; a malformed file yields defaults plus the
 /// path (never a hard failure in Phase 2).
 pub fn parse(text: &str, path: Option<PathBuf>) -> Config {
+    parse_with_issues(text, path).0
+}
+
+/// Parse the shared TOML, collecting every detected problem. An invalid
+/// value still falls back to its default so the rest of the file is
+/// honored; the issue list is what startup reports (plan §17: all issues
+/// together, sanitized).
+pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssues) {
     let mut config = Config {
         path,
         ..Config::default()
     };
-    let Ok(doc) = toml::from_str::<toml::Value>(text) else {
-        tracing::warn!("config is not valid TOML; using default [post] settings");
-        return config;
+    let mut issues = LoadIssues::default();
+    let doc = match toml::from_str::<toml::Value>(text) {
+        Ok(doc) => doc,
+        Err(err) => {
+            // The error text can quote a fragment of the offending line;
+            // run it through the sanitizer so a secret can never surface.
+            issues.push(format!(
+                "config file is not valid TOML: {}",
+                sanitize(&err.to_string())
+            ));
+            return (config, issues);
+        }
     };
+    let post = doc.get("post");
 
-    if let Some(account) = doc
-        .get("post")
+    if let Some(account) = post
         .and_then(|post| post.get("account"))
         .and_then(toml::Value::as_str)
+        .filter(|value| !value.is_empty())
         .map(str::to_owned)
     {
         config.account = Some(account);
     }
-    if let Some(page_size) = doc
-        .get("post")
-        .and_then(|post| post.get("mail"))
-        .and_then(|mail| mail.get("page_size"))
-        .and_then(toml::Value::as_integer)
-        .filter(|size| *size > 0)
-        .map(|size| size as usize)
-    {
-        config.page_size = page_size;
-    }
-    // The refresh interval: explicit 0 disables the timer; a negative
-    // value is treated as disabled too (a nonsense interval must never
-    // become a busy loop); anything absent or non-numeric defaults to 60.
-    config.refresh_interval_seconds = doc
-        .get("post")
-        .and_then(|post| post.get("mail"))
-        .and_then(|mail| mail.get("refresh_interval_seconds"))
-        .and_then(toml::Value::as_integer)
-        .map(|seconds| seconds.max(0) as u64)
-        .unwrap_or(DEFAULT_REFRESH_INTERVAL_SECONDS);
-    if let Some(downloads_dir) = doc
-        .get("post")
-        .and_then(|post| post.get("attachments"))
-        .and_then(|attachments| attachments.get("downloads_dir"))
-        .and_then(toml::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
-        config.downloads_dir = Some(downloads_dir);
-    }
+    config.mouse = post
+        .and_then(|post| post.get("mouse"))
+        .map(|value| match value.as_bool() {
+            Some(mouse) => mouse,
+            None => {
+                issues.push(String::from(
+                    "[post].mouse must be true or false; using false",
+                ));
+                false
+            }
+        })
+        .unwrap_or(false);
+    parse_page_size(post, &mut config, &mut issues);
+    parse_refresh_interval(post, &mut config, &mut issues);
+    parse_autosave_delay(post, &mut config, &mut issues);
+    parse_editor(post, &mut config, &mut issues);
+    parse_theme(post, &mut config, &mut issues);
+    parse_downloads_dir(post, &mut config, &mut issues);
+
     // Without `[post].account`, drive the account himalaya itself would
     // pick (no `-a` is forwarded): the one marked `default = true`, else
     // the sole account. The alias table is per-account, so role resolution
@@ -175,11 +249,236 @@ pub fn parse(text: &str, path: Option<PathBuf>) -> Config {
         config.account = default_account(&doc);
     }
     if let Some(account) = config.account.as_deref() {
+        let exists = doc
+            .get("accounts")
+            .and_then(|accounts| accounts.get(account))
+            .is_some();
+        if !exists {
+            issues.push(format!(
+                "[post].account selects {account:?} but [accounts.{account}] does not exist"
+            ));
+        }
         config.aliases = aliases_for(&doc, account);
         config.account_email = account_field(&doc, account, "email");
         config.account_display_name = account_field(&doc, account, "display-name");
     }
-    config
+    (config, issues)
+}
+
+fn parse_page_size(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    match post
+        .and_then(|post| post.get("mail"))
+        .and_then(|mail| mail.get("page_size"))
+    {
+        None => {}
+        Some(value) => match value.as_integer() {
+            Some(size) if size > 0 => config.page_size = size as usize,
+            Some(size) => issues.push(format!(
+                "[post.mail].page_size must be a positive integer, not {size}; using {}",
+                DEFAULT_PAGE_SIZE
+            )),
+            None => issues.push(format!(
+                "[post.mail].page_size must be an integer; using {DEFAULT_PAGE_SIZE}"
+            )),
+        },
+    }
+}
+
+fn parse_refresh_interval(
+    post: Option<&toml::Value>,
+    config: &mut Config,
+    issues: &mut LoadIssues,
+) {
+    let Some(value) = post
+        .and_then(|post| post.get("mail"))
+        .and_then(|mail| mail.get("refresh_interval_seconds"))
+    else {
+        return;
+    };
+    match value.as_integer() {
+        // Explicit 0 disables the timer; a negative value is nonsense and
+        // must never become a busy loop (plan §17: invalid values report).
+        Some(seconds) if seconds >= 0 => config.refresh_interval_seconds = seconds as u64,
+        Some(seconds) => {
+            issues.push(format!(
+                "[post.mail].refresh_interval_seconds must be ≥ 0, not {seconds}; using 0 (disabled)"
+            ));
+            config.refresh_interval_seconds = 0;
+        }
+        None => issues.push(format!(
+            "[post.mail].refresh_interval_seconds must be an integer; using {DEFAULT_REFRESH_INTERVAL_SECONDS}"
+        )),
+    }
+}
+
+fn parse_autosave_delay(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(value) = post
+        .and_then(|post| post.get("composer"))
+        .and_then(|composer| composer.get("autosave_delay_ms"))
+    else {
+        return;
+    };
+    let fallback = format!("; using {DEFAULT_AUTOSAVE_DELAY_MS}");
+    match value.as_integer() {
+        Some(delay)
+            if (AUTOSAVE_DELAY_MIN_MS as i64..=AUTOSAVE_DELAY_MAX_MS as i64).contains(&delay) =>
+        {
+            config.autosave_delay_ms = delay as u64;
+        }
+        Some(delay) => issues.push(format!(
+            "[post.composer].autosave_delay_ms must be between {AUTOSAVE_DELAY_MIN_MS} and {AUTOSAVE_DELAY_MAX_MS} ms, not {delay}{fallback}"
+        )),
+        None => issues.push(format!(
+            "[post.composer].autosave_delay_ms must be an integer{fallback}"
+        )),
+    }
+}
+
+/// `[post.composer].editor`: `"builtin"`, `"$EDITOR"`, or an explicit
+/// command (program + arguments, resolved without a shell — plan §14).
+fn parse_editor(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(value) = post
+        .and_then(|post| post.get("composer"))
+        .and_then(|composer| composer.get("editor"))
+    else {
+        return;
+    };
+    let Some(editor) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+        issues.push(String::from(
+            "[post.composer].editor must be a non-empty string; using \"builtin\"",
+        ));
+        return;
+    };
+    match validate_editor(editor) {
+        Ok(()) => config.editor = editor.to_owned(),
+        Err(problem) => {
+            issues.push(format!(
+                "[post.composer].editor: {problem}; using \"builtin\""
+            ));
+        }
+    }
+}
+
+fn validate_editor(editor: &str) -> Result<(), String> {
+    validate_editor_with(
+        editor,
+        std::env::var("EDITOR")
+            .ok()
+            .filter(|value| !value.is_empty()),
+    )
+}
+
+fn validate_editor_with(editor: &str, editor_env: Option<String>) -> Result<(), String> {
+    if editor == "builtin" {
+        return Ok(());
+    }
+    if editor == "$EDITOR" {
+        return editor_env
+            .map(|_| ())
+            .ok_or_else(|| String::from("$EDITOR is not set in the environment"));
+    }
+    // Explicit command: Post never spawns a shell, so metacharacters have
+    // no meaning and only invite confusion (plan §14 step 4).
+    if editor.contains(['|', '&', ';', '<', '>', '`', '$', '\\', '"', '\'']) {
+        return Err(
+            "must be \"builtin\", \"$EDITOR\", or a plain command without shell metacharacters"
+                .into(),
+        );
+    }
+    let Some(program) = editor.split_whitespace().next() else {
+        return Err(String::from("is empty"));
+    };
+    if program_exists(program) {
+        Ok(())
+    } else if program.contains('/') {
+        Err(format!("program {program:?} does not exist"))
+    } else {
+        Err(format!("program {program:?} was not found on PATH"))
+    }
+}
+
+/// Whether `program` resolves as an executable: a direct path (anything
+/// with a separator) must exist; otherwise each `PATH` entry is searched.
+pub fn program_exists(program: &str) -> bool {
+    if program.contains('/') {
+        return std::path::Path::new(program).is_file();
+    }
+    std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(program))
+                .any(|candidate| candidate.is_file())
+        })
+        .unwrap_or(false)
+}
+
+fn parse_theme(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(value) = post
+        .and_then(|post| post.get("theme"))
+        .and_then(|theme| theme.get("name"))
+    else {
+        return;
+    };
+    match value.as_str() {
+        Some(name) if THEME_NAMES.contains(&name) => config.theme_name = name.to_owned(),
+        Some(name) => issues.push(format!(
+            "[post.theme].name {name:?} is unknown (known: {})",
+            THEME_NAMES.join(", ")
+        )),
+        None => issues.push(String::from("[post.theme].name must be a string")),
+    }
+}
+
+fn parse_downloads_dir(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(value) = post
+        .and_then(|post| post.get("attachments"))
+        .and_then(|attachments| attachments.get("downloads_dir"))
+        .and_then(toml::Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let dir = PathBuf::from(value);
+    match validate_downloads_dir(&dir) {
+        Ok(()) => config.downloads_dir = Some(dir),
+        Err(problem) => issues.push(format!("[post.attachments].downloads_dir: {problem}")),
+    }
+}
+
+/// `~`-aware sanity checks on the downloads directory (plan §17): it must
+/// be absolute (or `~/…`) and, when it already exists, a directory. A
+/// missing directory is fine — the save path creates it on demand.
+fn validate_downloads_dir(dir: &Path) -> Result<(), String> {
+    let text = dir.to_string_lossy();
+    if !text.starts_with('/') && !text.starts_with('~') {
+        return Err(format!(
+            "{value:?} must be an absolute path or start with ~/ (expanded in Post, never via a shell)",
+            value = text
+        ));
+    }
+    let Some(expanded) = expand_home(dir) else {
+        return Err(String::from("uses ~ but $HOME is not set"));
+    };
+    if expanded.is_file() {
+        return Err(format!(
+            "{} exists and is a file, not a directory",
+            expanded.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Expand a leading `~` with `$HOME` (plan §15: expansion in Post, never
+/// through a shell). `None` when `~` is used but `$HOME` is missing.
+fn expand_home(path: &Path) -> Option<PathBuf> {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix("~/") {
+        return std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest));
+    }
+    if text == "~" {
+        return std::env::var_os("HOME").map(PathBuf::from);
+    }
+    Some(path.to_path_buf())
 }
 
 /// The account himalaya would pick without an explicit selection: the
@@ -449,5 +748,157 @@ mod tests {
         // draft `From` identity comes along.
         let config = parse("[accounts.probe]\nemail = \"probe@post.local\"\n", None);
         assert_eq!(config.account_email.as_deref(), Some("probe@post.local"));
+    }
+
+    // ── Phase 10.4: one-file completion and startup validation ──────────
+
+    #[test]
+    fn parses_the_reference_shape() {
+        let text = r#"
+            [post]
+            account = "probe"
+            mouse = true
+
+            [post.mail]
+            page_size = 50
+            refresh_interval_seconds = 0
+
+            [post.composer]
+            editor = "builtin"
+            autosave_delay_ms = 4000
+
+            [post.attachments]
+            downloads_dir = "~/Downloads"
+
+            [post.theme]
+            name = "default"
+
+            [accounts.probe]
+            email = "probe@post.local"
+        "#;
+        let (config, issues) = parse_with_issues(text, None);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert!(config.mouse);
+        assert_eq!(config.page_size, 50);
+        assert_eq!(config.refresh_interval_seconds, 0);
+        assert_eq!(config.editor, "builtin");
+        assert_eq!(config.autosave_delay_ms, 4000);
+        assert_eq!(config.theme_name, "default");
+    }
+
+    #[test]
+    fn non_bool_mouse_reports_and_disables() {
+        let (config, issues) = parse_with_issues("[post]\nmouse = \"yes\"\n", None);
+        assert!(!config.mouse);
+        assert_eq!(issues.items.len(), 1);
+        assert!(issues.items[0].contains("mouse"));
+    }
+
+    #[test]
+    fn out_of_bounds_autosave_delay_reports_and_falls_back() {
+        for delay in [50_i64, 1_000_000] {
+            let text = format!("[post.composer]\nautosave_delay_ms = {delay}\n");
+            let (config, issues) = parse_with_issues(&text, None);
+            assert_eq!(config.autosave_delay_ms, DEFAULT_AUTOSAVE_DELAY_MS);
+            assert_eq!(issues.items.len(), 1, "{delay}");
+            assert!(issues.items[0].contains("autosave_delay_ms"));
+        }
+        let (config, issues) =
+            parse_with_issues("[post.composer]\nautosave_delay_ms = 500\n", None);
+        assert!(issues.is_empty());
+        assert_eq!(config.autosave_delay_ms, 500);
+    }
+
+    #[test]
+    fn unknown_theme_name_reports() {
+        let (config, issues) = parse_with_issues("[post.theme]\nname = \"solarized\"\n", None);
+        assert_eq!(config.theme_name, "default");
+        assert_eq!(issues.items.len(), 1);
+        assert!(issues.items[0].contains("solarized"));
+    }
+
+    #[test]
+    fn editor_validation_covers_the_documented_shapes() {
+        assert!(validate_editor_with("builtin", None).is_ok());
+        assert!(validate_editor_with("$EDITOR", Some(String::from("nvim"))).is_ok());
+        assert!(
+            validate_editor_with("$EDITOR", None)
+                .unwrap_err()
+                .contains("$EDITOR is not set")
+        );
+        // Shell metacharacters are rejected: Post never spawns a shell.
+        assert!(
+            validate_editor_with("nvim -c 'set nu'", None)
+                .unwrap_err()
+                .contains("metacharacters")
+        );
+        // A plain command must resolve.
+        assert!(
+            validate_editor_with("definitely-not-a-real-program-xyz", None)
+                .unwrap_err()
+                .contains("PATH")
+        );
+        // An absolute path must exist.
+        assert!(
+            validate_editor_with("/definitely/missing/editor", None)
+                .unwrap_err()
+                .contains("does not exist")
+        );
+    }
+
+    #[test]
+    fn unknown_editor_program_reports_and_falls_back() {
+        let (config, issues) = parse_with_issues(
+            "[post.composer]\neditor = \"definitely-not-a-real-program-xyz\"\n",
+            None,
+        );
+        assert_eq!(config.editor, "builtin");
+        assert_eq!(issues.items.len(), 1);
+        assert!(issues.items[0].contains("editor"));
+    }
+
+    #[test]
+    fn missing_selected_account_reports() {
+        let (config, issues) = parse_with_issues("[post]\naccount = \"ghost\"\n", None);
+        assert_eq!(config.account.as_deref(), Some("ghost"));
+        assert_eq!(issues.items.len(), 1);
+        assert!(issues.items[0].contains("[accounts.ghost]"));
+    }
+
+    #[test]
+    fn relative_downloads_dir_reports() {
+        let (config, issues) = parse_with_issues(
+            "[post.attachments]\ndownloads_dir = \"Downloads/out\"\n",
+            None,
+        );
+        assert_eq!(config.downloads_dir, None);
+        assert_eq!(issues.items.len(), 1);
+        assert!(issues.items[0].contains("absolute path"));
+    }
+
+    #[test]
+    fn malformed_toml_reports_sanitized() {
+        let (config, issues) = parse_with_issues("not [ valid toml", None);
+        assert_eq!(config, Config::default());
+        assert_eq!(issues.items.len(), 1);
+        assert!(issues.items[0].contains("not valid TOML"));
+    }
+
+    #[test]
+    fn issues_carry_no_secret_values() {
+        // A malformed line quoting a secret-shaped value must not surface
+        // the value in the reported detail.
+        let (config, issues) = parse_with_issues(
+            "[post]\naccount = \"probe\"\npassword = \"hunter2 )\"\n",
+            None,
+        );
+        let _ = config;
+        let joined = issues.items.join("\n");
+        assert!(!joined.contains("hunter2"), "leaked: {joined}");
+    }
+
+    #[test]
+    fn program_exists_rejects_unknown_names() {
+        assert!(!program_exists("definitely-not-a-real-program-xyz"));
     }
 }

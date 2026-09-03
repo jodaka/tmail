@@ -8,8 +8,11 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
+use crate::app::action::ClickTarget;
 use crate::app::overlay::{ConfirmButton, Overlay};
+use crate::input::mouse::HitMap;
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
@@ -26,7 +29,12 @@ fn layout(size: (u16, u16)) -> Rect {
 }
 
 /// Render the dialog, when open, above everything already drawn.
-pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme: &Theme) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    state: &crate::app::state::AppState,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
     let Some(Overlay::ConfirmDiscard(dialog)) = &state.overlay else {
         return;
     };
@@ -91,6 +99,31 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
                 width: inner.width,
                 height: 1,
             },
+        );
+    }
+    // Click targets for the two buttons when their row is drawn (plan
+    // §10/§14): Tab + Enter reaches the same states. `Keep` stays the safe
+    // default — clicking outside the buttons does nothing.
+    if inner.height > 4 {
+        let discard_w = " [ Discard ] ".width() as u16;
+        let keep_w = " [ Keep editing ] ".width() as u16;
+        hits.push(
+            Rect {
+                x: inner.x,
+                y: inner.y + 4,
+                width: discard_w,
+                height: 1,
+            },
+            ClickTarget::ConfirmButton(ConfirmButton::Discard),
+        );
+        hits.push(
+            Rect {
+                x: inner.x + discard_w + 1,
+                y: inner.y + 4,
+                width: keep_w,
+                height: 1,
+            },
+            ClickTarget::ConfirmButton(ConfirmButton::Keep),
         );
     }
 }

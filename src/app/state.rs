@@ -98,6 +98,10 @@ pub struct AppState {
     /// Set from the config at startup; the reducer never reads a clock for
     /// it — arming uses the injected `Action::Tick` wall clock.
     pub refresh_interval_seconds: u64,
+    /// Draft autosave debounce in milliseconds (plan §14,
+    /// `[post.composer].autosave_delay_ms`). Set from the config at
+    /// startup; the reducer applies it with the injected tick clock.
+    pub autosave_delay_ms: u64,
     /// Injected-clock timestamp of the last refresh (manual or automatic),
     /// the timer's arm point. `None` until the first tick arms it.
     pub last_refresh_at: Option<DateTime<FixedOffset>>,
@@ -143,6 +147,7 @@ impl AppState {
             search_query: String::new(),
             search_return: None,
             refresh_interval_seconds: 0,
+            autosave_delay_ms: crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS,
             last_refresh_at: None,
             last_background_error: None,
             focus: Focus::MessageList,

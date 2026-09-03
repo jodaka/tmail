@@ -30,6 +30,23 @@ use crate::domain::{
     SearchRequest, SendOutcome,
 };
 
+/// Whether the backend's executable can be found before anything is
+/// spawned (plan §17 startup validation: a missing Himalaya executable is
+/// reported up front, not as the first operation's failure). A name with a
+/// path separator must exist as a file; otherwise the `PATH` is searched.
+pub fn executable_available(program: &str) -> bool {
+    if program.contains('/') {
+        return Path::new(program).is_file();
+    }
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join(program))
+                .any(|candidate| candidate.is_file())
+        })
+        .unwrap_or(false)
+}
+
 /// Drives the `himalaya` executable with argv-only child processes.
 #[derive(Debug, Clone)]
 pub struct HimalayaCliBackend {

@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use crossterm::event::{Event as CrosstermEvent, KeyEvent, KeyEventKind};
+use crossterm::event::{Event as CrosstermEvent, KeyEvent, KeyEventKind, MouseEvent};
 use futures_util::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -14,7 +14,13 @@ pub const TICK_INTERVAL: Duration = Duration::from_millis(250);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Key(KeyEvent),
-    Resize { width: u16, height: u16 },
+    /// Click or wheel event (Phase 10, plan §10). Arrives only while mouse
+    /// capture is enabled (`[post].mouse`).
+    Mouse(MouseEvent),
+    Resize {
+        width: u16,
+        height: u16,
+    },
     Tick,
 }
 
@@ -52,8 +58,23 @@ async fn event_loop(tx: UnboundedSender<Event>) {
                             break;
                         }
                     }
+                    Some(Ok(CrosstermEvent::Mouse(mouse))) => {
+                        // Phase 10: clicks and wheel scroll forward into
+                        // the same action vocabulary; motion/drag events
+                        // are dropped (v1 has no hover or selection).
+                        if matches!(
+                            mouse.kind,
+                            crossterm::event::MouseEventKind::Down(_)
+                                | crossterm::event::MouseEventKind::Up(_)
+                                | crossterm::event::MouseEventKind::ScrollUp
+                                | crossterm::event::MouseEventKind::ScrollDown
+                        ) && tx.send(Event::Mouse(mouse)).is_err()
+                        {
+                            break;
+                        }
+                    }
                     Some(Ok(_)) => {
-                        // Mouse arrives in Phase 10; other events ignored.
+                        // Focus changes and gestures have no v1 behavior.
                     }
                     Some(Err(err)) => {
                         tracing::warn!(%err, "crossterm event stream error");

@@ -114,8 +114,9 @@ fn draw_reader(name: &str, width: u16, height: u16) -> ratatui::buffer::Buffer {
     let ctx = RenderContext::new(now, dates::format_clock(now));
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend");
+    let mut hits = tmail::input::mouse::HitMap::default();
     terminal
-        .draw(|frame| render(frame, &state, &theme, &ctx))
+        .draw(|frame| render(frame, &state, &theme, &ctx, &mut hits))
         .expect("draw");
     terminal.backend().buffer().clone()
 }

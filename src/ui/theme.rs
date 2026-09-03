@@ -58,6 +58,45 @@ impl Theme {
         }
     }
 
+    /// Theme by `[post.theme].name` (plan §17/§18). Unknown names are
+    /// rejected by config validation; here they fall back to the default
+    /// so a stale file can never blank the UI.
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "default" => Self::default_dark(),
+            _ => Self::default_dark(),
+        }
+    }
+
+    /// The no-color theme (plan §18: "support no-color behavior"): every
+    /// token falls back to the terminal default and emphasis relies on
+    /// modifiers only. Selected by a non-empty `NO_COLOR` environment
+    /// variable, the de-facto standard (https://no-color.org).
+    pub fn monochrome() -> Self {
+        Self {
+            background: Color::Reset,
+            surface: Color::Reset,
+            surface2: Color::Reset,
+            border: Color::Reset,
+            text: Color::Reset,
+            text_soft: Color::Reset,
+            muted: Color::Reset,
+            dim: Color::Reset,
+            accent: Color::Reset,
+            accent_bg: Color::Reset,
+            warning: Color::Reset,
+            error: Color::Reset,
+            selection: Color::Reset,
+            unread: Modifier::empty(),
+        }
+    }
+
+    /// Whether the environment asked for no color (`NO_COLOR` set to a
+    /// non-empty value).
+    pub fn no_color_requested() -> bool {
+        std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
+    }
+
     /// Style for a selected list row (mockup `.mail.selected`).
     pub fn row_selected(&self) -> Style {
         Style::new().bg(self.accent_bg)
@@ -138,5 +177,22 @@ mod tests {
         assert_ne!(t.accent, t.accent_bg);
         assert_ne!(t.text, t.muted);
         assert_ne!(t.muted, t.dim);
+    }
+
+    #[test]
+    fn from_name_falls_back_to_the_reference_theme() {
+        assert_eq!(Theme::from_name("default"), Theme::default_dark());
+        assert_eq!(Theme::from_name("nope"), Theme::default_dark());
+    }
+
+    #[test]
+    fn monochrome_uses_terminal_defaults() {
+        let t = Theme::monochrome();
+        assert_eq!(t.background, Color::Reset);
+        assert_eq!(t.accent, Color::Reset);
+        assert_eq!(t.unread, Modifier::empty());
+        // Derived styles stay usable: no fg/bg means "default colors".
+        let row = t.row_selected();
+        assert_eq!(row.bg, Some(Color::Reset));
     }
 }

@@ -14,7 +14,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::app::action::ClickTarget;
 use crate::app::state::{AppState, Loadable};
+use crate::input::mouse::HitMap;
 use crate::ui::dates;
 use crate::ui::rich::{RichLine, RichSpan, RichStyle};
 use crate::ui::text;
@@ -227,7 +229,13 @@ pub fn content_line_count(state: &AppState, width: usize) -> usize {
 /// the same call the reducer's scroll clamp makes — never from the sub-rect
 /// alone, whose dimensions would re-run mode selection on the wrong frame
 /// (caught by the Phase 5 corpus below 120 columns).
-pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -242,6 +250,27 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
         .map(|line| reader_spans(line, theme, area.width as usize))
         .collect();
     frame.render_widget(Paragraph::new(visible), area);
+    // Attachment chips are clickable (plan §15): the chip's index counts
+    // across the whole document, so chips scrolled out of view never shift
+    // the identity of the visible ones.
+    let mut chip_index = 0usize;
+    for (offset, line) in lines.iter().enumerate() {
+        let is_chip = matches!(line, ReaderLine::Chip { .. });
+        if is_chip && offset >= start && offset < start + viewport {
+            hits.push(
+                Rect {
+                    x: area.x,
+                    y: area.y + (offset - start) as u16,
+                    width: area.width,
+                    height: 1,
+                },
+                ClickTarget::ReaderAttachment(chip_index),
+            );
+        }
+        if is_chip {
+            chip_index += 1;
+        }
+    }
 }
 
 /// Style for one rich span (plan §13 semantic table → theme tokens; no

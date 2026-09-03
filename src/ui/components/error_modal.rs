@@ -11,8 +11,11 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
+use crate::app::action::ClickTarget;
 use crate::app::overlay::{ErrorDialog, ModalButton, Overlay};
+use crate::input::mouse::HitMap;
 use crate::ui::text::wrap;
 use crate::ui::theme::Theme;
 
@@ -67,7 +70,12 @@ pub fn max_scroll(dialog: &ErrorDialog, size: (u16, u16)) -> usize {
 }
 
 /// Render the modal, when open, above everything already drawn.
-pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme: &Theme) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    state: &crate::app::state::AppState,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
     let Some(Overlay::Error(dialog)) = &state.overlay else {
         return;
     };
@@ -176,6 +184,27 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
         ),
     ]);
     frame.render_widget(Paragraph::new(buttons), row(y, 1));
+    // Click targets for the two buttons (plan §10): Tab + Enter reaches
+    // the same states. The click path ignores Retry when the failure
+    // carries no retry intent (the dimmed button).
+    hits.push(
+        Rect {
+            x: inner_x,
+            y,
+            width: "[ Retry ]".width() as u16,
+            height: 1,
+        },
+        ClickTarget::ErrorButton(ModalButton::Retry),
+    );
+    hits.push(
+        Rect {
+            x: inner_x + ("[ Retry ]".width() + 3) as u16,
+            y,
+            width: "[ Dismiss ]".width() as u16,
+            height: 1,
+        },
+        ClickTarget::ErrorButton(ModalButton::Dismiss),
+    );
     y += 1;
 
     let hint = "↑↓ scroll · Tab switch · ↵ confirm · Esc dismiss";

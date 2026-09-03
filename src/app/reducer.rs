@@ -7,7 +7,7 @@
 //! registered, so stale, cancelled, or superseded results never win
 //! (plan §11). Reducers never perform I/O themselves.
 
-use crate::app::action::{Action, DialogEdit, SearchEdit};
+use crate::app::action::{Action, ClickTarget, DialogEdit, SearchEdit};
 use crate::app::composer::{ComposerField, ComposerState};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
@@ -29,6 +29,19 @@ use crate::domain::{
 /// Apply `action` to `state`, returning backend work to spawn. Never
 /// performs I/O, never panics on odd input.
 pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
+    // A mouse click on a modal button must reach the modal path before the
+    // interception swallows everything else (plan §9: a modal intercepts
+    // all input; Phase 10.2 adds its buttons as clickable).
+    if let Action::Click(target) = action
+        && state.overlay.is_some()
+    {
+        return match target {
+            ClickTarget::ErrorButton(button) => click_error_button(state, *button),
+            ClickTarget::ConfirmButton(button) => click_confirm_button(state, *button),
+            // Clicks "through" the modal do nothing, like any other input.
+            _ => Vec::new(),
+        };
+    }
     // A modal overlay intercepts all input while it is open (plan §9).
     if let Some(effects) = modal_reduce(state, action) {
         return effects;
@@ -122,6 +135,7 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             // Only meaningful with their modal open (handled above).
             Vec::new()
         }
+        Action::Click(target) => click(state, *target),
         Action::BackendCompleted(result) => backend_completed(state, result),
         Action::Refresh => refresh(state),
         Action::Tick { now } => {
@@ -432,6 +446,138 @@ fn open_error_modal(state: &mut AppState, failure: &OperationFailure) -> Vec<Eff
     state.focus = Focus::ErrorModal;
     state.set_status("Operation failed");
     Vec::new()
+}
+
+// ── Mouse clicks (plan §10, Phase 10.1/10.2) ─────────────────────────────
+
+/// Apply a mouse click recorded during render. Every arm below mirrors the
+/// keyboard path — selecting, opening, focusing, or pressing — so the
+/// mouse never unlocks behavior the keyboard cannot reach (plan §10). A
+/// click on an already-selected row activates it, matching the
+/// select-then-Enter rhythm the keyboard uses. Modal-button clicks are
+/// routed before the modal interception (see `reduce`); this function only
+/// ever runs with no overlay open.
+fn click(state: &mut AppState, target: ClickTarget) -> Vec<Effect> {
+    match target {
+        ClickTarget::ComposeButton => reduce(state, &Action::Compose),
+        ClickTarget::Mailbox(index) => click_mailbox(state, index),
+        ClickTarget::SearchField => reduce(state, &Action::OpenSearch),
+        ClickTarget::MessageRow(index) => click_message_row(state, index),
+        ClickTarget::ReaderAttachment(index) => click_reader_attachment(state, index),
+        ClickTarget::ComposerField(field) => click_composer_field(state, field),
+        // Modal buttons outside a modal cannot happen (their regions are
+        // only recorded while the modal renders); the arm keeps the match
+        // total.
+        ClickTarget::ErrorButton(_) | ClickTarget::ConfirmButton(_) => Vec::new(),
+    }
+}
+
+/// Click a modal button: focus it (the same state Tab produces), then run
+/// the same path Enter would (plan §12).
+fn click_error_button(state: &mut AppState, button: ModalButton) -> Vec<Effect> {
+    if let Some(Overlay::Error(dialog)) = state.overlay.as_mut() {
+        // A dimmed Retry button (failure without a retry intent) does
+        // nothing, like a Retry that only `Tab` could reach.
+        if button == ModalButton::Retry && dialog.retry.is_none() {
+            return Vec::new();
+        }
+        dialog.button = button;
+    }
+    match button {
+        ModalButton::Retry => reduce(state, &Action::RetryError),
+        ModalButton::Dismiss => reduce(state, &Action::DismissError),
+    }
+}
+
+/// Click a confirm-discard button (plan §14): focus, then the same
+/// confirm/keep path Enter takes.
+fn click_confirm_button(state: &mut AppState, button: ConfirmButton) -> Vec<Effect> {
+    if let Some(Overlay::ConfirmDiscard(dialog)) = state.overlay.as_mut() {
+        dialog.button = button;
+    }
+    reduce(state, &Action::Activate)
+}
+
+/// Click a sidebar mailbox row: focus follows the click, a new row is
+/// selected (the arrows' job), an already-selected row activates (Enter's
+/// job, plan §10).
+fn click_mailbox(state: &mut AppState, index: usize) -> Vec<Effect> {
+    let count = state.mailboxes.as_loaded().map(Vec::len).unwrap_or(0);
+    if index >= count {
+        return Vec::new();
+    }
+    state.focus = Focus::Sidebar;
+    if index == state.mailbox_selection {
+        return match state.selected_mailbox().cloned() {
+            Some(mailbox) => switch_mailbox(state, &mailbox.id),
+            None => Vec::new(),
+        };
+    }
+    state.mailbox_selection = index;
+    Vec::new()
+}
+
+/// Click a message row: focus the list, select the row, and open it when
+/// it was already the selection (arrows + Enter equivalent).
+fn click_message_row(state: &mut AppState, index: usize) -> Vec<Effect> {
+    if index >= state.messages.items.len() {
+        return Vec::new();
+    }
+    state.focus = Focus::MessageList;
+    if index == state.selection {
+        return match state.selected_message().cloned() {
+            Some(summary) => open_message(state, summary),
+            None => Vec::new(),
+        };
+    }
+    state.selection = index;
+    keep_selection_visible(state);
+    Vec::new()
+}
+
+/// Click an attachment chip in the reader (plan §15): select it; clicking
+/// the already-selected chip opens it (`o`'s job — reuse a saved path or
+/// save first, then open).
+fn click_reader_attachment(state: &mut AppState, index: usize) -> Vec<Effect> {
+    if !matches!(state.active_route(), Some(Route::Message(_))) {
+        return Vec::new();
+    }
+    let count = state
+        .open_message
+        .as_loaded()
+        .map(|message| message.attachments.len())
+        .unwrap_or(0);
+    if index >= count {
+        return Vec::new();
+    }
+    state.focus = Focus::Reader;
+    if state.reader_attachment.unwrap_or(0) == index {
+        return reduce(state, &Action::OpenAttachment);
+    }
+    state.reader_attachment = Some(index);
+    Vec::new()
+}
+
+/// Click a composer control (plan §10): focus it; buttons activate, like
+/// Tab-then-Enter would. Text fields place the caret the way `Tab` does
+/// (at the end of the field; the body keeps its caret).
+fn click_composer_field(state: &mut AppState, field: ComposerField) -> Vec<Effect> {
+    if !matches!(state.active_route(), Some(Route::Composer)) {
+        return Vec::new();
+    }
+    let focused = state
+        .composer
+        .as_mut()
+        .is_some_and(|composer| composer.focus_field(field));
+    if !focused {
+        return Vec::new();
+    }
+    state.focus = Focus::Composer;
+    if field.accepts_text() {
+        Vec::new()
+    } else {
+        activate_composer(state)
+    }
 }
 
 // ── Reply / forward seeding (plan §14, Phase 7.3) ────────────────────────
@@ -1909,7 +2055,7 @@ fn autosave_tick(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset
         composer.draft.last_edit_at = Some(now);
         return Vec::new();
     }
-    if !composer.draft.autosave_due(now) {
+    if !composer.draft.autosave_due(now, state.autosave_delay_ms) {
         return Vec::new();
     }
     tracing::debug!(

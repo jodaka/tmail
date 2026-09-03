@@ -8,11 +8,20 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
+use crate::app::action::ClickTarget;
 use crate::app::state::AppState;
+use crate::input::mouse::HitMap;
 use crate::ui::theme::Theme;
 
 /// Render the topbar into `area` (height 4: 3 content rows + hairline).
-pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme, clock: &str) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    clock: &str,
+    hits: &mut HitMap,
+) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -76,6 +85,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
         };
         let field = Paragraph::new(Line::from(vec![prompt, text, cursor])).block(block);
         frame.render_widget(field, search_area);
+        // Clicking the field focuses it (`/`'s job, plan §10).
+        hits.push(search_area, ClickTarget::SearchField);
     }
 
     // Clock, right-aligned on the middle row.

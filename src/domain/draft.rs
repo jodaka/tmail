@@ -26,8 +26,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::MessageId;
 
-/// Two-second autosave debounce (plan §14: "debounce 2 seconds").
-pub const AUTOSAVE_DEBOUNCE_SECS: i64 = 2;
+/// Default autosave debounce (plan §14: "debounce 2 seconds"). The
+/// `[post.composer].autosave_delay_ms` setting overrides it within the
+/// bounds the config layer validates (Phase 10.4).
+pub const DEFAULT_AUTOSAVE_DELAY_MS: u64 = 2_000;
 
 /// Locally unique draft identity; doubles as the journal file stem
 /// (ADR 0002 §D.1). Minted once, before the first save, from reducer-supplied
@@ -157,11 +159,11 @@ impl Draft {
     }
 
     /// Whether the debounce window has elapsed and an autosave is due.
-    pub fn autosave_due(&self, now: DateTime<FixedOffset>) -> bool {
+    /// `delay_ms` is the configured `[post.composer].autosave_delay_ms`.
+    pub fn autosave_due(&self, now: DateTime<FixedOffset>, delay_ms: u64) -> bool {
+        let delay = Duration::milliseconds(delay_ms.max(1) as i64);
         self.save == DraftSaveState::Debouncing
-            && self
-                .last_edit_at
-                .is_some_and(|at| now - at >= Duration::seconds(AUTOSAVE_DEBOUNCE_SECS))
+            && self.last_edit_at.is_some_and(|at| now - at >= delay)
     }
 
     /// Begin a save of the current revision: mint the stable identities on
@@ -248,7 +250,7 @@ mod tests {
         let d = Draft::default();
         assert!(!d.is_dirty());
         assert_eq!(d.save, DraftSaveState::Saved);
-        assert!(!d.autosave_due(at(100)));
+        assert!(!d.autosave_due(at(100), DEFAULT_AUTOSAVE_DELAY_MS));
     }
 
     #[test]
@@ -259,10 +261,10 @@ mod tests {
         assert_eq!(d.save, DraftSaveState::Debouncing);
         assert_eq!(d.revision, 1);
         // Too early: the window has not elapsed.
-        assert!(!d.autosave_due(at(11)));
+        assert!(!d.autosave_due(at(11), DEFAULT_AUTOSAVE_DELAY_MS));
         // At exactly 2 s the save is due.
-        assert!(d.autosave_due(at(12)));
-        assert!(d.autosave_due(at(100)));
+        assert!(d.autosave_due(at(12), DEFAULT_AUTOSAVE_DELAY_MS));
+        assert!(d.autosave_due(at(100), DEFAULT_AUTOSAVE_DELAY_MS));
     }
 
     #[test]
@@ -272,8 +274,8 @@ mod tests {
         d.note_edit(Some(at(1)));
         d.note_edit(Some(at(2)));
         // 2 s after the *last* edit, not the first.
-        assert!(!d.autosave_due(at(3)));
-        assert!(d.autosave_due(at(4)));
+        assert!(!d.autosave_due(at(3), DEFAULT_AUTOSAVE_DELAY_MS));
+        assert!(d.autosave_due(at(4), DEFAULT_AUTOSAVE_DELAY_MS));
     }
 
     #[test]
@@ -371,7 +373,7 @@ mod tests {
         // The next edit re-arms autosave.
         d.note_edit(Some(at(30)));
         assert_eq!(d.save, DraftSaveState::Debouncing);
-        assert!(d.autosave_due(at(32)));
+        assert!(d.autosave_due(at(32), DEFAULT_AUTOSAVE_DELAY_MS));
     }
 
     #[test]

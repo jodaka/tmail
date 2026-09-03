@@ -11,13 +11,21 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
+use crate::app::action::ClickTarget;
 use crate::app::focus::Focus;
 use crate::app::state::AppState;
+use crate::input::mouse::HitMap;
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
 /// Render the sidebar into `area` (width 24 in full mode).
-pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -49,6 +57,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
         ),
         rows.compose,
     );
+    // Clicking the affordance composes (`c`'s job, plan §10).
+    hits.push(rows.compose, ClickTarget::ComposeButton);
 
     // Mailbox list: backend-driven since Phase 2, so all loadable states
     // render safely (plan §16: empty results are valid).
@@ -69,6 +79,9 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
                     height: 1,
                 };
                 render_folder_row(frame, row_area, theme, mailbox, is_active, cursor);
+                // Clicking a folder selects it; clicking the selected one
+                // switches (arrows + Enter, plan §10).
+                hits.push(row_area, ClickTarget::Mailbox(i));
             }
         }
         crate::app::state::Loadable::Loaded(_) => {

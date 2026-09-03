@@ -14,16 +14,19 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
+use crate::app::action::ClickTarget;
 use crate::app::focus::Focus;
 use crate::app::route::Route;
 use crate::app::state::AppState;
 use crate::domain::MessageSummary;
+use crate::input::mouse::HitMap;
 use crate::ui::dates;
 use crate::ui::layout::LayoutMode;
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
 /// Render the message list into `area` (already split off from the sidebar).
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -31,6 +34,7 @@ pub fn render(
     mode: LayoutMode,
     theme: &Theme,
     now: chrono::DateTime<chrono::FixedOffset>,
+    hits: &mut HitMap,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -72,6 +76,9 @@ pub fn render(
             state.focus == Focus::MessageList,
         );
         frame.render_widget(Paragraph::new(Line::from(spans)), row_area);
+        // Clicking a row selects it; clicking the selected row opens it
+        // (arrows + Enter, plan §10).
+        hits.push(row_area, ClickTarget::MessageRow(i));
     }
     // An empty search result set is a valid state, not an error — say so
     // once the request is no longer in flight (Phase 9.3).

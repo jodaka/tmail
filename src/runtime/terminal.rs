@@ -6,6 +6,7 @@ use std::io::{self, Stdout};
 use std::panic;
 
 use crossterm::cursor::Show;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::{execute, terminal as term};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -23,21 +24,34 @@ impl TerminalGuard {
     }
 }
 
-/// Enter raw mode + alternate screen and install the panic hook.
-pub fn enable() -> io::Result<TerminalGuard> {
+/// Enter raw mode + alternate screen and install the panic hook. When
+/// `mouse` is set (plan §10, `[post].mouse`), mouse capture is enabled so
+/// click/wheel events reach the app; otherwise the terminal keeps its
+/// native selection behavior and no mouse events arrive.
+pub fn enable(mouse: bool) -> io::Result<TerminalGuard> {
     term::enable_raw_mode()?;
     execute!(io::stdout(), term::EnterAlternateScreen)?;
+    if mouse {
+        execute!(io::stdout(), EnableMouseCapture)?;
+    }
     let backend = CrosstermBackend::new(io::stdout());
     let terminal = Terminal::new(backend)?;
     install_panic_hook();
-    tracing::debug!("terminal entered (raw mode + alternate screen)");
+    tracing::debug!(mouse, "terminal entered (raw mode + alternate screen)");
     Ok(TerminalGuard { terminal })
 }
 
 /// Best-effort, idempotent restoration. Safe to call multiple times and
-/// from the panic hook.
+/// from the panic hook. Mouse capture is always disabled: it is harmless
+/// when never enabled and guarantees restoration after a mid-session
+/// enable.
 pub fn restore() {
-    let _ = execute!(io::stdout(), term::LeaveAlternateScreen, Show);
+    let _ = execute!(
+        io::stdout(),
+        term::LeaveAlternateScreen,
+        DisableMouseCapture,
+        Show
+    );
     let _ = term::disable_raw_mode();
 }
 

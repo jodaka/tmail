@@ -14,18 +14,26 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
+use crate::app::action::ClickTarget;
 use crate::app::composer::{ComposerField, ComposerState};
 use crate::app::focus::Focus;
 use crate::app::route::Route;
 use crate::app::state::AppState;
 use crate::domain::DraftSaveState;
+use crate::input::mouse::HitMap;
 use crate::ui::theme::Theme;
 
 /// Label column width (mockup `grid-template-columns: 8ch`).
 const LABEL_WIDTH: usize = 8;
 
 /// Render the composer into `area` (the body region right of the sidebar).
-pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
     let Some(composer) = &state.composer else {
         return;
     };
@@ -89,9 +97,42 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
             let toggle_w: usize = toggles.iter().map(|s| s.content.width()).sum();
             let pad = inner_w.saturating_sub(LABEL_WIDTH + 2 + used + toggle_w);
             value.push(Span::raw(" ".repeat(pad)));
-            value.extend(toggles);
+            value.extend(toggles.clone());
+            // Each toggle is its own click target (mockup `.field-extra
+            // button`); the row beneath keeps the To-row target.
+            let mut toggle_fields = Vec::new();
+            if !composer.show_cc {
+                toggle_fields.push(ComposerField::CcToggle);
+            }
+            if !composer.show_bcc {
+                toggle_fields.push(ComposerField::BccToggle);
+            }
+            let mut toggle_x = x + (LABEL_WIDTH + 2 + used + pad) as u16;
+            for (target, toggle) in toggle_fields.into_iter().zip(&toggles) {
+                let width = toggle.content.width() as u16;
+                hits.push(
+                    Rect {
+                        x: toggle_x,
+                        y,
+                        width,
+                        height: 1,
+                    },
+                    ClickTarget::ComposerField(target),
+                );
+                toggle_x += width;
+            }
         }
         render_field_row(frame, x, y, inner_w, label, value);
+        // Clicking anywhere on a field row focuses it (Tab's job, plan §10).
+        hits.push(
+            Rect {
+                x,
+                y,
+                width: inner_w as u16,
+                height: 1,
+            },
+            ClickTarget::ComposerField(field),
+        );
         y += 1;
         hairline(frame, x, y, inner_w, theme);
         y += 1;
@@ -108,6 +149,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
             height: attach_y - y,
         };
         frame.render_widget(&composer.body, body);
+        hits.push(body, ClickTarget::ComposerField(ComposerField::Body));
     }
 
     // Attach row (mockup `.attach-row`): one chip per attached file with
@@ -124,6 +166,36 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
             Paragraph::new(Line::from(attach_spans(composer, focused, theme))),
             attach_row,
         );
+        // Chips and the add control are separate click targets; removing a
+        // focused chip and opening the path dialog are Enter's jobs.
+        let mut target_x = x;
+        for (index, attachment) in composer.draft.attachments.iter().enumerate() {
+            let label = format!(
+                " {} · {} ",
+                attachment.name,
+                crate::ui::text::human_size(attachment.size)
+            );
+            let width = label.width() as u16;
+            hits.push(
+                Rect {
+                    x: target_x,
+                    y: attach_y,
+                    width,
+                    height: 1,
+                },
+                ClickTarget::ComposerField(ComposerField::Attachment(index)),
+            );
+            target_x += width + 1; // trailing gap span
+        }
+        hits.push(
+            Rect {
+                x: target_x,
+                y: attach_y,
+                width: " [ + attach ] ".width() as u16,
+                height: 1,
+            },
+            ClickTarget::ComposerField(ComposerField::Attach),
+        );
     }
 
     // Action row: Send (accent) and Discard (warning), mockup
@@ -138,6 +210,31 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
         frame.render_widget(
             Paragraph::new(Line::from(action_spans(composer, focused, theme))),
             actions,
+        );
+        let send_label = if composer.sending {
+            " [ Sending… ] "
+        } else {
+            " [ Send ^↵ ] "
+        };
+        let send_w = send_label.width() as u16;
+        let discard_w = " Discard ".width() as u16;
+        hits.push(
+            Rect {
+                x,
+                y: actions.y,
+                width: send_w,
+                height: 1,
+            },
+            ClickTarget::ComposerField(ComposerField::Send),
+        );
+        hits.push(
+            Rect {
+                x: x + send_w + 3, // the gap span between the buttons
+                y: actions.y,
+                width: discard_w,
+                height: 1,
+            },
+            ClickTarget::ComposerField(ComposerField::Discard),
         );
     }
 }
