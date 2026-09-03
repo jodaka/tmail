@@ -590,7 +590,17 @@ fn send_from_composer(state: &mut AppState) -> Vec<Effect> {
         return Vec::new();
     }
     let draft = &composer.draft;
-    let message = crate::domain::OutboundMessage::from_fields(
+    // Attached files ride through by path (plan §15, Phase 8.2): the
+    // backend reads the bytes when it serializes the MIME.
+    let attachments = draft
+        .attachments
+        .iter()
+        .map(|att| crate::domain::OutboundAttachment {
+            name: att.name.clone(),
+            path: att.path.clone(),
+        })
+        .collect();
+    let message = crate::domain::OutboundMessage::with_attachments(
         &draft.to,
         &draft.cc,
         &draft.bcc,
@@ -601,6 +611,7 @@ fn send_from_composer(state: &mut AppState) -> Vec<Effect> {
             references: draft.references.clone(),
         },
         draft.message_id.clone(),
+        attachments,
     );
     let message = match message {
         Ok(message) => message,

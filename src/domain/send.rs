@@ -109,6 +109,17 @@ pub struct OutgoingContent {
     pub references: Option<String>,
 }
 
+/// One file attached to an outgoing message (plan §15, Phase 8.2).
+/// Metadata only — the backend reads the bytes from `path` when it
+/// serializes the MIME, so neither state nor retry intents carry payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboundAttachment {
+    /// File name used as the MIME `filename` parameter.
+    pub name: String,
+    /// Validated source path (from the composer's attachment chips).
+    pub path: std::path::PathBuf,
+}
+
 /// One outgoing message, fully validated (plan §7/§14). Built only through
 /// [`OutboundMessage::from_fields`], which refuses invalid or missing
 /// recipients — the Phase 7.1 guarantee that invalid composer entries never
@@ -123,6 +134,9 @@ pub struct OutboundMessage {
     /// when already known — draft-derived sends reuse the draft's stable
     /// identity (ADR 0002 §D.6). The backend mints one when `None`.
     pub message_id: Option<String>,
+    /// Attached files (plan §15), serialized as MIME attachment parts.
+    #[serde(default)]
+    pub attachments: Vec<OutboundAttachment>,
 }
 
 impl OutboundMessage {
@@ -134,6 +148,19 @@ impl OutboundMessage {
         bcc: &str,
         content: OutgoingContent,
         message_id: Option<String>,
+    ) -> Result<Self, SendBlocker> {
+        Self::with_attachments(to, cc, bcc, content, message_id, Vec::new())
+    }
+
+    /// [`OutboundMessage::from_fields`] with attached files (plan §15,
+    /// Phase 8.2). Recipients are validated exactly the same way.
+    pub fn with_attachments(
+        to: &str,
+        cc: &str,
+        bcc: &str,
+        content: OutgoingContent,
+        message_id: Option<String>,
+        attachments: Vec<OutboundAttachment>,
     ) -> Result<Self, SendBlocker> {
         let mut invalid = Vec::new();
         let collect = |field: &str, invalid: &mut Vec<String>| -> Vec<Address> {
@@ -161,6 +188,7 @@ impl OutboundMessage {
             bcc,
             content,
             message_id,
+            attachments,
         })
     }
 

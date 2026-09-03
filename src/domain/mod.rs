@@ -17,4 +17,4 @@ pub use mailbox::{Mailbox, MailboxId, MailboxRole};
 pub use message::{Attachment, Message, MessageHeaders, MessageId, MessageLocator, MessageSummary};
 pub use page::{Page, PageRequest};
 pub use reply::{ReplyKind, Seed, seed_forward, seed_reply};
-pub use send::{OutboundMessage, OutgoingContent, SendBlocker, SendOutcome};
+pub use send::{OutboundAttachment, OutboundMessage, OutgoingContent, SendBlocker, SendOutcome};

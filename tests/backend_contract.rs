@@ -996,6 +996,7 @@ fn send_without_recipients_is_refused_before_spawning() {
         bcc: Vec::new(),
         content: OutgoingContent::default(),
         message_id: None,
+        attachments: Vec::new(),
     };
     let err =
         block(backend_with_identity(&fake).send_message(ctx(), message)).expect_err("no rcpt");

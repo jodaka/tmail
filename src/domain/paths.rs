@@ -17,6 +17,38 @@ pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// Best-effort media type for a filename (send side, plan §15: the MIME
+/// part must carry a type). A deliberately small, conventional map;
+/// unknown extensions send as `application/octet-stream`, which every
+/// client handles safely.
+pub fn media_type_for(filename: &str) -> &'static str {
+    let ext = Path::new(filename)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "json" => "application/json",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "jpg" | "jpeg" => "image/jpeg",
+        "txt" | "text" | "log" | "md" => "text/plain",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "doc" | "docx" => "application/msword",
+        "xls" | "xlsx" => "application/vnd.ms-excel",
+        _ => "application/octet-stream",
+    }
+}
+
 /// Expand a leading `~` or `~/…` against `home` (plan §15: expansion
 /// happens in Post, not through a shell). `~user` forms are left literal —
 /// resolving other users' homes is out of scope and would need a shell or
@@ -75,5 +107,20 @@ mod tests {
     fn without_home_nothing_expands() {
         let raw = Path::new("~/x");
         assert_eq!(expand_tilde(raw, None), raw);
+    }
+
+    #[test]
+    fn media_types_map_by_extension() {
+        assert_eq!(media_type_for("report.pdf"), "application/pdf");
+        assert_eq!(
+            media_type_for("photo.JPG"),
+            "image/jpeg",
+            "case-insensitive"
+        );
+        assert_eq!(media_type_for("notes.txt"), "text/plain");
+        assert_eq!(media_type_for("archive.tar.gz"), "application/gzip");
+        // Unknown and extension-less names fall back safely.
+        assert_eq!(media_type_for("data.weird"), "application/octet-stream");
+        assert_eq!(media_type_for("noext"), "application/octet-stream");
     }
 }

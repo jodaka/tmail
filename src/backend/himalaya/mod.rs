@@ -559,12 +559,15 @@ impl HimalayaCliBackend {
             })
     }
 
-    /// Serialize one outgoing message as a single-part `text/plain` RFC 5322
-    /// message via the mail-builder library (plan §14, Phase 7.1: never
-    /// hand-concatenate MIME). `From` comes from the configured account
-    /// identity; reply headers ride through unchanged (plan §14); the
-    /// `Message-ID` reuses the draft's stable identity when the send
-    /// derives from a draft (ADR 0002 §D.6) and is minted otherwise.
+    /// Serialize one outgoing message as an RFC 5322 message via the
+    /// mail-builder library (plan §14, Phase 7.1: never hand-concatenate
+    /// MIME). `From` comes from the configured account identity; reply
+    /// headers ride through unchanged (plan §14); the `Message-ID` reuses
+    /// the draft's stable identity when the send derives from a draft
+    /// (ADR 0002 §D.6) and is minted otherwise. Attached files (plan §15,
+    /// Phase 8.2) are read here and become MIME attachment parts in
+    /// insertion order — a missing or unreadable file is a detailed,
+    /// retryable refusal, never a partial send.
     ///
     /// Recipients are refused here as defense in depth — [`crate::domain::OutboundMessage`]
     /// is constructed only from validated fields, so this arm is
@@ -626,6 +629,19 @@ impl HimalayaCliBackend {
             builder = builder.references(mail_builder::headers::message_id::MessageId::new_list(
                 ids.into_iter(),
             ));
+        }
+        for attachment in &message.attachments {
+            let bytes = std::fs::read(&attachment.path).map_err(|err| {
+                BackendError::File(format!(
+                    "`{}` could not be read for sending: {err}",
+                    attachment.path.display()
+                ))
+            })?;
+            builder = builder.attachment(
+                crate::domain::paths::media_type_for(&attachment.name),
+                attachment.name.as_str(),
+                bytes,
+            );
         }
         builder
             .text_body(message.content.body.as_str())
@@ -960,6 +976,114 @@ mod attachment_tests {
         }
         let err = validate_attachment_source(&path).expect_err("unreadable");
         assert!(matches!(err, BackendError::File(_)));
+    }
+}
+
+#[cfg(all(test, feature = "test-fixtures"))]
+mod attachment_mime_tests {
+    //! Round-trip proof for outgoing attachments (plan §15, Phase 8
+    //! acceptance): the serializer's bytes are parsed with `mail-parser` —
+    //! the same library Himalaya embeds — and the filename, media type,
+    //! bytes, and size must all survive.
+
+    use super::*;
+    use crate::domain::{OutboundAttachment, OutgoingContent};
+    use mail_parser::MimeHeaders;
+
+    fn backend() -> HimalayaCliBackend {
+        HimalayaCliBackend::new("himalaya", None, None, HashMap::new())
+            .with_account_identity(Some(String::from("probe@post.local")), None)
+    }
+
+    fn outbound(attachments: Vec<OutboundAttachment>) -> OutboundMessage {
+        OutboundMessage::with_attachments(
+            "ada@example.org",
+            "",
+            "",
+            OutgoingContent {
+                subject: String::from("With files"),
+                body: String::from("see attached"),
+                in_reply_to: None,
+                references: None,
+            },
+            None,
+            attachments,
+        )
+        .expect("valid recipients")
+    }
+
+    #[test]
+    fn attachments_round_trip_filename_media_type_bytes_and_size() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        // A name with a space and a binary payload with non-UTF-8 bytes.
+        let pdf_path = dir.path().join("report final.pdf");
+        let pdf_bytes: &[u8] = b"%PDF-1.4\n\x01\x02\xff\xfe payload";
+        std::fs::write(&pdf_path, pdf_bytes).expect("write pdf");
+        let txt_path = dir.path().join("notes.txt");
+        std::fs::write(&txt_path, b"line one\nline two\n").expect("write txt");
+
+        let message = outbound(vec![
+            OutboundAttachment {
+                name: String::from("report final.pdf"),
+                path: pdf_path,
+            },
+            OutboundAttachment {
+                name: String::from("notes.txt"),
+                path: txt_path,
+            },
+        ]);
+        let wire = backend().serialize_outbound(&message).expect("serializes");
+
+        let parsed = mail_parser::MessageParser::default()
+            .parse(&wire)
+            .expect("wire bytes are parseable MIME");
+        let parts: Vec<_> = parsed.attachments().collect();
+        assert_eq!(parts.len(), 2, "both attachments ride the wire");
+
+        // Wire order preserved (insertion order, deterministic duplicates).
+        let first = parts[0];
+        assert_eq!(first.attachment_name(), Some("report final.pdf"));
+        let ct = first.content_type().expect("content type");
+        assert_eq!(ct.c_type.as_ref(), "application");
+        assert_eq!(ct.c_subtype.as_ref().map(|s| s.as_ref()), Some("pdf"));
+        assert_eq!(first.contents(), pdf_bytes, "bytes byte-for-byte");
+        assert_eq!(first.contents().len() as u64, pdf_bytes.len() as u64);
+
+        let second = parts[1];
+        assert_eq!(second.attachment_name(), Some("notes.txt"));
+        assert!(second.is_content_type("text", "plain"));
+        assert_eq!(second.contents(), b"line one\nline two\n");
+
+        // The body text remains the plain part alongside the attachments.
+        assert!(wire.windows(9).any(|w| w == b"multipart"), "mixed body");
+    }
+
+    #[test]
+    fn missing_attachment_files_are_detailed_retryable_refusals() {
+        let message = outbound(vec![OutboundAttachment {
+            name: String::from("gone.pdf"),
+            path: std::path::PathBuf::from("/nonexistent/gone.pdf"),
+        }]);
+        let err = backend()
+            .serialize_outbound(&message)
+            .expect_err("file missing");
+        match err {
+            BackendError::File(detail) => {
+                assert!(detail.contains("/nonexistent/gone.pdf"), "{detail}");
+                assert!(detail.contains("could not be read"), "{detail}");
+            }
+            other => panic!("expected a File error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_send_without_attachments_stays_single_part() {
+        let wire = backend()
+            .serialize_outbound(&outbound(Vec::new()))
+            .expect("ok");
+        let text = String::from_utf8_lossy(&wire);
+        assert!(!text.contains("multipart"), "no attachment scaffolding");
+        assert!(text.contains("see attached"));
     }
 }
 
