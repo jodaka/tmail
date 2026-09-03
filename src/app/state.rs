@@ -60,6 +60,12 @@ pub struct AppState {
     pub messages: Page<MessageSummary>,
     /// Index into `messages.items`; always valid or the list is empty.
     pub selection: usize,
+    /// Bulk-selection set (ticket p0s3): backend ids of the messages the
+    /// user marked with Space. Keyed by backend id, so a selection survives
+    /// paging and refreshes while the rows stay; a mailbox switch or a
+    /// search leave clears it. Selection mode is on exactly when this is
+    /// non-empty.
+    pub selected: std::collections::HashSet<crate::domain::MessageId>,
     /// First row of `messages.items` currently drawn, kept by the reducer so
     /// the selection always stays on screen across movement and resize
     /// (Phase 2 acceptance).
@@ -102,6 +108,10 @@ pub struct AppState {
     /// `[post.composer].autosave_delay_ms`). Set from the config at
     /// startup; the reducer applies it with the injected tick clock.
     pub autosave_delay_ms: u64,
+    /// The configured external editor as an argv (plan §14, Phase 11),
+    /// resolved from the config at startup. `None` means the builtin
+    /// editor: `Ctrl+E` is inert.
+    pub editor_command: Option<Vec<String>>,
     /// Injected-clock timestamp of the last refresh (manual or automatic),
     /// the timer's arm point. `None` until the first tick arms it.
     pub last_refresh_at: Option<DateTime<FixedOffset>>,
@@ -142,6 +152,7 @@ impl AppState {
             mailbox_selection: 0,
             messages: Page::empty(page_size.max(1)),
             selection: 0,
+            selected: std::collections::HashSet::new(),
             list_scroll: 0,
             open_message: Loadable::Idle,
             reader_scroll: 0,
@@ -154,6 +165,7 @@ impl AppState {
             search_return: None,
             refresh_interval_seconds: 0,
             autosave_delay_ms: crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS,
+            editor_command: None,
             last_refresh_at: None,
             last_background_error: None,
             focus: Focus::MessageList,
@@ -174,6 +186,48 @@ impl AppState {
     /// The message under the selection, if any.
     pub fn selected_message(&self) -> Option<&MessageSummary> {
         self.messages.items.get(self.selection)
+    }
+
+    /// Whether bulk-selection mode is on (ticket p0s3): at least one
+    /// visible-list message carries the Space mark.
+    pub fn selection_active(&self) -> bool {
+        !self.selected.is_empty()
+    }
+
+    /// How many of the currently visible rows are bulk-selected.
+    pub fn visible_selected_count(&self) -> usize {
+        self.messages
+            .items
+            .iter()
+            .filter(|m| self.selected.contains(&m.id))
+            .count()
+    }
+
+    /// Whether every visible row is bulk-selected (the `[X]` header state).
+    /// An empty list is never "all selected".
+    pub fn all_visible_selected(&self) -> bool {
+        !self.messages.items.is_empty()
+            && self
+                .messages
+                .items
+                .iter()
+                .all(|m| self.selected.contains(&m.id))
+    }
+
+    /// Locators of the bulk-selected messages, in visible-list order. The
+    /// set may hold ids from other pages; only rows actually present are
+    /// actionable.
+    pub fn selected_locators(&self) -> Vec<crate::domain::MessageLocator> {
+        self.messages
+            .items
+            .iter()
+            .filter(|m| self.selected.contains(&m.id))
+            .map(|m| crate::domain::MessageLocator {
+                mailbox: m.mailbox_id.clone(),
+                id: m.id.clone(),
+                message_id: m.message_id.clone(),
+            })
+            .collect()
     }
 
     /// The summary of the message open in the reader, if one is.

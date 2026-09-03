@@ -63,6 +63,31 @@ pub fn restore() {
     let _ = term::disable_raw_mode();
 }
 
+/// Suspend the TUI so a child program (the external editor, plan §14
+/// step 2, Phase 11.2) owns the terminal: leave raw mode and the
+/// alternate screen. Best-effort and idempotent, like [`restore`] — which
+/// this is.
+pub fn suspend() {
+    restore();
+    tracing::debug!("terminal suspended for the external editor");
+}
+
+/// Re-enter the TUI after [`suspend`]: raw mode, alternate screen, and
+/// mouse capture per `mouse` — always called after the editor exits,
+/// success or failure (plan §14 step 7, Phase 11.7). A *fresh* guard is
+/// built on purpose: its ratatui buffers start empty, so the next draw
+/// repaints the whole screen without a cursor-position query (which the
+/// paused event reader would race for).
+pub fn reenter(mouse: bool) -> io::Result<TerminalGuard> {
+    term::enable_raw_mode()?;
+    execute!(io::stdout(), term::EnterAlternateScreen)?;
+    set_mouse_capture(mouse)?;
+    let backend = CrosstermBackend::new(io::stdout());
+    let terminal = Terminal::new(backend)?;
+    tracing::debug!(mouse, "terminal re-entered after the external editor");
+    Ok(TerminalGuard { terminal })
+}
+
 fn install_panic_hook() {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {

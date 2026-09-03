@@ -15,6 +15,16 @@ pub fn to_action(key: KeyEvent, focus: Focus) -> Option<Action> {
     match key.code {
         Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
         Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Refresh),
+        // Ctrl+A toggles select-all (ticket p0s3); text-entry foci never
+        // intercept keys, so it only fires where shortcuts are accepted.
+        Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) && focus.accepts_shortcuts() => {
+            Some(Action::SelectAll)
+        }
+        // Ctrl+E hands the draft body to the external editor (plan §14,
+        // Phase 11): composer-only, regardless of which field holds focus.
+        Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) && focus == Focus::Composer => {
+            Some(Action::EditExternal)
+        }
         Esc => Some(Action::BackOrCancel),
         Enter => Some(enter_action(key.modifiers)),
         Tab => Some(Action::FocusNext),
@@ -104,9 +114,17 @@ fn char_action(c: char, modifiers: KeyModifiers, focus: Focus) -> Option<Action>
         'e' => Some(Action::Archive),
         's' => Some(Action::ToggleStar),
         'u' => Some(Action::MarkUnread),
+        // `i` marks read (ticket p0s3): the focused row, or the whole
+        // selection when bulk-selection mode is on. No-op in the reader
+        // (an open message is already read).
+        'i' => Some(Action::MarkRead),
         'm' => Some(Action::ToggleMouseCapture),
         'd' => Some(Action::SaveAttachment),
         'o' => Some(Action::OpenAttachment),
+        // Space toggles the focused row's bulk-selection mark, list only
+        // (ticket p0s3): the sidebar has no selection semantics, and the
+        // reader scrolls instead of marking.
+        ' ' if focus == Focus::MessageList => Some(Action::ToggleSelected),
         _ => None, // No j/k (plan §4), no '?' help.
     }
 }

@@ -7,13 +7,13 @@
 //! registered, so stale, cancelled, or superseded results never win
 //! (plan §11). Reducers never perform I/O themselves.
 
-use crate::app::action::{Action, ClickTarget, DialogEdit, ReaderAction, SearchEdit};
+use crate::app::action::{Action, BulkOp, ClickTarget, DialogEdit, ReaderAction, SearchEdit};
 use crate::app::composer::{ComposerField, ComposerState};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::operation::{
-    DraftRemovalReason, OperationFailure, OperationKind, OperationOrigin, OperationOutcome,
-    OperationResult,
+    DraftRemovalReason, OperationFailure, OperationId, OperationKind, OperationOrigin,
+    OperationOutcome, OperationResult,
 };
 use crate::app::overlay::{
     AttachmentPathDialog, ConfirmButton, DiscardDialog, ErrorDialog, ModalButton, Overlay,
@@ -98,6 +98,9 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::OpenAttachment => open_selected_attachment(state),
         Action::ToggleStar => toggle_star(state),
         Action::MarkUnread => mark_unread(state),
+        Action::MarkRead => mark_read(state),
+        Action::ToggleSelected => toggle_selected(state),
+        Action::SelectAll => toggle_select_all(state),
         Action::Compose => open_composer(state),
         Action::LoadDrafts => load_drafts(state),
         Action::ComposerEdit(edit) => {
@@ -131,6 +134,8 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             leave_composer(state)
         }
         Action::DiscardDraft => open_discard_confirm(state),
+        Action::EditExternal => edit_externally(state),
+        Action::EditorFinished { id, result } => editor_finished(state, *id, result.clone()),
         Action::RetryError | Action::DismissError | Action::DialogEdit(_) => {
             // Only meaningful with their modal open (handled above).
             Vec::new()
@@ -482,6 +487,24 @@ fn click(state: &mut AppState, target: ClickTarget) -> Vec<Effect> {
         // only recorded while the modal renders); the arm keeps the match
         // total.
         ClickTarget::ErrorButton(_) | ClickTarget::ConfirmButton(_) => Vec::new(),
+        ClickTarget::SelectAllToggle => {
+            state.focus = Focus::SelectAllToggle;
+            toggle_select_all(state)
+        }
+        ClickTarget::BulkAction(op) => {
+            // The buttons act on the selection (ticket p0s3): focus the
+            // list first so the bulk path (not the reader path) applies,
+            // then run the advertised action's exact code path.
+            if state.selection_active() {
+                state.focus = Focus::MessageList;
+            }
+            match op {
+                BulkOp::Trash => reduce(state, &Action::Trash),
+                BulkOp::Archive => reduce(state, &Action::Archive),
+                BulkOp::MarkRead => reduce(state, &Action::MarkRead),
+                BulkOp::MarkUnread => reduce(state, &Action::MarkUnread),
+            }
+        }
     }
 }
 
@@ -707,7 +730,27 @@ fn message_target(state: &AppState) -> Option<MessageLocator> {
     }
 }
 
+/// Locators for a bulk operation (ticket p0s3): only when the list holds
+/// focus, selection mode is on, and the visible selection is non-empty.
+/// Reader shortcuts keep acting on the open message even while a selection
+/// exists — the selection belongs to the list behind the reader.
+fn bulk_targets(state: &AppState) -> Option<Vec<MessageLocator>> {
+    if state.focus != Focus::MessageList || !state.selection_active() {
+        return None;
+    }
+    let locators = state.selected_locators();
+    (!locators.is_empty()).then_some(locators)
+}
+
 fn archive_message(state: &mut AppState) -> Vec<Effect> {
+    if let Some(locators) = bulk_targets(state) {
+        let count = locators.len();
+        state.set_status(format!("Archiving {count} messages…"));
+        return locators
+            .into_iter()
+            .map(|locator| state.operations.start(OperationKind::Archive(locator)))
+            .collect();
+    }
     match message_target(state) {
         Some(locator) => {
             state.set_status("Archiving…");
@@ -718,11 +761,48 @@ fn archive_message(state: &mut AppState) -> Vec<Effect> {
 }
 
 fn trash_message(state: &mut AppState) -> Vec<Effect> {
+    if let Some(locators) = bulk_targets(state) {
+        let count = locators.len();
+        state.set_status(format!("Moving {count} messages to trash…"));
+        return locators
+            .into_iter()
+            .map(|locator| state.operations.start(OperationKind::Trash(locator)))
+            .collect();
+    }
     match message_target(state) {
         Some(locator) => {
             state.set_status("Moving to trash…");
             vec![state.operations.start(OperationKind::Trash(locator))]
         }
+        None => Vec::new(),
+    }
+}
+
+/// Mark read (ticket p0s3): the whole selection in selection mode, else the
+/// focused row (the list has no read shortcut today; the reader marks read
+/// on open, so this arm stays list-only in practice).
+fn mark_read(state: &mut AppState) -> Vec<Effect> {
+    if let Some(locators) = bulk_targets(state) {
+        let count = locators.len();
+        state.set_status(format!("Marking {count} messages read…"));
+        return locators
+            .into_iter()
+            .map(|locator| {
+                state.operations.start(OperationKind::SetRead {
+                    locator,
+                    read: true,
+                })
+            })
+            .collect();
+    }
+    if state.focus != Focus::MessageList {
+        return Vec::new();
+    }
+    match message_target(state) {
+        Some(locator) => vec![state.operations.start(OperationKind::SetRead {
+            locator,
+            read: true,
+        })],
         None => Vec::new(),
     }
 }
@@ -744,6 +824,19 @@ fn toggle_star(state: &mut AppState) -> Vec<Effect> {
 }
 
 fn mark_unread(state: &mut AppState) -> Vec<Effect> {
+    if let Some(locators) = bulk_targets(state) {
+        let count = locators.len();
+        state.set_status(format!("Marking {count} messages unread…"));
+        return locators
+            .into_iter()
+            .map(|locator| {
+                state.operations.start(OperationKind::SetRead {
+                    locator,
+                    read: false,
+                })
+            })
+            .collect();
+    }
     match message_target(state) {
         Some(locator) => vec![state.operations.start(OperationKind::SetRead {
             locator,
@@ -751,6 +844,54 @@ fn mark_unread(state: &mut AppState) -> Vec<Effect> {
         })],
         None => Vec::new(),
     }
+}
+
+// ── Bulk selection (ticket p0s3) ─────────────────────────────────────────
+
+/// Space on a focused message row: toggle its bulk-selection mark, then
+/// advance the cursor to the next row (ticket yy4m) so several messages
+/// can be marked by pressing Space repeatedly. The mark rides the backend
+/// id, so it survives paging and refreshes while the row stays listed.
+fn toggle_selected(state: &mut AppState) -> Vec<Effect> {
+    if state.focus != Focus::MessageList {
+        return Vec::new();
+    }
+    let Some(summary) = state.selected_message() else {
+        return Vec::new();
+    };
+    let id = summary.id.clone();
+    if !state.selected.remove(&id) {
+        state.selected.insert(id);
+    }
+    if state.selection + 1 < state.messages.items.len() {
+        state.selection += 1;
+        keep_selection_visible(state);
+    }
+    Vec::new()
+}
+
+/// Ctrl+A or the `[ ]`/`[X]` header toggle: select every visible message,
+/// or clear the selection when all visible rows are already marked. The
+/// toggle needs a visible list — it never fires over the reader.
+fn toggle_select_all(state: &mut AppState) -> Vec<Effect> {
+    if !matches!(
+        state.active_route(),
+        Some(Route::Mailbox(_) | Route::Search(_))
+    ) {
+        return Vec::new();
+    }
+    if state.all_visible_selected() {
+        state.selected.clear();
+        state.set_status("Selection cleared");
+    } else {
+        let ids: Vec<_> = state.messages.items.iter().map(|m| m.id.clone()).collect();
+        for id in ids {
+            state.selected.insert(id);
+        }
+        let count = state.messages.items.len();
+        state.set_status(format!("{count} messages selected"));
+    }
+    Vec::new()
 }
 
 // ── Attachment save (plan §15, Phase 8.4) ────────────────────────────────
@@ -1297,6 +1438,15 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                 Err(failure) => open_error_modal(state, failure),
             }
         }
+        // The external editor completes through `Action::EditorFinished`,
+        // not the result channel (Phase 11: it runs on the terminal owner,
+        // not in the manager). A result arriving here would be a routing
+        // bug; finish quietly so the registry cannot leak.
+        OperationKind::EditExternally { .. } => {
+            tracing::warn!(id = %result.id, "result for an external-editor operation");
+            state.operations.finish(result.id);
+            Vec::new()
+        }
     }
 }
 
@@ -1588,7 +1738,19 @@ fn message_moved(state: &mut AppState, locator: &MessageLocator) -> Vec<Effect> 
     if matches!(state.active_route(), Some(Route::Message(route)) if matches(&route.summary)) {
         close_reader(state);
     }
+    // A moved row leaves the bulk selection with it (ticket p0s3): only
+    // the moved ids are pruned, selections on other pages stay.
+    let moved_ids: Vec<_> = state
+        .messages
+        .items
+        .iter()
+        .filter(|s| matches(s))
+        .map(|s| s.id.clone())
+        .collect();
     state.messages.items.retain(|summary| !matches(summary));
+    for id in moved_ids {
+        state.selected.remove(&id);
+    }
     state.selection = state
         .selection
         .min(state.messages.items.len().saturating_sub(1));
@@ -1678,6 +1840,9 @@ fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
         Focus::SearchField => {
             // Cursor movement inside the field is a render concern for now;
             // the query is edited append/backspace only (Phase 1).
+        }
+        Focus::SelectAllToggle => {
+            // A header button: arrows do nothing (ticket p0s3).
         }
         Focus::Reader => scroll_reader(state, delta),
         Focus::Composer | Focus::Dialog | Focus::ErrorModal => {}
@@ -1878,6 +2043,9 @@ fn activate(state: &mut AppState) -> Vec<Effect> {
             Some(summary) => open_message(state, summary),
             None => Vec::new(),
         },
+        // Enter on the focused `[ ]`/`[X]` header button: the one place
+        // Enter participates in selection (ticket p0s3).
+        Focus::SelectAllToggle => toggle_select_all(state),
         Focus::Composer => activate_composer(state),
         // The dialog intercepts Enter itself; unreachable in practice.
         Focus::Reader | Focus::Dialog | Focus::SearchField | Focus::ErrorModal => {
@@ -2000,6 +2168,87 @@ fn close_reader(state: &mut AppState) {
     }
 }
 
+// ── External editor (plan §14, Phase 11) ─────────────────────────────────
+
+/// Ctrl+E in the composer: save the draft first (plan §14 step 1), mark
+/// the composer as externally edited so background autosave stays quiet
+/// while the editor owns the file (step 5), and emit the effect the main
+/// loop runs synchronously — the terminal must be suspended from the thread
+/// that owns it (steps 2–7). The editor edits the body only.
+fn edit_externally(state: &mut AppState) -> Vec<Effect> {
+    if state.focus != Focus::Composer || state.composer.is_none() {
+        return Vec::new();
+    }
+    let Some(program) = state.editor_command.clone() else {
+        // Builtin editor configured: nothing external to run.
+        return Vec::new();
+    };
+    let body = state
+        .composer
+        .as_ref()
+        .map(|composer| composer.body.lines().join("\n"))
+        .unwrap_or_default();
+    // Step 1 (save first) — forced save when the draft has unsaved edits;
+    // a clean draft is already saved, so the editor opens immediately.
+    let mut effects = draft_save_effect(state).into_iter().collect::<Vec<_>>();
+    if let Some(composer) = state.composer.as_mut() {
+        composer.external_editing = true;
+    }
+    effects.push(
+        state
+            .operations
+            .start(OperationKind::EditExternally { program, body }),
+    );
+    effects
+}
+
+/// The external editor exited (plan §14 steps 6–8): import the edited text,
+/// mark the draft dirty, and save exactly once. An editor failure imports
+/// nothing — the pre-launch save already put the draft somewhere safe —
+/// and surfaces a sanitized status. Terminal restoration happened in the
+/// runtime before this runs, success or failure (step 7).
+fn editor_finished(
+    state: &mut AppState,
+    id: OperationId,
+    result: Result<String, String>,
+) -> Vec<Effect> {
+    state.operations.finish(id);
+    let should_save = match result {
+        Ok(content) => {
+            let now = state.clock;
+            let changed = state
+                .composer
+                .as_mut()
+                .map(|composer| {
+                    composer.external_editing = false;
+                    composer.import_body(&content, now)
+                })
+                .unwrap_or(false);
+            if changed {
+                // Steps 7/8: the import is one edit — mark dirty and save
+                // once (the forced save, not the autosave debounce).
+                state.set_status("Imported from external editor");
+                true
+            } else {
+                state.set_status("External editor: no changes");
+                false
+            }
+        }
+        Err(detail) => {
+            if let Some(composer) = state.composer.as_mut() {
+                composer.external_editing = false;
+            }
+            state.set_status(format!("External editor failed: {detail}"));
+            false
+        }
+    };
+    if should_save {
+        draft_save_effect(state).into_iter().collect()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Open (or reopen) the built-in composer (plan §19 Phase 6). A left-open
 /// draft is preserved in `AppState.composer`, so composing again returns to
 /// it; only one composer exists at a time.
@@ -2080,6 +2329,11 @@ fn autosave_tick(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset
     let Some(composer) = state.composer.as_mut() else {
         return Vec::new();
     };
+    // Phase 11.5: the external editor owns the body file — no background
+    // autosave is promised while it runs (plan §14 step 5).
+    if composer.external_editing {
+        return Vec::new();
+    }
     if composer.draft.save != DraftSaveState::Debouncing {
         return Vec::new();
     }
@@ -2147,6 +2401,10 @@ fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Vec<Effect> {
     state.selection = 0;
     state.list_scroll = 0;
     state.focus = Focus::MessageList;
+    // The selection set belongs to the previous mailbox's list (ticket
+    // p0s3): ids from another folder must never leak into bulk operations
+    // here.
+    state.selected.clear();
     // Rows of the previous mailbox must not linger while the new one loads.
     state.messages = Page::empty(state.messages.limit);
     request_page(state, 0)
@@ -2176,6 +2434,13 @@ fn back_or_cancel(state: &mut AppState) -> Vec<Effect> {
     if let Some(op) = state.operations.cancel_foreground() {
         tracing::info!(id = %op.id, kind = ?op.kind, "cancelled foreground operation");
         state.set_status(format!("{} — cancelled", op.kind.summary()));
+        return Vec::new();
+    }
+    // With nothing to cancel or close, an active selection is the next
+    // thing Esc releases (ticket p0s3) before it goes back or quits.
+    if state.selection_active() && !matches!(state.focus, Focus::Reader | Focus::Composer) {
+        state.selected.clear();
+        state.set_status("Selection cleared");
         return Vec::new();
     }
     if state.routes.len() > 1 {
@@ -2280,6 +2545,9 @@ fn leave_search(state: &mut AppState) {
             state.list_scroll = stash.scroll;
         }
         state.focus = Focus::MessageList;
+        // Search selections do not follow the user back to the mailbox
+        // list (ticket p0s3): the visible set changed entirely.
+        state.selected.clear();
     }
 }
 

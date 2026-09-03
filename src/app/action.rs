@@ -9,7 +9,7 @@
 //!   and its failure payloads are already sanitized (plan §12).
 
 use crate::app::composer::ComposerField;
-use crate::app::operation::OperationResult;
+use crate::app::operation::{OperationId, OperationResult};
 use crate::app::overlay::{ConfirmButton, ModalButton};
 use chrono::{DateTime, FixedOffset};
 
@@ -100,6 +100,25 @@ pub enum ClickTarget {
     ErrorButton(ModalButton),
     /// Discard/Keep buttons of the confirm-discard dialog.
     ConfirmButton(ConfirmButton),
+    /// The list header's `[ ]`/`[X]` select-all toggle (ticket p0s3):
+    /// equivalent of Ctrl+A.
+    SelectAllToggle,
+    /// A bulk-operation button in the selection-mode status bar (ticket
+    /// p0s3): equivalent of the advertised key acting on the selection.
+    BulkAction(BulkOp),
+}
+
+/// One bulk operation the selection-mode status bar offers (ticket p0s3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BulkOp {
+    /// Delete every selected message (trash).
+    Trash,
+    /// Archive every selected message.
+    Archive,
+    /// Mark every selected message read.
+    MarkRead,
+    /// Mark every selected message unread.
+    MarkUnread,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +148,15 @@ pub enum Action {
     Trash,
     ToggleStar,
     MarkUnread,
+    /// Mark the focused message read (`i`), or — when bulk-selection mode
+    /// is on — every selected message (ticket p0s3).
+    MarkRead,
+    /// Space on a focused message row: toggle its bulk-selection mark
+    /// (ticket p0s3).
+    ToggleSelected,
+    /// Ctrl+A or the `[ ]`/`[X]` header toggle: select every visible
+    /// message, or clear the selection when all are selected.
+    SelectAll,
     Refresh,
     /// Turn terminal mouse capture on/off at runtime (plan §10 feedback).
     /// While capture is on, the terminal's native text selection needs the
@@ -146,6 +174,16 @@ pub enum Action {
     OpenAttachment,
     LeaveComposer,
     DiscardDraft,
+    /// Ctrl+E in the composer (plan §14, Phase 11): save the draft, then
+    /// hand the body to the configured external editor.
+    EditExternal,
+    /// The external editor exited (plan §14 steps 6–8, Phase 11): import
+    /// the edited text and save once, or report the failure. `id` is the
+    /// `EditExternally` operation being completed.
+    EditorFinished {
+        id: OperationId,
+        result: Result<String, String>,
+    },
     RetryError,
     DismissError,
     /// A mouse click on a recorded widget rectangle (Phase 10.2). The

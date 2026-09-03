@@ -80,6 +80,10 @@ pub struct ComposerState {
     /// frozen so the bytes on the wire stay exactly what the user saw,
     /// and a second send cannot start.
     pub sending: bool,
+    /// The external editor owns the body file (plan §14 step 5, Phase
+    /// 11.5): background autosave is suppressed until it exits, no matter
+    /// how long the user writes.
+    pub external_editing: bool,
 }
 
 impl Default for ComposerState {
@@ -98,6 +102,7 @@ impl ComposerState {
             body: TextArea::from([""]),
             draft: Draft::default(),
             sending: false,
+            external_editing: false,
         }
     }
 
@@ -186,6 +191,7 @@ impl ComposerState {
             body,
             draft,
             sending: false,
+            external_editing: false,
         }
     }
 
@@ -261,6 +267,30 @@ impl ComposerState {
     pub fn sync_draft(&mut self, now: Option<chrono::DateTime<chrono::FixedOffset>>) {
         self.draft.body = self.body.lines().join("\n");
         self.draft.note_edit(now);
+    }
+
+    /// Import the external editor's text (plan §14 step 6, Phase 11.6):
+    /// replace the body wholesale. Content identical to what the editor
+    /// was handed imports as a no-op — no revision bump, no save. The
+    /// changed case records exactly one edit (step 8: mark dirty once);
+    /// `now` is the injected clock for the debounce bookkeeping.
+    pub fn import_body(
+        &mut self,
+        content: &str,
+        now: Option<chrono::DateTime<chrono::FixedOffset>>,
+    ) -> bool {
+        if content == self.draft.body {
+            return false;
+        }
+        let lines: Vec<String> = content.lines().map(str::to_owned).collect();
+        self.body = if lines.is_empty() {
+            TextArea::from([""])
+        } else {
+            TextArea::from(lines)
+        };
+        self.draft.body = String::from(content);
+        self.draft.note_edit(now);
+        true
     }
 
     /// Apply one character-level edit to the focused field (plan §10:

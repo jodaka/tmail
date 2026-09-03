@@ -353,3 +353,59 @@ fn unbound_keys_return_none() {
         None
     );
 }
+
+#[test]
+fn selection_keys_map_per_focus() {
+    // Space toggles the bulk mark in the list only (ticket p0s3).
+    assert_eq!(
+        to_action(plain(KeyCode::Char(' ')), Focus::MessageList),
+        Some(Action::ToggleSelected)
+    );
+    assert_eq!(to_action(plain(KeyCode::Char(' ')), Focus::Sidebar), None);
+    // In text-entry foci the space is typed, never a shortcut.
+    assert_eq!(
+        to_action(plain(KeyCode::Char(' ')), Focus::Composer),
+        Some(Action::ComposerEdit(ComposerEdit::Char(' ')))
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Char(' ')), Focus::SearchField),
+        Some(Action::SearchEdit(SearchEdit::Char(' ')))
+    );
+}
+
+#[test]
+fn ctrl_a_is_select_all_where_shortcuts_are_accepted() {
+    let ctrl_a = key(KeyCode::Char('a'), KeyModifiers::CONTROL);
+    assert_eq!(
+        to_action(ctrl_a, Focus::MessageList),
+        Some(Action::SelectAll)
+    );
+    assert_eq!(to_action(ctrl_a, Focus::Sidebar), Some(Action::SelectAll));
+    // Text-entry foci keep their pre-existing behavior: the letter types.
+    assert_eq!(
+        to_action(ctrl_a, Focus::SearchField),
+        Some(Action::SearchEdit(SearchEdit::Char('a')))
+    );
+    assert_eq!(to_action(ctrl_a, Focus::Composer), None);
+}
+
+#[test]
+fn i_maps_to_mark_read() {
+    assert_eq!(
+        to_action(plain(KeyCode::Char('i')), Focus::MessageList),
+        Some(Action::MarkRead)
+    );
+}
+
+#[test]
+fn ctrl_e_opens_the_external_editor_in_the_composer_only() {
+    let ctrl_e = key(KeyCode::Char('e'), KeyModifiers::CONTROL);
+    assert_eq!(
+        to_action(ctrl_e, Focus::Composer),
+        Some(Action::EditExternal)
+    );
+    // Outside the composer the combo does nothing: the editor edits the
+    // draft body (plan §14).
+    assert_eq!(to_action(ctrl_e, Focus::MessageList), None);
+    assert_eq!(to_action(ctrl_e, Focus::Sidebar), None);
+}

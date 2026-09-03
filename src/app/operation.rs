@@ -97,6 +97,11 @@ pub enum OperationKind {
     /// Open a saved file with the platform handler (`open`/`xdg-open`,
     /// plan §15, Phase 8.5): spawned directly, never through a shell.
     OpenPath { path: std::path::PathBuf },
+    /// Hand the draft body to the configured external editor (plan §14,
+    /// Phase 11): the runtime suspends the TUI, spawns `program` (argv
+    /// only, no shell) on a secure temporary file, and waits for exit.
+    /// Boxed strings keep the variant small.
+    EditExternally { program: Vec<String>, body: String },
 }
 
 /// Why a draft is being removed (Phase 7.6): it selects the failure UX.
@@ -132,6 +137,7 @@ impl OperationKind {
             OperationKind::ReadAttachment { .. } => "Checking file",
             OperationKind::SaveAttachment { .. } => "Saving attachment",
             OperationKind::OpenPath { .. } => "Opening attachment",
+            OperationKind::EditExternally { .. } => "Editing externally",
         }
     }
 
@@ -201,12 +207,16 @@ impl OperationKind {
     /// state unknown while the suppressed `Cancelled` result could claim
     /// neither failure nor success — exactly the ambiguity plan §12 forbids
     /// hiding (an already-spawned handler app is likewise let alone). The
-    /// user can still leave the composer; the send completes (or is
-    /// classified) in the background.
+    /// external editor is likewise untouchable: it owns the terminal and
+    /// the body file until it exits (plan §14 step 5). The user can still
+    /// leave the composer; the send completes (or is classified) in the
+    /// background.
     pub fn is_cancellable(&self) -> bool {
         !matches!(
             self,
-            OperationKind::Send { .. } | OperationKind::OpenPath { .. }
+            OperationKind::Send { .. }
+                | OperationKind::OpenPath { .. }
+                | OperationKind::EditExternally { .. }
         )
     }
 }

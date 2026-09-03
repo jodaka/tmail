@@ -34,9 +34,54 @@ pub const DEFAULT_REFRESH_INTERVAL_SECONDS: u64 = 60;
 pub const AUTOSAVE_DELAY_MIN_MS: u64 = 100;
 pub const AUTOSAVE_DELAY_MAX_MS: u64 = 600_000;
 
-/// The theme names Post knows (plan §17/§18); only the dark reference
-/// theme ships in v1.
-pub const THEME_NAMES: [&str; 1] = ["default"];
+/// The theme names Post knows (plan §17/§18): the dark reference theme and
+/// a light variant.
+pub const THEME_NAMES: [&str; 2] = ["default", "light"];
+
+/// The `[post.theme]` color tokens a user may override (ticket wrs7), as
+/// hex strings like `"#4e86dd"`. Kept beside the config parser because the
+/// token list is part of the file's grammar; [`crate::ui::theme::Theme`]
+/// applies them (a test pins the two lists together).
+pub const THEME_TOKENS: [&str; 14] = [
+    "background",
+    "surface",
+    "surface2",
+    "border",
+    "text",
+    "text_soft",
+    "muted",
+    "dim",
+    "accent",
+    "accent_bg",
+    "bulk_selected_bg",
+    "warning",
+    "error",
+    "selection",
+];
+
+/// Parse a config-file color: `#rgb` or `#rrggbb` (case-insensitive hex).
+/// Returns the normalized `#rrggbb` form, or `None` when the value is not
+/// a color Post can use.
+pub fn parse_hex_color(value: &str) -> Option<String> {
+    let hex = value.strip_prefix('#')?;
+    if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    match hex.len() {
+        3 => {
+            let doubled: String = hex
+                .chars()
+                .flat_map(|c| {
+                    let low = c.to_ascii_lowercase();
+                    [low, low]
+                })
+                .collect();
+            Some(format!("#{doubled}"))
+        }
+        6 => Some(format!("#{}", hex.to_ascii_lowercase())),
+        _ => None,
+    }
+}
 
 /// A loaded configuration plus every problem found while reading it, in
 /// file order. Issues are user-facing, actionable, and secret-free.
@@ -91,15 +136,28 @@ pub struct Config {
     /// translation. Off by default: capture changes what terminal text
     /// selection does, so it stays opt-in.
     pub mouse: bool,
+    /// `[post.ui].clock` (ticket w7f5): show the top-right date/time
+    /// clock. Off by default.
+    pub ui_clock: bool,
     /// `[post.composer].editor` (plan §14/§17): `"builtin"`, `"$EDITOR"`,
     /// or an explicit command. The external-editor flow itself is Phase 11;
     /// v1 validates the value so a broken entry is reported up front.
     pub editor: String,
+    /// `[post.composer].editor` resolved into an argv (Phase 11.4):
+    /// `None` is the builtin editor; `Some` is program + arguments,
+    /// spawned directly, never a shell. Resolution: `"builtin"` → `None`;
+    /// `"$EDITOR"` → the environment value split on whitespace; anything
+    /// else is the value itself split on whitespace.
+    pub editor_command: Option<Vec<String>>,
     /// `[post.composer].autosave_delay_ms` (plan §14): the draft autosave
     /// debounce for the builtin editor.
     pub autosave_delay_ms: u64,
     /// `[post.theme].name` (plan §17/§18); see [`THEME_NAMES`].
     pub theme_name: String,
+    /// `[post.theme]` color overrides (ticket wrs7): `(token, "#rrggbb")`
+    /// pairs, validated at parse time and applied over the named theme in
+    /// file order.
+    pub theme_overrides: Vec<(String, String)>,
 }
 
 impl Default for Config {
@@ -114,9 +172,12 @@ impl Default for Config {
             account_display_name: None,
             downloads_dir: None,
             mouse: false,
+            ui_clock: false,
             editor: String::from("builtin"),
+            editor_command: None,
             autosave_delay_ms: DEFAULT_AUTOSAVE_DELAY_MS,
             theme_name: String::from("default"),
+            theme_overrides: Vec::new(),
         }
     }
 }
@@ -239,6 +300,7 @@ pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssu
     parse_editor(post, &mut config, &mut issues);
     parse_theme(post, &mut config, &mut issues);
     parse_downloads_dir(post, &mut config, &mut issues);
+    parse_ui_clock(post, &mut config, &mut issues);
 
     // Without `[post].account`, drive the account himalaya itself would
     // pick (no `-a` is forwarded): the one marked `default = true`, else
@@ -334,6 +396,26 @@ fn parse_autosave_delay(post: Option<&toml::Value>, config: &mut Config, issues:
     }
 }
 
+/// `[post.ui].clock` (ticket w7f5): show the top-right date/time clock.
+/// Off by default.
+fn parse_ui_clock(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(value) = post
+        .and_then(|post| post.get("ui"))
+        .and_then(|ui| ui.get("clock"))
+    else {
+        return;
+    };
+    config.ui_clock = match value.as_bool() {
+        Some(clock) => clock,
+        None => {
+            issues.push(String::from(
+                "[post.ui].clock must be true or false; using false",
+            ));
+            false
+        }
+    };
+}
+
 /// `[post.composer].editor`: `"builtin"`, `"$EDITOR"`, or an explicit
 /// command (program + arguments, resolved without a shell — plan §14).
 fn parse_editor(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
@@ -350,12 +432,33 @@ fn parse_editor(post: Option<&toml::Value>, config: &mut Config, issues: &mut Lo
         return;
     };
     match validate_editor(editor) {
-        Ok(()) => config.editor = editor.to_owned(),
+        Ok(()) => {
+            config.editor = editor.to_owned();
+            config.editor_command = resolve_editor_command(editor);
+        }
         Err(problem) => {
             issues.push(format!(
                 "[post.composer].editor: {problem}; using \"builtin\""
             ));
         }
+    }
+}
+
+/// Resolve an editor value into an argv (Phase 11.4): `"builtin"` is the
+/// builtin editor (`None`); `"$EDITOR"` resolves from the environment;
+/// anything else is program + arguments split on whitespace, spawned
+/// directly — never a shell (plan §14 step 4).
+pub fn resolve_editor_command(editor: &str) -> Option<Vec<String>> {
+    match editor {
+        "builtin" => None,
+        "$EDITOR" => std::env::var_os("EDITOR").map(|value| {
+            value
+                .to_string_lossy()
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect()
+        }),
+        _ => Some(editor.split_whitespace().map(str::to_owned).collect()),
     }
 }
 
@@ -413,19 +516,44 @@ pub fn program_exists(program: &str) -> bool {
 }
 
 fn parse_theme(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    let Some(value) = post
-        .and_then(|post| post.get("theme"))
-        .and_then(|theme| theme.get("name"))
-    else {
+    let Some(theme) = post.and_then(|post| post.get("theme")) else {
         return;
     };
-    match value.as_str() {
-        Some(name) if THEME_NAMES.contains(&name) => config.theme_name = name.to_owned(),
-        Some(name) => issues.push(format!(
-            "[post.theme].name {name:?} is unknown (known: {})",
-            THEME_NAMES.join(", ")
-        )),
-        None => issues.push(String::from("[post.theme].name must be a string")),
+    let Some(table) = theme.as_table() else {
+        issues.push(String::from("[post.theme] must be a table"));
+        return;
+    };
+    // The table walk is deterministic; a token written twice applies its
+    // last occurrence (map iteration order), matching how a duplicate key
+    // reads in the file.
+    for (key, value) in table {
+        match key.as_str() {
+            "name" => match value.as_str() {
+                Some(name) if THEME_NAMES.contains(&name) => config.theme_name = name.to_owned(),
+                Some(name) => issues.push(format!(
+                    "[post.theme].name {name:?} is unknown (known: {})",
+                    THEME_NAMES.join(", ")
+                )),
+                None => issues.push(String::from("[post.theme].name must be a string")),
+            },
+            token if THEME_TOKENS.contains(&token) => match value.as_str() {
+                Some(hex) => match parse_hex_color(hex) {
+                    Some(normalized) => config
+                        .theme_overrides
+                        .push((String::from(token), normalized)),
+                    None => issues.push(format!(
+                        "[post.theme].{token} must be a hex color like \"#4e86dd\""
+                    )),
+                },
+                None => issues.push(format!(
+                    "[post.theme].{token} must be a hex color like \"#4e86dd\""
+                )),
+            },
+            other => issues.push(format!(
+                "[post.theme].{other} is unknown (known tokens: {})",
+                THEME_TOKENS.join(", ")
+            )),
+        }
     }
 }
 
@@ -900,5 +1028,97 @@ mod tests {
     #[test]
     fn program_exists_rejects_unknown_names() {
         assert!(!program_exists("definitely-not-a-real-program-xyz"));
+    }
+}
+
+#[cfg(test)]
+mod theme_override_tests {
+    use super::*;
+
+    #[test]
+    fn parse_hex_color_normalizes_and_accepts_both_lengths() {
+        assert_eq!(parse_hex_color("#4e86dd").as_deref(), Some("#4e86dd"));
+        assert_eq!(parse_hex_color("#4E86DD").as_deref(), Some("#4e86dd"));
+        assert_eq!(parse_hex_color("#abc").as_deref(), Some("#aabbcc"));
+        assert_eq!(parse_hex_color("4e86dd"), None, "missing #");
+        assert_eq!(parse_hex_color("#4e86"), None, "wrong length");
+        assert_eq!(parse_hex_color("#4e86dd0"), None, "too long");
+        assert_eq!(parse_hex_color("#xyzxyz"), None, "not hex");
+        assert_eq!(parse_hex_color("#"), None, "empty");
+    }
+
+    #[test]
+    fn theme_overrides_parse_validate_and_normalize() {
+        let (config, issues) = parse_with_issues(
+            "[post.theme]\nname = \"light\"\naccent = \"#ABC\"\nbackground = \"#101014\"\n",
+            None,
+        );
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(config.theme_name, "light");
+        assert_eq!(
+            config.theme_overrides,
+            vec![
+                (String::from("accent"), String::from("#aabbcc")),
+                (String::from("background"), String::from("#101014")),
+            ]
+        );
+    }
+
+    #[test]
+    fn bad_hex_reports_the_token() {
+        let (_, issues) = parse_with_issues("[post.theme]\naccent = \"blue\"\n", None);
+        assert_eq!(issues.items.len(), 1);
+        assert!(issues.items[0].contains("accent"), "{issues:?}");
+        assert!(issues.items[0].contains("hex"), "{issues:?}");
+
+        let (_, issues) = parse_with_issues("[post.theme]\naccent = 7\n", None);
+        assert_eq!(issues.items.len(), 1);
+        assert!(issues.items[0].contains("accent"), "{issues:?}");
+    }
+
+    #[test]
+    fn unknown_theme_token_reports_the_known_ones() {
+        let (_, issues) = parse_with_issues("[post.theme]\nfont = \"x\"\n", None);
+        assert_eq!(issues.items.len(), 1);
+        assert!(issues.items[0].contains("font"), "{issues:?}");
+        assert!(issues.items[0].contains("background"), "{issues:?}");
+    }
+
+    #[test]
+    fn light_theme_name_is_known() {
+        let (config, issues) = parse_with_issues("[post.theme]\nname = \"light\"\n", None);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(config.theme_name, "light");
+    }
+
+    #[test]
+    fn issues_carry_no_file_contents_for_theme_errors() {
+        // The error names the token and the expected shape, never the
+        // offending value's raw content beyond the token context.
+        let (_, issues) = parse_with_issues("[post.theme]\naccent = \"#zz\"\n", None);
+        assert!(issues.items.iter().all(|i| !i.contains("zz")));
+    }
+}
+
+#[cfg(test)]
+mod ui_clock_tests {
+    use super::*;
+
+    #[test]
+    fn clock_is_off_by_default_and_configurable() {
+        let (config, issues) = parse_with_issues("", None);
+        assert!(issues.is_empty());
+        assert!(!config.ui_clock, "clock off by default");
+
+        let (config, issues) = parse_with_issues("[post.ui]\nclock = true\n", None);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert!(config.ui_clock);
+    }
+
+    #[test]
+    fn non_bool_clock_reports() {
+        let (_, issues) = parse_with_issues("[post.ui]\nclock = \"yes\"\n", None);
+        assert_eq!(issues.items.len(), 1);
+        assert!(issues.items[0].contains("clock"), "{issues:?}");
     }
 }

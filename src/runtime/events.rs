@@ -24,25 +24,65 @@ pub enum Event {
     Tick,
 }
 
-/// Spawn the event reader task; returns the receiving end. The task ends
-/// when the sender is dropped (i.e. when this receiver goes away).
-pub fn spawn() -> UnboundedReceiver<Event> {
-    let (tx, rx) = unbounded_channel();
-    tokio::spawn(event_loop(tx));
-    rx
+/// Control commands for the running event loop.
+enum Control {
+    /// Stop reading input events and ticks: the terminal is about to be
+    /// handed to a child program (the external editor, plan §14 Phase
+    /// 11.2), and a concurrent reader would steal its keystrokes.
+    Pause,
+    /// Resume normal event delivery.
+    Resume,
 }
 
-async fn event_loop(tx: UnboundedSender<Event>) {
+/// Handle over the running event loop's lifecycle (Phase 11.5): pause
+/// while the external editor owns the terminal, resume after it exits.
+#[derive(Clone)]
+pub struct EventControl {
+    tx: UnboundedSender<Control>,
+}
+
+impl EventControl {
+    pub fn pause(&self) {
+        let _ = self.tx.send(Control::Pause);
+    }
+
+    pub fn resume(&self) {
+        let _ = self.tx.send(Control::Resume);
+    }
+}
+
+/// Spawn the event reader task; returns the receiving end together with
+/// the loop's control handle. The task ends when the sender is dropped
+/// (i.e. when this receiver goes away).
+pub fn spawn() -> (UnboundedReceiver<Event>, EventControl) {
+    let (tx, rx) = unbounded_channel();
+    let (control_tx, control_rx) = unbounded_channel();
+    tokio::spawn(event_loop(tx, control_rx));
+    (rx, EventControl { tx: control_tx })
+}
+
+async fn event_loop(tx: UnboundedSender<Event>, mut control: UnboundedReceiver<Control>) {
     let mut reader = crossterm::event::EventStream::new();
     let mut tick = tokio::time::interval(TICK_INTERVAL);
+    // While paused (external editor owns the terminal) ticks are not
+    // consumed; delay mode prevents a burst firing on resume.
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut paused = false;
     loop {
         tokio::select! {
-            _ = tick.tick() => {
+            command = control.recv() => match command {
+                Some(Control::Pause) => paused = true,
+                Some(Control::Resume) => paused = false,
+                None => break,
+            },
+            // Both input arms are disabled while paused: the child program
+            // owns stdin, and its keystrokes must reach it untouched.
+            _ = tick.tick(), if !paused => {
                 if tx.send(Event::Tick).is_err() {
                     break;
                 }
             }
-            event = reader.next() => {
+            event = reader.next(), if !paused => {
                 match event {
                     Some(Ok(CrosstermEvent::Key(key))) => {
                         // Only real presses; repeats/releases would double-fire.

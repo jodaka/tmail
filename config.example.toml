@@ -45,3 +45,7 @@ downloads_dir = "~/Downloads"
 
 [post.theme]
 name = "default"
+# Fine-tune any color token with a hex value (ticket wrs7):
+# background = "#0f1014"
+# accent = "#8ab4f8"
+# name = "light"  # or switch to the built-in light theme

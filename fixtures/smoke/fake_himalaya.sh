@@ -10,12 +10,30 @@
 set -u
 
 SUB=""
+OP=""
+prev=""
 for a in "$@"; do
+  case "$prev" in
+    message) OP="$a" ;;
+  esac
   case "$a" in
     mailbox) SUB="mailbox" ;;
     envelope) SUB="envelope" ;;
+    message) SUB="message" ;;
   esac
+  prev="$a"
 done
+
+if [ "$SUB" = "mailbox" ]; then
+  printf '%s' '{"mailboxes":[{"id":"/root/maildir/INBOX","name":"INBOX","total":null,"unread":null},{"id":"/root/maildir/Archive","name":"Archive","total":null,"unread":null},{"id":"Drafts","name":"Drafts","total":null,"unread":null},{"id":"Sent","name":"Sent"}]}'
+  exit 0
+fi
+
+if [ "$SUB" = "message" ] && [ "$OP" = "add" ]; then
+  # Draft save (plan §14): the backend id of the new copy.
+  printf '%s' '{"id":"draft-1","sent":false}'
+  exit 0
+fi
 
 if [ "$SUB" = "mailbox" ]; then
   printf '%s' '{"mailboxes":[{"id":"/root/maildir/INBOX","name":"INBOX","total":null,"unread":null},{"id":"/root/maildir/Archive","name":"Archive","total":null,"unread":null},{"id":"Sent","name":"Sent"}]}'

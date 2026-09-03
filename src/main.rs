@@ -85,8 +85,9 @@ async fn run() -> anyhow::Result<()> {
 
     // Mouse capture is opt-in (`[post].mouse`, plan §10): with capture off,
     // terminal text selection keeps its native behavior and no mouse
-    // events arrive at all.
-    let mut guard = terminal::enable(config.mouse)?;
+    // events arrive at all. The guard is optional: `None` only while the
+    // external editor owns the terminal (Phase 11).
+    let mut guard = Some(terminal::enable(config.mouse)?);
     let mut state = AppState::initial(config.page_size);
     // Reply-all excludes the configured account address (Phase 7.5).
     state.account_email = config.account_email.clone();
@@ -95,6 +96,8 @@ async fn run() -> anyhow::Result<()> {
     // Draft autosave debounce (Phase 10.4 wiring of
     // `[post.composer].autosave_delay_ms`).
     state.autosave_delay_ms = config.autosave_delay_ms;
+    // The external editor argv (Phase 11.4); `None` = builtin editor.
+    state.editor_command = config.editor_command.clone();
     // Mouse capture starts in the configured mode (Phase 10.4); `m`
     // toggles it at runtime via `Action::ToggleMouseCapture`.
     state.mouse_capture = config.mouse;
@@ -103,13 +106,24 @@ async fn run() -> anyhow::Result<()> {
     }
     tracing::info!(size = ?state.size, "shell started (real backend)");
 
-    let mut events = events::spawn();
-    // `[post.theme].name`, falling back to plain terminal colors when the
-    // environment asks for no color (plan §18).
+    let (mut events, events_control) = events::spawn();
+    // `[post.theme].name` plus any `[post.theme]` color overrides (ticket
+    // wrs7), falling back to plain terminal colors when the environment
+    // asks for no color (plan §18) — NO_COLOR wins over custom colors.
     let theme = if Theme::no_color_requested() {
         Theme::monochrome()
     } else {
-        Theme::from_name(&config.theme_name)
+        let mut theme = Theme::from_name(&config.theme_name);
+        for (token, hex) in &config.theme_overrides {
+            // Validation guarantees known tokens and valid hex; a stale
+            // parse would only skip the override, never crash startup.
+            if let Some(color) =
+                tmail::config::parse_hex_color(hex).and_then(|hex| Theme::color_from_hex(&hex))
+            {
+                theme.set_token(token, color);
+            }
+        }
+        theme
     };
 
     // Backend results re-enter the reducer as actions; the manager spawns
@@ -124,17 +138,26 @@ async fn run() -> anyhow::Result<()> {
     // with no mailboxes loaded yet, Refresh starts the mailbox listing;
     // LoadDrafts restores any crash-safe draft from the journal (plan §14).
     let effects = reducer::reduce(&mut state, &Action::Refresh);
-    launch(&manager, &state, effects);
+    handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
     let effects = reducer::reduce(&mut state, &Action::LoadDrafts);
-    launch(&manager, &state, effects);
+    handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
 
     loop {
         let now = Local::now().fixed_offset();
-        let ctx = RenderContext::new(now, format_clock(now));
+        // The top-right clock is config-gated and off by default (ticket
+        // w7f5): an empty label renders nothing.
+        let clock_label = if config.ui_clock {
+            format_clock(now)
+        } else {
+            String::new()
+        };
+        let ctx = RenderContext::new(now, clock_label);
         // The hit map of the frame currently on screen: mouse events are
         // hit-tested against exactly what the user sees (plan §10).
         let mut hits = mouse::HitMap::default();
         guard
+            .as_mut()
+            .expect("terminal guard alive while drawing")
             .terminal_mut()
             .draw(|frame| tmail::ui::render(frame, &state, &theme, &ctx, &mut hits))
             .context("terminal draw failed")?;
@@ -156,7 +179,7 @@ async fn run() -> anyhow::Result<()> {
                     if let Some(action) = keyboard::to_action(key, state.focus) {
                         tracing::debug!(?action, "dispatch");
                         let effects = reducer::reduce(&mut state, &action);
-                        launch(&manager, &state, effects);
+                        handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
                         sync_mouse_capture(&state, &mut capture_applied);
                     }
                 }
@@ -166,7 +189,7 @@ async fn run() -> anyhow::Result<()> {
                     if let Some(action) = mouse::to_action(mouse_event, &hits, &state) {
                         tracing::debug!(?action, "mouse dispatch");
                         let effects = reducer::reduce(&mut state, &action);
-                        launch(&manager, &state, effects);
+                        handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
                         sync_mouse_capture(&state, &mut capture_applied);
                     }
                 }
@@ -175,7 +198,7 @@ async fn run() -> anyhow::Result<()> {
                         &mut state,
                         &Action::Resize { width, height },
                     );
-                    launch(&manager, &state, effects);
+                    handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
                     sync_mouse_capture(&state, &mut capture_applied);
                 }
                 Some(events::Event::Tick) => {
@@ -185,7 +208,7 @@ async fn run() -> anyhow::Result<()> {
                             now: Box::new(Local::now().fixed_offset()),
                         },
                     );
-                    launch(&manager, &state, effects);
+                    handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
                     sync_mouse_capture(&state, &mut capture_applied);
                 }
                 None => {
@@ -199,7 +222,7 @@ async fn run() -> anyhow::Result<()> {
                         &mut state,
                         &Action::BackendCompleted(result),
                     );
-                    launch(&manager, &state, effects);
+                    handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
                     sync_mouse_capture(&state, &mut capture_applied);
                 }
                 // The manager holds a sender for the whole session.
@@ -212,9 +235,19 @@ async fn run() -> anyhow::Result<()> {
 
 /// Launch the effects a state transition produced: each one gets its
 /// cancellation token from the registry, so a later `Esc` can cancel
-/// exactly that work.
+/// exactly that work. The `EditExternally` effect never reaches the
+/// manager: the external editor must run on the thread that owns the
+/// terminal (plan §14, Phase 11), so it is awaited inline by the caller —
+/// `handle_effects` below.
 fn launch(manager: &OperationManager, state: &AppState, effects: Vec<Effect>) {
     for effect in effects {
+        if matches!(
+            effect.kind,
+            tmail::app::operation::OperationKind::EditExternally { .. }
+        ) {
+            tracing::warn!(id = %effect.id, "external editor effect reached the manager; dropped");
+            continue;
+        }
         let Some(token) = state.operations.cancellation(effect.id) else {
             tracing::warn!(id = %effect.id, "effect without a registered operation");
             continue;
@@ -225,6 +258,65 @@ fn launch(manager: &OperationManager, state: &AppState, effects: Vec<Effect>) {
         };
         manager.launch(effect, ctx);
     }
+}
+
+/// Route one batch of reducer effects: async backend operations go to the
+/// manager; the external editor runs here, synchronously, on the terminal
+/// owner (plan §14 steps 2–7, Phase 11): pause the event reader so it
+/// cannot steal the editor's keystrokes, suspend the TUI, run the editor
+/// (the runtime stays live, so the pre-launch draft save completes), then
+/// always resume — success or failure (step 7) — and force a full redraw.
+async fn handle_effects(
+    state: &mut AppState,
+    manager: &OperationManager,
+    guard: &mut Option<terminal::TerminalGuard>,
+    events_control: &events::EventControl,
+    effects: Vec<Effect>,
+) -> anyhow::Result<()> {
+    for effect in effects {
+        if let tmail::app::operation::OperationKind::EditExternally { program, body } =
+            effect.kind.clone()
+        {
+            // Suspend: drop the guard (its Drop restores the terminal) and
+            // pause the event reader so it cannot steal the editor's
+            // keystrokes (plan §14 steps 2 and 5).
+            events_control.pause();
+            drop(guard.take().expect("terminal guard to suspend"));
+            let mouse = state.mouse_capture;
+            let result = tmail::runtime::editor::run(&program, &body).await;
+            // Step 7: restore the terminal even on editor failure —
+            // unconditionally, before anything else runs. The fresh guard
+            // repaints from scratch on the next draw.
+            *guard = Some(terminal::reenter(mouse).context("terminal resume failed")?);
+            events_control.resume();
+            let effects = reducer::reduce(
+                state,
+                &Action::EditorFinished {
+                    id: effect.id,
+                    result,
+                },
+            );
+            // The import's follow-up save is a plain backend effect; the
+            // editor flow itself cannot re-enter here.
+            launch(manager, state, effects);
+        } else {
+            launch_one(manager, state, effect);
+        }
+    }
+    Ok(())
+}
+
+/// Launch one non-editor effect.
+fn launch_one(manager: &OperationManager, state: &AppState, effect: Effect) {
+    let Some(token) = state.operations.cancellation(effect.id) else {
+        tracing::warn!(id = %effect.id, "effect without a registered operation");
+        return;
+    };
+    let ctx = RequestContext {
+        operation: effect.id,
+        cancellation: token,
+    };
+    manager.launch(effect, ctx);
 }
 
 /// Keep the terminal's mouse-capture mode in sync with the mode the

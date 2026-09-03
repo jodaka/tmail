@@ -162,6 +162,72 @@ def step_editor_validation(binpath, config):
         os.close(fd)
 
 
+def step_external_editor(binpath, config, editor_name, expect_import):
+    label = "succeeding" if expect_import else "failing"
+    print(f"== external editor ({label}): suspend → edit → resume ==", flush=True)
+    pid, fd = spawn(
+        [binpath, config],
+        {
+            "EDITOR": os.path.join(ROOT, "fixtures", "smoke", editor_name),
+            "PATH": os.environ["PATH"],
+        },
+    )
+    try:
+        wait_for(fd, "Welcome")
+        before = read_for(fd, 0.3)
+        alt_screens = before.count("\x1b[?1049h")
+
+        # Compose, then hand the body to the external editor (Ctrl+E).
+        os.write(fd, b"c")
+        time.sleep(0.6)
+        os.write(fd, b"\x05")
+        # The editor run suspends the TUI; wait for it to finish and the
+        # app to repaint with the imported text (or the failure status).
+        needle = "EDITED-BY-SMOKE" if expect_import else "External editor failed"
+        end = time.time() + 12.0
+        acc = ""
+        while time.time() < end:
+            acc += read_for(fd, 0.3)
+            if needle in strip_ansi(acc):
+                break
+        assert needle in strip_ansi(acc), (
+            f"editor flow did not reach {needle!r}:\n{strip_ansi(acc)[-3000:]}"
+        )
+
+        # The TUI re-entered the alternate screen after the editor (plan
+        # §14 step 7), regardless of the editor's exit status.
+        assert acc.count("\x1b[?1049h") > alt_screens, (
+            "the alternate screen was not re-entered after the editor"
+        )
+        if expect_import:
+            # Esc leaves the composer, second Esc quits.
+            os.write(fd, b"\x1b")
+            time.sleep(0.4)
+            os.write(fd, b"\x1b")
+            status, out = wait_exit(pid, fd)
+            assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (
+                f"exit status {status!r}"
+            )
+            assert "\x1b[?1049l" in out, "terminal not restored after quit"
+        else:
+            # The composer stays usable: Esc leaves it, second Esc quits.
+            os.write(fd, b"\x1b")
+            time.sleep(0.4)
+            os.write(fd, b"\x1b")
+            status, out = wait_exit(pid, fd)
+            assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (
+                f"exit status {status!r}"
+            )
+        print(f"   external editor ({label}) OK", flush=True)
+    finally:
+        try:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+        except (ChildProcessError, ProcessLookupError):
+            pass
+        os.close(fd)
+
+
 def step_opener_environment():
     print("== opener environment: platform opener present ==", flush=True)
     program = "open" if sys.platform == "darwin" else "xdg-open"
@@ -197,6 +263,11 @@ def main():
             os.remove(link)
         os.symlink(target, link)
 
+    # The committed external editors (Phase 11 smoke): one saves the file,
+    # one fails — both chmod'd executable here.
+    for editor in ("fake_editor.sh", "failing_editor.sh"):
+        os.chmod(os.path.join(ROOT, "fixtures", "smoke", editor), 0o755)
+
     # The fake himalaya wins over any installed binary; real tools stay
     # reachable behind it.
     env_path = fake_dir + os.pathsep + os.environ["PATH"]
@@ -210,6 +281,8 @@ def main():
         step_opener_environment()
         step_happy(binpath, config, fake_dir)
         step_editor_validation(binpath, config)
+        step_external_editor(binpath, config, "fake_editor.sh", expect_import=True)
+        step_external_editor(binpath, config, "failing_editor.sh", expect_import=False)
     finally:
         os.environ["PATH"] = old_path
     print("SMOKE OK", flush=True)

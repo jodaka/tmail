@@ -102,7 +102,7 @@ pub fn render(
     } else {
         screens::mailbox::render(frame, list, state, mode, theme, ctx.now, hits);
     }
-    components::statusbar::render(frame, statusbar, state, theme);
+    components::statusbar::render(frame, statusbar, state, theme, hits);
     components::error_modal::render(frame, state, theme, hits);
     components::confirm_modal::render(frame, state, theme, hits);
     components::attachment_dialog::render(frame, state, theme);

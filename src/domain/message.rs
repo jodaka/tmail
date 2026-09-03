@@ -100,8 +100,9 @@ impl Message {
     }
 }
 
-/// One row of a message list (plan §7 `MessageSummary`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One row of a message list (plan §7 `MessageSummary`). Serializable so
+/// the summary cache (ticket haeb) can persist the last loaded page.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MessageSummary {
     pub id: MessageId,
     pub mailbox_id: MailboxId,

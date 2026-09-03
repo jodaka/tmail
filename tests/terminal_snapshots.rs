@@ -1224,7 +1224,7 @@ fn list_matches_mockup_density_and_hierarchy() {
     assert!(range_x > 120, "range is right-aligned, found at {range_x}");
     // A starred row keeps the single-line grid: star | from | subject |
     // snippet | date on one row (mockup `.mail` grid).
-    let (row_y, star_x) = position_of(&text, "*PayPal");
+    let (row_y, star_x) = position_of(&text, "* PayPal");
     let (_, from_x) = position_of(&text, "PayPal");
     let (_, subject_x) = position_of(&text, "Payment received");
     let (_, date_x) = position_of(&text, "Yest");
@@ -1353,3 +1353,142 @@ fn hit_map_records_reader_action_row_segments() {
 }
 
 use unicode_width::UnicodeWidthStr as _;
+
+// ── Bulk selection rendering (ticket p0s3) ───────────────────────────────
+
+#[test]
+fn select_all_marks_rows_and_the_header_toggle() {
+    let mut state = mock_initial_state();
+    state.focus = tmail::app::Focus::MessageList;
+    let before = text_of(&buffer_after(&mut state, &[], 152, 40));
+    assert!(
+        before.contains("[ ]"),
+        "header starts unchecked:\n{}",
+        before.lines().take(6).collect::<Vec<_>>().join("\n")
+    );
+
+    // One draw after SelectAll: the header flips and every marked row but
+    // the cursor row carries the bulk highlight.
+    let mut state = mock_initial_state();
+    state.focus = tmail::app::Focus::MessageList;
+    let buffer = buffer_after(&mut state, &[Action::SelectAll], 152, 40);
+    let text = text_of(&buffer);
+    assert!(text.contains("[X]"), "header flips to checked");
+
+    // Rows are located by their rendered subject text.
+    let theme = Theme::default_dark();
+    let cursor_row = text
+        .lines()
+        .position(|line| line.contains("KKF Notifications"))
+        .expect("cursor row") as u16;
+    let marked_row = text
+        .lines()
+        .position(|line| line.contains("Weekly digest"))
+        .expect("another marked row") as u16;
+    assert_eq!(
+        buffer[(tmail::ui::layout::SIDEBAR_WIDTH + 2, cursor_row)].bg,
+        theme.accent_bg,
+        "cursor row keeps the accent fill"
+    );
+    assert_eq!(
+        buffer[(tmail::ui::layout::SIDEBAR_WIDTH + 2, marked_row)].bg,
+        theme.bulk_selected_bg,
+        "marked rows carry the bulk highlight"
+    );
+}
+
+#[test]
+fn selection_mode_status_bar_lists_the_bulk_buttons() {
+    let mut state = mock_initial_state();
+    state.focus = tmail::app::Focus::MessageList;
+    let (buffer, hits) = draw_with_hits_at(&mut state, &[Action::SelectAll], 152, 40);
+    let text = text_of(&buffer);
+    assert!(text.contains("selected:"), "count label:\n{text}");
+    assert!(text.contains("[delete]"), "delete button");
+    assert!(text.contains("[archive]"), "archive button");
+    assert!(text.contains("[read]"), "read button");
+    assert!(text.contains("[unread]"), "unread button");
+    assert!(text.contains("esc clear"), "clear hint");
+
+    // The [archive] button is clickable where it is drawn.
+    let (mut bx, mut by) = (0u16, 0u16);
+    'outer: for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width.saturating_sub(9) {
+            let symbol: String = (0..9)
+                .map(|dx| buffer[(x + dx, y)].symbol().chars().next().unwrap_or(' '))
+                .collect();
+            if symbol == "[archive]" {
+                bx = x;
+                by = y;
+                break 'outer;
+            }
+        }
+    }
+    assert_ne!(bx + by, 0, "[archive] drawn somewhere");
+    assert_eq!(
+        hits.hit_test(bx + 1, by, false),
+        Some(tmail::app::action::ClickTarget::BulkAction(
+            tmail::app::action::BulkOp::Archive
+        )),
+        "the drawn button answers clicks"
+    );
+}
+
+/// [`draw_with_hits`] after applying actions.
+fn draw_with_hits_at(
+    state: &mut tmail::app::AppState,
+    actions: &[Action],
+    width: u16,
+    height: u16,
+) -> (ratatui::buffer::Buffer, HitMap) {
+    let theme = Theme::default_dark();
+    let now = mock::now();
+    let ctx = RenderContext::new(now, dates::format_clock(now));
+    for action in actions {
+        reducer::reduce(state, action);
+    }
+    state.size = (width, height);
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("test backend");
+    let mut hits = HitMap::default();
+    terminal
+        .draw(|frame| render(frame, state, &theme, &ctx, &mut hits))
+        .expect("draw");
+    (terminal.backend().buffer().clone(), hits)
+}
+
+#[test]
+fn selected_rows_show_the_checkbox_and_star_gets_a_trailing_space() {
+    // Bulk-marked rows render the checkbox in the icon column (ticket
+    // cvc4), whatever their star state; every icon is followed by a space.
+    let mut state = mock_initial_state();
+    state.focus = tmail::app::Focus::MessageList;
+    let buffer = buffer_after(&mut state, &[Action::SelectAll], 152, 40);
+    let text = text_of(&buffer);
+    let cursor_row = text
+        .lines()
+        .position(|line| line.contains("KKF Notifications"))
+        .expect("cursor row");
+    let line = text.lines().nth(cursor_row).unwrap();
+    let cells: Vec<char> = line.chars().collect();
+    // Columns past the list edge are marker (1) + icon (2): ▏/space, then
+    // ☑ or * followed by one space.
+    let list_start = tmail::ui::layout::SIDEBAR_WIDTH as usize;
+    let icon: String = cells[list_start + 1..list_start + 3].iter().collect();
+    assert_eq!(icon, "☑ ", "checkbox icon with trailing space");
+    // A starred row renders "* " in the same column when not marked.
+    let mut state = mock_initial_state();
+    state.messages.items[0].is_starred = true;
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    let text = text_of(&buffer);
+    let star_line = text
+        .lines()
+        .find(|l| l.contains("KKF Notifications"))
+        .expect("starred row");
+    let cells: Vec<char> = star_line.chars().collect();
+    let icon: String = cells[tmail::ui::layout::SIDEBAR_WIDTH as usize + 1
+        ..tmail::ui::layout::SIDEBAR_WIDTH as usize + 3]
+        .iter()
+        .collect();
+    assert_eq!(icon, "* ", "star icon with trailing space");
+}

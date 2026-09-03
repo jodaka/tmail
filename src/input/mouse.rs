@@ -111,7 +111,9 @@ fn wheel(state: &AppState, delta: i64) -> Option<Action> {
                 Action::MoveDown
             }
         }
-        Focus::SearchField | Focus::Composer | Focus::Dialog => return None,
+        Focus::SearchField | Focus::Composer | Focus::Dialog | Focus::SelectAllToggle => {
+            return None;
+        }
     };
     Some(action)
 }

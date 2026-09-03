@@ -164,6 +164,15 @@ async fn run_effect(
                 }
             }
         }
+        // The external editor never reaches the manager: the main loop
+        // runs it synchronously on the terminal owner (plan §14, Phase
+        // 11). This arm keeps the match total; reaching it would mean the
+        // editor was spawned behind a suspended TUI, so nothing is
+        // reported and the registry entry is finished by the real runner.
+        OperationKind::EditExternally { .. } => {
+            tracing::error!(id = %effect.id, "external editor effect reached the operation manager");
+            None
+        }
     }
 }
 

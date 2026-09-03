@@ -4,12 +4,11 @@ A Gmail-inspired, keyboard-first terminal email client built in Rust with
 Ratatui, backed by the [Himalaya CLI](https://pimalaya.org) for all mail
 protocols, accounts, and credentials.
 
-**Status: Phases 0–10 complete** (shell, Himalaya adapter, operation
+**Status: Phases 0–11 complete** (shell, Himalaya adapter, operation
 manager/cancellation, reader, MIME/HTML rendering, composer + draft
 autosave, send/reply/forward, attachments, search/refresh, mouse +
-responsive polish + config validation), Phase 12 hardening in progress.
-The external-editor composer flow (Phase 11) is not implemented yet; the
-`editor` setting is validated at startup either way. Implementation
+responsive polish + config validation, external editor). Phase 12
+hardening (integration suites, docs, CI) is in progress. Implementation
 proceeds phase by phase per `POST_IMPLEMENTATION_PLAN.md`.
 
 ## Installation
@@ -84,7 +83,8 @@ any other file are ignored.**
 | `[post.composer].editor` | string | `"builtin"` | `"builtin"`, `"$EDITOR"` (resolved from the environment), or a plain command like `nvim` (program + arguments, **no shell metacharacters** — Post never spawns a shell). The external-editor flow itself ships in Phase 11; the value is validated at startup either way. |
 | `[post.composer].autosave_delay_ms` | integer | `2000` | Draft autosave debounce for the builtin editor. Accepted range: 100–600000. |
 | `[post.attachments].downloads_dir` | string | `$HOME/Downloads` | Directory used by *save attachment*. Must be absolute or start with `~/` (Post expands `~` itself, never via a shell). May not exist yet; must not be an existing file. |
-| `[post.theme].name` | string | `"default"` | Theme name. `"default"` is the dark reference theme. Set the `NO_COLOR` environment variable (non-empty) to render without any colors at all. |
+| `[post.theme].name` | string | `"default"` | Theme name: `"default"` (dark) or `"light"` (ticket wrs7). Set the `NO_COLOR` environment variable (non-empty) to render without any colors at all — it also ignores theme overrides. |
+| `[post.ui].clock` | bool | `false` | Show the date/time clock in the top-right corner (ticket w7f5). Off by default. |
 
 ### Example
 
@@ -124,6 +124,27 @@ name = "default"
 
 A runnable copy lives in `config.example.toml`.
 
+### Theming
+
+Pick a built-in theme with `[post.theme].name` (`"default"` for the dark
+reference look, `"light"` for a paper variant), and fine-tune any of the
+semantic color tokens right in the same file with hex colors:
+
+```toml
+[post.theme]
+name = "default"
+background = "#0f1014"   # #rrggbb or the short #rgb form
+accent = "#8ab4f8"
+error = "#ff6b5e"
+```
+
+Overridable tokens: `background`, `surface`, `surface2`, `border`, `text`,
+`text_soft`, `muted`, `dim`, `accent`, `accent_bg`, `bulk_selected_bg`
+(the Space-marked row highlight), `warning`, `error`, `selection`. Unknown
+tokens or malformed colors fail startup validation like any other config
+problem; `NO_COLOR` overrides everything and renders with terminal
+defaults only.
+
 ### Startup validation
 
 Before the UI starts, Post validates the whole file and reports **every**
@@ -158,22 +179,63 @@ Post reads, from himalaya's own blocks:
 | Global | `↑` / `↓` | Move selection / scroll focused area |
 | Global | `←` / `→` | Previous / next page (reader: page the viewport) |
 | Global | `Enter` | Open / activate focused control |
-| Global | `Esc` (or `q`) | Cancel work → close overlay → go back |
+| Global | `Esc` (or `q`) | Cancel work → clear selection → close overlay → go back |
 | Global | `Tab` / `Shift+Tab` | Next / previous focus |
 | Global | `/` | Focus search |
 | Global | `c` | Compose |
 | Global | `Ctrl+R` | Manual refresh |
 | Global | `Ctrl+C` | Quit |
+| Global | `Ctrl+A` | Select all visible messages (or clear the selection) |
 | Global | `m` | Toggle mouse capture on/off (see [Mouse](#mouse)) |
 | List/reader | `r` / `a` / `f` | Reply / reply-all / forward |
 | List/reader | `e` / `s` / `u` | Archive / star / mark unread |
 | List/reader | `Delete` | Trash |
+| List | `Space` | Toggle the focused message's selection mark |
+| List | `i` | Mark read (focused row, or the whole selection) |
 | Reader | `d` / `o`, `Tab` | Save / open attachment, cycle chips |
 | Search | printable, `Backspace`, `Enter`, `Esc` | Edit query, submit, leave |
 | Composer | `Enter` | Newline in body; activate focused control |
 | Composer | `Ctrl+Enter` | Send |
+| Composer | `Ctrl+E` | Edit the body in the configured external editor |
 | Composer | `Esc` | Save and leave (never silently discards) |
 | Modal | `↑↓` / `Tab` / `Enter` / `Esc` | Scroll, switch button, confirm, dismiss/keep |
+
+## External editor
+
+With `[post.composer].editor` set to `"$EDITOR"` (or an explicit command
+like `nvim`), press `Ctrl+E` inside the composer to edit the draft body in
+your own editor:
+
+1. The draft is saved first (journal + remote), so nothing can be lost.
+2. Post suspends its UI: raw mode and the alternate screen are left, and
+   your editor takes over the full terminal.
+3. The body travels through a secure temporary file (owner-only
+   permissions, removed afterwards). The editor gets the file path as its
+   last argument.
+4. Post waits for the editor to exit — no background autosave runs while
+   it owns the file — then imports the text and saves once.
+5. The terminal is restored even if the editor fails; a failed run
+   imports nothing and the draft stays intact.
+
+With the default `editor = "builtin"`, `Ctrl+E` does nothing.
+
+## Bulk selection
+
+Select messages with `Space` (or by clicking the `[ ] Inbox` label in the
+list header, or `Ctrl+A` for every visible message). While any message is
+marked, the status bar shows how many are selected and the bulk operations:
+
+- `[delete]` — trash every selected message (`Delete`)
+- `[archive]` — archive every selected message (`e`)
+- `[read]` — mark every selected message read (`i`)
+- `[unread]` — mark every selected message unread (`u`)
+
+The buttons are clickable; the bracketed keys do the same from the list.
+Marks ride the message id, so they survive paging and refreshes; switching
+mailboxes, leaving search, or pressing `Esc` (with nothing to cancel or
+close) clears the selection. Marked rows carry a distinct highlight fill.
+`Enter` still opens the focused message; the only place it touches the
+selection is on the focused `[ ] Inbox` toggle itself.
 
 ## Search
 
@@ -254,8 +316,7 @@ TUI. You keep two ways to select text:
 
 **v1 scope** (by design, per `POST_IMPLEMENTATION_PLAN.md` §23): no
 conversation threads, no multiple-account switching, no label management,
-no settings/help UI, no offline sync, and no external-editor composer flow
-yet (Phase 11).
+no settings/help UI, and no offline sync.
 
 **Search:**
 

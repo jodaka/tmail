@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::app::action::SearchEdit;
+use crate::app::action::{BulkOp, ClickTarget};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::mock::{self, mock_initial_state};
@@ -1354,6 +1355,8 @@ fn focus_cycles_tab_shift_tab() {
     assert_eq!(s.focus, Focus::MessageList);
     reduce(&mut s, &Action::FocusNext);
     assert_eq!(s.focus, Focus::SearchField);
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.focus, Focus::SelectAllToggle);
     reduce(&mut s, &Action::FocusNext);
     assert_eq!(s.focus, Focus::Sidebar);
     reduce(&mut s, &Action::FocusNext);
@@ -3741,7 +3744,6 @@ fn refresh_preserves_the_logical_selection_when_new_mail_arrives() {
 
 // ── Mouse clicks (plan §10, Phase 10.1/10.2) ─────────────────────────────
 
-use crate::app::action::ClickTarget;
 use crate::app::overlay::{ConfirmButton, ErrorDialog, ModalButton};
 
 #[test]
@@ -4145,4 +4147,442 @@ fn m_toggles_mouse_capture_state() {
     );
     no_effects(&reduce(&mut s, &Action::ToggleMouseCapture));
     assert!(!s.mouse_capture);
+}
+
+// ── Bulk selection (ticket p0s3) ─────────────────────────────────────────
+
+#[test]
+fn space_toggles_the_selection_mark_on_the_focused_row() {
+    let mut s = state();
+    s.focus = Focus::MessageList;
+    s.selection = 2;
+    let id = s.selected_message().unwrap().id.clone();
+
+    no_effects(&reduce(&mut s, &Action::ToggleSelected));
+    assert!(s.selected.contains(&id), "first Space marks the row");
+    assert!(s.selection_active());
+
+    // The cursor advanced; move back to the marked row and unmark it.
+    s.selection = 2;
+    no_effects(&reduce(&mut s, &Action::ToggleSelected));
+    assert!(!s.selected.contains(&id), "second Space unmarks");
+    assert!(!s.selection_active(), "empty set = selection mode off");
+}
+
+#[test]
+fn space_does_nothing_outside_the_list_focus() {
+    let mut s = state();
+    let id = s.messages.items[0].id.clone();
+    s.selected.insert(id.clone());
+    s.focus = Focus::Sidebar;
+    no_effects(&reduce(&mut s, &Action::ToggleSelected));
+    s.focus = Focus::Reader;
+    no_effects(&reduce(&mut s, &Action::ToggleSelected));
+    assert!(s.selected.contains(&id), "marks never change off-list");
+}
+
+#[test]
+fn select_all_marks_every_visible_row_and_toggles_back() {
+    let mut s = state();
+    s.focus = Focus::MessageList;
+    no_effects(&reduce(&mut s, &Action::SelectAll));
+    assert_eq!(
+        s.visible_selected_count(),
+        s.messages.items.len(),
+        "all visible rows marked"
+    );
+    assert!(s.all_visible_selected());
+
+    no_effects(&reduce(&mut s, &Action::SelectAll));
+    assert!(s.selected.is_empty(), "second Ctrl+A deselects all");
+}
+
+#[test]
+fn selection_survives_paging_but_not_mailbox_switch() {
+    let mut s = state();
+    s.focus = Focus::MessageList;
+    no_effects(&reduce(&mut s, &Action::SelectAll));
+    let marked: Vec<_> = s.selected.iter().cloned().collect();
+
+    // Page forward and back: the marks ride backend ids.
+    reduce(&mut s, &Action::PageNext);
+    reduce(&mut s, &Action::PagePrevious);
+    for id in &marked {
+        assert!(
+            s.messages.items.iter().any(|m| &m.id == id),
+            "page 1 rows returned"
+        );
+    }
+    assert!(marked.iter().all(|id| s.selected.contains(id)));
+
+    // A mailbox switch is a new context: the set clears. The first click
+    // only selects the sidebar row; the second (already-selected) switches.
+    let next_mailbox = s.mailbox_selection + 1;
+    reduce(&mut s, &Action::Click(ClickTarget::Mailbox(next_mailbox)));
+    reduce(&mut s, &Action::Click(ClickTarget::Mailbox(next_mailbox)));
+    assert!(s.selected.is_empty(), "mailbox switch clears the selection");
+}
+
+#[test]
+fn bulk_archive_starts_one_operation_per_selected_message() {
+    let mut s = state();
+    s.focus = Focus::MessageList;
+    s.selection = 0;
+    no_effects(&reduce(&mut s, &Action::ToggleSelected));
+    reduce(&mut s, &Action::MoveDown);
+    no_effects(&reduce(&mut s, &Action::ToggleSelected));
+    let count = s.selected.len();
+    assert_eq!(count, 2);
+
+    let effects = reduce(&mut s, &Action::Archive);
+    assert_eq!(effects.len(), count, "one operation per marked row");
+    for effect in &effects {
+        assert!(matches!(effect.kind, OperationKind::Archive(_)));
+    }
+    assert!(
+        s.status
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("2 messages")),
+        "status announces the batch: {:?}",
+        s.status.message
+    );
+}
+
+#[test]
+fn bulk_trash_read_and_unread_follow_the_same_pattern() {
+    let mut s = state();
+    s.focus = Focus::MessageList;
+    no_effects(&reduce(&mut s, &Action::SelectAll));
+    let count = s.messages.items.len();
+
+    let effects = reduce(&mut s, &Action::Trash);
+    assert_eq!(effects.len(), count);
+    assert!(
+        effects
+            .iter()
+            .all(|e| matches!(e.kind, OperationKind::Trash(_)))
+    );
+
+    let effects = reduce(&mut s, &Action::MarkRead);
+    assert_eq!(effects.len(), count);
+    assert!(
+        effects
+            .iter()
+            .all(|e| matches!(e.kind, OperationKind::SetRead { read: true, .. }))
+    );
+
+    let effects = reduce(&mut s, &Action::MarkUnread);
+    assert_eq!(effects.len(), count);
+    assert!(
+        effects
+            .iter()
+            .all(|e| matches!(e.kind, OperationKind::SetRead { read: false, .. }))
+    );
+}
+
+#[test]
+fn mark_read_single_row_when_no_selection() {
+    let mut s = state();
+    s.focus = Focus::MessageList;
+    s.selection = 1;
+    let target = s.selected_message().unwrap().id.clone();
+    let (id, kind) = expect_kind(&reduce(&mut s, &Action::MarkRead));
+    assert!(
+        matches!(&kind, OperationKind::SetRead { read: true, .. }),
+        "kind: {kind:?}"
+    );
+    complete_done(&mut s, id);
+    let row = s.messages.items.iter().find(|m| m.id == target).unwrap();
+    assert!(row.is_read, "confirmation marks the row read");
+}
+
+#[test]
+fn reader_shortcuts_do_not_act_on_the_selection() {
+    let mut s = state();
+    s.focus = Focus::MessageList;
+    no_effects(&reduce(&mut s, &Action::SelectAll));
+    // Open the first message; the reader takes focus.
+    let (load_id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    complete_message_ok(&mut s, load_id);
+    assert_eq!(s.focus, Focus::Reader);
+
+    // Selection still on, but `e` in the reader archives the open message,
+    // not the batch.
+    let effects = reduce(&mut s, &Action::Archive);
+    let (id, _) = effect_parts(&effects);
+    assert!(matches!(effects[0].kind, OperationKind::Archive(_)));
+    let opened = s.open_summary().unwrap().id.clone();
+    if let OperationKind::Archive(locator) = &effects[0].kind {
+        assert_eq!(locator.id, opened, "the open message is the target");
+    }
+    complete_done(&mut s, id);
+}
+
+#[test]
+fn moved_messages_leave_the_selection() {
+    let mut s = state();
+    s.focus = Focus::MessageList;
+    s.selection = 0;
+    no_effects(&reduce(&mut s, &Action::ToggleSelected));
+    reduce(&mut s, &Action::MoveDown);
+    no_effects(&reduce(&mut s, &Action::ToggleSelected));
+    let first = s.messages.items[0].id.clone();
+
+    let effects = reduce(&mut s, &Action::Archive);
+    assert_eq!(effects.len(), 2, "one operation per marked row");
+    // Complete the first move: its row leaves the selection, the other
+    // mark stays.
+    let first_id = effects[0].id;
+    let _ = complete_done(&mut s, first_id);
+    assert!(
+        !s.selected.contains(&first),
+        "the moved row is no longer marked"
+    );
+    assert!(
+        s.selection_active(),
+        "other marks survive a single move completion"
+    );
+}
+
+#[test]
+fn esc_clears_the_selection_when_nothing_is_pending() {
+    let mut s = state();
+    s.focus = Focus::MessageList;
+    no_effects(&reduce(&mut s, &Action::SelectAll));
+    assert!(s.selection_active());
+    reduce(&mut s, &Action::BackOrCancel);
+    assert!(s.selected.is_empty(), "Esc releases the selection first");
+    assert!(!s.quit_requested, "Esc does not quit while clearing");
+}
+
+#[test]
+fn enter_on_the_select_all_toggle_flips_the_set() {
+    let mut s = state();
+    s.focus = Focus::SelectAllToggle;
+    no_effects(&reduce(&mut s, &Action::Activate));
+    assert!(s.all_visible_selected(), "Enter selects all");
+    no_effects(&reduce(&mut s, &Action::Activate));
+    assert!(s.selected.is_empty(), "Enter again clears");
+}
+
+#[test]
+fn clicking_the_select_all_toggle_marks_every_visible_row() {
+    let mut s = state();
+    no_effects(&reduce(
+        &mut s,
+        &Action::Click(ClickTarget::SelectAllToggle),
+    ));
+    assert!(s.all_visible_selected());
+    assert_eq!(s.focus, Focus::SelectAllToggle, "focus follows the click");
+}
+
+#[test]
+fn bulk_button_click_dispatches_the_advertised_action() {
+    let mut s = state();
+    no_effects(&reduce(
+        &mut s,
+        &Action::Click(ClickTarget::SelectAllToggle),
+    ));
+    let expected = s.messages.items.len();
+    let effects = reduce(
+        &mut s,
+        &Action::Click(ClickTarget::BulkAction(BulkOp::Trash)),
+    );
+    assert_eq!(effects.len(), expected);
+    assert!(
+        effects
+            .iter()
+            .all(|e| matches!(e.kind, OperationKind::Trash(_))),
+        "every selected row gets a trash operation"
+    );
+    // The click focused the list, so bulk semantics (not reader semantics)
+    // applied.
+    assert_eq!(s.focus, Focus::MessageList);
+}
+
+// ── External editor (plan §14, Phase 11) ─────────────────────────────────
+
+fn edit_external(s: &mut AppState) -> Vec<Effect> {
+    reduce(s, &Action::EditExternal)
+}
+
+#[test]
+fn edit_external_saves_the_draft_first_and_flags_the_composer() {
+    let mut s = state();
+    s.editor_command = Some(vec![String::from("vim")]);
+    compose(&mut s);
+    tick(&mut s, 0);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    assert!(s.composer.as_ref().unwrap().draft.is_dirty());
+
+    let effects = edit_external(&mut s);
+    // The forced save (step 1) rides ahead of the editor effect.
+    assert_eq!(effects.len(), 2);
+    assert!(matches!(effects[0].kind, OperationKind::SaveDraft { .. }));
+    assert!(matches!(
+        effects[1].kind,
+        OperationKind::EditExternally { .. }
+    ));
+    // No background autosave is promised while the editor owns the file.
+    assert!(s.composer.as_ref().unwrap().external_editing);
+}
+
+#[test]
+fn edit_external_with_a_clean_draft_only_starts_the_editor() {
+    let mut s = state();
+    s.editor_command = Some(vec![String::from("vim")]);
+    compose(&mut s);
+    let effects = edit_external(&mut s);
+    assert_eq!(effects.len(), 1, "only the editor effect");
+    assert!(matches!(
+        effects[0].kind,
+        OperationKind::EditExternally { .. }
+    ));
+}
+
+#[test]
+fn edit_external_is_inert_without_an_editor_or_composer() {
+    let mut s = state();
+    // Builtin editor: nothing external to run.
+    compose(&mut s);
+    no_effects(&edit_external(&mut s));
+    // Editor configured, but the composer does not hold focus.
+    s.editor_command = Some(vec![String::from("vim")]);
+    s.focus = Focus::MessageList;
+    no_effects(&edit_external(&mut s));
+}
+
+#[test]
+fn no_autosave_while_the_external_editor_owns_the_file() {
+    let mut s = state();
+    s.editor_command = Some(vec![String::from("vim")]);
+    compose(&mut s);
+    s.composer.as_mut().unwrap().field = crate::app::composer::ComposerField::Body;
+    tick(&mut s, 0);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    let effects = edit_external(&mut s);
+    assert!(matches!(effects[0].kind, OperationKind::SaveDraft { .. }));
+    // A dirty edit during the editor session would normally re-arm the
+    // autosave; ticks must not save while the editor owns the file.
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('y')));
+    no_effects(&tick(&mut s, 5));
+    no_effects(&tick(&mut s, 10));
+}
+
+#[test]
+fn editor_import_marks_dirty_and_saves_once() {
+    let mut s = state();
+    s.editor_command = Some(vec![String::from("vim")]);
+    compose(&mut s);
+    tick(&mut s, 0);
+    let effects = edit_external(&mut s);
+    let editor_id = effects.last().unwrap().id;
+    let before_revision = s.composer.as_ref().unwrap().draft.revision;
+
+    let effects = reduce(
+        &mut s,
+        &Action::EditorFinished {
+            id: editor_id,
+            result: Ok(String::from("edited body\nline two\n")),
+        },
+    );
+    // Steps 6–8: import → dirty → exactly one save.
+    let (id, snapshot) = expect_save(&effects);
+    assert_eq!(snapshot.body, "edited body\nline two\n");
+    assert_eq!(snapshot.revision, before_revision + 1);
+    assert!(s.composer.as_ref().unwrap().draft.is_dirty());
+    assert!(!s.composer.as_ref().unwrap().external_editing);
+    complete_save_ok(&mut s, id, snapshot.revision, "remote-9");
+    assert!(!s.composer.as_ref().unwrap().draft.is_dirty());
+}
+
+#[test]
+fn editor_import_without_changes_saves_nothing() {
+    let mut s = state();
+    s.editor_command = Some(vec![String::from("vim")]);
+    compose(&mut s);
+    s.composer.as_mut().unwrap().field = crate::app::composer::ComposerField::Body;
+    tick(&mut s, 0);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    // Body is now "x"; the editor hands back exactly that.
+    let editor_id = edit_external(&mut s).last().unwrap().id;
+    let effects = reduce(
+        &mut s,
+        &Action::EditorFinished {
+            id: editor_id,
+            result: Ok(String::from("x")),
+        },
+    );
+    no_effects(&effects);
+    assert!(!s.composer.as_ref().unwrap().external_editing);
+}
+
+#[test]
+fn editor_failure_keeps_the_draft_and_reports() {
+    let mut s = state();
+    s.editor_command = Some(vec![String::from("vim")]);
+    compose(&mut s);
+    s.composer.as_mut().unwrap().field = crate::app::composer::ComposerField::Body;
+    tick(&mut s, 0);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    let editor_id = edit_external(&mut s).last().unwrap().id;
+    let effects = reduce(
+        &mut s,
+        &Action::EditorFinished {
+            id: editor_id,
+            result: Err(String::from("editor exited with code 1")),
+        },
+    );
+    no_effects(&effects);
+    // The draft keeps its content and the composer is usable again.
+    assert_eq!(s.composer.as_ref().unwrap().draft.body, "x");
+    assert!(!s.composer.as_ref().unwrap().external_editing);
+    assert!(
+        s.status
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("editor exited with code 1"))
+    );
+}
+
+#[test]
+fn the_editor_operation_is_never_cancellable() {
+    let mut s = state();
+    s.editor_command = Some(vec![String::from("vim")]);
+    compose(&mut s);
+    let effects = edit_external(&mut s);
+    let editor_id = effects.last().unwrap().id;
+    let op = s.operations.get(editor_id).unwrap();
+    assert!(!op.kind.is_cancellable());
+}
+
+#[test]
+fn space_advances_to_the_next_row_after_toggling() {
+    let mut s = state();
+    s.focus = Focus::MessageList;
+    s.selection = 0;
+    let first = s.messages.items[0].id.clone();
+
+    no_effects(&reduce(&mut s, &Action::ToggleSelected));
+    assert!(s.selected.contains(&first), "row 0 marked");
+    assert_eq!(s.selection, 1, "cursor advanced to row 1");
+
+    // The next Space marks row 1 (not unmarks row 0).
+    let second = s.messages.items[1].id.clone();
+    no_effects(&reduce(&mut s, &Action::ToggleSelected));
+    assert!(s.selected.contains(&second), "row 1 marked next");
+    assert!(s.selected.contains(&first), "row 0 stays marked");
+    assert_eq!(s.selection, 2);
+
+    // The last row does not advance further.
+    s.selection = s.messages.items.len() - 1;
+    let last = s.messages.items[s.selection].id.clone();
+    no_effects(&reduce(&mut s, &Action::ToggleSelected));
+    assert_eq!(
+        s.selection,
+        s.messages.items.len() - 1,
+        "clamped at the end"
+    );
+    assert!(s.selected.contains(&last));
 }

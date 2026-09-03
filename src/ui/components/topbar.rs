@@ -89,8 +89,9 @@ pub fn render(
         hits.push(search_area, ClickTarget::SearchField);
     }
 
-    // Clock, right-aligned on the middle row.
-    if clock.len() < area.width as usize {
+    // Clock, right-aligned on the middle row. Empty string = disabled
+    // (`[post.ui].clock`, ticket w7f5: off by default).
+    if !clock.is_empty() && clock.len() < area.width as usize {
         let clock_area = Rect {
             x: area.x + area.width - clock.width() as u16 - 2,
             y: area.y.saturating_add(1),

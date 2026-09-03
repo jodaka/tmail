@@ -40,7 +40,7 @@ pub fn render(
         return;
     }
     let (head, rows) = crate::ui::layout::split_list(area);
-    render_head(frame, head, state, theme);
+    render_head(frame, head, state, theme, hits);
 
     // Draw from the reducer-maintained scroll anchor so the selected row is
     // always on screen regardless of movement, page loads, or resize
@@ -60,6 +60,7 @@ pub fn render(
         }
         drew_any_row = true;
         let selected = i == state.selection;
+        let bulk_selected = state.selected.contains(&message.id);
         let row_area = Rect {
             x: rows.x,
             y,
@@ -73,6 +74,7 @@ pub fn render(
             theme,
             now,
             selected,
+            bulk_selected,
             state.focus == Focus::MessageList,
         );
         frame.render_widget(Paragraph::new(Line::from(spans)), row_area);
@@ -109,7 +111,13 @@ fn render_note(frame: &mut Frame<'_>, rows: Rect, theme: &Theme, note: &str) {
     );
 }
 
-fn render_head(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+fn render_head(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
     if area.height == 0 {
         return;
     }
@@ -141,12 +149,31 @@ fn render_head(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Them
     // Right-aligned range (mockup `.pane-range`).
     let range_w = range.width();
     let left_budget = width.saturating_sub(range_w + 2).max(10);
-    let left = format!("[ ]  {title}");
-    let left = text::clip(&left, left_budget);
-    let mut spans = vec![Span::styled(
-        left,
-        Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
-    )];
+    // The select-all toggle (ticket p0s3): `[X]` while every visible row
+    // carries the bulk mark, `[ ]` otherwise. Clicking it (or Ctrl+A, or
+    // Enter while it holds focus) flips the whole visible set.
+    let checkbox = if state.all_visible_selected() {
+        "[X]"
+    } else {
+        "[ ]"
+    };
+    let toggle_style = if state.focus == Focus::SelectAllToggle {
+        Style::new()
+            .fg(theme.accent)
+            .bg(theme.background)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new()
+            .fg(theme.text)
+            .bg(theme.background)
+            .add_modifier(Modifier::BOLD)
+    };
+    let title = text::clip(&format!("  {title}"), left_budget.saturating_sub(3));
+    let title_width = title.width();
+    let mut spans = vec![Span::styled(checkbox, toggle_style)];
+    if !title.is_empty() {
+        spans.push(Span::styled(title, toggle_style));
+    }
     if !unread.is_empty() {
         spans.push(Span::styled(
             format!("  {unread}"),
@@ -166,6 +193,20 @@ fn render_head(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Them
         );
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
+
+    // The checkbox (plus its label) is the select-all click target.
+    let toggle_w = (checkbox.width() + title_width) as u16;
+    if toggle_w > 0 {
+        hits.push(
+            Rect {
+                x: area.x,
+                y: row.y,
+                width: toggle_w.min(area.width),
+                height: 1,
+            },
+            ClickTarget::SelectAllToggle,
+        );
+    }
 
     // Hairline under the header.
     let hairline = Rect {
@@ -190,6 +231,9 @@ fn message_spans<'a>(
     theme: &'a Theme,
     now: chrono::DateTime<chrono::FixedOffset>,
     selected: bool,
+    // Space-marked row (ticket p0s3): the bulk highlight fill. The cursor
+    // row keeps its accent fill; both may apply to one row (cursor wins).
+    bulk_selected: bool,
     // The message list holds focus: the selected row shows the accent
     // marker (the same bar the sidebar's focused folder carries). Selection
     // alone keeps the fill but never the marker, so focus stays readable.
@@ -198,29 +242,40 @@ fn message_spans<'a>(
     let full = mode == LayoutMode::Full;
     let compact = mode == LayoutMode::Compact;
 
-    // Column anatomy: marker 1 + star 1 + from + gap 2 + subject(+snippet) +
-    // gap 2 + date 8, summing to the full row width so the date lands on
-    // the right edge (mockup grid).
+    // Column anatomy: marker 1 + icon 2 (star/checkbox + trailing space,
+    // ticket cvc4) + from + gap 2 + subject(+snippet) + gap 2 + date 8,
+    // summing to the full row width so the date lands on the right edge
+    // (mockup grid).
     let date = dates::format_relative(now, message.timestamp);
     let from_w = if compact { 14 } else { 18 };
-    let subject_w = width.saturating_sub(2 + from_w + 2 + 2 + 8).max(10);
+    let subject_w = width.saturating_sub(3 + from_w + 2 + 2 + 8).max(10);
 
     let bg = if selected {
         theme.accent_bg
+    } else if bulk_selected {
+        theme.bulk_selected_bg
     } else {
         theme.background
     };
     let base = if selected {
         theme.row_selected()
+    } else if bulk_selected {
+        theme.row_bulk_selected()
     } else {
         Style::new().bg(theme.background)
     };
 
-    let star = if message.is_starred {
-        Span::styled("*", theme.star().bg(bg))
+    // Icon column (ticket cvc4): a bulk-selected row shows the checkbox
+    // whatever its star state; otherwise the star, or a blank. The cell is
+    // always two columns — symbol + trailing space.
+    let (symbol, style) = if bulk_selected {
+        ("☑", theme.accent_fg().bg(bg))
+    } else if message.is_starred {
+        ("*", theme.star().bg(bg))
     } else {
-        Span::styled(" ", base)
+        (" ", base)
     };
+    let icon = Span::styled(format!("{symbol} "), style);
     // Accent bar in the marker column (mockup `.folder.active` bar): marks
     // the focused row while the list holds focus.
     let marker = if selected && focused {
@@ -229,7 +284,7 @@ fn message_spans<'a>(
         Span::styled(" ", base)
     };
 
-    let from_style = if selected {
+    let from_style = if selected || bulk_selected {
         base.fg(theme.text)
     } else if message.is_read {
         theme.read_text().bg(theme.background)
@@ -252,7 +307,7 @@ fn message_spans<'a>(
 
     let mut spans = vec![
         marker,
-        star,
+        icon,
         Span::styled(text::fit_left(message.from_display(), from_w), from_style),
         Span::styled("  ", base),
         Span::styled(text::fit_left(&combined, subject_w), subject_style),
