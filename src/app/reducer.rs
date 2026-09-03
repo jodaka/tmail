@@ -165,10 +165,24 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         }
         Action::Resize { width, height } => {
             state.size = (*width, *height);
+            // Ticket kjfq: auto-sized pages track the terminal — the limit
+            // is however many rows fit the list right now. A change re-loads
+            // the visible page in the background (supersession collapses a
+            // resize storm; the newest request wins) so the list refills.
+            let mut effects = Vec::new();
+            if state.page_size_auto {
+                let rows = crate::ui::layout::message_rows_visible(state.size).max(1);
+                if state.messages.limit != rows {
+                    state.messages.limit = rows;
+                    if !state.messages.items.is_empty() {
+                        effects = request_visible_page_background(state, state.messages.offset);
+                    }
+                }
+            }
             // A smaller window may have pushed the selection off screen.
             keep_selection_visible(state);
             clamp_reader_scroll(state);
-            Vec::new()
+            effects
         }
         Action::Quit => {
             state.quit_requested = true;
@@ -2751,7 +2765,9 @@ fn submit_search(state: &mut AppState) -> Vec<Effect> {
 
 /// Leave the search route: restore the stashed mailbox list context
 /// (Phase 9.1) — page, selection, and scroll come back exactly as they
-/// were, with no reload.
+/// were, with no reload. The search field clears with it (ticket 32b3):
+/// leaving the results means the query is done, so `/` opens an empty
+/// field for the next search.
 fn leave_search(state: &mut AppState) {
     if matches!(state.active_route(), Some(Route::Search(_))) {
         state.routes.pop();
@@ -2761,6 +2777,7 @@ fn leave_search(state: &mut AppState) {
             state.list_scroll = stash.scroll;
         }
         state.focus = Focus::MessageList;
+        state.search_query.clear();
         // Search selections do not follow the user back to the mailbox
         // list (ticket p0s3): the visible set changed entirely.
         state.selected.clear();

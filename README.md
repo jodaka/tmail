@@ -78,7 +78,8 @@ any other file are ignored.**
 | --- | --- | --- | --- |
 | `[post].account` | string | none | Name of the `[accounts.<name>]` table Post drives (forwarded to himalaya as `-a`). When absent, Post uses the account himalaya itself would pick: the one with `default = true`, else the sole account. **If set, the name must match an existing `[accounts.<name>]` table or startup fails.** |
 | `[post].mouse` | bool | `false` | **Mouse support (off by default).** When `true`, Post enables terminal mouse capture and you can click mailboxes, message rows, the search field, the Compose button, attachment chips, composer controls, and modal buttons, and scroll with the wheel. See [Mouse](#mouse) for exact behavior. Capture changes what terminal text selection does, so it is opt-in. |
-| `[post.mail].page_size` | integer | `20` | Rows per page of the message list (explicit pagination with ←/→). Must be positive. |
+| `[post.mail].page_size_auto` | bool | `true` | Size each page to the number of message rows the terminal can show (ticket kjfq): the whole page fits the list without scrolling, and resizing re-loads the page. When `true`, `page_size` is ignored. |
+| `[post.mail].page_size` | integer | `50` | Rows per page of the message list with `page_size_auto = false` (explicit pagination with ←/→). Must be positive. A page longer than the list shows a vertical scrollbar. |
 | `[post.mail].refresh_interval_seconds` | integer | `60` | Periodic background refresh; `0` disables the timer. Never preempts foreground work or the composer. |
 | `[post.composer].editor` | string | `"builtin"` | `"builtin"`, `"$EDITOR"` (resolved from the environment), or a plain command like `nvim` (program + arguments, **no shell metacharacters** — Post never spawns a shell). The external-editor flow itself ships in Phase 11; the value is validated at startup either way. |
 | `[post.composer].autosave_delay_ms` | integer | `2000` | Draft autosave debounce for the builtin editor. Accepted range: 100–600000. |
@@ -110,7 +111,8 @@ account = "personal"        # optional; omit to use himalaya's default
 mouse   = true              # REQUIRED for mouse support (default: off)
 
 [post.mail]
-page_size = 20
+page_size_auto = true        # size pages to the terminal (page_size is ignored)
+page_size = 50               # used only when page_size_auto = false
 refresh_interval_seconds = 60
 
 [post.composer]

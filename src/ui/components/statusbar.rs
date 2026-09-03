@@ -16,6 +16,7 @@ use crate::app::action::{BulkOp, ClickTarget};
 use crate::app::route::Route;
 use crate::app::state::AppState;
 use crate::input::mouse::HitMap;
+use crate::ui::text;
 use crate::ui::theme::Theme;
 
 /// Render the status bar into `area` (height 3: hairline + content row).
@@ -138,54 +139,35 @@ pub fn render(
             ));
         }
     }
-    // Foreground work never blocks input, but it is announced here so the
-    // user knows what `Esc` would cancel (plan §11).
-    if let Some(operation) = state.operations.foreground() {
-        spans.push(Span::styled("  ", Style::new().bg(theme.background)));
-        spans.push(Span::styled(
-            super::spinner::frame(state.ticks),
-            Style::new().fg(theme.accent).bg(theme.background),
-        ));
-        spans.push(Span::styled(
-            format!(" {}", operation.kind.summary()),
-            Style::new().fg(theme.muted).bg(theme.background),
-        ));
-    }
+    // Foreground work is announced by the loader in the top bar (in place
+    // of the program name, ticket m3by); the status bar keeps hints and
+    // the status message only.
+    // Status messages sit in the bottom-right corner (ticket en85): the
+    // encoding/size readout they replaced carried nothing the user could
+    // act on. Clipped to the space left of the hints so they never
+    // overlap.
     if let Some(message) = &state.status.message {
-        spans.push(Span::styled(
-            format!("  · {message}"),
-            Style::new().fg(theme.accent).bg(theme.background),
-        ));
-    }
-
-    let env = format!("UTF-8 · {}×{}", state.size.0, state.size.1);
-    let env_w = env.width() as u16;
-    if env_w + 2 < area.width {
-        let env_area = Rect {
-            x: area.x + area.width - env_w - 2,
-            y: row.y,
-            width: env_w + 2,
-            height: 1,
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(" ", Style::new().bg(theme.background)),
-                Span::styled(env, Style::new().fg(theme.dim).bg(theme.background)),
-            ])),
-            env_area,
-        );
-        // Trim the hint row so it never overlaps the env info.
-        let hint_budget = (area.width - env_w - 4) as usize;
-        let mut used = 0usize;
-        spans.retain(|span| {
-            let w = span.content.width();
-            if used + w <= hint_budget {
-                used += w;
-                true
-            } else {
-                false
-            }
-        });
+        let left_used: usize = spans.iter().map(|s| s.content.width()).sum();
+        let budget = (area.width as usize)
+            .saturating_sub(left_used)
+            .saturating_sub(3)
+            .max(10);
+        let message = text::truncate(message, budget);
+        let width = message.width() as u16;
+        if width > 0 {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    message,
+                    Style::new().fg(theme.accent).bg(theme.background),
+                )),
+                Rect {
+                    x: area.x + area.width - width,
+                    y: row.y,
+                    width,
+                    height: 1,
+                },
+            );
+        }
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), row);

@@ -3561,6 +3561,9 @@ fn leaving_search_restores_the_mailbox_context_exactly() {
     assert_eq!(s.selection, before.1);
     assert_eq!(s.list_scroll, before.2);
     assert_eq!(s.focus, Focus::MessageList);
+    // The search field clears with the results (ticket 32b3): `/` opens
+    // an empty field for the next search.
+    assert_eq!(s.search_query, "");
 }
 
 #[test]
@@ -5089,4 +5092,65 @@ fn preview_fetches_roll_within_the_window() {
     let refill = expect_previews(&effects);
     assert_eq!(refill.len(), 1, "the next queued row starts");
     assert_eq!(s.preview_requested.len(), 7, "queued rows are tracked");
+}
+
+// ── Auto page size (ticket kjfq) ─────────────────────────────────────────
+
+#[test]
+fn auto_page_size_tracks_the_visible_rows_on_resize() {
+    let mut s = state();
+    s.page_size_auto = true;
+    // Shrink the terminal: the limit becomes however many rows fit the
+    // list, and the visible page reloads in the background (ticket kjfq).
+    reduce(
+        &mut s,
+        &Action::Resize {
+            width: 152,
+            height: 20,
+        },
+    );
+    let rows_20 = crate::ui::layout::message_rows_visible((152, 20)).max(1);
+    assert_eq!(s.messages.limit, rows_20, "limit matches the visible rows");
+    // Growing further changes the limit again and re-loads (background).
+    reduce(
+        &mut s,
+        &Action::Resize {
+            width: 152,
+            height: 24,
+        },
+    );
+    let rows_24 = crate::ui::layout::message_rows_visible((152, 24)).max(1);
+    assert_ne!(rows_20, rows_24);
+    let effects = reduce(
+        &mut s,
+        &Action::Resize {
+            width: 152,
+            height: 28,
+        },
+    );
+    let (id, req) = expect_page(&effects);
+    assert_eq!(
+        req.limit,
+        crate::ui::layout::message_rows_visible((152, 28)).max(1)
+    );
+    assert_eq!(
+        s.operations.get(id).map(|op| op.origin),
+        Some(OperationOrigin::Background),
+        "silent reload"
+    );
+}
+
+#[test]
+fn manual_page_size_is_untouched_by_resize() {
+    let mut s = state();
+    s.page_size_auto = false;
+    reduce(
+        &mut s,
+        &Action::Resize {
+            width: 90,
+            height: 20,
+        },
+    );
+    assert_eq!(s.messages.limit, mock::PAGE_SIZE, "page_size rules");
+    assert!(s.operations.is_empty(), "no reload without auto sizing");
 }

@@ -77,7 +77,8 @@ fn full_layout_renders_all_regions() {
     assert_absent(&text, "NORMAL", size);
     assert_absent(&text, "READER", size);
     assert_absent(&text, "COMPOSE", size);
-    assert!(text.contains("UTF-8 · 152×40"), "env info missing");
+    assert_absent(&text, "UTF-8", size);
+    assert_absent(&text, "152×40", size);
     // v1 overrides: no j/k hint, no help hint anywhere.
     assert_absent(&text, "help", size);
     assert_absent(&text, "j k", size);
@@ -352,20 +353,25 @@ fn sanitized_failure(id: tmail::app::OperationId, kind: OperationKind, detail: &
 #[test]
 fn spinner_shows_foreground_work_without_blocking_the_frame() {
     let mut state = mock_initial_state();
-    // A page request starts an operation; the spinner appears in the
-    // status bar with the operation summary (plan §11).
-    let actions = vec![Action::PageNext];
-    let text = draw_after(&mut state, &actions, 152, 40);
+    // An empty list with a page load in flight (startup / mailbox switch
+    // look): the loader replaces the program name/version in the top bar
+    // (ticket m3by) and the list pane shows its own centered spinner.
+    state.messages = Page::empty(20);
+    let actions = vec![Action::Refresh];
+    let buffer = buffer_after(&mut state, &actions, 152, 40);
+    let text = text_of(&buffer);
     assert!(text.contains("⠋"), "spinner frame missing:\n{text}");
     assert!(
-        text.contains("Loading messages"),
-        "summary missing:\n{text}"
+        !text.contains("post v0.1.0"),
+        "brand must yield to the loader:\n{text}"
     );
-    // The list underneath still rendered — work never blocks the frame.
+    // The list head and sidebar still render — work never blocks the frame.
     assert!(
         text.contains("INBOX"),
-        "list hidden behind spinner:\n{text}"
+        "list head hidden behind spinner:\n{text}"
     );
+    // The list rows area spans y 6..37, x 24..152: the spinner is centered.
+    assert_eq!(buffer[(87, 21)].symbol(), "⠋", "list pane spinner:\n{text}");
 }
 
 #[test]
@@ -373,6 +379,7 @@ fn no_spinner_when_idle() {
     let mut state = mock_initial_state();
     let text = draw_after(&mut state, &[], 152, 40);
     assert!(!text.contains("⠋"), "spinner leaked while idle:\n{text}");
+    assert!(text.contains("post v0.1.0"), "brand restored when idle");
 }
 
 #[test]
@@ -538,12 +545,19 @@ fn reader_renders_exactly_one_message_document() {
 fn reader_loading_state_renders_placeholder() {
     let mut state = reader_state(0);
     state.open_message = Loadable::Loading;
-    let text = draw_after(&mut state, &[], 152, 40);
-    assert!(text.contains("loading message…"), "placeholder:\n{text}");
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    let text = text_of(&buffer);
+    assert!(
+        !text.contains("loading message…"),
+        "text placeholder replaced by the pane spinner (ticket m3by):\n{text}"
+    );
     assert!(
         !text.contains("body line 01"),
         "body must not exist while loading:\n{text}"
     );
+    // The spinner sits centered in the body area (header ends at row 10;
+    // the body spans 10..37 → center row 23, column 24+63=87).
+    assert_eq!(buffer[(87, 23)].symbol(), "⠋", "centered spinner:\n{text}");
 }
 
 #[test]
@@ -954,7 +968,7 @@ fn snapshot_at_full_floor_120x30() {
     let text = text_of(&buffer);
     assert!(text.contains("INBOX"), "pane title missing:\n{text}");
     assert!(text.contains("Compose"), "full floor keeps the sidebar");
-    assert!(text.contains("UTF-8 · 120×30"), "env info missing");
+    assert_absent(&text, "UTF-8", (120, 30));
 }
 
 /// 90×25 is the compact floor: the sidebar hides but rows still render.
@@ -966,7 +980,7 @@ fn snapshot_at_compact_floor_90x25() {
     // The compact sender column clips to 14ch; the subject stays whole.
     assert!(text.contains("Re: WIP — 240 mm"), "rows missing:\n{text}");
     assert_absent(&text, "Compose", (90, 25));
-    assert!(text.contains("UTF-8 · 90×25"), "env info missing");
+    assert_absent(&text, "UTF-8", (90, 25));
 }
 
 /// 89 wide is already too small (compact floor is 90): the message shows
@@ -1161,7 +1175,7 @@ fn monochrome_theme_renders_the_same_content() {
     let text = text_of(terminal.backend().buffer());
     assert!(text.contains("INBOX"), "content missing:\n{text}");
     assert!(text.contains("KKF Notificati"), "rows missing:\n{text}");
-    assert!(text.contains("UTF-8 · 152×40"), "status bar missing");
+    assert_absent(&text, "UTF-8", (152, 40));
     // Hit maps still record in monochrome.
     assert_eq!(
         hits.hit_test(30, 6, false),
@@ -1569,5 +1583,70 @@ fn reader_without_overflow_draws_no_scrollbar() {
         !none,
         "no scrollbar when the message fits:\n{}",
         text_of(&buffer)
+    );
+}
+
+#[test]
+fn status_message_sits_in_the_bottom_right_corner() {
+    // Ticket en85: the status message replaces the encoding/size readout,
+    // right-aligned in the status bar's content row.
+    let mut state = mock_initial_state();
+    state.size = (152, 40);
+    state.set_status("Mailboxes loaded");
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    // The status bar content row is the one under its top hairline.
+    let row: String = (0..152).map(|x| buffer[(x, 38)].symbol()).collect();
+    let trimmed = row.trim_end();
+    assert!(
+        trimmed.ends_with("Mailboxes loaded"),
+        "status message flush right: {trimmed:?}"
+    );
+    assert_absent(&text_of(&buffer), "UTF-8", (152, 40));
+}
+
+#[test]
+fn sidebar_shows_unread_counters_in_brackets() {
+    // Ticket ye28: `Inbox (4)`-style counters right after the name;
+    // folders without unread mail show none.
+    let (buffer, _) = draw_with_hits(152, 40);
+    let text = text_of(&buffer);
+    assert!(text.contains("Inbox (24)"), "{text}");
+    assert!(text.contains("Spam (5)"), "{text}");
+    assert_absent(&text, "Sent (", (152, 40));
+    assert_absent(&text, "Drafts (", (152, 40));
+    assert_absent(&text, "Trash (", (152, 40));
+}
+
+#[test]
+fn sidebar_loading_shows_a_centered_spinner() {
+    // Ticket m3by: the mailboxes pane spinner is the same centered glyph.
+    let mut state = mock_initial_state();
+    state.mailboxes = Loadable::Loading;
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    // The sidebar's folder area (inset pane) spans x 0..23, y 9..37.
+    assert_eq!(buffer[(11, 22)].symbol(), "⠋", "sidebar spinner");
+    assert!(
+        !text_of(&buffer).contains("loading mailboxes"),
+        "text placeholder replaced by the spinner"
+    );
+}
+
+#[test]
+fn message_list_shows_a_scrollbar_only_when_rows_overflow() {
+    // Ticket kjfq: a page longer than the list shows a vertical scrollbar
+    // in the last column; a page that fits shows none.
+    // 20 mock rows on a 16-row list (compact floor): scrollbar present.
+    let (buffer, _) = draw_with_hits(90, 25);
+    let col: Vec<&str> = (6..22).map(|y| buffer[(89, y)].symbol()).collect();
+    assert!(
+        col.iter().any(|s| *s == "│" || *s == "█"),
+        "scrollbar expected: {col:?}"
+    );
+    // 20 rows on a 31-row list: no scrollbar.
+    let (buffer, _) = draw_with_hits(152, 40);
+    let col: Vec<&str> = (6..37).map(|y| buffer[(151, y)].symbol()).collect();
+    assert!(
+        col.iter().all(|s| *s != "│" && *s != "█"),
+        "no scrollbar expected: {col:?}"
     );
 }

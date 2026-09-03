@@ -113,6 +113,13 @@ async fn run() -> anyhow::Result<()> {
     if let Ok((width, height)) = crossterm::terminal::size() {
         state.size = (width, height);
     }
+    // Ticket kjfq: `page_size_auto` sizes each page to the number of
+    // message rows the terminal can show, so the page fits the list
+    // without scrolling; manual pagination keeps `[post.mail].page_size`.
+    state.page_size_auto = config.page_size_auto;
+    if config.page_size_auto {
+        state.messages.limit = tmail::ui::layout::message_rows_visible(state.size).max(1);
+    }
     tracing::info!(size = ?state.size, "shell started (real backend)");
 
     let (mut events, events_control) = events::spawn();

@@ -11,7 +11,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::action::ClickTarget;
@@ -44,7 +46,16 @@ pub fn render(
 
     // Draw from the reducer-maintained scroll anchor so the selected row is
     // always on screen regardless of movement, page loads, or resize
-    // (Phase 2 acceptance).
+    // (Phase 2 acceptance). When the page holds more rows than fit, a
+    // vertical scrollbar takes the last column (ticket kjfq) and the rows
+    // clip one column short.
+    let visible_rows = rows.height as usize;
+    let scrolling = state.messages.items.len() > visible_rows;
+    let row_width = if scrolling {
+        rows.width.saturating_sub(1)
+    } else {
+        rows.width
+    };
     let bottom = area.y + area.height;
     let mut drew_any_row = false;
     for (y, (i, message)) in (rows.y..).zip(
@@ -64,12 +75,12 @@ pub fn render(
         let row_area = Rect {
             x: rows.x,
             y,
-            width: rows.width,
+            width: row_width,
             height: 1,
         };
         let spans = message_spans(
             message,
-            rows.width as usize,
+            row_width as usize,
             mode,
             theme,
             now,
@@ -82,13 +93,46 @@ pub fn render(
         // (arrows + Enter, plan §10).
         hits.push(row_area, ClickTarget::MessageRow(i));
     }
+    if scrolling {
+        let mut scrollbar_state =
+            ScrollbarState::new(state.messages.items.len()).position(state.list_scroll);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("│"))
+                .track_style(Style::new().fg(theme.border).bg(theme.background))
+                .thumb_style(Style::new().fg(theme.dim).bg(theme.background)),
+            rows,
+            &mut scrollbar_state,
+        );
+    }
     // An empty search result set is a valid state, not an error — say so
-    // once the request is no longer in flight (Phase 9.3).
-    if !drew_any_row
+    // once the request is no longer in flight (Phase 9.3). While the list
+    // is empty and a load is in flight, show the pane spinner instead
+    // (ticket m3by: one loader look everywhere, centered in the panel).
+    if !drew_any_row && list_load_in_flight(state) {
+        crate::ui::components::spinner::render_centered(frame, rows, theme, state.ticks);
+    } else if !drew_any_row
         && matches!(state.active_route(), Some(Route::Search(_)))
         && state.operations.foreground().is_none()
     {
         render_note(frame, rows, theme, "(no results)");
+    }
+}
+
+/// Whether the visible list is waiting for its first rows: a page or
+/// search load in flight for the active route (ticket m3by).
+fn list_load_in_flight(state: &AppState) -> bool {
+    match state.active_route() {
+        Some(Route::Search(route)) => state
+            .operations
+            .search_in_flight(&route.mailbox_id)
+            .is_some(),
+        Some(route) => route
+            .mailbox_id()
+            .is_some_and(|id| state.operations.page_in_flight(id).is_some()),
+        None => false,
     }
 }
 

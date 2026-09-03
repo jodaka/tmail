@@ -203,6 +203,8 @@ pub(crate) fn scroll_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
     // Body (plan §13: HTML-preferred selection, rich semantic rendering,
     // reflow at the current width; Unicode-safe via ui::text and html2text).
     // Missing bodies render explicit placeholders (plan §19 Phase 4).
+    // While the message loads there is nothing to lay out: the pane
+    // spinner takes over (ticket m3by), so the document length stays 0.
     let body: Vec<RichLine> = match &state.open_message {
         Loadable::Loaded(message) => {
             crate::ui::rich::body_lines(message, w.saturating_sub(INDENT.len()))
@@ -213,7 +215,7 @@ pub(crate) fn scroll_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
         ))],
         // `Idle` is defensive: a reader route without its load lifecycle.
         Loadable::Idle => vec![RichLine::from_plain("(no message loaded)")],
-        Loadable::Loading => vec![RichLine::from_plain("(loading message…)")],
+        Loadable::Loading => Vec::new(),
     };
     for line in body {
         lines.push(indented(line));
@@ -331,6 +333,12 @@ pub fn render(
     }
     let viewport = body_area.height as usize;
     let total = body.len();
+    // While the message loads the body carries nothing: the centered pane
+    // spinner stands in for it (ticket m3by).
+    if matches!(state.open_message, Loadable::Loading) {
+        crate::ui::components::spinner::render_centered(frame, body_area, theme, state.ticks);
+        return;
+    }
     let start = state.reader_scroll.min(total.saturating_sub(1));
     let scrolling = total > viewport;
     // A visible scrollbar reserves its column: body text clips one column
@@ -770,13 +778,11 @@ mod tests {
             mailbox_id: MailboxId(String::from("inbox")),
             summary: summary(),
         }));
+        // Loading: the body lays out empty — the pane spinner stands in
+        // for it (ticket m3by), so nothing but the header is in the
+        // document.
         state.open_message = Loadable::Loading;
-        let lines = content(&state, 100);
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.text().contains("(loading message…)"))
-        );
+        assert!(scroll_line_count(&state, 100) == 0, "no body while loading");
 
         state.open_message = Loadable::Failed(String::from("boom\nmore"));
         let lines = content(&state, 100);

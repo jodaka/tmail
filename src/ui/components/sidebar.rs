@@ -87,13 +87,11 @@ pub fn render(
         crate::app::state::Loadable::Loaded(_) => {
             render_note(frame, rows.folders, theme, "(no mailboxes)")
         }
-        crate::app::state::Loadable::Loading => {
-            render_note(frame, rows.folders, theme, "loading mailboxes…")
-        }
-        // `Idle` cannot occur for the sidebar slot, but the fallback keeps
-        // the exhaustive match honest.
-        crate::app::state::Loadable::Idle => {
-            render_note(frame, rows.folders, theme, "loading mailboxes…")
+        // Loading: one centered spinner, like every other pane (ticket
+        // m3by). `Idle` cannot occur for the sidebar slot, but the
+        // fallback keeps the exhaustive match honest.
+        crate::app::state::Loadable::Loading | crate::app::state::Loadable::Idle => {
+            super::spinner::render_centered(frame, rows.folders, theme, state.ticks);
         }
         crate::app::state::Loadable::Failed(_) => {
             render_note(frame, rows.folders, theme, "mailboxes unavailable")
@@ -133,14 +131,16 @@ fn render_folder_row(
     cursor: bool,
 ) {
     let width = area.width as usize;
-    // Row anatomy: 1 marker col + 2 left pad + name + gap + count + 1 right pad.
-    let count = match mailbox.unread_count {
-        Some(n) if n > 0 => n.to_string(),
+    // Row anatomy (ticket ye28): 1 marker col + 2 left pad + name +
+    // ` (N)` when the folder holds unread mail + right pad. The counter
+    // reads as part of the folder name, exactly as written: `Inbox (4)`.
+    let suffix = match mailbox.unread_count {
+        Some(n) if n > 0 => format!(" ({n})"),
         _ => String::new(),
     };
-    let name_budget = width.saturating_sub(4 + count.width()).max(1);
+    let name_budget = width.saturating_sub(3 + suffix.width()).max(1);
     let name = text::clip(&mailbox.name, name_budget);
-    let gap = width.saturating_sub(4 + name.width() + count.width());
+    let right_pad = width.saturating_sub(3 + name.width() + suffix.width());
 
     let row_bg = if is_active {
         theme.accent_bg
@@ -175,9 +175,8 @@ fn render_folder_row(
         Span::styled(marker, marker_style),
         Span::styled("  ", pad),
         Span::styled(name, name_style),
-        Span::styled(" ".repeat(gap), pad),
-        Span::styled(count, count_style),
-        Span::styled(" ", pad),
+        Span::styled(suffix, count_style),
+        Span::styled(" ".repeat(right_pad), pad),
     ];
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

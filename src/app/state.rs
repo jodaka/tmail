@@ -116,6 +116,12 @@ pub struct AppState {
     /// Set from the config at startup; the reducer never reads a clock for
     /// it — arming uses the injected `Action::Tick` wall clock.
     pub refresh_interval_seconds: u64,
+    /// Ticket kjfq (`[post.mail].page_size_auto`): size each page to the
+    /// number of message rows the terminal can show, overriding
+    /// `page_size`. Set from the config at startup; the reducer recomputes
+    /// the limit from `size` on every resize so the page always matches
+    /// the visible rows.
+    pub page_size_auto: bool,
     /// Draft autosave debounce in milliseconds (plan §14,
     /// `[post.composer].autosave_delay_ms`). Set from the config at
     /// startup; the reducer applies it with the injected tick clock.
@@ -182,6 +188,7 @@ impl AppState {
             search_query: String::new(),
             search_return: None,
             refresh_interval_seconds: 0,
+            page_size_auto: false,
             autosave_delay_ms: crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS,
             editor_command: None,
             page_cache: None,

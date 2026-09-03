@@ -22,7 +22,11 @@ use crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS;
 
 /// Default page size when the config does not provide a usable one
 /// (plan §16/§17: explicit pagination, default 20).
-pub const DEFAULT_PAGE_SIZE: usize = 20;
+/// Default `[post.mail].page_size` for manual pagination (ticket kjfq).
+pub const DEFAULT_PAGE_SIZE: usize = 50;
+/// Default `[post.mail].page_size_auto` (ticket kjfq): size pages to the
+/// terminal so the whole page fits the list without scrolling.
+pub const DEFAULT_PAGE_SIZE_AUTO: bool = true;
 
 /// Default periodic refresh interval in seconds (plan §11/§19 Phase 9);
 /// `[post.mail].refresh_interval_seconds = 0` disables the timer.
@@ -120,8 +124,13 @@ pub struct Config {
     /// resolution, which is per-account).
     pub account: Option<String>,
     /// `[post.mail].page_size`, defaulting to [`DEFAULT_PAGE_SIZE`]; a
-    /// non-positive or absent value falls back to the default.
+    /// non-positive or absent value falls back to the default. Ignored
+    /// while [`Config::page_size_auto`] is on.
     pub page_size: usize,
+    /// `[post.mail].page_size_auto` (ticket kjfq): size each page to the
+    /// number of message rows the terminal can show, so the page fits the
+    /// list without scrolling. On by default; overrides `page_size`.
+    pub page_size_auto: bool,
     /// `[post.mail].refresh_interval_seconds` (plan §11/§19 Phase 9):
     /// the periodic background-refresh interval; `0` disables the timer.
     /// Absent defaults to 60; a negative value disables (treated as 0).
@@ -178,6 +187,7 @@ impl Default for Config {
             path: None,
             account: None,
             page_size: DEFAULT_PAGE_SIZE,
+            page_size_auto: DEFAULT_PAGE_SIZE_AUTO,
             refresh_interval_seconds: DEFAULT_REFRESH_INTERVAL_SECONDS,
             aliases: HashMap::new(),
             account_email: None,
@@ -309,6 +319,7 @@ pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssu
         })
         .unwrap_or(false);
     parse_page_size(post, &mut config, &mut issues);
+    parse_page_size_auto(post, &mut config, &mut issues);
     parse_refresh_interval(post, &mut config, &mut issues);
     parse_autosave_delay(post, &mut config, &mut issues);
     parse_editor(post, &mut config, &mut issues);
@@ -356,6 +367,23 @@ fn parse_page_size(post: Option<&toml::Value>, config: &mut Config, issues: &mut
             )),
             None => issues.push(format!(
                 "[post.mail].page_size must be an integer; using {DEFAULT_PAGE_SIZE}"
+            )),
+        },
+    }
+}
+
+/// `[post.mail].page_size_auto` (ticket kjfq): a boolean; anything else
+/// is reported and the default (true) applies.
+fn parse_page_size_auto(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    match post
+        .and_then(|post| post.get("mail"))
+        .and_then(|mail| mail.get("page_size_auto"))
+    {
+        None => {}
+        Some(value) => match value.as_bool() {
+            Some(auto) => config.page_size_auto = auto,
+            None => issues.push(String::from(
+                "[post.mail].page_size_auto must be true or false; using true",
             )),
         },
     }
@@ -757,6 +785,30 @@ mod tests {
     fn nonpositive_page_size_falls_back_to_default() {
         let text = "[post.mail]\npage_size = 0\n";
         assert_eq!(parse(text, None).page_size, DEFAULT_PAGE_SIZE);
+    }
+
+    #[test]
+    fn page_size_auto_defaults_on_and_parses_both_ways() {
+        // Ticket kjfq: auto-sized pages are the default; `page_size` is
+        // only honored when the auto mode is switched off.
+        let text = "[post.mail]\npage_size = 7\n";
+        let config = parse(text, None);
+        assert!(config.page_size_auto);
+        assert_eq!(config.page_size, 7, "parsed even while ignored");
+
+        let config = parse("[post.mail]\npage_size_auto = false\n", None);
+        assert!(!config.page_size_auto);
+
+        let config = parse("[post.mail]\npage_size_auto = true\n", None);
+        assert!(config.page_size_auto);
+    }
+
+    #[test]
+    fn nonboolean_page_size_auto_falls_back_to_default() {
+        let text = "[post.mail]\npage_size_auto = \"yes\"\n";
+        let (config, issues) = parse_with_issues(text, None);
+        assert!(config.page_size_auto, "default applies");
+        assert!(!issues.is_empty(), "the problem is reported");
     }
 
     #[test]

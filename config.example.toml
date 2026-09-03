@@ -29,8 +29,9 @@ mouse = true
 
 [post.mail]
 # Message list page size (explicit pagination).
-page_size = 20
 page_size_auto = true
+# Used only when page_size_auto = false.
+page_size = 50
 # Periodic background refresh, 0 disables. Foreground work is never preempted.
 refresh_interval_seconds = 60
 

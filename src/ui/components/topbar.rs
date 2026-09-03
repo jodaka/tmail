@@ -26,24 +26,37 @@ pub fn render(
         return;
     }
 
-    // Brand: "post" bold + version dim, on the middle row.
-    let brand = Line::from(vec![
-        Span::styled(
-            "post",
-            Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(" v{}", env!("CARGO_PKG_VERSION")),
-            Style::new().fg(theme.dim),
-        ),
-    ]);
+    // Brand row: "post" bold + version dim — or, while foreground work is
+    // in flight, the loader in its place (ticket m3by: the status spinner
+    // lives on top of the program name; the brand returns when loading
+    // finishes). Animated from the tick counter (plan §20).
     let brand_area = Rect {
         x: area.x.saturating_add(2),
         y: area.y.saturating_add(1),
         width: area.width.min(22),
         height: 1,
     };
-    frame.render_widget(Paragraph::new(brand), brand_area);
+    if state.operations.foreground().is_some() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                super::spinner::frame(state.ticks),
+                Style::new().fg(theme.accent),
+            )),
+            brand_area,
+        );
+    } else {
+        let brand = Line::from(vec![
+            Span::styled(
+                "post",
+                Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" v{}", env!("CARGO_PKG_VERSION")),
+                Style::new().fg(theme.dim),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(brand), brand_area);
+    }
 
     // Search field: bordered well, `/` prompt, query or placeholder.
     let search_width = area.width.saturating_sub(28).clamp(12, 60);
