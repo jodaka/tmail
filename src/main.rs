@@ -95,6 +95,9 @@ async fn run() -> anyhow::Result<()> {
     // Draft autosave debounce (Phase 10.4 wiring of
     // `[post.composer].autosave_delay_ms`).
     state.autosave_delay_ms = config.autosave_delay_ms;
+    // Mouse capture starts in the configured mode (Phase 10.4); `m`
+    // toggles it at runtime via `Action::ToggleMouseCapture`.
+    state.mouse_capture = config.mouse;
     if let Ok((width, height)) = crossterm::terminal::size() {
         state.size = (width, height);
     }
@@ -113,6 +116,9 @@ async fn run() -> anyhow::Result<()> {
     // one cancellable task per effect.
     let (result_tx, mut result_rx) = mpsc::unbounded_channel();
     let manager = OperationManager::new(Arc::clone(&backend), opener, result_tx);
+    // The capture mode the terminal is currently in; the reducer owns the
+    // intent as `state.mouse_capture`, and the runtime applies any change.
+    let mut capture_applied = config.mouse;
 
     // Startup work flows through the same reducer path as everything else:
     // with no mailboxes loaded yet, Refresh starts the mailbox listing;
@@ -151,6 +157,7 @@ async fn run() -> anyhow::Result<()> {
                         tracing::debug!(?action, "dispatch");
                         let effects = reducer::reduce(&mut state, &action);
                         launch(&manager, &state, effects);
+                        sync_mouse_capture(&state, &mut capture_applied);
                     }
                 }
                 Some(events::Event::Mouse(mouse_event)) => {
@@ -160,6 +167,7 @@ async fn run() -> anyhow::Result<()> {
                         tracing::debug!(?action, "mouse dispatch");
                         let effects = reducer::reduce(&mut state, &action);
                         launch(&manager, &state, effects);
+                        sync_mouse_capture(&state, &mut capture_applied);
                     }
                 }
                 Some(events::Event::Resize { width, height }) => {
@@ -168,6 +176,7 @@ async fn run() -> anyhow::Result<()> {
                         &Action::Resize { width, height },
                     );
                     launch(&manager, &state, effects);
+                    sync_mouse_capture(&state, &mut capture_applied);
                 }
                 Some(events::Event::Tick) => {
                     let effects = reducer::reduce(
@@ -177,6 +186,7 @@ async fn run() -> anyhow::Result<()> {
                         },
                     );
                     launch(&manager, &state, effects);
+                    sync_mouse_capture(&state, &mut capture_applied);
                 }
                 None => {
                     tracing::warn!("event stream closed");
@@ -190,6 +200,7 @@ async fn run() -> anyhow::Result<()> {
                         &Action::BackendCompleted(result),
                     );
                     launch(&manager, &state, effects);
+                    sync_mouse_capture(&state, &mut capture_applied);
                 }
                 // The manager holds a sender for the whole session.
                 None => bail!("backend result channel closed unexpectedly"),
@@ -213,5 +224,21 @@ fn launch(manager: &OperationManager, state: &AppState, effects: Vec<Effect>) {
             cancellation: token,
         };
         manager.launch(effect, ctx);
+    }
+}
+
+/// Keep the terminal's mouse-capture mode in sync with the mode the
+/// reducer owns (plan §10 feedback: `m` toggles capture at runtime). The
+/// reducer stays I/O-free; this is where the terminal actually changes.
+fn sync_mouse_capture(state: &AppState, applied: &mut bool) {
+    if state.mouse_capture != *applied {
+        if let Err(err) = terminal::set_mouse_capture(state.mouse_capture) {
+            tracing::warn!(%err, "failed to switch mouse capture");
+        }
+        *applied = state.mouse_capture;
+        tracing::debug!(
+            mouse_capture = state.mouse_capture,
+            "mouse capture switched"
+        );
     }
 }

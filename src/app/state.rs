@@ -110,6 +110,12 @@ pub struct AppState {
     /// status line until a success or a manual refresh clears the record.
     pub last_background_error: Option<String>,
     pub focus: Focus,
+    /// Whether terminal mouse capture is currently active (plan §10,
+    /// `[post].mouse`). Set from the config at startup and flipped by
+    /// `Action::ToggleMouseCapture`; the runtime applies the actual
+    /// capture mode and keeps the terminal in sync. With capture off, the
+    /// terminal's native text selection works untouched.
+    pub mouse_capture: bool,
     /// Last known terminal size; drives the responsive layout (plan §18).
     pub size: (u16, u16),
     /// The configured account address (plan §17 `[accounts.<account>].email`).
@@ -151,6 +157,7 @@ impl AppState {
             last_refresh_at: None,
             last_background_error: None,
             focus: Focus::MessageList,
+            mouse_capture: false,
             size: (152, 40),
             account_email: None,
             clock: None,

@@ -31,14 +31,22 @@ impl TerminalGuard {
 pub fn enable(mouse: bool) -> io::Result<TerminalGuard> {
     term::enable_raw_mode()?;
     execute!(io::stdout(), term::EnterAlternateScreen)?;
-    if mouse {
-        execute!(io::stdout(), EnableMouseCapture)?;
-    }
+    set_mouse_capture(mouse)?;
     let backend = CrosstermBackend::new(io::stdout());
     let terminal = Terminal::new(backend)?;
     install_panic_hook();
     tracing::debug!(mouse, "terminal entered (raw mode + alternate screen)");
     Ok(TerminalGuard { terminal })
+}
+
+/// Turn mouse capture on or off at runtime (the `m` toggle, plan §10
+/// feedback): idempotent, safe to call with the same mode repeatedly.
+pub fn set_mouse_capture(enabled: bool) -> io::Result<()> {
+    if enabled {
+        execute!(io::stdout(), EnableMouseCapture)
+    } else {
+        execute!(io::stdout(), DisableMouseCapture)
+    }
 }
 
 /// Best-effort, idempotent restoration. Safe to call multiple times and

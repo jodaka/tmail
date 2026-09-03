@@ -15,12 +15,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::action::ClickTarget;
+use crate::app::action::ReaderAction;
 use crate::app::state::{AppState, Loadable};
 use crate::input::mouse::HitMap;
 use crate::ui::dates;
 use crate::ui::rich::{RichLine, RichSpan, RichStyle};
 use crate::ui::text;
 use crate::ui::theme::Theme;
+use unicode_width::UnicodeWidthStr;
 
 /// Visual tone of one chrome reader line; the renderer maps tones to theme
 /// styles.
@@ -28,8 +30,6 @@ use crate::ui::theme::Theme;
 pub(crate) enum Tone {
     /// Subject line (mockup `.thread-subject`).
     Strong,
-    /// Body text (mockup `.m-text`) and the action row.
-    Body,
     /// Meta labels, hairlines, placeholders, attachment chips.
     Dim,
 }
@@ -43,6 +43,10 @@ pub(crate) enum ReaderLine {
         tone: Tone,
         text: String,
     },
+    /// The action row (mockup `.thread-actions`): one clickable control per
+    /// segment, each label advertising its keyboard key. Rendered as one
+    /// ` · `-joined line; the mouse layer records a region per segment.
+    Actions(Vec<(String, ReaderAction)>),
     /// One attachment chip (mockup `.att`). `selected` marks the chip the
     /// save/open keys act on; it renders with the cursor marker and the
     /// accent style.
@@ -66,11 +70,19 @@ impl ReaderLine {
     fn text(&self) -> String {
         match self {
             ReaderLine::Chrome { text, .. } => text.clone(),
+            ReaderLine::Actions(segments) => segments
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>()
+                .join(SEPARATOR),
             ReaderLine::Chip { text, .. } => text.clone(),
             ReaderLine::Rich(line) => line.text(),
         }
     }
 }
+
+/// Separator between reader action segments (mockup `.thread-actions`).
+const SEPARATOR: &str = " · ";
 
 /// Body indent (mockup `.m-text` `padding-left: 2ch`).
 const INDENT: &str = "  ";
@@ -151,15 +163,26 @@ pub(crate) fn content(state: &AppState, width: usize) -> Vec<ReaderLine> {
         .unwrap_or(summary.timestamp);
     push_meta(&mut lines, "Date", &date_label(date), w);
 
-    // Action row (mockup `.thread-actions`): keyboard-first, plan §10 keys.
-    // Save/open hints appear only when attachments exist (plan §15).
-    let actions = match state.open_message.as_loaded().map(|m| m.attachments.len()) {
-        Some(count) if count > 0 => String::from(
-            "Reply r · Forward f · Archive e · Star s · Unread u · Delete ⌫ · Save d · Open o · Tab chip",
-        ),
-        _ => String::from("Reply r · Forward f · Archive e · Star s · Unread u · Delete ⌫"),
-    };
-    lines.push(ReaderLine::chrome(Tone::Body, actions));
+    // Action row (mockup `.thread-actions`): one clickable control per
+    // keyboard shortcut, save/open hints only when attachments exist
+    // (plan §15). Clicking a control runs the same action as its key.
+    let mut actions: Vec<(String, ReaderAction)> = vec![
+        (String::from("Reply r"), ReaderAction::Reply),
+        (String::from("Forward f"), ReaderAction::Forward),
+        (String::from("Archive e"), ReaderAction::Archive),
+        (String::from("Star s"), ReaderAction::Star),
+        (String::from("Unread u"), ReaderAction::Unread),
+        (String::from("Delete ⌫"), ReaderAction::Trash),
+    ];
+    if state
+        .open_message
+        .as_loaded()
+        .is_some_and(|m| !m.attachments.is_empty())
+    {
+        actions.push((String::from("Save d"), ReaderAction::SaveAttachment));
+        actions.push((String::from("Open o"), ReaderAction::OpenAttachment));
+    }
+    lines.push(ReaderLine::Actions(actions));
     lines.push(hairline(w));
 
     // Body (plan §13: HTML-preferred selection, rich semantic rendering,
@@ -250,25 +273,54 @@ pub fn render(
         .map(|line| reader_spans(line, theme, area.width as usize))
         .collect();
     frame.render_widget(Paragraph::new(visible), area);
-    // Attachment chips are clickable (plan §15): the chip's index counts
-    // across the whole document, so chips scrolled out of view never shift
-    // the identity of the visible ones.
+    // Clickable regions (plan §10): attachment chips and the action row.
+    // Both are indexed across the whole document, so scrolling never
+    // shifts the identity of the visible controls.
     let mut chip_index = 0usize;
     for (offset, line) in lines.iter().enumerate() {
-        let is_chip = matches!(line, ReaderLine::Chip { .. });
-        if is_chip && offset >= start && offset < start + viewport {
-            hits.push(
-                Rect {
-                    x: area.x,
-                    y: area.y + (offset - start) as u16,
-                    width: area.width,
-                    height: 1,
-                },
-                ClickTarget::ReaderAttachment(chip_index),
-            );
-        }
-        if is_chip {
-            chip_index += 1;
+        let visible = offset >= start && offset < start + viewport;
+        match line {
+            ReaderLine::Chip { .. } => {
+                if visible {
+                    hits.push(
+                        Rect {
+                            x: area.x,
+                            y: area.y + (offset - start) as u16,
+                            width: area.width,
+                            height: 1,
+                        },
+                        ClickTarget::ReaderAttachment(chip_index),
+                    );
+                }
+                chip_index += 1;
+            }
+            ReaderLine::Actions(segments) => {
+                if !visible {
+                    continue;
+                }
+                let y = area.y + (offset - start) as u16;
+                let mut segment_col = 0usize;
+                for (label, action) in segments {
+                    // Segment regions are exact: each starts where the
+                    // previous one ended plus the ` · ` separator, so a
+                    // click lands on the control it names (plan §10).
+                    let remaining = (area.width as usize).saturating_sub(segment_col);
+                    let width = label.width().min(remaining);
+                    if width > 0 {
+                        hits.push(
+                            Rect {
+                                x: area.x + segment_col as u16,
+                                y,
+                                width: width as u16,
+                                height: 1,
+                            },
+                            ClickTarget::ReaderAction(*action),
+                        );
+                    }
+                    segment_col += label.width() + SEPARATOR.width();
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -310,10 +362,20 @@ fn reader_spans<'a>(line: &'a ReaderLine, theme: &'a Theme, width: usize) -> Lin
                     .fg(theme.text)
                     .bg(theme.background)
                     .add_modifier(Modifier::BOLD),
-                Tone::Body => Style::new().fg(theme.text_soft).bg(theme.background),
                 Tone::Dim => Style::new().fg(theme.dim).bg(theme.background),
             };
             Line::from(Span::styled(text::clip(text, width), style))
+        }
+        ReaderLine::Actions(segments) => {
+            let joined = segments
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>()
+                .join(SEPARATOR);
+            Line::from(Span::styled(
+                text::clip(&joined, width),
+                Style::new().fg(theme.text_soft).bg(theme.background),
+            ))
         }
         ReaderLine::Chip { text, selected } => {
             let style = if *selected {

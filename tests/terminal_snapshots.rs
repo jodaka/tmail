@@ -1299,3 +1299,57 @@ fn composer_matches_mockup_hierarchy_and_density() {
     // Action row: Send first, Discard after it (mockup `.compose-actions`).
     assert!(send_x < discard_x, "Send precedes Discard");
 }
+
+/// The reader action row is clickable (plan §10 "action button"): each
+/// segment is its own region at the exact columns where its label draws,
+/// and every click maps to the action the key would run (yemf).
+#[test]
+fn hit_map_records_reader_action_row_segments() {
+    use tmail::app::action::{ClickTarget as Target, ReaderAction};
+    let mut state = mock_initial_state();
+    let summary = state.messages.items[0].clone();
+    let message = mock::mock_message(&summary);
+    state.routes.push(Route::Message(MessageRoute {
+        mailbox_id: MailboxId(String::from("inbox")),
+        summary,
+    }));
+    state.open_message = Loadable::Loaded(message);
+    state.focus = Focus::Reader;
+    let (_, hits) = draw_state_hits(&state, 152, 40);
+    // Document geometry at 152×40: subject y=4, From/To/Date y=5..7, so
+    // the action row draws at y=8 starting at the list edge x=24.
+    assert_eq!(
+        hits.hit_test(25, 8, false),
+        Some(Target::ReaderAction(ReaderAction::Reply))
+    );
+    assert_eq!(
+        hits.hit_test(36, 8, false),
+        Some(Target::ReaderAction(ReaderAction::Forward))
+    );
+    assert_eq!(
+        hits.hit_test(47, 8, false),
+        Some(Target::ReaderAction(ReaderAction::Archive))
+    );
+    assert_eq!(
+        hits.hit_test(60, 8, false),
+        Some(Target::ReaderAction(ReaderAction::Star))
+    );
+    // The separator between segments stays inside a segment's region only
+    // by belonging to the preceding label's end — a click on the gap right
+    // before "Archive" hits Archive only inside its label; the gap itself
+    // is the tail of "Forward f"'s trailing separator, owned by Archive's
+    // start: assert the boundary behaves (gap after "Forward f" hits
+    // nothing until Archive's own first column).
+    let archive_x = 24 + "Reply r".width() + 3 + "Forward f".width() + 3;
+    assert_eq!(
+        hits.hit_test(archive_x as u16, 8, false),
+        Some(Target::ReaderAction(ReaderAction::Archive))
+    );
+    assert_eq!(
+        hits.hit_test(archive_x as u16 - 1, 8, false),
+        None,
+        "the separator column binds to no action"
+    );
+}
+
+use unicode_width::UnicodeWidthStr as _;

@@ -60,6 +60,21 @@ pub enum DialogEdit {
     CursorRight,
 }
 
+/// The clickable controls of the reader action row (mockup `viewer.html`
+/// `.thread-actions`). Each maps onto the keyboard action whose key the
+/// label already advertises (plan §10: "action button" click target).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReaderAction {
+    Reply,
+    Forward,
+    Archive,
+    Star,
+    Unread,
+    Trash,
+    SaveAttachment,
+    OpenAttachment,
+}
+
 /// What a mouse click landed on (plan §10, Phase 10.1). Recorded during
 /// render as widget rectangles; the mouse layer translates a click into
 /// `Action::Click(target)` and the reducer — the only state writer —
@@ -77,6 +92,8 @@ pub enum ClickTarget {
     MessageRow(usize),
     /// An attachment chip in the reader (equivalent: Tab + `d`/`o`).
     ReaderAttachment(usize),
+    /// A control on the reader action row (equivalent: the advertised key).
+    ReaderAction(ReaderAction),
     /// A composer control (equivalent: Tab; Enter activates buttons).
     ComposerField(ComposerField),
     /// Retry/Dismiss buttons of the error modal (equivalent: Tab + Enter).
@@ -113,6 +130,12 @@ pub enum Action {
     ToggleStar,
     MarkUnread,
     Refresh,
+    /// Turn terminal mouse capture on/off at runtime (plan §10 feedback).
+    /// While capture is on, the terminal's native text selection needs the
+    /// Shift+click/drag convention; with it off, selection works exactly
+    /// as if the mouse were disabled. The reducer only flips the state
+    /// flag; the runtime applies the capture mode.
+    ToggleMouseCapture,
     Send,
     /// Save the selected reader attachment to the downloads directory
     /// (plan §15, Phase 8.4).

@@ -41,13 +41,51 @@ pub(crate) fn envelope_list_argv(
     argv
 }
 
+/// The predicates and connectors of the himalaya 2.1.0 search DSL,
+/// verified against the binary: lowercase keywords, space-separated
+/// values, `and`/`or` connectors, parentheses for grouping, and quoted
+/// values with `\"` escapes. There is no all-fields `text` predicate.
+const SEARCH_PREDICATES: [&str; 10] = [
+    "from", "to", "subject", "body", "flag", "not", "date", "after", "and", "or",
+];
+
+/// Gmail-style search (plan §16, user feedback): a query with no DSL
+/// predicate is full text — the user types `plati` and Post matches
+/// sender, subject, or body. Because this himalaya version has no `text`
+/// predicate, that becomes an `or` chain over the three fields, with the
+/// whole query as one quoted value (spaces stay inside the value; embedded
+/// quotes are `\"`-escaped, verified on 2.1.0). Queries that already look
+/// like the DSL pass through unchanged, so hand-written filters keep
+/// working; an empty query stays empty (it matches everything).
+pub(crate) fn normalize_search_query(query: &str) -> String {
+    let query = query.trim();
+    if query.is_empty() {
+        return String::new();
+    }
+    let tokens: Vec<&str> = query.split_whitespace().collect();
+    // A keyword anywhere ahead of a value token means the user is writing
+    // the DSL by hand. A keyword in final position is just a word being
+    // searched (`hello from` → full text for the words, not a broken
+    // filter).
+    let looks_like_dsl = tokens
+        .iter()
+        .take(tokens.len().saturating_sub(1))
+        .any(|token| SEARCH_PREDICATES.contains(token));
+    if looks_like_dsl {
+        return query.to_owned();
+    }
+    let quoted = format!("\"{}\"", query.replace('"', "\\\""));
+    format!("(from {quoted}) or (subject {quoted}) or (body {quoted})")
+}
+
 /// `envelope search -m <mailbox> -p <page> -s <size> --json <query>`
 /// (Phase 9). All flags precede the query: himalaya parses *every*
 /// trailing positional as the shared search DSL, so the query must be the
 /// single final argv entry — and it travels as one entry, never through a
 /// shell, so special characters stay one argument (verified on himalaya
 /// 2.1.0: `envelope search -m Inbox -p 1 -s 20 --json "from x"`; an empty
-/// query is valid backend behavior and matches everything).
+/// query is valid backend behavior and matches everything). Bare text is
+/// normalized into an any-field match — see [`normalize_search_query`].
 pub(crate) fn envelope_search_argv(
     config: Option<&Path>,
     account: Option<&str>,
@@ -72,7 +110,7 @@ pub(crate) fn envelope_search_argv(
         .into_iter()
         .map(String::from),
     );
-    argv.push(String::from(query));
+    argv.push(normalize_search_query(query));
     argv
 }
 
@@ -339,6 +377,70 @@ mod tests {
         assert_eq!(
             argv.last().map(String::as_str),
             Some("subject \"quoted (x)\"")
+        );
+        // Bare text becomes the any-field OR chain (Gmail-style search).
+        let argv = envelope_search_argv(None, None, "Inbox", "plati", 1, 20);
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("(from \"plati\") or (subject \"plati\") or (body \"plati\")")
+        );
+    }
+
+    #[test]
+    fn bare_text_becomes_an_any_field_or_chain() {
+        assert_eq!(
+            normalize_search_query("plati"),
+            "(from \"plati\") or (subject \"plati\") or (body \"plati\")"
+        );
+        // Multi-word input stays one quoted value (verified on 2.1.0:
+        // `body "hello world"` matches the phrase).
+        assert_eq!(
+            normalize_search_query("hello world"),
+            "(from \"hello world\") or (subject \"hello world\") or (body \"hello world\")"
+        );
+        // Whitespace is trimmed; an empty query stays empty (it matches
+        // everything — wrapping it would match nothing).
+        assert_eq!(
+            normalize_search_query("  plati  "),
+            normalize_search_query("plati")
+        );
+        assert_eq!(normalize_search_query(""), "");
+        assert_eq!(normalize_search_query("   "), "");
+    }
+
+    #[test]
+    fn handwritten_dsl_queries_pass_through_unchanged() {
+        // Predicate keyword ahead of a value: the user is writing the DSL.
+        for query in [
+            "from bob",
+            "body \"hello world\"",
+            "not from bob",
+            "from example and subject quote",
+            "(from bob) or (subject bob)",
+        ] {
+            assert_eq!(normalize_search_query(query), query);
+        }
+    }
+
+    #[test]
+    fn keywords_in_value_position_are_searched_not_parsed() {
+        // A keyword in final position has no value: searching for the
+        // literal word must still work.
+        assert_eq!(
+            normalize_search_query("hello from"),
+            "(from \"hello from\") or (subject \"hello from\") or (body \"hello from\")"
+        );
+        assert_eq!(
+            normalize_search_query("from"),
+            "(from \"from\") or (subject \"from\") or (body \"from\")"
+        );
+    }
+
+    #[test]
+    fn embedded_quotes_are_escaped_for_the_dsl() {
+        assert_eq!(
+            normalize_search_query("say \"hi\""),
+            "(from \"say \\\"hi\\\"\") or (subject \"say \\\"hi\\\"\") or (body \"say \\\"hi\\\"\")"
         );
     }
 

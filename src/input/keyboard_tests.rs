@@ -74,6 +74,10 @@ fn list_shortcuts_per_input_contract() {
         to_action(plain(KeyCode::Char('u')), f),
         Some(Action::MarkUnread)
     );
+    assert_eq!(
+        to_action(plain(KeyCode::Char('m')), f),
+        Some(Action::ToggleMouseCapture)
+    );
     assert_eq!(to_action(plain(KeyCode::Delete), f), Some(Action::Trash));
 }
 

@@ -4070,3 +4070,79 @@ fn resize_never_pushes_the_attachment_cursor_out_of_range() {
         assert!(s.reader_attachment.unwrap_or(0) < count.max(1));
     }
 }
+
+// ── Phase 10 feedback: reader action row + capture toggle (yemf) ─────────
+
+#[test]
+fn click_reader_action_runs_the_advertised_action() {
+    use crate::app::action::ReaderAction;
+    let mut s = reader_with_attachments();
+
+    // Archive starts the move operation, exactly like `e`.
+    let effects = reduce(
+        &mut s,
+        &Action::Click(ClickTarget::ReaderAction(ReaderAction::Archive)),
+    );
+    let (_, kind) = effect_parts(&effects);
+    assert!(matches!(kind, OperationKind::Archive(_)));
+
+    // Star issues the starred-flag command, exactly like `s`.
+    let effects = reduce(
+        &mut s,
+        &Action::Click(ClickTarget::ReaderAction(ReaderAction::Star)),
+    );
+    let (_, kind) = effect_parts(&effects);
+    assert!(matches!(
+        kind,
+        OperationKind::SetStarred { starred: true, .. }
+    ));
+}
+
+#[test]
+fn click_reader_action_reply_opens_a_seeded_reply() {
+    use crate::app::action::ReaderAction;
+    let mut s = reader_with_attachments();
+    tick(&mut s, 0); // seed the clock for draft identities
+    let expected_in_reply_to = s
+        .open_message
+        .as_loaded()
+        .and_then(|message| message.headers.message_id.clone());
+    no_effects(&reduce(
+        &mut s,
+        &Action::Click(ClickTarget::ReaderAction(ReaderAction::Reply)),
+    ));
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    assert_eq!(s.focus, Focus::Composer);
+    assert_eq!(
+        s.composer.as_ref().expect("composer").draft.in_reply_to,
+        expected_in_reply_to
+    );
+}
+
+#[test]
+fn click_reader_action_outside_the_reader_is_inert() {
+    use crate::app::action::ReaderAction;
+    let mut s = state(); // mailbox route: no reader, no open message
+    let before = s.routes.clone();
+    no_effects(&reduce(
+        &mut s,
+        &Action::Click(ClickTarget::ReaderAction(ReaderAction::Archive)),
+    ));
+    assert_eq!(s.routes, before);
+}
+
+#[test]
+fn m_toggles_mouse_capture_state() {
+    let mut s = state();
+    assert!(!s.mouse_capture);
+    no_effects(&reduce(&mut s, &Action::ToggleMouseCapture));
+    assert!(s.mouse_capture);
+    assert!(
+        s.status
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("off —") || m.contains("on —"))
+    );
+    no_effects(&reduce(&mut s, &Action::ToggleMouseCapture));
+    assert!(!s.mouse_capture);
+}

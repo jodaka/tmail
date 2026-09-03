@@ -104,6 +104,7 @@ fn char_action(c: char, modifiers: KeyModifiers, focus: Focus) -> Option<Action>
         'e' => Some(Action::Archive),
         's' => Some(Action::ToggleStar),
         'u' => Some(Action::MarkUnread),
+        'm' => Some(Action::ToggleMouseCapture),
         'd' => Some(Action::SaveAttachment),
         'o' => Some(Action::OpenAttachment),
         _ => None, // No j/k (plan §4), no '?' help.
