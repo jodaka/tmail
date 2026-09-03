@@ -31,16 +31,9 @@ impl<T> Loadable<T> {
     }
 }
 
-/// Which mode badge the status bar shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatusMode {
-    Normal,
-}
-
 /// Transient status area state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusState {
-    pub mode: StatusMode,
     /// One-line transient message; cleared on the next interaction.
     pub message: Option<String>,
 }
@@ -125,10 +118,7 @@ impl AppState {
             size: (152, 40),
             account_email: None,
             clock: None,
-            status: StatusState {
-                mode: StatusMode::Normal,
-                message: None,
-            },
+            status: StatusState { message: None },
             quit_requested: false,
             ticks: 0,
         }

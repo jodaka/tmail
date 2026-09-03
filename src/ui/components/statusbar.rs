@@ -1,10 +1,13 @@
-//! Status bar: mode badge, key hints, environment info (mockup `list.html`).
+//! Status bar: key hints, foreground-work spinner, environment info
+//! (mockup `list.html`).
 //!
-//! v1 overrides applied (plan §4): no `j`/`k` move hints, no `?` help.
+//! v1 overrides applied (plan §4): no `j`/`k` move hints, no `?` help. The
+//! mockup's mode badge was dropped: it named the screen the user is already
+//! looking at, so it carried no information.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
@@ -67,17 +70,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
             ("/", "search"),
         ]
     };
-    let mode = if composer {
-        " COMPOSE "
-    } else if reader {
-        " READER "
-    } else {
-        " NORMAL "
-    };
-    let mut spans: Vec<Span<'_>> = vec![Span::styled(
-        mode,
-        theme.mode_badge().add_modifier(Modifier::empty()),
-    )];
+    let mut spans: Vec<Span<'_>> = Vec::new();
     // Foreground work never blocks input, but it is announced here so the
     // user knows what `Esc` would cancel (plan §11).
     if let Some(operation) = state.operations.foreground() {

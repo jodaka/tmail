@@ -67,7 +67,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
                     width: area.width,
                     height: 1,
                 };
-                render_folder_row(frame, row_area, state, theme, mailbox, is_active, cursor);
+                render_folder_row(frame, row_area, theme, mailbox, is_active, cursor);
             }
         }
         crate::app::state::Loadable::Loaded(_) => {
@@ -109,10 +109,13 @@ fn render_note(frame: &mut Frame<'_>, area: Rect, theme: &Theme, note: &str) {
 fn render_folder_row(
     frame: &mut Frame<'_>,
     area: Rect,
-    _state: &AppState,
     theme: &Theme,
     mailbox: &crate::domain::Mailbox,
     is_active: bool,
+    // Sidebar-focused cursor on this row: the only state in which a folder
+    // row shows the accent marker. The marker is the focus indicator, so
+    // the message list (or search field) holding focus leaves no folder
+    // marked, even the active one.
     cursor: bool,
 ) {
     let width = area.width as usize;
@@ -145,9 +148,10 @@ fn render_folder_row(
         Style::new().fg(theme.dim)
     }
     .bg(row_bg);
-    // Inset accent bar on the active folder (mockup `.folder.active`).
-    let marker = if is_active { "▏" } else { " " };
-    let marker_style = if is_active {
+    // Inset accent bar marking the focused row (mockup `.folder.active`):
+    // the cursor row while the sidebar holds focus.
+    let marker = if cursor { "▏" } else { " " };
+    let marker_style = if cursor {
         Style::new().fg(theme.accent)
     } else {
         pad

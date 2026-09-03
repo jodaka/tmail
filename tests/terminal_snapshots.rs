@@ -63,8 +63,11 @@ fn full_layout_renders_all_regions() {
     // Rows.
     assert!(text.contains("KKF Notifications"), "row sender missing");
     assert!(text.contains("Shipment #TF-8841"), "row subject missing");
-    // Status bar.
-    assert!(text.contains("NORMAL"), "mode badge missing");
+    // Status bar: key hints only — the mode badge was dropped (it named
+    // the screen the user is already looking at).
+    assert_absent(&text, "NORMAL", size);
+    assert_absent(&text, "READER", size);
+    assert_absent(&text, "COMPOSE", size);
     assert!(text.contains("UTF-8 · 152×40"), "env info missing");
     // v1 overrides: no j/k hint, no help hint anywhere.
     assert_absent(&text, "help", size);
@@ -81,7 +84,7 @@ fn compact_layout_hides_sidebar_and_snippets() {
     let size = (100, 30);
     let text = text_of(&draw(size.0, size.1));
     assert!(text.contains("INBOX"), "pane title missing");
-    assert!(text.contains("NORMAL"), "mode badge missing");
+    assert_absent(&text, "NORMAL", size);
     // Sidebar hidden in compact.
     assert_absent(&text, "Compose", size);
     assert_absent(&text, "Archive", size);
@@ -120,6 +123,77 @@ fn selected_row_uses_accent_fill() {
         style.bg == Some(theme.accent_bg)
     });
     assert!(has_accent_bg, "selected row lacks accent fill:\n{text}");
+}
+
+/// The mockup's `.sidebar` border-right: a hairline divider column between
+/// the folders and the message list, spanning the full body height.
+#[test]
+fn sidebar_divider_separates_folders_from_messages() {
+    let buffer = draw(152, 40);
+    let top = tmail::ui::layout::TOPBAR_HEIGHT;
+    let bottom = 40 - tmail::ui::layout::STATUSBAR_HEIGHT;
+    let x = tmail::ui::layout::SIDEBAR_WIDTH - 1;
+    let divider_rows = (top..bottom)
+        .filter(|y| buffer[(x, *y)].symbol() == "│")
+        .count();
+    assert_eq!(
+        divider_rows,
+        (bottom - top) as usize,
+        "divider must span the body height"
+    );
+}
+
+/// The accent bar marks focus, not selection: whichever pane holds focus
+/// carries the bar on its cursor row, and the other pane carries none.
+#[test]
+fn focus_marker_follows_the_focused_pane() {
+    // Default state: the message list holds focus.
+    let mut state = mock_initial_state();
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    let text = text_of(&buffer);
+    let list_row = text
+        .lines()
+        .position(|line| line.contains("KKF Notifications"))
+        .expect("selected message row") as u16;
+    let folder_row = text
+        .lines()
+        .position(|line| line.contains("Inbox"))
+        .expect("active folder row") as u16;
+    assert_eq!(
+        buffer[(tmail::ui::layout::SIDEBAR_WIDTH, list_row)].symbol(),
+        "▏",
+        "list focused: selected message shows the bar"
+    );
+    assert_eq!(
+        buffer[(0, folder_row)].symbol(),
+        " ",
+        "list focused: no folder shows the bar"
+    );
+
+    // Sidebar focused: the cursor folder (Inbox, selection 0) shows the
+    // bar and the selected message does not.
+    let mut state = mock_initial_state();
+    state.focus = tmail::app::Focus::Sidebar;
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    let text = text_of(&buffer);
+    let folder_row = text
+        .lines()
+        .position(|line| line.contains("Inbox"))
+        .expect("cursor folder row") as u16;
+    let list_row = text
+        .lines()
+        .position(|line| line.contains("KKF Notifications"))
+        .expect("selected message row") as u16;
+    assert_eq!(
+        buffer[(0, folder_row)].symbol(),
+        "▏",
+        "sidebar focused: cursor folder shows the bar"
+    );
+    assert_eq!(
+        buffer[(tmail::ui::layout::SIDEBAR_WIDTH, list_row)].symbol(),
+        " ",
+        "sidebar focused: no message shows the bar"
+    );
 }
 
 #[test]
@@ -421,14 +495,11 @@ fn reader_renders_exactly_one_message_document() {
         "sender missing:\n{text}"
     );
     // Action row and hints: exactly one message, no thread navigation
-    // (plan §4 overrides).
+    // (plan §4 overrides); no mode badge.
     assert!(text.contains("Archive e"), "actions missing:\n{text}");
     assert_absent(&text, "3 of 3", (152, 40));
     assert_absent(&text, "thread", (152, 40));
-    // Body content from the mock message.
-    assert!(text.contains("body line 01"), "body missing:\n{text}");
-    // Reader mode badge (mockup `.mode`).
-    assert!(text.contains("READER"), "reader badge missing:\n{text}");
+    assert_absent(&text, "READER", (152, 40));
     assert_absent(&text, "NORMAL", (152, 40));
     // Sidebar chrome stays visible.
     assert!(text.contains("Compose"), "sidebar hidden:\n{text}");
@@ -550,8 +621,8 @@ fn composer_renders_fields_actions_and_toggles() {
     assert!(text.contains("[Bcc]"), "Bcc toggle missing:\n{text}");
     assert!(text.contains("Send"), "send button missing:\n{text}");
     assert!(text.contains("Discard"), "discard button missing:\n{text}");
-    // Composer mode badge and hints.
-    assert!(text.contains("COMPOSE"), "mode badge missing:\n{text}");
+    // The mode badge is gone; the hints row still lists composer keys.
+    assert_absent(&text, "COMPOSE", (152, 40));
 }
 
 #[test]

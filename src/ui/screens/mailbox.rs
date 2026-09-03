@@ -12,6 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
+use crate::app::focus::Focus;
 use crate::app::state::AppState;
 use crate::domain::MessageSummary;
 use crate::ui::dates;
@@ -56,7 +57,15 @@ pub fn render(
             width: rows.width,
             height: 1,
         };
-        let spans = message_spans(message, rows.width as usize, mode, theme, now, selected);
+        let spans = message_spans(
+            message,
+            rows.width as usize,
+            mode,
+            theme,
+            now,
+            selected,
+            state.focus == Focus::MessageList,
+        );
         frame.render_widget(Paragraph::new(Line::from(spans)), row_area);
     }
 }
@@ -135,6 +144,10 @@ fn message_spans<'a>(
     theme: &'a Theme,
     now: chrono::DateTime<chrono::FixedOffset>,
     selected: bool,
+    // The message list holds focus: the selected row shows the accent
+    // marker (the same bar the sidebar's focused folder carries). Selection
+    // alone keeps the fill but never the marker, so focus stays readable.
+    focused: bool,
 ) -> Vec<Span<'a>> {
     let full = mode == LayoutMode::Full;
     let compact = mode == LayoutMode::Compact;
@@ -162,7 +175,13 @@ fn message_spans<'a>(
     } else {
         Span::styled(" ", base)
     };
-    let marker = Span::styled(" ", base);
+    // Accent bar in the marker column (mockup `.folder.active` bar): marks
+    // the focused row while the list holds focus.
+    let marker = if selected && focused {
+        Span::styled("▏", Style::new().fg(theme.accent).bg(bg))
+    } else {
+        Span::styled(" ", base)
+    };
 
     let from_style = if selected {
         base.fg(theme.text)

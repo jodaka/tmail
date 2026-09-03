@@ -15,7 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::route::Route;
 use crate::app::state::AppState;
@@ -62,7 +62,26 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, ctx: &Rend
     components::topbar::render(frame, topbar, state, theme, &ctx.clock);
     let (sidebar, list) = layout::split_body(mode, body);
     if let Some(sidebar) = sidebar {
-        components::sidebar::render(frame, sidebar, state, theme);
+        // The mockup's `.sidebar` carries a `border-right` hairline (list,
+        // viewer, and new-mail alike). The divider column is shaved off the
+        // sidebar so folder rows never draw under it; the list area (and
+        // with it every width computation the reducer relies on) is
+        // untouched.
+        let divider = Rect {
+            x: sidebar.x + sidebar.width - 1,
+            y: sidebar.y,
+            width: 1,
+            height: sidebar.height,
+        };
+        let mut inset = sidebar;
+        inset.width -= 1;
+        components::sidebar::render(frame, inset, state, theme);
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::RIGHT)
+                .border_style(theme.hairline()),
+            divider,
+        );
     }
     // The reader screen replaces the message list; the sidebar and topbar
     // chrome stay (mockup `viewer.html`). The composer likewise replaces
