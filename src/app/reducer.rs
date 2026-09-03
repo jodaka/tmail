@@ -1156,18 +1156,6 @@ fn cycle_reader_attachment(state: &mut AppState, delta: i64) {
     state.reader_attachment = Some(next);
 }
 
-/// The attachment the reader's save/open keys act on, when the open
-/// message carries any (plan §15).
-fn selected_attachment(state: &AppState) -> Option<(usize, &crate::domain::Attachment)> {
-    let message = state.open_message.as_loaded()?;
-    let index = state
-        .reader_attachment
-        .unwrap_or(0)
-        .min(message.attachments.len().saturating_sub(1));
-    let attachment = message.attachments.get(index)?;
-    Some((index, attachment))
-}
-
 /// Apply the fetched message: show it, fill the list snippet (Post fills
 /// snippets only from full fetches, see map.rs), and mark unread mail read
 /// after successful load (plan §19 Phase 4) as a separate, retryable flag
