@@ -84,10 +84,17 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
         .as_ref()
         .map(|spec| spec.kind.summary())
         .unwrap_or("Operation");
+    // Plan §12: an ambiguous outcome never claims definite failure — the
+    // message may already be out (e.g. a send that died mid-DATA).
+    let title_text = if dialog.ambiguous {
+        format!(" {title} — outcome unclear ")
+    } else {
+        format!(" {title} failed ")
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
-            format!(" {title} failed "),
+            title_text,
             Style::new()
                 .fg(theme.background)
                 .bg(theme.error)

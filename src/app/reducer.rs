@@ -222,6 +222,15 @@ fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
                         // stored snapshot unchanged — the safe direction
                         // is to preserve, never discard.
                     }
+                    OperationKind::Send { .. } => {
+                        // A send retry re-delivers the frozen bytes
+                        // verbatim (plan §12: the intent is replayed
+                        // unchanged, under a new id). The composer freezes
+                        // again while the replay runs.
+                        if let Some(composer) = state.composer.as_mut() {
+                            composer.sending = true;
+                        }
+                    }
                     _ => {}
                 }
                 return vec![state.operations.start(spec.kind)];
@@ -536,12 +545,15 @@ fn send_completed(
                 ),
                 ambiguous: other.is_ambiguous(),
             };
+            // The specific send status must survive the modal opening
+            // (the modal sets the generic "Operation failed" first).
+            let effects = open_error_modal(state, &failure);
             state.set_status(if other.is_ambiguous() {
                 "Send outcome unclear"
             } else {
                 "Send failed"
             });
-            open_error_modal(state, &failure)
+            effects
         }
     }
 }

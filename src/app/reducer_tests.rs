@@ -2526,3 +2526,108 @@ fn cleanup_of_a_discarded_draft_still_opens_the_modal_on_failure() {
     );
     assert!(s.overlay.is_some(), "discard cleanup failures stay visible");
 }
+
+// ── Ambiguous sends (plan §12, Phase 7.7) ────────────────────────────────
+
+#[test]
+fn ambiguous_send_opens_the_duplicate_warning_and_keeps_the_draft() {
+    let mut s = state();
+    sendable(&mut s);
+    let (id, message) = expect_send(&reduce(&mut s, &Action::Send));
+    // Probe-verified ambiguous outcome: payload transmitted, himalaya
+    // reported a DATA-phase EOF.
+    complete_send(
+        &mut s,
+        id,
+        SendOutcome::Unknown {
+            code: Some(1),
+            detail: String::from("SMTP DATA failed: Reached unexpected EOF"),
+        },
+    );
+    let Some(Overlay::Error(dialog)) = &s.overlay else {
+        panic!("modal open");
+    };
+    assert!(dialog.ambiguous, "the modal must carry the ambiguity flag");
+    assert_eq!(dialog.code, Some(1));
+    assert!(dialog.detail.contains("SMTP DATA failed"));
+    // Retry stays available, replaying the exact frozen message.
+    assert_eq!(
+        dialog.retry.as_ref().map(|spec| spec.kind.clone()),
+        Some(OperationKind::Send {
+            message: Box::new(message),
+        })
+    );
+    // The draft is intact and editable again; nothing claimed success.
+    let composer = s.composer.as_ref().unwrap();
+    assert!(!composer.sending);
+    assert_eq!(composer.draft.body, "Body");
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    assert_eq!(s.status.message.as_deref(), Some("Send outcome unclear"));
+}
+
+#[test]
+fn ambiguous_send_never_shows_a_failure_title_or_status() {
+    let mut s = state();
+    sendable(&mut s);
+    let (id, _) = expect_send(&reduce(&mut s, &Action::Send));
+    complete_send(
+        &mut s,
+        id,
+        SendOutcome::SentButCopyFailed {
+            code: None,
+            detail: String::from("sent-copy append failed"),
+        },
+    );
+    // Not success ("Message sent"), not definite failure ("Send failed").
+    assert_eq!(s.status.message.as_deref(), Some("Send outcome unclear"));
+    let Some(Overlay::Error(dialog)) = &s.overlay else {
+        panic!("modal open");
+    };
+    assert!(dialog.ambiguous);
+}
+
+#[test]
+fn retrying_an_ambiguous_send_replays_the_frozen_message() {
+    let mut s = state();
+    sendable(&mut s);
+    let (id, message) = expect_send(&reduce(&mut s, &Action::Send));
+    complete_send(
+        &mut s,
+        id,
+        SendOutcome::Unknown {
+            code: Some(1),
+            detail: String::from("connection reset"),
+        },
+    );
+    let effects = reduce(&mut s, &Action::RetryError);
+    let (retry_id, replay) = expect_send(&effects);
+    assert_ne!(retry_id, id, "a retry gets a new operation id");
+    assert_eq!(replay, message, "the exact same bytes are re-sent");
+    assert!(s.overlay.is_none());
+    let composer = s.composer.as_ref().unwrap();
+    assert!(composer.sending, "the retry send is in flight again");
+}
+
+#[test]
+fn failed_before_delivery_send_reports_definite_failure_safely() {
+    let mut s = state();
+    sendable(&mut s);
+    let (id, _) = expect_send(&reduce(&mut s, &Action::Send));
+    complete_send(
+        &mut s,
+        id,
+        SendOutcome::FailedBeforeDelivery {
+            code: Some(1),
+            detail: String::from("connect 127.0.0.1:3425: connection refused"),
+        },
+    );
+    assert_eq!(s.status.message.as_deref(), Some("Send failed"));
+    let Some(Overlay::Error(dialog)) = &s.overlay else {
+        panic!("modal open");
+    };
+    // Nothing was transmitted: retrying is safe, no duplicate warning.
+    assert!(!dialog.ambiguous);
+    assert!(dialog.retry.is_some());
+    let composer = s.composer.as_ref().unwrap();
+    assert_eq!(composer.draft.body, "Body", "draft intact");
+}
