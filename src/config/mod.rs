@@ -18,6 +18,10 @@ use std::path::{Path, PathBuf};
 /// (plan §16/§17: explicit pagination, default 20).
 pub const DEFAULT_PAGE_SIZE: usize = 20;
 
+/// Default periodic refresh interval in seconds (plan §11/§19 Phase 9);
+/// `[post.mail].refresh_interval_seconds = 0` disables the timer.
+pub const DEFAULT_REFRESH_INTERVAL_SECONDS: u64 = 60;
+
 /// Resolved, validated Phase 2 configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -30,6 +34,10 @@ pub struct Config {
     /// `[post.mail].page_size`, defaulting to [`DEFAULT_PAGE_SIZE`]; a
     /// non-positive or absent value falls back to the default.
     pub page_size: usize,
+    /// `[post.mail].refresh_interval_seconds` (plan §11/§19 Phase 9):
+    /// the periodic background-refresh interval; `0` disables the timer.
+    /// Absent defaults to 60; a negative value disables (treated as 0).
+    pub refresh_interval_seconds: u64,
     /// `[accounts.<account>.mailbox.alias]` entries: role key → mailbox
     /// name. Non-string values are ignored.
     pub aliases: HashMap<String, String>,
@@ -50,6 +58,7 @@ impl Default for Config {
             path: None,
             account: None,
             page_size: DEFAULT_PAGE_SIZE,
+            refresh_interval_seconds: DEFAULT_REFRESH_INTERVAL_SECONDS,
             aliases: HashMap::new(),
             account_email: None,
             account_display_name: None,
@@ -137,6 +146,16 @@ pub fn parse(text: &str, path: Option<PathBuf>) -> Config {
     {
         config.page_size = page_size;
     }
+    // The refresh interval: explicit 0 disables the timer; a negative
+    // value is treated as disabled too (a nonsense interval must never
+    // become a busy loop); anything absent or non-numeric defaults to 60.
+    config.refresh_interval_seconds = doc
+        .get("post")
+        .and_then(|post| post.get("mail"))
+        .and_then(|mail| mail.get("refresh_interval_seconds"))
+        .and_then(toml::Value::as_integer)
+        .map(|seconds| seconds.max(0) as u64)
+        .unwrap_or(DEFAULT_REFRESH_INTERVAL_SECONDS);
     if let Some(downloads_dir) = doc
         .get("post")
         .and_then(|post| post.get("attachments"))
@@ -265,6 +284,23 @@ mod tests {
     fn nonpositive_page_size_falls_back_to_default() {
         let text = "[post.mail]\npage_size = 0\n";
         assert_eq!(parse(text, None).page_size, DEFAULT_PAGE_SIZE);
+    }
+
+    #[test]
+    fn refresh_interval_defaults_to_sixty_and_zero_disables() {
+        // Absent: the plan default (Phase 9.4).
+        assert_eq!(parse("", None).refresh_interval_seconds, 60);
+        // Explicit value wins; 0 disables the timer.
+        let text = "[post.mail]\nrefresh_interval_seconds = 120\n";
+        assert_eq!(parse(text, None).refresh_interval_seconds, 120);
+        let text = "[post.mail]\nrefresh_interval_seconds = 0\n";
+        assert_eq!(parse(text, None).refresh_interval_seconds, 0);
+        // A negative value is nonsense: treated as disabled, never a loop.
+        let text = "[post.mail]\nrefresh_interval_seconds = -5\n";
+        assert_eq!(parse(text, None).refresh_interval_seconds, 0);
+        // Non-numeric falls back to the default.
+        let text = "[post.mail]\nrefresh_interval_seconds = \"soon\"\n";
+        assert_eq!(parse(text, None).refresh_interval_seconds, 60);
     }
 
     #[test]

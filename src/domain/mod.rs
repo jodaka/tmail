@@ -18,6 +18,6 @@ pub use message::{
     Attachment, AttachmentRequest, Message, MessageHeaders, MessageId, MessageLocator,
     MessageSummary,
 };
-pub use page::{Page, PageRequest};
+pub use page::{Page, PageRequest, SearchRequest};
 pub use reply::{ReplyKind, Seed, seed_forward, seed_reply};
 pub use send::{OutboundAttachment, OutboundMessage, OutgoingContent, SendBlocker, SendOutcome};

@@ -26,7 +26,8 @@ use crate::backend::traits::{BackendError, BackendResult, MailBackend, RequestCo
 use crate::config::Config;
 use crate::domain::{
     AttachmentRequest, DraftAttachment, DraftSnapshot, Mailbox, MailboxRole, Message, MessageId,
-    MessageLocator, MessageSummary, OutboundMessage, Page, PageRequest, RestoredDraft, SendOutcome,
+    MessageLocator, MessageSummary, OutboundMessage, Page, PageRequest, RestoredDraft,
+    SearchRequest, SendOutcome,
 };
 
 /// Drives the `himalaya` executable with argv-only child processes.
@@ -184,6 +185,45 @@ impl MailBackend for HimalayaCliBackend {
         let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
         let dto: dto::MessageReadDto = process::decode(output)?;
         Ok(map::message(dto, locator))
+    }
+
+    /// `envelope search` with the query passed through unchanged (Phase 9).
+    /// The output shape matches `envelope list` (verified on himalaya
+    /// 2.1.0), so the same envelope mapping applies; the backend provides
+    /// no total, so the page degrades to next-availability (plan §16).
+    async fn search_messages(
+        &self,
+        ctx: RequestContext,
+        request: SearchRequest,
+    ) -> BackendResult<Page<MessageSummary>> {
+        tracing::debug!(
+            operation = %ctx.operation,
+            mailbox = %request.mailbox_id.0,
+            "search_messages"
+        );
+        if request.limit == 0 {
+            return Err(BackendError::InvalidRequest(String::from(
+                "page limit must be non-zero",
+            )));
+        }
+        let aligned = request.offset - request.offset % request.limit;
+        let page_number = aligned / request.limit + 1;
+        let argv = command::envelope_search_argv(
+            self.config_path.as_deref(),
+            self.account.as_deref(),
+            &request.mailbox_id.0,
+            &request.query,
+            page_number,
+            request.limit,
+        );
+        let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
+        let dto: dto::EnvelopesDto = process::decode(output)?;
+        Ok(map::envelopes(
+            dto,
+            request.mailbox_id,
+            aligned,
+            request.limit,
+        ))
     }
 
     async fn set_read(

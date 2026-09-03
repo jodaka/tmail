@@ -480,7 +480,7 @@ fn ambiguous_failure_shows_duplicate_warning() {
 use tmail::app::Focus;
 use tmail::app::route::{MessageRoute, Route};
 use tmail::app::state::Loadable;
-use tmail::domain::{MailboxId, Message, MessageId};
+use tmail::domain::{MailboxId, Message, MessageId, Page};
 
 /// A reader-open state: the selected mock summary is open with its mock
 /// message loaded.
@@ -708,6 +708,53 @@ fn composer_flags_invalid_addresses_in_the_warning_color() {
     let buffer = buffer_after(&mut state, &actions, 152, 40);
     let warned = buffer.content.iter().any(|cell| cell.fg == theme.warning);
     assert!(!warned, "valid address must not warn");
+}
+
+// ── Search screen (plan §19 Phase 9) ─────────────────────────────────────
+
+/// Search results reuse the mailbox list: the head names the query, and an
+/// empty result set says so explicitly once the request has landed.
+#[test]
+fn search_results_render_query_head_and_empty_note() {
+    let mut state = mock_initial_state();
+    state.size = (152, 40);
+    let mut actions: Vec<Action> = vec![Action::OpenSearch];
+    for c in "quote".chars() {
+        actions.push(Action::SearchEdit(tmail::app::action::SearchEdit::Char(c)));
+    }
+    actions.push(Action::SubmitSearch);
+    let mut effects = Vec::new();
+    for action in &actions {
+        effects.extend(reducer::reduce(&mut state, action));
+    }
+    let search_id = match effects.as_slice() {
+        [effect] => {
+            assert!(
+                matches!(effect.kind, OperationKind::Search(_)),
+                "expected a Search operation"
+            );
+            effect.id
+        }
+        other => panic!("expected one effect, got {other:?}"),
+    };
+    // In flight: the head names the query; no empty note yet.
+    let text = text_of(&buffer_after(&mut state, &[], 152, 40));
+    assert!(text.contains("SEARCH — quote"), "head:\n{text}");
+    assert!(
+        !text.contains("(no results)"),
+        "an in-flight search must not claim empty:\n{text}"
+    );
+    // An empty result page is valid and explicit (Phase 9.3).
+    reducer::reduce(
+        &mut state,
+        &Action::BackendCompleted(OperationResult {
+            id: search_id,
+            outcome: Ok(OperationOutcome::Page(Page::empty(20))),
+        }),
+    );
+    let text = text_of(&buffer_after(&mut state, &[], 152, 40));
+    assert!(text.contains("SEARCH — quote"), "head stays:\n{text}");
+    assert!(text.contains("(no results)"), "empty note:\n{text}");
 }
 
 #[test]

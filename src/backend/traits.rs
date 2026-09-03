@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::app::operation::OperationId;
 use crate::domain::{
     AttachmentRequest, DraftAttachment, DraftSnapshot, Mailbox, Message, MessageId, MessageLocator,
-    MessageSummary, OutboundMessage, Page, PageRequest, RestoredDraft, SendOutcome,
+    MessageSummary, OutboundMessage, Page, PageRequest, RestoredDraft, SearchRequest, SendOutcome,
 };
 
 /// Per-request context handed to every backend call (plan §8).
@@ -83,6 +83,17 @@ pub trait MailBackend: Send + Sync {
         &self,
         ctx: RequestContext,
         page: PageRequest,
+    ) -> BackendResult<Page<MessageSummary>>;
+
+    /// One page of search results (plan §16/§19 Phase 9): the query is
+    /// passed to the backend unchanged — Post adds no syntax of its own —
+    /// and scoped to `request.mailbox_id`. Shapes and pagination match
+    /// [`MailBackend::list_messages`]; the backend does not provide a
+    /// total, so the page degrades to next-availability (plan §16).
+    async fn search_messages(
+        &self,
+        ctx: RequestContext,
+        request: SearchRequest,
     ) -> BackendResult<Page<MessageSummary>>;
 
     /// One full message, parsed into domain types (plan §7/§13).

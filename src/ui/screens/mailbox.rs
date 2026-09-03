@@ -1,9 +1,11 @@
 //! Mailbox screen: list header + message rows (mockup `list.html`).
 //!
 //! One row per message (the mockup's single-line grid). Unread rows get the
-//! `unread` modifier; the selected row gets the accent fill. No thread
-//! count, no labels column, no tags (plan §4 overrides; labels carry no
-//! backend meaning — ADR 0001).
+//! `unread` modifier; the selected row gets the accent fill. The same list
+//! renders search results (Phase 9): the head then names the query, and an
+//! empty result set is a valid, explicit state. No thread count, no labels
+//! column, no tags (plan §4 overrides; labels carry no backend meaning —
+//! ADR 0001).
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -13,6 +15,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::focus::Focus;
+use crate::app::route::Route;
 use crate::app::state::AppState;
 use crate::domain::MessageSummary;
 use crate::ui::dates;
@@ -39,6 +42,7 @@ pub fn render(
     // always on screen regardless of movement, page loads, or resize
     // (Phase 2 acceptance).
     let bottom = area.y + area.height;
+    let mut drew_any_row = false;
     for (y, (i, message)) in (rows.y..).zip(
         state
             .messages
@@ -50,6 +54,7 @@ pub fn render(
         if y >= bottom {
             break;
         }
+        drew_any_row = true;
         let selected = i == state.selection;
         let row_area = Rect {
             x: rows.x,
@@ -68,6 +73,33 @@ pub fn render(
         );
         frame.render_widget(Paragraph::new(Line::from(spans)), row_area);
     }
+    // An empty search result set is a valid state, not an error — say so
+    // once the request is no longer in flight (Phase 9.3).
+    if !drew_any_row
+        && matches!(state.active_route(), Some(Route::Search(_)))
+        && state.operations.foreground().is_none()
+    {
+        render_note(frame, rows, theme, "(no results)");
+    }
+}
+
+/// A dim one-line note in the list area (Phase 9: empty search results).
+fn render_note(frame: &mut Frame<'_>, rows: Rect, theme: &Theme, note: &str) {
+    if rows.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            text::clip(note, rows.width as usize),
+            Style::new().fg(theme.dim),
+        )),
+        Rect {
+            x: rows.x,
+            y: rows.y,
+            width: rows.width,
+            height: 1,
+        },
+    );
 }
 
 fn render_head(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
@@ -82,14 +114,21 @@ fn render_head(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Them
     };
     let width = area.width as usize;
 
-    let title = state
-        .active_mailbox_name()
-        .unwrap_or("Mailbox")
-        .to_uppercase();
-    let unread = state
-        .active_mailbox_unread()
-        .map(|n| format!("{n} unread"))
-        .unwrap_or_default();
+    // Search results headline the query; a mailbox names itself (Phase 9).
+    let (title, unread) = match state.active_route() {
+        Some(Route::Search(route)) => (format!("SEARCH — {}", route.query), String::new()),
+        _ => {
+            let title = state
+                .active_mailbox_name()
+                .unwrap_or("Mailbox")
+                .to_uppercase();
+            let unread = state
+                .active_mailbox_unread()
+                .map(|n| format!("{n} unread"))
+                .unwrap_or_default();
+            (title, unread)
+        }
+    };
     let range = state.messages.range_label();
 
     // Right-aligned range (mockup `.pane-range`).

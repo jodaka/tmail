@@ -41,6 +41,41 @@ pub(crate) fn envelope_list_argv(
     argv
 }
 
+/// `envelope search -m <mailbox> -p <page> -s <size> --json <query>`
+/// (Phase 9). All flags precede the query: himalaya parses *every*
+/// trailing positional as the shared search DSL, so the query must be the
+/// single final argv entry — and it travels as one entry, never through a
+/// shell, so special characters stay one argument (verified on himalaya
+/// 2.1.0: `envelope search -m Inbox -p 1 -s 20 --json "from x"`; an empty
+/// query is valid backend behavior and matches everything).
+pub(crate) fn envelope_search_argv(
+    config: Option<&Path>,
+    account: Option<&str>,
+    mailbox_id: &str,
+    query: &str,
+    page_number: usize,
+    page_size: usize,
+) -> Vec<String> {
+    let mut argv = global_flags(config, account);
+    argv.extend(
+        [
+            "envelope",
+            "search",
+            "-m",
+            mailbox_id,
+            "-p",
+            &page_number.to_string(),
+            "-s",
+            &page_size.to_string(),
+            "--json",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
+    argv.push(String::from(query));
+    argv
+}
+
 /// `message read -m <mailbox> <id> --json` (ADR 0001 finding 10).
 pub(crate) fn message_read_argv(
     config: Option<&Path>,
@@ -265,6 +300,46 @@ mod tests {
         let path = PathBuf::from("/tmp/some dir/my config.toml");
         let argv = mailbox_list_argv(Some(&path), None);
         assert_eq!(argv[1], "/tmp/some dir/my config.toml");
+    }
+
+    #[test]
+    fn envelope_search_argv_is_exact_and_query_comes_last() {
+        // All flags precede the query: himalaya parses every trailing
+        // positional as the search DSL (verified on 2.1.0), so the query
+        // must be the single final argv entry.
+        let argv = envelope_search_argv(
+            Some(Path::new("/tmp/cfg.toml")),
+            Some("gmail"),
+            "Inbox",
+            "from example and subject quote",
+            2,
+            20,
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "-c",
+                "/tmp/cfg.toml",
+                "-a",
+                "gmail",
+                "envelope",
+                "search",
+                "-m",
+                "Inbox",
+                "-p",
+                "2",
+                "-s",
+                "20",
+                "--json",
+                "from example and subject quote",
+            ]
+        );
+        // Special characters travel as one argv entry, never a shell line.
+        let argv = envelope_search_argv(None, None, "Inbox", "subject \"quoted (x)\"", 1, 20);
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("subject \"quoted (x)\"")
+        );
     }
 
     #[test]

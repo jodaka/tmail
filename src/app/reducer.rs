@@ -12,16 +12,18 @@ use crate::app::composer::{ComposerField, ComposerState};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::operation::{
-    DraftRemovalReason, OperationFailure, OperationKind, OperationOutcome, OperationResult,
+    DraftRemovalReason, OperationFailure, OperationKind, OperationOrigin, OperationOutcome,
+    OperationResult,
 };
 use crate::app::overlay::{
     AttachmentPathDialog, ConfirmButton, DiscardDialog, ErrorDialog, ModalButton, Overlay,
 };
-use crate::app::route::{MailboxRoute, MessageRoute, Route};
+use crate::app::route::{MailboxRoute, MessageRoute, Route, SearchRoute};
 use crate::app::sanitize::sanitize;
-use crate::app::state::{AppState, Loadable};
+use crate::app::state::{AppState, ListStash, Loadable};
 use crate::domain::{
     DraftSaveState, Mailbox, MailboxId, MailboxRole, Message, MessageLocator, Page, PageRequest,
+    SearchRequest,
 };
 
 /// Apply `action` to `state`, returning backend work to spawn. Never
@@ -76,12 +78,7 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             search_edit(state, edit);
             Vec::new()
         }
-        Action::SubmitSearch => {
-            // Real search arrives in Phase 9 (plan §16); the field and its
-            // focus/edit interactions already work.
-            tracing::debug!(query = %state.search_query, "submit search (noop until phase 9)");
-            Vec::new()
-        }
+        Action::SubmitSearch => submit_search(state),
         Action::Archive => archive_message(state),
         Action::Trash => trash_message(state),
         Action::SaveAttachment => save_selected_attachment(state, false),
@@ -131,7 +128,9 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             state.ticks += 1;
             let now = **now;
             state.clock = Some(now);
-            autosave_tick(state, now)
+            let mut effects = autosave_tick(state, now);
+            effects.extend(auto_refresh_tick(state, now));
+            effects
         }
         Action::Resize { width, height } => {
             state.size = (*width, *height);
@@ -795,15 +794,39 @@ fn confirm_send(state: &mut AppState) -> Vec<Effect> {
 
 // ── Backend results (plan §11) ───────────────────────────────────────────
 
+/// Failure handling for list-shaped results (mailbox pages and searches,
+/// Phase 9): a *foreground* failure opens the Retry/Dismiss modal; a
+/// *background* (timer) refresh failure never interrupts the user — the
+/// first failure lands in the status line, and repeated identical failures
+/// are suppressed until a success or a manual refresh clears the record
+/// (Phase 9.6).
+fn list_failure(state: &mut AppState, failure: &OperationFailure, origin: OperationOrigin) {
+    if origin == OperationOrigin::Background {
+        if state.last_background_error.as_deref() != Some(failure.detail.as_str()) {
+            tracing::info!(detail = %failure.detail, "background refresh failed");
+            state.set_status("Refresh failed — the timer will retry");
+            state.last_background_error = Some(failure.detail.clone());
+        } else {
+            tracing::debug!("identical background refresh failure; status unchanged");
+        }
+        return;
+    }
+    // The last coherent page stays visible; the modal offers Retry/Dismiss
+    // (plan §12).
+    open_error_modal(state, failure);
+}
+
 /// Apply a backend result. Results for unknown, cancelled, or superseded
 /// operation ids never mutate state: `finish` removes the operation, and a
 /// superseded operation was already cancelled and removed when its
 /// replacement started.
 fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
-    let Some(kind) = state.operations.get(result.id).map(|op| op.kind.clone()) else {
+    let Some(op) = state.operations.get(result.id) else {
         tracing::debug!(id = %result.id, "dropping result for unknown or cancelled operation");
         return Vec::new();
     };
+    let kind = op.kind.clone();
+    let origin = op.origin;
     match &kind {
         OperationKind::LoadMailboxes => {
             state.operations.finish(result.id);
@@ -847,6 +870,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             }
             match &result.outcome {
                 Ok(OperationOutcome::Page(page)) => {
+                    state.last_background_error = None;
                     apply_page(state, page.clone());
                     Vec::new()
                 }
@@ -855,12 +879,48 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                     Vec::new()
                 }
                 Err(failure) => {
-                    // The last coherent page stays visible; the modal offers
-                    // Retry/Dismiss (plan §12).
-                    open_error_modal(state, failure)
+                    // Foreground failures open the Retry/Dismiss modal;
+                    // background (timer) refresh failures never interrupt
+                    // the user (Phase 9.6).
+                    list_failure(state, failure, origin);
+                    Vec::new()
                 }
                 _ => {
                     tracing::warn!(id = %result.id, "unexpected payload for a page operation");
+                    Vec::new()
+                }
+            }
+        }
+        OperationKind::Search(request) => {
+            // Currency check: the results must belong to the open search —
+            // same query and mailbox (a re-submit supersedes the older
+            // operation, so only races with navigation land here).
+            let current = matches!(
+                state.active_route(),
+                Some(Route::Search(route))
+                    if route.mailbox_id == request.mailbox_id && route.query == request.query
+            );
+            state.operations.finish(result.id);
+            if !current {
+                tracing::debug!(
+                    id = %result.id,
+                    mailbox = %request.mailbox_id.0,
+                    "dropping search result for a closed or changed search"
+                );
+                return Vec::new();
+            }
+            match &result.outcome {
+                Ok(OperationOutcome::Page(page)) => {
+                    state.last_background_error = None;
+                    apply_page(state, page.clone());
+                    Vec::new()
+                }
+                Ok(_) => {
+                    tracing::warn!(id = %result.id, "unexpected payload for a search operation");
+                    Vec::new()
+                }
+                Err(failure) => {
+                    list_failure(state, failure, origin);
                     Vec::new()
                 }
             }
@@ -1354,7 +1414,9 @@ fn message_moved(state: &mut AppState, locator: &MessageLocator) -> Vec<Effect> 
         .min(state.messages.items.len().saturating_sub(1));
     keep_selection_visible(state);
     state.set_status("Message moved");
-    request_page(state, state.messages.offset)
+    // The visible context could be a mailbox page or search results
+    // (Phase 9); the re-sync follows whichever is open.
+    request_visible_page(state, state.messages.offset)
 }
 
 /// Apply the mailbox listing: select the Inbox, or the first mailbox when
@@ -1510,11 +1572,16 @@ fn change_page(state: &mut AppState, delta: i64) -> Vec<Effect> {
     let limit = state.messages.limit.max(1) as i64;
     // Base on the in-flight request when there is one, so repeated keys
     // before results arrive keep advancing instead of re-requesting the
-    // same next page.
-    let base = match state.active_route().and_then(Route::mailbox_id) {
-        Some(id) => state
+    // same next page. The in-flight kind follows the visible context
+    // (mailbox page vs search results, Phase 9).
+    let base = match state.active_route() {
+        Some(Route::Search(route)) => state
             .operations
-            .page_in_flight(id)
+            .search_in_flight(&route.mailbox_id)
+            .map(|pending| pending.offset as i64),
+        Some(route) => route
+            .mailbox_id()
+            .and_then(|id| state.operations.page_in_flight(id))
             .map(|pending| pending.offset as i64),
         None => None,
     }
@@ -1531,14 +1598,79 @@ fn change_page(state: &mut AppState, delta: i64) -> Vec<Effect> {
     {
         return Vec::new();
     }
-    // Unknown total (maildir): a short page is the last one, so there is
-    // nothing valid to request.
+    // Unknown total (maildir, search): a short page is the last one, so
+    // there is nothing valid to request.
     if state.messages.total.is_none() && state.messages.items.len() < state.messages.limit {
         return Vec::new();
     }
     // The selection keeps pointing at the current page until the result
     // applies; `apply_page` re-resolves it by identity.
-    request_page(state, target as usize)
+    request_visible_page(state, target as usize)
+}
+
+/// Request one page of whatever list the active route shows (Phase 9): the
+/// active mailbox's page, or the open search's results. Both share the
+/// list state, selection, and scroll machinery (Phase 9.1).
+fn request_visible_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
+    match state.active_route() {
+        Some(Route::Search(route)) => {
+            let request = SearchRequest {
+                mailbox_id: route.mailbox_id.clone(),
+                query: route.query.clone(),
+                offset,
+                limit: state.messages.limit.max(1),
+            };
+            vec![state.operations.start(OperationKind::Search(request))]
+        }
+        Some(route) => match route.mailbox_id().cloned() {
+            Some(mailbox_id) => {
+                let request = PageRequest {
+                    mailbox_id,
+                    offset,
+                    limit: state.messages.limit.max(1),
+                };
+                vec![state.operations.start(OperationKind::LoadPage(request))]
+            }
+            None => Vec::new(),
+        },
+        None => Vec::new(),
+    }
+}
+
+/// Background variant of [`request_visible_page`] (Phase 9.4): same
+/// request, but failures are handled as background work (Phase 9.6).
+fn request_visible_page_background(state: &mut AppState, offset: usize) -> Vec<Effect> {
+    match state.active_route() {
+        Some(Route::Search(route)) => {
+            let request = SearchRequest {
+                mailbox_id: route.mailbox_id.clone(),
+                query: route.query.clone(),
+                offset,
+                limit: state.messages.limit.max(1),
+            };
+            vec![
+                state
+                    .operations
+                    .start_background(OperationKind::Search(request)),
+            ]
+        }
+        Some(route) => match route.mailbox_id().cloned() {
+            Some(mailbox_id) => {
+                let request = PageRequest {
+                    mailbox_id,
+                    offset,
+                    limit: state.messages.limit.max(1),
+                };
+                vec![
+                    state
+                        .operations
+                        .start_background(OperationKind::LoadPage(request)),
+                ]
+            }
+            None => Vec::new(),
+        },
+        None => Vec::new(),
+    }
 }
 
 /// Start a page load for the active route's mailbox and return its effect.
@@ -1813,9 +1945,13 @@ fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Vec<Effect> {
     {
         return Vec::new();
     }
-    // A reader (or composer, later) open on top is replaced by the new
-    // mailbox; its data must not linger.
-    if state.routes.pop().is_some() {
+    // A reader, search, or composer open on top is replaced by the new
+    // mailbox: the stack is rebuilt around the new root mailbox route — a
+    // reader may sit above a search route — and the search's stashed
+    // mailbox context is dropped with it (Phase 9.1).
+    if !state.routes.is_empty() {
+        state.routes.clear();
+        state.search_return = None;
         state.open_message = Loadable::Idle;
         state.reader_scroll = 0;
         state.reader_attachment = None;
@@ -1863,6 +1999,12 @@ fn back_or_cancel(state: &mut AppState) -> Vec<Effect> {
         return Vec::new();
     }
     if state.routes.len() > 1 {
+        // Leave an open search first: its results are regenerated on
+        // re-submit, the mailbox context underneath is stashed (Phase 9.1).
+        if matches!(state.active_route(), Some(Route::Search(_))) {
+            leave_search(state);
+            return Vec::new();
+        }
         // Pop the reader: the mailbox route underneath still holds the
         // exact page, selection, and scroll.
         state.routes.pop();
@@ -1890,8 +2032,81 @@ fn search_edit(state: &mut AppState, edit: &SearchEdit) {
     }
 }
 
+// ── Search (plan §16/§19 Phase 9) ────────────────────────────────────────
+
+/// Enter in the search field: run the query against the current mailbox.
+/// The query travels to the backend unchanged (Phase 9.2: no local parser).
+/// The mailbox list context is stashed for an exact return (Phase 9.1), and
+/// search results reuse the mailbox list's page/selection/scroll machinery.
+/// Re-submitting while the search route is open re-runs the (edited) query
+/// without disturbing the stashed context.
+fn submit_search(state: &mut AppState) -> Vec<Effect> {
+    // Submitting is the search field's Enter; dispatched elsewhere it is
+    // inert (the field is the only submit affordance, plan §10).
+    if state.focus != Focus::SearchField {
+        return Vec::new();
+    }
+    let query = state.search_query.clone();
+    if query.trim().is_empty() {
+        state.set_status("Type something to search for");
+        return Vec::new();
+    }
+    // The search runs against the mailbox currently displayed. Submitting
+    // is inert while a reader/composer sits on top: the search field is a
+    // mailbox-screen affordance.
+    let mailbox_id = match state.active_route() {
+        Some(Route::Mailbox(route)) => route.mailbox_id.clone(),
+        Some(Route::Search(route)) => route.mailbox_id.clone(),
+        _ => return Vec::new(),
+    };
+    let already_searching = matches!(state.active_route(), Some(Route::Search(_)));
+    if already_searching {
+        if let Some(Route::Search(route)) = state.routes.last_mut() {
+            route.query = query.clone();
+        }
+    } else {
+        state.search_return = Some(ListStash {
+            page: state.messages.clone(),
+            selection: state.selection,
+            scroll: state.list_scroll,
+        });
+        state.routes.push(Route::Search(SearchRoute {
+            query: query.clone(),
+            mailbox_id: mailbox_id.clone(),
+        }));
+    }
+    state.selection = 0;
+    state.list_scroll = 0;
+    state.messages = Page::empty(state.messages.limit);
+    state.focus = Focus::MessageList;
+    let limit = state.messages.limit.max(1);
+    vec![state.operations.start(OperationKind::Search(SearchRequest {
+        mailbox_id,
+        query,
+        offset: 0,
+        limit,
+    }))]
+}
+
+/// Leave the search route: restore the stashed mailbox list context
+/// (Phase 9.1) — page, selection, and scroll come back exactly as they
+/// were, with no reload.
+fn leave_search(state: &mut AppState) {
+    if matches!(state.active_route(), Some(Route::Search(_))) {
+        state.routes.pop();
+        if let Some(stash) = state.search_return.take() {
+            state.messages = stash.page;
+            state.selection = stash.selection;
+            state.list_scroll = stash.scroll;
+        }
+        state.focus = Focus::MessageList;
+    }
+}
+
 /// Manual refresh (`Ctrl+R`): (re)load the mailbox listing while startup
-/// has not completed, otherwise refresh the visible page.
+/// has not completed, otherwise refresh the visible context — the mailbox
+/// page or the open search results (Phase 9.5). Re-arms the periodic
+/// timer, so a manual refresh never collides with an imminent auto one.
 fn refresh(state: &mut AppState) -> Vec<Effect> {
     if !matches!(state.mailboxes, Loadable::Loaded(_)) {
         if state.operations.is_loading_mailboxes() {
@@ -1903,7 +2118,41 @@ fn refresh(state: &mut AppState) -> Vec<Effect> {
         return Vec::new();
     }
     state.set_status("Refreshing…");
-    request_page(state, state.messages.offset)
+    state.last_refresh_at = state.clock;
+    request_visible_page(state, state.messages.offset)
+}
+
+/// The periodic timer (Phase 9.4, plan §11): every
+/// `refresh_interval_seconds` of injected clock time, refresh the visible
+/// context in the background. The timer never interrupts conflicting work:
+/// it stands down while a modal is open, the composer is on screen, or any
+/// operation is in flight, and retries on the next tick once they clear.
+/// The first tick arms the timer (the reducer has no clock before then).
+fn auto_refresh_tick(
+    state: &mut AppState,
+    now: chrono::DateTime<chrono::FixedOffset>,
+) -> Vec<Effect> {
+    if state.refresh_interval_seconds == 0 {
+        return Vec::new();
+    }
+    let Some(last) = state.last_refresh_at else {
+        state.last_refresh_at = Some(now);
+        return Vec::new();
+    };
+    let elapsed = (now - last).num_seconds().max(0) as u64;
+    if elapsed < state.refresh_interval_seconds {
+        return Vec::new();
+    }
+    let conflicts = state.overlay.is_some()
+        || matches!(state.active_route(), Some(Route::Composer))
+        || !state.operations.is_empty();
+    if conflicts {
+        tracing::debug!("auto refresh stood down: conflicting work in flight");
+        return Vec::new();
+    }
+    state.last_refresh_at = Some(now);
+    tracing::debug!(elapsed, "auto refresh");
+    request_visible_page_background(state, state.messages.offset)
 }
 
 #[cfg(test)]

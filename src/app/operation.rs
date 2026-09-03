@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::{
     DraftSnapshot, Mailbox, Message, MessageId, MessageLocator, MessageSummary, OutboundMessage,
-    Page, PageRequest, RestoredDraft, SendOutcome,
+    Page, PageRequest, RestoredDraft, SearchRequest, SendOutcome,
 };
 
 /// Opaque identifier carried by every backend request and result (plan §5:
@@ -42,6 +42,10 @@ pub enum OperationKind {
     LoadMailboxes,
     /// Fetch one page of message summaries.
     LoadPage(PageRequest),
+    /// Fetch one page of search results (plan §16/§19 Phase 9): the query
+    /// travels unchanged, scoped to the mailbox the search was launched
+    /// from. Results shape like `LoadPage`.
+    Search(SearchRequest),
     /// Fetch one full message (plan §19 Phase 4: reader).
     LoadMessage(MessageLocator),
     /// Mark a message read (`read: true`) or unread.
@@ -110,6 +114,7 @@ impl OperationKind {
         match self {
             OperationKind::LoadMailboxes => "Loading mailboxes",
             OperationKind::LoadPage(_) => "Loading messages",
+            OperationKind::Search(_) => "Searching",
             OperationKind::LoadMessage(_) => "Loading message",
             OperationKind::SetRead { read: true, .. } => "Marking read",
             OperationKind::SetRead { read: false, .. } => "Marking unread",
@@ -147,6 +152,11 @@ impl OperationKind {
         match (newer, older) {
             (OperationKind::LoadMailboxes, OperationKind::LoadMailboxes) => true,
             (OperationKind::LoadPage(newer), OperationKind::LoadPage(older)) => {
+                newer.mailbox_id == older.mailbox_id
+            }
+            // A new search of the same mailbox replaces the previous run:
+            // only the newest query's results can ever be shown.
+            (OperationKind::Search(newer), OperationKind::Search(older)) => {
                 newer.mailbox_id == older.mailbox_id
             }
             (OperationKind::LoadMessage(newer), OperationKind::LoadMessage(older)) => {
@@ -273,6 +283,18 @@ pub struct Operation {
     /// Cancelling this token terminates the operation, including the child
     /// process the backend owns (Phase 3.2).
     pub cancellation: CancellationToken,
+    /// Who asked for this work (Phase 9): foreground operations surface
+    /// failures in the Retry/Dismiss modal; a *background* refresh failure
+    /// never interrupts the user — it lands in the status line, with
+    /// repeated identical failures suppressed (Phase 9.6).
+    pub origin: OperationOrigin,
+}
+
+/// Who requested an operation (Phase 9): see [`Operation::origin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationOrigin {
+    Foreground,
+    Background,
 }
 
 /// Registry of in-flight operations, owned by [`crate::app::state::AppState`].
@@ -291,6 +313,21 @@ impl OperationRegistry {
     /// operation it supersedes. Returns the effect for the runtime to
     /// launch.
     pub fn start(&mut self, kind: OperationKind) -> crate::app::effect::Effect {
+        self.start_with_origin(kind, OperationOrigin::Foreground)
+    }
+
+    /// Start a *background* operation (Phase 9.4: the periodic timer):
+    /// identical lifecycle to [`Self::start`], but failures are handled as
+    /// background work (status line, never a modal — Phase 9.6).
+    pub fn start_background(&mut self, kind: OperationKind) -> crate::app::effect::Effect {
+        self.start_with_origin(kind, OperationOrigin::Background)
+    }
+
+    fn start_with_origin(
+        &mut self,
+        kind: OperationKind,
+        origin: OperationOrigin,
+    ) -> crate::app::effect::Effect {
         for id in self.superseded_ids(&kind) {
             if let Some(older) = self.cancel(id) {
                 tracing::debug!(id = %older.id, "superseded by newer operation");
@@ -307,6 +344,7 @@ impl OperationRegistry {
                 started_at: Instant::now(),
                 retry: Some(kind.retry_spec()),
                 cancellation: CancellationToken::new(),
+                origin,
             },
         );
         self.foreground = Some(id);
@@ -379,6 +417,17 @@ impl OperationRegistry {
     pub fn page_in_flight(&self, mailbox_id: &crate::domain::MailboxId) -> Option<PageRequest> {
         self.entries.values().find_map(|op| match &op.kind {
             OperationKind::LoadPage(request) if &request.mailbox_id == mailbox_id => {
+                Some(request.clone())
+            }
+            _ => None,
+        })
+    }
+
+    /// The search request currently in flight for `mailbox_id`, if any
+    /// (Phase 9). Superseding guarantees at most one.
+    pub fn search_in_flight(&self, mailbox_id: &crate::domain::MailboxId) -> Option<SearchRequest> {
+        self.entries.values().find_map(|op| match &op.kind {
+            OperationKind::Search(request) if &request.mailbox_id == mailbox_id => {
                 Some(request.clone())
             }
             _ => None,
@@ -583,5 +632,33 @@ mod tests {
         assert_eq!(effect.id, registry.get(effect.id).unwrap().id);
         assert_eq!(effect.retry_spec().kind, effect.kind);
         let _ = effect as Effect; // type shape check
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+    use crate::domain::MailboxId;
+
+    fn page(mailbox: &str, offset: usize) -> OperationKind {
+        OperationKind::LoadPage(PageRequest {
+            mailbox_id: MailboxId(String::from(mailbox)),
+            offset,
+            limit: 20,
+        })
+    }
+
+    #[test]
+    fn background_start_marks_the_origin() {
+        let mut registry = OperationRegistry::default();
+        let foreground = registry.start(page("inbox", 0));
+        let background = registry.start_background(page("inbox", 0));
+        // The background request superseded the foreground one (same page
+        // kind, same mailbox) — the flag is on the surviving operation.
+        assert!(registry.get(foreground.id).is_none());
+        assert_eq!(
+            registry.get(background.id).map(|op| op.origin),
+            Some(OperationOrigin::Background)
+        );
     }
 }

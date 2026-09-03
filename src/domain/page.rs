@@ -11,6 +11,18 @@ pub struct PageRequest {
     pub limit: usize,
 }
 
+/// One search request (plan §16/§19 Phase 9): the query travels to the
+/// backend unchanged — no local parser rewrites it — scoped to the mailbox
+/// the search was launched from, with the same explicit pagination as a
+/// page request. Serializable for typed retry intents.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SearchRequest {
+    pub mailbox_id: MailboxId,
+    pub query: String,
+    pub offset: usize,
+    pub limit: usize,
+}
+
 /// An explicitly paginated slice of items (plan §7).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page<T> {

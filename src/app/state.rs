@@ -31,6 +31,17 @@ impl<T> Loadable<T> {
     }
 }
 
+/// The mailbox list context stashed while search results own the visible
+/// list (Phase 9.1). Restored when the search route is left, so returning
+/// is exact — page, selection, and scroll — with no reload (plan §9 route
+/// contract).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListStash {
+    pub page: Page<MessageSummary>,
+    pub selection: usize,
+    pub scroll: usize,
+}
+
 /// Transient status area state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusState {
@@ -78,6 +89,22 @@ pub struct AppState {
     /// draft data stays for reopening.
     pub composer: Option<ComposerState>,
     pub search_query: String,
+    /// The mailbox list context saved when a search took over the visible
+    /// list (Phase 9.1); restored when the search route is left. `None`
+    /// while no search is open above a mailbox.
+    pub search_return: Option<ListStash>,
+    /// Periodic refresh interval in seconds (plan §11/§19 Phase 9,
+    /// `[post.mail].refresh_interval_seconds`); `0` disables the timer.
+    /// Set from the config at startup; the reducer never reads a clock for
+    /// it — arming uses the injected `Action::Tick` wall clock.
+    pub refresh_interval_seconds: u64,
+    /// Injected-clock timestamp of the last refresh (manual or automatic),
+    /// the timer's arm point. `None` until the first tick arms it.
+    pub last_refresh_at: Option<DateTime<FixedOffset>>,
+    /// The sanitized detail of the last *background* refresh failure
+    /// (Phase 9.6): repeated identical failures are suppressed in the
+    /// status line until a success or a manual refresh clears the record.
+    pub last_background_error: Option<String>,
     pub focus: Focus,
     /// Last known terminal size; drives the responsive layout (plan §18).
     pub size: (u16, u16),
@@ -114,6 +141,10 @@ impl AppState {
             overlay: None,
             composer: None,
             search_query: String::new(),
+            search_return: None,
+            refresh_interval_seconds: 0,
+            last_refresh_at: None,
+            last_background_error: None,
             focus: Focus::MessageList,
             size: (152, 40),
             account_email: None,

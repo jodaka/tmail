@@ -85,6 +85,10 @@ async fn run_effect(
             Ok(page) => Some(Ok(OperationOutcome::Page(page))),
             Err(err) => operation_failure(&effect, err).map(Err),
         },
+        OperationKind::Search(request) => match backend.search_messages(ctx, request).await {
+            Ok(page) => Some(Ok(OperationOutcome::Page(page))),
+            Err(err) => operation_failure(&effect, err).map(Err),
+        },
         OperationKind::LoadMessage(locator) => match backend.get_message(ctx, locator).await {
             Ok(message) => Some(Ok(OperationOutcome::Message(Box::new(message)))),
             Err(err) => operation_failure(&effect, err).map(Err),
@@ -211,6 +215,7 @@ mod tests {
     use crate::backend::BackendResult;
     use crate::domain::{
         Mailbox, MailboxId, Message, MessageId, MessageLocator, MessageSummary, Page, PageRequest,
+        SearchRequest,
     };
     use std::time::Duration;
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -281,6 +286,23 @@ mod tests {
             &self,
             req: RequestContext,
             _page: PageRequest,
+        ) -> BackendResult<Page<MessageSummary>> {
+            tokio::select! {
+                _ = tokio::time::sleep(self.messages_delay) => match &self.error {
+                    Some((code, detail)) => Err(BackendError::Command {
+                        code: *code,
+                        detail: detail.clone(),
+                    }),
+                    None => Ok(Page::empty(20)),
+                },
+                _ = req.cancellation.cancelled() => Err(BackendError::Cancelled),
+            }
+        }
+
+        async fn search_messages(
+            &self,
+            req: RequestContext,
+            _request: SearchRequest,
         ) -> BackendResult<Page<MessageSummary>> {
             tokio::select! {
                 _ = tokio::time::sleep(self.messages_delay) => match &self.error {
