@@ -624,6 +624,8 @@ fn draft_snapshot(revision: u64, remote_id: Option<&str>) -> DraftSnapshot {
     DraftSnapshot {
         local_id: DraftId(String::from("local-123")),
         message_id: Some(String::from("<123.draft@post.local>")),
+        in_reply_to: None,
+        references: None,
         remote_id: remote_id.map(|id| MessageId(String::from(id))),
         to: String::from("Maksim Orlov <m.orlov@example.org>, broken-entry"),
         cc: String::from("cc@example.org"),

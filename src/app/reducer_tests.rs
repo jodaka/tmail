@@ -1754,6 +1754,8 @@ fn restored_draft(to: &str, revision: u64, saved_revision: u64) -> crate::domain
         draft: crate::domain::DraftSnapshot {
             local_id: crate::domain::DraftId(String::from("local-crash-1")),
             message_id: Some(String::from("<crash-1@post.local>")),
+            in_reply_to: None,
+            references: None,
             remote_id: Some(MessageId(String::from("remote-crash"))),
             to: String::from(to),
             cc: String::new(),

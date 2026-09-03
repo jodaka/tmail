@@ -71,6 +71,11 @@ pub struct Draft {
     /// RFC `Message-ID` header, stable across revisions (ADR 0002 §D.6);
     /// what makes add-then-delete replacement and reconciliation possible.
     pub message_id: Option<String>,
+    /// Bare `In-Reply-To` id when this draft replies to a message (plan
+    /// §14, Phase 7.4); serialized into the outgoing message.
+    pub in_reply_to: Option<String>,
+    /// Bare, whitespace-separated `References` chain for replies.
+    pub references: Option<String>,
     /// Backend id of the last confirmed remote copy; the next save replaces
     /// it (add-then-delete, ADR 0002 §D.3).
     pub remote_id: Option<MessageId>,
@@ -83,6 +88,12 @@ pub struct Draft {
 pub struct DraftSnapshot {
     pub local_id: DraftId,
     pub message_id: Option<String>,
+    /// Reply threading headers (Phase 7.4); `default` keeps journals from
+    /// earlier revisions loadable.
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub references: Option<String>,
     /// Backend id of the previous confirmed remote copy, if any.
     pub remote_id: Option<MessageId>,
     pub to: String,
@@ -184,6 +195,8 @@ impl Draft {
                 .clone()
                 .unwrap_or_else(|| DraftId(String::from("local-unsaved"))),
             message_id: self.message_id.clone(),
+            in_reply_to: self.in_reply_to.clone(),
+            references: self.references.clone(),
             remote_id: self.remote_id.clone(),
             to: self.to.clone(),
             cc: self.cc.clone(),
@@ -341,6 +354,8 @@ mod tests {
         let mut d = Draft {
             to: String::from("a@b.c"),
             body: String::from("hello"),
+            in_reply_to: Some(String::from("1@x")),
+            references: Some(String::from("0@x 1@x")),
             ..Draft::default()
         };
         d.note_edit(Some(at(0)));
@@ -348,9 +363,31 @@ mod tests {
         assert_eq!(snap.to, "a@b.c");
         assert_eq!(snap.body, "hello");
         assert_eq!(snap.revision, 1);
+        assert_eq!(snap.in_reply_to.as_deref(), Some("1@x"));
+        assert_eq!(snap.references.as_deref(), Some("0@x 1@x"));
         // Serializable retry intents (plan §12).
         let json = serde_json::to_string(&snap).expect("snapshot json");
         let back: DraftSnapshot = serde_json::from_str(&json).expect("round trip");
         assert_eq!(back, snap);
+    }
+
+    #[test]
+    fn snapshots_from_older_journals_load_without_reply_headers() {
+        // Journal entries written before Phase 7.4 carry no threading
+        // fields; serde defaults keep them loadable (ADR 0002 versioning).
+        let legacy = r#"{
+            "local_id": "local-1",
+            "message_id": "<1@post.local>",
+            "remote_id": "remote-1",
+            "to": "a@b.c",
+            "cc": "",
+            "bcc": "",
+            "subject": "s",
+            "body": "b",
+            "revision": 3
+        }"#;
+        let snap: DraftSnapshot = serde_json::from_str(legacy).expect("legacy journal entry");
+        assert_eq!(snap.in_reply_to, None);
+        assert_eq!(snap.references, None);
     }
 }

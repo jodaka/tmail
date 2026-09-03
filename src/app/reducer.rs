@@ -592,6 +592,8 @@ fn drafts_restored(state: &mut AppState, drafts: &[crate::domain::RestoredDraft]
         save,
         local_id: Some(snapshot.local_id),
         message_id: snapshot.message_id,
+        in_reply_to: snapshot.in_reply_to,
+        references: snapshot.references,
         remote_id: snapshot.remote_id,
     };
     tracing::info!(

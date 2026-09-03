@@ -200,6 +200,8 @@ mod tests {
         DraftSnapshot {
             local_id: DraftId(String::from(local_id)),
             message_id: Some(format!("<{local_id}@post.local>")),
+            in_reply_to: None,
+            references: None,
             remote_id: None,
             to: String::from("dest@example.com"),
             cc: String::new(),
