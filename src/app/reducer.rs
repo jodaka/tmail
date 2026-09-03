@@ -39,22 +39,28 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::Activate => activate(state),
         Action::BackOrCancel => back_or_cancel(state),
         Action::FocusNext => {
-            if state.focus == Focus::Composer {
-                if let Some(composer) = state.composer.as_mut() {
-                    composer.focus_next();
+            match state.focus {
+                Focus::Composer => {
+                    if let Some(composer) = state.composer.as_mut() {
+                        composer.focus_next();
+                    }
                 }
-            } else {
-                state.focus = state.focus.next();
+                // In the reader Tab walks the attachment chips (plan §15):
+                // the selection the save/open keys act on.
+                Focus::Reader => cycle_reader_attachment(state, 1),
+                _ => state.focus = state.focus.next(),
             }
             Vec::new()
         }
         Action::FocusPrevious => {
-            if state.focus == Focus::Composer {
-                if let Some(composer) = state.composer.as_mut() {
-                    composer.focus_previous();
+            match state.focus {
+                Focus::Composer => {
+                    if let Some(composer) = state.composer.as_mut() {
+                        composer.focus_previous();
+                    }
                 }
-            } else {
-                state.focus = state.focus.previous();
+                Focus::Reader => cycle_reader_attachment(state, -1),
+                _ => state.focus = state.focus.previous(),
             }
             Vec::new()
         }
@@ -211,6 +217,7 @@ fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
                     OperationKind::LoadMessage(_) => {
                         state.open_message = Loadable::Loading;
                         state.reader_scroll = 0;
+                        state.reader_attachment = None;
                     }
                     OperationKind::SaveDraft { draft } => {
                         // A draft-save retry replays the *intent* ("save
@@ -1132,6 +1139,35 @@ enum FlagChange {
     Starred(bool),
 }
 
+/// Move the reader's attachment-chip cursor (Tab/Shift+Tab, plan §15).
+/// Wraps within the loaded message's chip count; inert without a loaded
+/// message or attachments.
+fn cycle_reader_attachment(state: &mut AppState, delta: i64) {
+    let len = state
+        .open_message
+        .as_loaded()
+        .map(|message| message.attachments.len())
+        .unwrap_or(0);
+    if len == 0 {
+        return;
+    }
+    let current = state.reader_attachment.unwrap_or(0).min(len - 1);
+    let next = (current as i64 + delta).rem_euclid(len as i64) as usize;
+    state.reader_attachment = Some(next);
+}
+
+/// The attachment the reader's save/open keys act on, when the open
+/// message carries any (plan §15).
+fn selected_attachment(state: &AppState) -> Option<(usize, &crate::domain::Attachment)> {
+    let message = state.open_message.as_loaded()?;
+    let index = state
+        .reader_attachment
+        .unwrap_or(0)
+        .min(message.attachments.len().saturating_sub(1));
+    let attachment = message.attachments.get(index)?;
+    Some((index, attachment))
+}
+
 /// Apply the fetched message: show it, fill the list snippet (Post fills
 /// snippets only from full fetches, see map.rs), and mark unread mail read
 /// after successful load (plan §19 Phase 4) as a separate, retryable flag
@@ -1515,6 +1551,7 @@ fn open_message(state: &mut AppState, summary: crate::domain::MessageSummary) ->
     state.focus = Focus::Reader;
     state.open_message = Loadable::Loading;
     state.reader_scroll = 0;
+    state.reader_attachment = None;
     vec![state.operations.start(OperationKind::LoadMessage(locator))]
 }
 
@@ -1526,6 +1563,7 @@ fn close_reader(state: &mut AppState) {
         state.routes.pop();
         state.open_message = Loadable::Idle;
         state.reader_scroll = 0;
+        state.reader_attachment = None;
         state.focus = Focus::MessageList;
     }
 }
@@ -1660,6 +1698,7 @@ fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Vec<Effect> {
     if state.routes.pop().is_some() {
         state.open_message = Loadable::Idle;
         state.reader_scroll = 0;
+        state.reader_attachment = None;
     }
     state.routes.push(Route::Mailbox(MailboxRoute {
         mailbox_id: mailbox_id.clone(),
@@ -1709,6 +1748,7 @@ fn back_or_cancel(state: &mut AppState) -> Vec<Effect> {
         state.routes.pop();
         state.open_message = Loadable::Idle;
         state.reader_scroll = 0;
+        state.reader_attachment = None;
         state.focus = Focus::MessageList;
         return Vec::new();
     }

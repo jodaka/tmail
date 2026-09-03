@@ -815,6 +815,55 @@ fn esc_from_reader_restores_exact_list_state() {
 }
 
 #[test]
+fn tab_cycles_the_reader_attachment_cursor_and_wraps() {
+    let mut s = state();
+    let summary = s.messages.items[0].clone();
+    let mut message = mock::mock_message(&summary);
+    message.attachments = vec![
+        crate::domain::Attachment {
+            name: Some(String::from("a.pdf")),
+            mime_type: Some(String::from("application/pdf")),
+            size: Some(1),
+            part_id: 2,
+        },
+        crate::domain::Attachment {
+            name: Some(String::from("b.png")),
+            mime_type: Some(String::from("image/png")),
+            size: Some(2),
+            part_id: 5,
+        },
+    ];
+    s.routes
+        .push(Route::Message(crate::app::route::MessageRoute {
+            mailbox_id: summary.mailbox_id.clone(),
+            summary,
+        }));
+    s.open_message = Loadable::Loaded(message);
+    s.focus = Focus::Reader;
+
+    assert_eq!(s.reader_attachment, None, "cursor starts at the first chip");
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.reader_attachment, Some(1));
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.reader_attachment, Some(0), "wraps forward");
+    reduce(&mut s, &Action::FocusPrevious);
+    assert_eq!(s.reader_attachment, Some(1), "wraps backward");
+    // Closing the reader resets the cursor.
+    reduce(&mut s, &Action::BackOrCancel);
+    assert_eq!(s.reader_attachment, None);
+}
+
+#[test]
+fn tab_is_inert_without_attachments() {
+    let mut s = state();
+    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    complete_message_ok(&mut s, id);
+    assert_eq!(s.focus, Focus::Reader);
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.reader_attachment, None, "no chips: no cursor");
+}
+
+#[test]
 fn esc_cancels_message_load_then_second_esc_returns() {
     let mut s = state();
     let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));

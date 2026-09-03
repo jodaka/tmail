@@ -65,6 +65,10 @@ pub struct AppState {
     pub open_message: Loadable<Message>,
     /// First content line currently visible in the reader document.
     pub reader_scroll: usize,
+    /// Cursor within the open message's attachment chips (plan §15): the
+    /// chip the save/open keys act on. `None` addresses the first chip;
+    /// the reducer clamps with the loaded message's chip count.
+    pub reader_attachment: Option<usize>,
     /// In-flight backend operations with their ids, retry intents, and
     /// cancellation tokens (plan §9/§11). Results only apply while their
     /// operation is still registered here.
@@ -106,6 +110,7 @@ impl AppState {
             list_scroll: 0,
             open_message: Loadable::Idle,
             reader_scroll: 0,
+            reader_attachment: None,
             operations: OperationRegistry::default(),
             overlay: None,
             composer: None,

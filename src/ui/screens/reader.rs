@@ -37,7 +37,17 @@ pub(crate) enum Tone {
 /// HTML semantics mapped by `ui::rich` (plan §13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReaderLine {
-    Chrome { tone: Tone, text: String },
+    Chrome {
+        tone: Tone,
+        text: String,
+    },
+    /// One attachment chip (mockup `.att`). `selected` marks the chip the
+    /// save/open keys act on; it renders with the cursor marker and the
+    /// accent style.
+    Chip {
+        text: String,
+        selected: bool,
+    },
     Rich(RichLine),
 }
 
@@ -54,6 +64,7 @@ impl ReaderLine {
     fn text(&self) -> String {
         match self {
             ReaderLine::Chrome { text, .. } => text.clone(),
+            ReaderLine::Chip { text, .. } => text.clone(),
             ReaderLine::Rich(line) => line.text(),
         }
     }
@@ -164,8 +175,9 @@ pub(crate) fn content(state: &AppState, width: usize) -> Vec<ReaderLine> {
         lines.push(indented(line));
     }
 
-    // Attachments (mockup `.attachments`): metadata chips only; saving is
-    // Phase 8 (plan §15).
+    // Attachments (mockup `.attachments`): metadata chips — filename, MIME
+    // type when known, and size. Tab cycles the cursor; `d`/`o` save/open
+    // the selected chip (plan §15).
     if let Some(message) = state.open_message.as_loaded()
         && !message.attachments.is_empty()
     {
@@ -179,17 +191,22 @@ pub(crate) fn content(state: &AppState, width: usize) -> Vec<ReaderLine> {
                 if count == 1 { "" } else { "s" }
             ),
         ));
-        for attachment in &message.attachments {
+        let selected = state
+            .reader_attachment
+            .unwrap_or(0)
+            .min(message.attachments.len() - 1);
+        for (index, attachment) in message.attachments.iter().enumerate() {
             let name = attachment.name.as_deref().unwrap_or("(unnamed attachment)");
             let size = attachment
                 .size
                 .map(crate::ui::text::human_size)
                 .unwrap_or_else(|| String::from("unknown size"));
             let mime = attachment.mime_type.as_deref().unwrap_or("unknown type");
-            lines.push(ReaderLine::chrome(
-                Tone::Dim,
-                text::truncate(&format!("{INDENT}[ {name} · {mime} · {size} ]"), w),
-            ));
+            let marker = if index == selected { "▸ " } else { "  " };
+            lines.push(ReaderLine::Chip {
+                text: text::truncate(&format!("{INDENT}{marker}[ {name} · {mime} · {size} ]"), w),
+                selected: index == selected,
+            });
         }
     }
     lines
@@ -262,6 +279,17 @@ fn reader_spans<'a>(line: &'a ReaderLine, theme: &'a Theme, width: usize) -> Lin
                     .add_modifier(Modifier::BOLD),
                 Tone::Body => Style::new().fg(theme.text_soft).bg(theme.background),
                 Tone::Dim => Style::new().fg(theme.dim).bg(theme.background),
+            };
+            Line::from(Span::styled(text::clip(text, width), style))
+        }
+        ReaderLine::Chip { text, selected } => {
+            let style = if *selected {
+                Style::new()
+                    .fg(theme.accent)
+                    .bg(theme.background)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(theme.dim).bg(theme.background)
             };
             Line::from(Span::styled(text::clip(text, width), style))
         }
@@ -594,6 +622,44 @@ mod tests {
         let count = content_line_count(&state, 100);
         assert_eq!(count, content(&state, 100).len());
         assert!(count > 5);
+    }
+
+    #[test]
+    fn selected_chip_carries_the_cursor_marker() {
+        let mut state = loaded_state();
+        if let Loadable::Loaded(message) = &mut state.open_message {
+            message.attachments.push(Attachment {
+                name: Some(String::from("second.png")),
+                mime_type: Some(String::from("image/png")),
+                size: Some(2_048),
+                part_id: 3,
+            });
+        }
+        // Default selection: the first chip.
+        let lines = content(&state, 100);
+        let chips: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| match l {
+                ReaderLine::Chip { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chips.len(), 2);
+        assert!(chips[0].starts_with("  ▸ [ report.pdf"), "{:?}", chips);
+        assert!(chips[1].starts_with("    [ second.png"), "{:?}", chips);
+
+        // The cursor moves to the second chip; both stay single lines.
+        state.reader_attachment = Some(1);
+        let lines = content(&state, 100);
+        let chips: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| match l {
+                ReaderLine::Chip { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(chips[0].starts_with("    [ report.pdf"), "{:?}", chips);
+        assert!(chips[1].starts_with("  ▸ [ second.png"), "{:?}", chips);
     }
 
     /// The envelope fallback timestamp (missing/unparseable Date) renders
