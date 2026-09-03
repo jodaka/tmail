@@ -66,13 +66,8 @@ mod tests {
         assert_eq!(opener_program(), Some("open"));
     }
 
-    #[tokio::test]
-    async fn system_opener_survives_an_invalid_path() {
-        // `open`/`xdg-open` validate the path themselves; Post only
-        // guarantees the direct argv spawn (no shell, path whole). An
-        // unusable path must not panic. (The tokio runtime context is
-        // required: the spawned child is reaped by the async runtime.)
-        let err = SystemOpener.open(Path::new("/nonexistent-dir/post-open-probe"));
-        let _ = err;
-    }
+    // The spawn path itself is exercised with test doubles in
+    // runtime::tasks (RecordingOpener / RefusingOpener): SystemOpener
+    // always spawns the real platform program, so unit tests must not
+    // call it.
 }
