@@ -1003,3 +1003,171 @@ fn send_without_recipients_is_refused_before_spawning() {
     assert!(matches!(err, BackendError::InvalidRequest(ref msg) if msg.contains("recipients")));
     assert!(fake.argv().is_empty(), "nothing was spawned");
 }
+
+// ── Attachment saves (plan §15, Phase 8.4) ────────────────────────────────
+
+use tmail::backend::AttachmentRequest;
+
+fn save_request(filename: Option<&str>, dir: Option<PathBuf>) -> AttachmentRequest {
+    AttachmentRequest {
+        locator: locator("INBOX", "env-1"),
+        part_id: 3,
+        filename: filename.map(String::from),
+        dir,
+    }
+}
+
+#[test]
+fn attachment_save_downloads_into_a_private_tempdir_then_lands_in_the_dest() {
+    let fake = FakeHimalaya::spawn_attachment("ok");
+    let dest = tempfile::TempDir::new().expect("dest dir");
+    let request = save_request(Some("report.pdf"), Some(dest.path().to_path_buf()));
+    let saved = block(backend(&fake, Some("probe")).save_attachment(ctx(), request))
+        .expect("save succeeds");
+    assert_eq!(saved, dest.path().join("report.pdf"));
+    let bytes = std::fs::read(&saved).expect("saved file");
+    assert_eq!(bytes, b"PDF-PAYLOAD-01", "exact bytes land");
+
+    // One invocation, exact argv except the private tempdir name, which is
+    // Post-generated and unpredictable by design. The directory travels as
+    // a single argv entry (never shell-split).
+    let argv = &fake.argv();
+    assert_eq!(argv.len(), 1);
+    let argv = &argv[0];
+    let (head, rest) = argv.split_at(8);
+    assert_eq!(
+        head,
+        vec![
+            "-c",
+            fake.config().display().to_string().as_str(),
+            "-a",
+            "probe",
+            "attachment",
+            "download",
+            "-m",
+            "INBOX",
+        ]
+    );
+    assert_eq!(argv[8], "-d");
+    let download_dir = Path::new(&argv[9]);
+    assert!(download_dir.is_absolute(), "tempdir path is absolute");
+    assert_eq!(&argv[10..], &["env-1", "3", "--json"]);
+    // The row's reported path resolved inside the requested tempdir.
+    let _ = rest;
+}
+
+#[test]
+fn attachment_save_never_silently_overwrites() {
+    let fake = FakeHimalaya::spawn_attachment("ok");
+    let dest = tempfile::TempDir::new().expect("dest dir");
+    let dir = dest.path().to_path_buf();
+    // The name is already taken: a previous download must survive.
+    std::fs::write(dir.join("report.pdf"), b"PREVIOUS").expect("seed collision");
+
+    let backend = backend(&fake, Some("probe"));
+    let first =
+        block(backend.save_attachment(ctx(), save_request(Some("report.pdf"), Some(dir.clone()))))
+            .expect("first save");
+    assert_eq!(first, dir.join("report (1).pdf"));
+    let second =
+        block(backend.save_attachment(ctx(), save_request(Some("report.pdf"), Some(dir.clone()))))
+            .expect("second save");
+    assert_eq!(second, dir.join("report (2).pdf"));
+
+    // The previous download is untouched; the new files carry the payload.
+    assert_eq!(std::fs::read(dir.join("report.pdf")).unwrap(), b"PREVIOUS");
+    assert_eq!(
+        std::fs::read(dir.join("report (1).pdf")).unwrap(),
+        b"PDF-PAYLOAD-01"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("report (2).pdf")).unwrap(),
+        b"PDF-PAYLOAD-01"
+    );
+}
+
+#[test]
+fn attachment_save_reduces_hostile_filenames_to_one_component() {
+    // The MIME metadata claims `../../evil.bin`. Post must not escape the
+    // destination: only the final component may land there.
+    let fake = FakeHimalaya::spawn_attachment("traversal");
+    let dest = tempfile::TempDir::new().expect("dest dir");
+    let dir = dest.path().to_path_buf();
+    let saved = block(backend(&fake, Some("probe")).save_attachment(
+        ctx(),
+        save_request(Some("../../evil.bin"), Some(dir.clone())),
+    ))
+    .expect("save succeeds");
+    assert_eq!(saved, dir.join("evil.bin"));
+    assert_eq!(std::fs::read(&saved).unwrap(), b"EVIL-PAYLOAD");
+    // Nothing escaped upward.
+    assert!(
+        !dest.path().parent().unwrap().join("evil.bin").exists(),
+        "no traversal outside the destination"
+    );
+}
+
+#[test]
+fn attachment_save_without_a_request_name_uses_the_mime_row_name() {
+    // The request carries no name: the download row's MIME filename fills
+    // in (both are display names, reduced to one component before use).
+    let fake = FakeHimalaya::spawn_attachment("ok");
+    let dest = tempfile::TempDir::new().expect("dest dir");
+    let saved = block(
+        backend(&fake, Some("probe"))
+            .save_attachment(ctx(), save_request(None, Some(dest.path().to_path_buf()))),
+    )
+    .expect("save succeeds");
+    assert_eq!(saved, dest.path().join("report.pdf"));
+    // The pure part-id fallback (no request name, no row name) is pinned
+    // by the adapter's unit tests for `destination_component`.
+}
+
+#[test]
+fn attachment_save_explicit_dir_wins_over_the_configured_one() {
+    let fake = FakeHimalaya::spawn_attachment("ok");
+    let dest = tempfile::TempDir::new().expect("dest dir");
+    // The config would point elsewhere; the request's dir wins.
+    let backend = backend(&fake, Some("probe"))
+        .with_downloads_dir(Some(PathBuf::from("/definitely/not/this")));
+    let saved = block(backend.save_attachment(
+        ctx(),
+        save_request(Some("report.pdf"), Some(dest.path().to_path_buf())),
+    ))
+    .expect("save succeeds");
+    assert_eq!(saved, dest.path().join("report.pdf"));
+    assert_eq!(std::fs::read(&saved).unwrap(), b"PDF-PAYLOAD-01");
+}
+
+#[test]
+fn attachment_save_fails_safely_on_bad_output() {
+    // Row for the wrong part id.
+    let fake = FakeHimalaya::spawn_attachment("wrong-row");
+    let dest = tempfile::TempDir::new().expect("dest dir");
+    let err = block(backend(&fake, Some("probe")).save_attachment(
+        ctx(),
+        save_request(Some("report.pdf"), Some(dest.path().to_path_buf())),
+    ))
+    .expect_err("no row for part 3");
+    assert!(matches!(err, BackendError::InvalidOutput(ref msg) if msg.contains("part 3")));
+
+    // Row without an output path.
+    let fake = FakeHimalaya::spawn_attachment("no-path");
+    let err = block(backend(&fake, Some("probe")).save_attachment(
+        ctx(),
+        save_request(Some("report.pdf"), Some(dest.path().to_path_buf())),
+    ))
+    .expect_err("no path in row");
+    assert!(matches!(err, BackendError::InvalidOutput(ref msg) if msg.contains("no output path")));
+
+    // Himalaya reports a failure.
+    let fake = FakeHimalaya::spawn_attachment("error-json");
+    let err = block(backend(&fake, Some("probe")).save_attachment(
+        ctx(),
+        save_request(Some("report.pdf"), Some(dest.path().to_path_buf())),
+    ))
+    .expect_err("download failed");
+    assert!(
+        matches!(err, BackendError::Command { ref detail, .. } if detail.contains("no such attachment"))
+    );
+}

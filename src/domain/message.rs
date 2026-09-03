@@ -54,6 +54,23 @@ pub struct Attachment {
     pub part_id: usize,
 }
 
+/// One request to save an incoming attachment to disk (plan §15, Phase 8).
+/// Serializable so retry intents replay it verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AttachmentRequest {
+    /// The message the attachment belongs to.
+    pub locator: MessageLocator,
+    /// MIME part id, what `attachment download` expects.
+    pub part_id: usize,
+    /// Display filename from the message's MIME metadata. Interpreted as a
+    /// name only — never as a path — so traversal is impossible.
+    pub filename: Option<String>,
+    /// Destination directory; `None` uses the configured downloads
+    /// directory (`[post.attachments].downloads_dir`, else the platform
+    /// default). A leading `~` is expanded by the backend, never a shell.
+    pub dir: Option<std::path::PathBuf>,
+}
+
 /// One full message (plan §7 `Message`), as fetched by `message read`.
 /// `raw` stays unset for now: the parsed content suffices for the reader,
 /// and keeping raw bytes out of state avoids duplicating payloads (plan

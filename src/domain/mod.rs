@@ -14,7 +14,10 @@ pub mod send;
 pub use address::Address;
 pub use draft::{Draft, DraftAttachment, DraftId, DraftSaveState, DraftSnapshot, RestoredDraft};
 pub use mailbox::{Mailbox, MailboxId, MailboxRole};
-pub use message::{Attachment, Message, MessageHeaders, MessageId, MessageLocator, MessageSummary};
+pub use message::{
+    Attachment, AttachmentRequest, Message, MessageHeaders, MessageId, MessageLocator,
+    MessageSummary,
+};
 pub use page::{Page, PageRequest};
 pub use reply::{ReplyKind, Seed, seed_forward, seed_reply};
 pub use send::{OutboundAttachment, OutboundMessage, OutgoingContent, SendBlocker, SendOutcome};

@@ -863,6 +863,164 @@ fn tab_is_inert_without_attachments() {
     assert_eq!(s.reader_attachment, None, "no chips: no cursor");
 }
 
+// ── Attachment save (plan §15, Phase 8.4) ────────────────────────────────
+
+/// Open the reader on a message carrying two attachments.
+fn reader_with_attachments() -> AppState {
+    let mut s = state();
+    let summary = s.messages.items[0].clone();
+    let mut message = mock::mock_message(&summary);
+    message.headers.message_id = Some(String::from("att-1@post.local"));
+    message.attachments = vec![
+        crate::domain::Attachment {
+            name: Some(String::from("report.pdf")),
+            mime_type: Some(String::from("application/pdf")),
+            size: Some(14),
+            part_id: 3,
+        },
+        crate::domain::Attachment {
+            name: None,
+            mime_type: Some(String::from("application/octet-stream")),
+            size: Some(4),
+            part_id: 5,
+        },
+    ];
+    s.routes
+        .push(Route::Message(crate::app::route::MessageRoute {
+            mailbox_id: summary.mailbox_id.clone(),
+            summary,
+        }));
+    s.open_message = Loadable::Loaded(message);
+    s.focus = Focus::Reader;
+    s
+}
+
+fn attachment_request(s: &AppState) -> crate::domain::AttachmentRequest {
+    // Rebuild the request the reducer would issue for the selected chip.
+    let message = s.open_message.as_loaded().unwrap();
+    let index = s.reader_attachment.unwrap_or(0);
+    let attachment = &message.attachments[index];
+    crate::domain::AttachmentRequest {
+        locator: crate::domain::MessageLocator {
+            mailbox: message.mailbox_id.clone(),
+            id: message.id.clone(),
+            message_id: message.headers.message_id.clone(),
+        },
+        part_id: attachment.part_id,
+        filename: attachment.name.clone(),
+        dir: None,
+    }
+}
+
+#[test]
+fn d_saves_the_selected_attachment_with_a_frozen_request() {
+    let mut s = reader_with_attachments();
+    let effects = reduce(&mut s, &Action::SaveAttachment);
+    let (id, kind) = effect_parts(&effects);
+    assert_eq!(kind.summary(), "Saving attachment");
+    let OperationKind::SaveAttachment { request } = kind else {
+        panic!("expected SaveAttachment");
+    };
+    assert_eq!(request, attachment_request(&s));
+    assert_eq!(request.part_id, 3, "first chip by default");
+    assert_eq!(request.filename.as_deref(), Some("report.pdf"));
+    assert_eq!(request.dir, None, "the backend resolves the downloads dir");
+    assert_eq!(s.status.message.as_deref(), Some("Saving attachment…"));
+    // Completing records the final path (possibly collision-renamed).
+    let final_path = PathBuf::from("/home/u/Downloads/report (1).pdf");
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::SavedPath(final_path.clone())),
+        }),
+    );
+    assert_eq!(
+        s.saved_attachments.values().collect::<Vec<_>>(),
+        vec![&final_path],
+        "the path is remembered for Open reuse"
+    );
+    assert_eq!(
+        s.status.message.as_deref(),
+        Some(format!("Saved to {}", final_path.display())).as_deref()
+    );
+}
+
+#[test]
+fn saving_targets_the_cursor_chip_by_part_id() {
+    let mut s = reader_with_attachments();
+    // Tab to the second chip (unnamed → part-id fallback naming).
+    reduce(&mut s, &Action::FocusNext);
+    let effects = reduce(&mut s, &Action::SaveAttachment);
+    let (_, kind) = effect_parts(&effects);
+    let OperationKind::SaveAttachment { request } = kind else {
+        panic!("expected SaveAttachment");
+    };
+    assert_eq!(request.part_id, 5);
+    assert_eq!(request.filename, None);
+}
+
+#[test]
+fn save_is_reader_only_and_attachment_gated() {
+    // From the list focus the action is inert.
+    let mut s = state();
+    no_effects(&reduce(&mut s, &Action::SaveAttachment));
+    assert!(s.operations.is_empty());
+    // In the reader without attachments too.
+    let mut s = state();
+    let summary = s.messages.items[0].clone();
+    let message = mock::mock_message(&summary);
+    s.routes
+        .push(Route::Message(crate::app::route::MessageRoute {
+            mailbox_id: summary.mailbox_id.clone(),
+            summary,
+        }));
+    s.open_message = Loadable::Loaded(message);
+    s.focus = Focus::Reader;
+    no_effects(&reduce(&mut s, &Action::SaveAttachment));
+    assert!(s.operations.is_empty());
+}
+
+#[test]
+fn save_failure_opens_a_retryable_modal() {
+    let mut s = reader_with_attachments();
+    let (id, kind) = effect_parts(&reduce(&mut s, &Action::SaveAttachment));
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Err(OperationFailure {
+                code: Some(1),
+                detail: String::from("disk full"),
+                retry: Some(kind.retry_spec()),
+                ambiguous: false,
+            }),
+        }),
+    );
+    assert!(matches!(s.overlay, Some(Overlay::Error(_))));
+    let retry = match &s.overlay {
+        Some(Overlay::Error(dialog)) => dialog.retry.clone().expect("retryable"),
+        _ => unreachable!(),
+    };
+    assert!(matches!(retry.kind, OperationKind::SaveAttachment { .. }));
+    // Retry replays the identical request under a new operation id.
+    let replayed = reduce(&mut s, &Action::RetryError);
+    let (new_id, new_kind) = effect_parts(&replayed);
+    assert_ne!(new_id, id);
+    assert_eq!(new_kind, retry.kind);
+}
+
+#[test]
+fn keyboard_d_maps_to_save_attachment() {
+    use crate::input::keyboard;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let action = keyboard::to_action(
+        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        Focus::Reader,
+    );
+    assert_eq!(action, Some(Action::SaveAttachment));
+}
+
 #[test]
 fn esc_cancels_message_load_then_second_esc_returns() {
     let mut s = state();

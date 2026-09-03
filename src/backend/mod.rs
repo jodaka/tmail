@@ -11,4 +11,5 @@ pub mod himalaya;
 pub mod journal;
 pub mod traits;
 
+pub use crate::domain::AttachmentRequest;
 pub use traits::{BackendError, BackendResult, MailBackend, RequestContext};

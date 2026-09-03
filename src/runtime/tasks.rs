@@ -121,6 +121,12 @@ async fn run_effect(
             Ok(attachment) => Some(Ok(OperationOutcome::Attachment(attachment))),
             Err(err) => operation_failure(&effect, err).map(Err),
         },
+        OperationKind::SaveAttachment { request } => {
+            match backend.save_attachment(ctx, request).await {
+                Ok(path) => Some(Ok(OperationOutcome::SavedPath(path))),
+                Err(err) => operation_failure(&effect, err).map(Err),
+            }
+        }
     }
 }
 
@@ -342,6 +348,21 @@ mod tests {
                 name: String::from("validated.pdf"),
                 size: 10,
             })
+        }
+
+        async fn save_attachment(
+            &self,
+            _req: RequestContext,
+            request: crate::domain::AttachmentRequest,
+        ) -> BackendResult<std::path::PathBuf> {
+            let dir = request
+                .dir
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+            Ok(dir.join(
+                request
+                    .filename
+                    .unwrap_or_else(|| String::from("attachment")),
+            ))
         }
     }
 

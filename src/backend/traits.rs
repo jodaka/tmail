@@ -15,8 +15,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app::operation::OperationId;
 use crate::domain::{
-    DraftAttachment, DraftSnapshot, Mailbox, Message, MessageId, MessageLocator, MessageSummary,
-    OutboundMessage, Page, PageRequest, RestoredDraft, SendOutcome,
+    AttachmentRequest, DraftAttachment, DraftSnapshot, Mailbox, Message, MessageId, MessageLocator,
+    MessageSummary, OutboundMessage, Page, PageRequest, RestoredDraft, SendOutcome,
 };
 
 /// Per-request context handed to every backend call (plan §8).
@@ -163,4 +163,17 @@ pub trait MailBackend: Send + Sync {
         ctx: RequestContext,
         path: PathBuf,
     ) -> BackendResult<DraftAttachment>;
+
+    /// Save one incoming attachment (plan §15, Phase 8): download the MIME
+    /// part into a Post-owned temporary directory, then write the bytes to
+    /// the destination through a collision-checked `create_new` — an
+    /// existing file is never silently overwritten (the saver picks
+    /// `name (1).ext`, `name (2).ext`, … deterministically). The filename
+    /// is reduced to a single component, so traversal cannot escape the
+    /// destination. Returns the final path actually written.
+    async fn save_attachment(
+        &self,
+        ctx: RequestContext,
+        request: AttachmentRequest,
+    ) -> BackendResult<PathBuf>;
 }

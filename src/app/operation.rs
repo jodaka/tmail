@@ -82,6 +82,12 @@ pub enum OperationKind {
     /// path as typed (`~` unexpanded); the backend expands and checks it.
     /// No bytes travel — only the resulting metadata.
     ReadAttachment { path: std::path::PathBuf },
+    /// Save one incoming attachment to disk (plan §15, Phase 8.4). The
+    /// request freezes the target message, part, name, and directory;
+    /// retries replay it verbatim.
+    SaveAttachment {
+        request: crate::domain::AttachmentRequest,
+    },
 }
 
 /// Why a draft is being removed (Phase 7.6): it selects the failure UX.
@@ -114,6 +120,7 @@ impl OperationKind {
             },
             OperationKind::Send { .. } => "Sending message",
             OperationKind::ReadAttachment { .. } => "Checking file",
+            OperationKind::SaveAttachment { .. } => "Saving attachment",
         }
     }
 
@@ -217,6 +224,10 @@ pub enum OperationOutcome {
     /// One validated attachment source (plan §15, Phase 8): metadata only,
     /// never bytes.
     Attachment(crate::domain::DraftAttachment),
+    /// One attachment saved to disk (plan §15, Phase 8.4): the final path
+    /// actually written — possibly a collision-renamed name, so the UI
+    /// always reports this path, never the requested one.
+    SavedPath(std::path::PathBuf),
 }
 
 /// A failure ready for the Retry/Dismiss modal (plan §12). Built by the

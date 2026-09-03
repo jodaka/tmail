@@ -150,10 +150,14 @@ pub(crate) fn content(state: &AppState, width: usize) -> Vec<ReaderLine> {
     push_meta(&mut lines, "Date", &date_label(date), w);
 
     // Action row (mockup `.thread-actions`): keyboard-first, plan §10 keys.
-    lines.push(ReaderLine::chrome(
-        Tone::Body,
-        "Reply r · Forward f · Archive e · Star s · Unread u · Delete ⌫",
-    ));
+    // The save hint appears only when attachments exist (plan §15).
+    let actions = match state.open_message.as_loaded().map(|m| m.attachments.len()) {
+        Some(count) if count > 0 => String::from(
+            "Reply r · Forward f · Archive e · Star s · Unread u · Delete ⌫ · Save d · Tab chip",
+        ),
+        _ => String::from("Reply r · Forward f · Archive e · Star s · Unread u · Delete ⌫"),
+    };
+    lines.push(ReaderLine::chrome(Tone::Body, actions));
     lines.push(hairline(w));
 
     // Body (plan §13: HTML-preferred selection, rich semantic rendering,

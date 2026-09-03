@@ -107,6 +107,34 @@ impl FakeHimalaya {
         send_mode: &'static str,
         script_template: &str,
     ) -> Self {
+        Self::spawn_script_attachment(
+            mailbox_mode,
+            envelope_mode,
+            message_mode,
+            flag_mode,
+            send_mode,
+            "ok",
+            script_template,
+        )
+    }
+
+    /// The fake with a dedicated `attachment download` behavior mode
+    /// (`ok` | `traversal` | `wrong-row` | `error-json` | `no-path`
+    /// | `slow`), for the Phase 8.4 save contract tests.
+    pub fn spawn_attachment(attachment_mode: &'static str) -> Self {
+        Self::spawn_script_attachment("ok", "ok", "ok", "ok", "ok", attachment_mode, SCRIPT)
+    }
+
+    /// The lowest-level constructor: every subcommand mode explicit.
+    pub fn spawn_script_attachment(
+        mailbox_mode: &'static str,
+        envelope_mode: &'static str,
+        message_mode: &'static str,
+        flag_mode: &'static str,
+        send_mode: &'static str,
+        attachment_mode: &'static str,
+        script_template: &str,
+    ) -> Self {
         let dir = TempDir::new().expect("temp dir");
         let program = dir.path().join("himalaya");
         let argv_log = dir.path().join("argv.log");
@@ -120,7 +148,8 @@ impl FakeHimalaya {
             .replace("@ENVELOPE_MODE@", envelope_mode)
             .replace("@MESSAGE_MODE@", message_mode)
             .replace("@FLAG_MODE@", flag_mode)
-            .replace("@SEND_MODE@", send_mode);
+            .replace("@SEND_MODE@", send_mode)
+            .replace("@ATTACHMENT_MODE@", attachment_mode);
 
         let mut file = fs::File::create(&program).expect("write fake script");
         file.write_all(script.as_bytes())
@@ -219,12 +248,14 @@ prev=""
 for a in "$@"; do
   case "$prev" in
     message) OP="$a" ;;
+    attachment) OP="$a" ;;
   esac
   case "$a" in
     mailbox) SUB="mailbox" ;;
     envelope) SUB="envelope" ;;
     message) SUB="message" ;;
     flag) SUB="flag" ;;
+    attachment) SUB="attachment" ;;
   esac
   prev="$a"
 done
@@ -362,6 +393,48 @@ if [ "$SUB" = "flag" ]; then
       ;;
     error-json)
       printf '%s' '{"error":"mailbox not found","sources":["maildir"]}'
+      exit 1
+      ;;
+    slow)
+      sleep 30
+      ;;
+  esac
+  exit 0
+fi
+
+if [ "$SUB" = "attachment" ]; then
+  # The `-d` destination directory is the value after the flag.
+  DIR=""
+  p2=""
+  for a in "$@"; do
+    case "$p2" in
+      -d) DIR="$a" ;;
+    esac
+    p2="$a"
+  done
+  case "@ATTACHMENT_MODE@" in
+    ok)
+      # Act like himalaya: write the decoded part into the requested
+      # directory and report the row with the output path.
+      mkdir -p "$DIR"
+      printf 'PDF-PAYLOAD-01' > "$DIR/report.pdf"
+      printf '%s' '{"attachments":[{"id":"3","filename":"report.pdf","mime":"application/pdf","size":14,"inline":false,"path":"'"$DIR"'/report.pdf"}]}'
+      ;;
+    traversal)
+      # A hostile filename in the MIME metadata; the file itself lives
+      # inside the requested dir, but the reported name carries separators.
+      mkdir -p "$DIR"
+      printf 'EVIL-PAYLOAD' > "$DIR/evil.bin"
+      printf '%s' '{"attachments":[{"id":"3","filename":"../../evil.bin","mime":"application/octet-stream","size":12,"inline":false,"path":"'"$DIR"'/evil.bin"}]}'
+      ;;
+    wrong-row)
+      printf '%s' '{"attachments":[{"id":"9","filename":"other.bin","mime":"application/octet-stream","size":1,"inline":false,"path":""}]}'
+      ;;
+    no-path)
+      printf '%s' '{"attachments":[{"id":"3","filename":"report.pdf","mime":"application/pdf","size":14,"inline":false,"path":null}]}'
+      ;;
+    error-json)
+      printf '%s' '{"error":"no such attachment","sources":["maildir"]}'
       exit 1
       ;;
     slow)

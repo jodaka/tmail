@@ -156,6 +156,37 @@ pub(crate) fn message_send_argv(config: Option<&Path>, account: Option<&str>) ->
     argv
 }
 
+/// `attachment download -m <mailbox> -d <dir> <message-id> <part-id>
+/// --json` (Phase 8.4, ADR 0001). The destination directory is passed as
+/// one argv entry — paths with spaces never see a shell — and Post points
+/// it at a private tempdir so collision handling stays in Post's hands.
+pub(crate) fn attachment_download_argv(
+    config: Option<&Path>,
+    account: Option<&str>,
+    mailbox_id: &str,
+    message_id: &str,
+    part_id: usize,
+    dir: &Path,
+) -> Vec<String> {
+    let mut argv = global_flags(config, account);
+    argv.extend(
+        [
+            "attachment",
+            "download",
+            "-m",
+            mailbox_id,
+            "-d",
+            &dir.display().to_string(),
+            message_id,
+            &part_id.to_string(),
+            "--json",
+        ]
+        .into_iter()
+        .map(String::from),
+    );
+    argv
+}
+
 fn global_flags(config: Option<&Path>, account: Option<&str>) -> Vec<String> {
     let mut argv = Vec::new();
     if let Some(config) = config {
@@ -318,6 +349,36 @@ mod tests {
                 "probe",
                 "message",
                 "send",
+                "--json",
+            ]
+        );
+    }
+
+    #[test]
+    fn attachment_download_argv_is_exact_and_keeps_dirs_whole() {
+        let argv = attachment_download_argv(
+            Some(Path::new("/tmp/cfg.toml")),
+            Some("probe"),
+            "INBOX",
+            "env-1",
+            3,
+            Path::new("/tmp/My Downloads/post-dl"),
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "-c",
+                "/tmp/cfg.toml",
+                "-a",
+                "probe",
+                "attachment",
+                "download",
+                "-m",
+                "INBOX",
+                "-d",
+                "/tmp/My Downloads/post-dl",
+                "env-1",
+                "3",
                 "--json",
             ]
         );

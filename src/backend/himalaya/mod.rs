@@ -25,8 +25,8 @@ use crate::backend::journal::DraftJournal;
 use crate::backend::traits::{BackendError, BackendResult, MailBackend, RequestContext};
 use crate::config::Config;
 use crate::domain::{
-    DraftAttachment, DraftSnapshot, Mailbox, MailboxRole, Message, MessageId, MessageLocator,
-    MessageSummary, OutboundMessage, Page, PageRequest, RestoredDraft, SendOutcome,
+    AttachmentRequest, DraftAttachment, DraftSnapshot, Mailbox, MailboxRole, Message, MessageId,
+    MessageLocator, MessageSummary, OutboundMessage, Page, PageRequest, RestoredDraft, SendOutcome,
 };
 
 /// Drives the `himalaya` executable with argv-only child processes.
@@ -55,6 +55,9 @@ pub struct HimalayaCliBackend {
     /// Configured account identity, used as the `From` header of drafts.
     account_email: Option<String>,
     account_display_name: Option<String>,
+    /// `[post.attachments].downloads_dir` (plan §17), as written; a leading
+    /// `~` is expanded at use time. `None` falls back to `$HOME/Downloads`.
+    downloads_dir: Option<PathBuf>,
 }
 
 impl HimalayaCliBackend {
@@ -74,6 +77,7 @@ impl HimalayaCliBackend {
                 .unwrap_or_else(|| DraftJournal::open(PathBuf::from("/dev/null/post-drafts"))),
             account_email: None,
             account_display_name: None,
+            downloads_dir: None,
         }
     }
 
@@ -95,6 +99,7 @@ impl HimalayaCliBackend {
             config.account_email.clone(),
             config.account_display_name.clone(),
         )
+        .with_downloads_dir(config.downloads_dir.clone())
     }
 
     /// Set the configured account identity (`From` of drafts).
@@ -105,6 +110,12 @@ impl HimalayaCliBackend {
     ) -> Self {
         self.account_email = email;
         self.account_display_name = display_name;
+        self
+    }
+
+    /// Set the configured downloads directory (plan §17).
+    pub fn with_downloads_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.downloads_dir = dir;
         self
     }
 }
@@ -346,6 +357,86 @@ impl MailBackend for HimalayaCliBackend {
     ) -> BackendResult<DraftAttachment> {
         tracing::debug!(operation = %ctx.operation, path = %path.display(), "read_attachment");
         Ok(validate_attachment_source(&path)?)
+    }
+
+    async fn save_attachment(
+        &self,
+        ctx: RequestContext,
+        request: AttachmentRequest,
+    ) -> BackendResult<PathBuf> {
+        tracing::debug!(
+            operation = %ctx.operation,
+            part = request.part_id,
+            "save_attachment"
+        );
+        // 1. Destination directory: explicit request, then config, then
+        //    the platform default. Created when missing.
+        let dir = resolve_downloads_dir(request.dir.as_deref(), self.downloads_dir.as_deref())?;
+        std::fs::create_dir_all(&dir).map_err(|err| {
+            BackendError::File(format!(
+                "download directory `{}` could not be created: {err}",
+                dir.display()
+            ))
+        })?;
+
+        // 2. Download the part into a Post-owned private tempdir — never
+        //    straight into the destination, so nothing there can be
+        //    touched until the collision-checked write is ready. The dir
+        //    travels as one argv entry: no shell, whatever the path.
+        let temp = tempfile::tempdir()
+            .map_err(|err| BackendError::File(format!("temporary download dir: {err}")))?;
+        let argv = command::attachment_download_argv(
+            self.config_path.as_deref(),
+            self.account.as_deref(),
+            &request.locator.mailbox.0,
+            &request.locator.id.0,
+            request.part_id,
+            temp.path(),
+        );
+        let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
+        let dto: dto::AttachmentsDto = process::decode(output)?;
+        let row = find_row(&dto, request.part_id)?;
+        let source = row
+            .path
+            .as_deref()
+            .map(PathBuf::from)
+            .map(|path| {
+                // Relative paths resolve against the tempdir himalaya was
+                // pointed at; absolute ones pass through.
+                if path.is_absolute() {
+                    path
+                } else {
+                    temp.path().join(path)
+                }
+            })
+            .ok_or_else(|| {
+                BackendError::InvalidOutput(format!(
+                    "attachment download row for part {} names no output path",
+                    request.part_id
+                ))
+            })?;
+        let bytes = std::fs::read(&source).map_err(|err| {
+            BackendError::File(format!(
+                "`{}` could not be read after download: {err}",
+                source.display()
+            ))
+        })?;
+
+        // 3. Destination name: the caller's display filename (reduced to a
+        //    single component — traversal is impossible), else the row's,
+        //    else a part-id fallback.
+        let name = destination_component(
+            request.filename.as_deref().or(row.filename.as_deref()),
+            request.part_id,
+        );
+        let final_path = write_collision_safe(&dir, &name, &bytes)?;
+        tracing::info!(
+            part = request.part_id,
+            bytes = bytes.len(),
+            saved = %final_path.display(),
+            "attachment saved"
+        );
+        Ok(final_path)
     }
 }
 
@@ -673,6 +764,126 @@ fn bare_message_id(message_id: &str) -> String {
         .to_string()
 }
 
+/// Resolve the destination directory for a save (plan §15): the request's
+/// explicit directory wins, then the configured downloads dir, then the
+/// platform default. `~` is expanded here — inside Post, never a shell.
+fn resolve_downloads_dir(
+    request_dir: Option<&Path>,
+    configured: Option<&Path>,
+) -> BackendResult<PathBuf> {
+    resolve_downloads_dir_with(
+        request_dir,
+        configured,
+        crate::domain::paths::home_dir().as_deref(),
+    )
+}
+
+/// [`resolve_downloads_dir`] with an injected home directory for tests.
+fn resolve_downloads_dir_with(
+    request_dir: Option<&Path>,
+    configured: Option<&Path>,
+    home: Option<&Path>,
+) -> BackendResult<PathBuf> {
+    let raw = request_dir
+        .or(configured)
+        .map(|dir| crate::domain::paths::expand_tilde(dir, home));
+    match raw {
+        Some(dir) => Ok(dir),
+        None => match home {
+            Some(home) => Ok(home.join("Downloads")),
+            None => Err(BackendError::File(String::from(
+                "no downloads directory is configured and $HOME is not set",
+            ))),
+        },
+    }
+}
+
+/// The row of the download output matching the requested part id.
+fn find_row(dto: &dto::AttachmentsDto, part_id: usize) -> BackendResult<dto::AttachmentRowDto> {
+    let wanted = part_id.to_string();
+    dto.attachments
+        .iter()
+        .find(|row| row.id == wanted)
+        .cloned()
+        .ok_or_else(|| {
+            BackendError::InvalidOutput(format!(
+                "attachment download returned no row for part {part_id}"
+            ))
+        })
+}
+
+/// Reduce a display filename to a single path component (plan §15: prevent
+/// path traversal). Only the final component survives — `../../.zshenv`
+/// becomes `.zshenv` — and empty, `..`, or unusable results fall back to
+/// `attachment-<part>` so the saver never fabricates a location.
+fn destination_component(filename: Option<&str>, part_id: usize) -> String {
+    let usable = filename
+        .and_then(|name| {
+            Path::new(name)
+                .file_name()
+                .and_then(|component| component.to_str())
+        })
+        .filter(|component| !component.is_empty() && *component != "." && *component != "..");
+    usable
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("attachment-{part_id}"))
+}
+
+/// Write `bytes` to `dir/name` without ever overwriting (plan §15
+/// acceptance): an atomic `create_new` write, walking `name (1).ext`,
+/// `name (2).ext`, … when the name is taken. Deterministic and
+/// crash-safe — a partially written file can never masquerade as the
+/// previous one because a collision-rename never reuses an existing path.
+fn write_collision_safe(dir: &Path, name: &str, bytes: &[u8]) -> BackendResult<PathBuf> {
+    use std::io::Write;
+    let write_new = |path: &Path| -> Result<PathBuf, (PathBuf, std::io::Error)> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|err| (path.to_path_buf(), err))?;
+        file.write_all(bytes)
+            .map_err(|err| (path.to_path_buf(), err))?;
+        Ok(path.to_path_buf())
+    };
+    let path = dir.join(name);
+    // Fast path: the plain name is free. A race (taken between the check
+    // and the open) surfaces as AlreadyExists and falls through to the
+    // numbered walk.
+    if !path.exists()
+        && let Ok(saved) = write_new(&path)
+    {
+        return Ok(saved);
+    }
+    let (stem, ext) = split_stem_ext(name);
+    for index in 1..=999u32 {
+        let candidate = dir.join(format!("{stem} ({index}){ext}"));
+        match write_new(&candidate) {
+            Ok(saved) => return Ok(saved),
+            Err((_, err)) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err((failed, err)) => {
+                return Err(BackendError::File(format!(
+                    "`{}` could not be written: {err}",
+                    failed.display()
+                )));
+            }
+        }
+    }
+    Err(BackendError::File(format!(
+        "`{}` is taken and no free numbered name was found (tried 999)",
+        dir.join(name).display()
+    )))
+}
+
+/// Split a filename into stem and dot-prefixed extension for the numbered
+/// collision walk (`report.pdf` → `report`, `.pdf`).
+fn split_stem_ext(name: &str) -> (String, String) {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_owned(), format!(".{ext}")),
+        _ => (name.to_owned(), String::new()),
+    }
+}
+
 /// Validate one attachment source path (plan §15, Phase 8): expand `~` in
 /// Post (never a shell), then require an existing, regular, readable file
 /// within the acceptable size. Every refusal is detailed so the composer
@@ -976,6 +1187,92 @@ mod attachment_tests {
         }
         let err = validate_attachment_source(&path).expect_err("unreadable");
         assert!(matches!(err, BackendError::File(_)));
+    }
+
+    #[test]
+    fn downloads_dir_resolution_prefers_request_then_config_then_default() {
+        let home = Path::new("/home/ada");
+        // Explicit request wins verbatim (absolute).
+        let req = Path::new("/tmp/My Downloads");
+        assert_eq!(
+            resolve_downloads_dir_with(Some(req), Some(Path::new("/cfg/dl")), Some(home))
+                .expect("resolves"),
+            req
+        );
+        // Config fills in when no request; `~` expands against home.
+        assert_eq!(
+            resolve_downloads_dir_with(None, Some(Path::new("~/Downloads")), Some(home))
+                .expect("resolves"),
+            Path::new("/home/ada/Downloads")
+        );
+        // Default: $HOME/Downloads.
+        assert_eq!(
+            resolve_downloads_dir_with(None, None, Some(home)).expect("resolves"),
+            Path::new("/home/ada/Downloads")
+        );
+        // No home and nothing configured is a detailed refusal.
+        let err = resolve_downloads_dir_with(None, None, None).expect_err("no home");
+        assert!(matches!(err, BackendError::File(_)));
+    }
+
+    #[test]
+    fn destination_names_reduce_to_single_components() {
+        // Traversal attempts collapse to the final component.
+        assert_eq!(destination_component(Some("../../.zshenv"), 3), ".zshenv");
+        assert_eq!(destination_component(Some("/etc/passwd"), 3), "passwd");
+        // A bare `..`, empty names, and non-names fall back to the part id.
+        assert_eq!(destination_component(Some(".."), 3), "attachment-3");
+        assert_eq!(destination_component(Some(""), 3), "attachment-3");
+        assert_eq!(destination_component(None, 7), "attachment-7");
+        // Ordinary names, spaces included, pass through.
+        assert_eq!(
+            destination_component(Some("report final.pdf"), 3),
+            "report final.pdf"
+        );
+    }
+
+    #[test]
+    fn collision_walk_splits_stem_and_extension() {
+        assert_eq!(
+            split_stem_ext("report.pdf"),
+            ("report".into(), ".pdf".into())
+        );
+        // Multiple dots: only the last is the extension.
+        assert_eq!(
+            split_stem_ext("my.report.final.tar"),
+            ("my.report.final".into(), ".tar".into())
+        );
+        // Dotfiles keep their whole name as the stem.
+        assert_eq!(split_stem_ext(".zshenv"), (".zshenv".into(), "".into()));
+        // Extension-less names have nothing to strip.
+        assert_eq!(
+            split_stem_ext("attachment-3"),
+            ("attachment-3".into(), "".into())
+        );
+    }
+
+    #[test]
+    fn collision_safe_writes_never_overwrite() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir = dir.path().to_path_buf();
+        std::fs::write(dir.join("file.bin"), b"v1").expect("seed");
+
+        // First save takes the plain name when free.
+        let first = write_collision_safe(&dir, "other.bin", b"a").expect("writes");
+        assert_eq!(first, dir.join("other.bin"));
+        // Second save walks to a numbered name; the first is untouched.
+        let second = write_collision_safe(&dir, "other.bin", b"bb").expect("writes");
+        assert_eq!(second, dir.join("other (1).bin"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"a");
+        assert_eq!(std::fs::read(&second).unwrap(), b"bb");
+        // Extensions survive the walk; dotfiles number as whole names.
+        let third = write_collision_safe(&dir, "file.bin", b"ccc").expect("writes");
+        assert_eq!(third, dir.join("file (1).bin"));
+        std::fs::write(dir.join(".zshenv"), b"old").expect("seed dotfile");
+        let fourth = write_collision_safe(&dir, ".zshenv", b"d").expect("writes");
+        assert_eq!(fourth, dir.join(".zshenv (1)"));
+        assert_eq!(std::fs::read(dir.join("file.bin")).unwrap(), b"v1");
+        assert_eq!(std::fs::read(dir.join(".zshenv")).unwrap(), b"old");
     }
 }
 

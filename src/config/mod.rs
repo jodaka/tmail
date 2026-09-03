@@ -38,6 +38,10 @@ pub struct Config {
     pub account_email: Option<String>,
     /// `[accounts.<account>].display-name`, when configured.
     pub account_display_name: Option<String>,
+    /// `[post.attachments].downloads_dir` (plan §17), as written — a
+    /// leading `~` is expanded by the backend when the directory is used.
+    /// `None` falls back to the platform default (`$HOME/Downloads`).
+    pub downloads_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -49,6 +53,7 @@ impl Default for Config {
             aliases: HashMap::new(),
             account_email: None,
             account_display_name: None,
+            downloads_dir: None,
         }
     }
 }
@@ -131,6 +136,16 @@ pub fn parse(text: &str, path: Option<PathBuf>) -> Config {
         .map(|size| size as usize)
     {
         config.page_size = page_size;
+    }
+    if let Some(downloads_dir) = doc
+        .get("post")
+        .and_then(|post| post.get("attachments"))
+        .and_then(|attachments| attachments.get("downloads_dir"))
+        .and_then(toml::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    {
+        config.downloads_dir = Some(downloads_dir);
     }
     if let Some(account) = config.account.as_deref() {
         config.aliases = aliases_for(&doc, account);
@@ -224,6 +239,27 @@ mod tests {
     fn nonpositive_page_size_falls_back_to_default() {
         let text = "[post.mail]\npage_size = 0\n";
         assert_eq!(parse(text, None).page_size, DEFAULT_PAGE_SIZE);
+    }
+
+    #[test]
+    fn downloads_dir_is_parsed_as_written() {
+        // `~` is NOT expanded here; the backend expands it so the whole
+        // path pipeline stays shell-free and testable (plan §15).
+        let text = "[post.attachments]\ndownloads_dir = \"~/My Downloads\"\n";
+        assert_eq!(
+            parse(text, None).downloads_dir,
+            Some(PathBuf::from("~/My Downloads"))
+        );
+        // Empty or non-string values fall back to None.
+        assert_eq!(
+            parse("[post.attachments]\ndownloads_dir = \"\"\n", None).downloads_dir,
+            None
+        );
+        assert_eq!(
+            parse("[post.attachments]\ndownloads_dir = 3\n", None).downloads_dir,
+            None
+        );
+        assert_eq!(parse("", None).downloads_dir, None);
     }
 
     #[test]

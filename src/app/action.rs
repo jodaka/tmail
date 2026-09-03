@@ -87,6 +87,9 @@ pub enum Action {
     MarkUnread,
     Refresh,
     Send,
+    /// Save the selected reader attachment to the downloads directory
+    /// (plan §15, Phase 8.4).
+    SaveAttachment,
     LeaveComposer,
     DiscardDraft,
     RetryError,

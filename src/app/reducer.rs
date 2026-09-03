@@ -84,6 +84,7 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         }
         Action::Archive => archive_message(state),
         Action::Trash => trash_message(state),
+        Action::SaveAttachment => save_selected_attachment(state, false),
         Action::ToggleStar => toggle_star(state),
         Action::MarkUnread => mark_unread(state),
         Action::Compose => open_composer(state),
@@ -572,6 +573,59 @@ fn mark_unread(state: &mut AppState) -> Vec<Effect> {
     }
 }
 
+// ── Attachment save (plan §15, Phase 8.4) ────────────────────────────────
+
+/// Save the selected reader attachment (plan §15). Reader-only: the open
+/// message supplies the locator and the part id, the chip cursor supplies
+/// the attachment. `d` saves into the downloads directory; the backend
+/// owns collision handling and returns the path actually written.
+fn save_selected_attachment(state: &mut AppState, open_after: bool) -> Vec<Effect> {
+    let _ = open_after; // the open-with chain arrives with Phase 8.5
+    if state.focus != Focus::Reader {
+        tracing::debug!("save attachment ignored outside the reader");
+        return Vec::new();
+    }
+    let Some(message) = state.open_message.as_loaded() else {
+        return Vec::new();
+    };
+    let Some((_, attachment)) = selected_attachment(state) else {
+        return Vec::new();
+    };
+    let request = crate::domain::AttachmentRequest {
+        locator: MessageLocator {
+            mailbox: message.mailbox_id.clone(),
+            id: message.id.clone(),
+            message_id: message.headers.message_id.clone(),
+        },
+        part_id: attachment.part_id,
+        filename: attachment.name.clone(),
+        dir: None,
+    };
+    state.set_status("Saving attachment…");
+    vec![
+        state
+            .operations
+            .start(OperationKind::SaveAttachment { request }),
+    ]
+}
+
+/// Apply a finished attachment save: record the path for `Open` reuse and
+/// tell the user where the file actually landed (the backend may have
+/// collision-renamed it — that path, never the requested one, is shown).
+fn attachment_saved(state: &mut AppState, path: &std::path::Path) -> Vec<Effect> {
+    let Some(message) = state.open_message.as_loaded() else {
+        return Vec::new();
+    };
+    let Some((_, attachment)) = selected_attachment(state) else {
+        return Vec::new();
+    };
+    state
+        .saved_attachments
+        .insert((message.id.clone(), attachment.part_id), path.to_path_buf());
+    state.set_status(format!("Saved to {}", path.display()));
+    Vec::new()
+}
+
 // ── Send (plan §14, Phase 7.6/7.7) ───────────────────────────────────────
 
 /// Ctrl+Enter / Send button (plan §10). Sends only from the composer: the
@@ -937,6 +991,17 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             state.operations.finish(result.id);
             attachment_validated(state, path, result)
         }
+        OperationKind::SaveAttachment { .. } => {
+            state.operations.finish(result.id);
+            match &result.outcome {
+                Ok(OperationOutcome::SavedPath(path)) => attachment_saved(state, path),
+                Ok(_) => {
+                    tracing::warn!(id = %result.id, "unexpected payload for an attachment save");
+                    Vec::new()
+                }
+                Err(failure) => open_error_modal(state, failure),
+            }
+        }
     }
 }
 
@@ -1154,6 +1219,18 @@ fn cycle_reader_attachment(state: &mut AppState, delta: i64) {
     let current = state.reader_attachment.unwrap_or(0).min(len - 1);
     let next = (current as i64 + delta).rem_euclid(len as i64) as usize;
     state.reader_attachment = Some(next);
+}
+
+/// The attachment the reader's save/open keys act on, when the open
+/// message carries any (plan §15).
+fn selected_attachment(state: &AppState) -> Option<(usize, &crate::domain::Attachment)> {
+    let message = state.open_message.as_loaded()?;
+    let index = state
+        .reader_attachment
+        .unwrap_or(0)
+        .min(message.attachments.len().saturating_sub(1));
+    let attachment = message.attachments.get(index)?;
+    Some((index, attachment))
 }
 
 /// Apply the fetched message: show it, fill the list snippet (Post fills

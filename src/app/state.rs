@@ -69,6 +69,11 @@ pub struct AppState {
     /// chip the save/open keys act on. `None` addresses the first chip;
     /// the reducer clamps with the loaded message's chip count.
     pub reader_attachment: Option<usize>,
+    /// Paths where attachments were saved this session, keyed by
+    /// (message id, part id) (plan §15). `Open` reuses the saved file
+    /// instead of writing a duplicate; cleared implicitly with the state.
+    pub saved_attachments:
+        std::collections::HashMap<(crate::domain::MessageId, usize), std::path::PathBuf>,
     /// In-flight backend operations with their ids, retry intents, and
     /// cancellation tokens (plan §9/§11). Results only apply while their
     /// operation is still registered here.
@@ -111,6 +116,7 @@ impl AppState {
             open_message: Loadable::Idle,
             reader_scroll: 0,
             reader_attachment: None,
+            saved_attachments: std::collections::HashMap::new(),
             operations: OperationRegistry::default(),
             overlay: None,
             composer: None,

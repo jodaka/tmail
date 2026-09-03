@@ -23,6 +23,9 @@ async-trait = "0.1"
 thiserror = "2"
 toml = "0.9"
 html2text = "0.17.1"
+# Isolated download directories for attachment saves (plan §15: downloads
+# never touch the destination until a collision-checked write is ready).
+tempfile = "3"
 # Raw-MIME support for the test fixture corpus only (feature `test-fixtures`);
 # production builds never parse MIME — Himalaya does (ADR 0001).
 mail-parser = { version = "0.11.8", optional = true, features = ["serde"] }
@@ -31,6 +34,3 @@ mail-builder = "0.5.0"
 
 [features]
 test-fixtures = ["dep:mail-parser"]
-
-[dev-dependencies]
-tempfile = "3"

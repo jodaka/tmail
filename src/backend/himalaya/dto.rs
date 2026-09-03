@@ -223,6 +223,42 @@ pub(crate) struct ContentTypeAttributeDto {
     pub value: Option<String>,
 }
 
+// ── `attachment list/download --json` (plan §15, Phase 8) ────────────────
+//
+// Schema: himalaya-attachment-download.json. `id` is the 1-based MIME part
+// position (as a string on the wire); `size` and `inline` are required;
+// `filename`, `mime`, and `path` are optional (`path` is set only by
+// `attachment download`).
+
+/// The table of attachment rows.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AttachmentsDto {
+    #[serde(default)]
+    pub attachments: Vec<AttachmentRowDto>,
+}
+
+/// One attachment row.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AttachmentRowDto {
+    /// 1-based MIME part position, as a string.
+    pub id: String,
+    #[serde(default)]
+    pub filename: Option<String>,
+    /// Wire shape fidelity only; the saver uses the request/row filename.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub mime: Option<String>,
+    /// Decoded size in bytes (schema-required; shape fidelity only).
+    #[allow(dead_code)]
+    pub size: u64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub inline: bool,
+    /// Where `attachment download` wrote the bytes.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 /// Part bodies are externally tagged too: decoded text, HTML, raw binary
 /// (a JSON number array), or nested part indexes for multipart. The outer
 /// untagged wrapper tolerates unknown body shapes.
