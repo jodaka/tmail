@@ -7,6 +7,7 @@ pub mod draft;
 pub mod mailbox;
 pub mod message;
 pub mod page;
+pub mod reply;
 pub mod send;
 
 pub use address::Address;
@@ -14,4 +15,5 @@ pub use draft::{Draft, DraftId, DraftSaveState, DraftSnapshot, RestoredDraft};
 pub use mailbox::{Mailbox, MailboxId, MailboxRole};
 pub use message::{Attachment, Message, MessageHeaders, MessageId, MessageLocator, MessageSummary};
 pub use page::{Page, PageRequest};
+pub use reply::{ReplyKind, Seed, seed_forward, seed_reply};
 pub use send::{OutboundMessage, OutgoingContent, SendBlocker, SendOutcome};

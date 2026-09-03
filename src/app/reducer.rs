@@ -94,13 +94,12 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             }
             Vec::new()
         }
-        Action::Reply
-        | Action::ReplyAll
-        | Action::Forward
-        | Action::Send
-        | Action::LeaveComposer => {
-            // Vocabulary is complete (plan §9); Phase 7 owns reply/forward/
-            // send, and Esc handles leaving. No-op, never a crash.
+        Action::Reply => open_reply(state),
+        Action::Forward => open_forward(state),
+        Action::Send | Action::ReplyAll | Action::LeaveComposer => {
+            // Send lands with the composer send flow (Phase 7.6/7.7);
+            // ReplyAll with the recipient-merge work (Phase 7.5).
+            // LeaveComposer is routed through `back_or_cancel` (plan §10).
             tracing::debug!(?action, "action not yet implemented");
             Vec::new()
         }
@@ -299,6 +298,67 @@ fn open_error_modal(state: &mut AppState, failure: &OperationFailure) -> Vec<Eff
     }));
     state.focus = Focus::ErrorModal;
     state.set_status("Operation failed");
+    Vec::new()
+}
+
+// ── Reply / forward seeding (plan §14, Phase 7.3) ────────────────────────
+
+/// Seed a reply draft from the open message (reader). Reply acts on full
+/// message data — headers, threading ids, and the quotable body — so it
+/// requires a loaded reader; a draft already in the composer is never
+/// clobbered (plan §14: one composer at a time).
+fn open_reply(state: &mut AppState) -> Vec<Effect> {
+    let Some(message) = state.open_message.as_loaded() else {
+        tracing::debug!("reply ignored: no loaded message in the reader");
+        return Vec::new();
+    };
+    if state.composer.is_some() {
+        state.set_status("A draft is already open — send or discard it first");
+        return Vec::new();
+    }
+    let seed = crate::domain::reply::seed_reply(message, crate::domain::ReplyKind::Reply);
+    open_seeded_composer(state, seed, "Reply draft ready")
+}
+
+/// Seed a forward draft from the open message (reader).
+fn open_forward(state: &mut AppState) -> Vec<Effect> {
+    let Some(message) = state.open_message.as_loaded() else {
+        tracing::debug!("forward ignored: no loaded message in the reader");
+        return Vec::new();
+    };
+    if state.composer.is_some() {
+        state.set_status("A draft is already open — send or discard it first");
+        return Vec::new();
+    }
+    let seed = crate::domain::reply::seed_forward(message);
+    open_seeded_composer(state, seed, "Forward draft ready")
+}
+
+/// Install a seeded draft in the composer, pushing the composer route on
+/// top of the current one (reply from the reader returns to the reader on
+/// Esc). The seeded draft starts clean: autosave engages on the first
+/// edit.
+fn open_seeded_composer(
+    state: &mut AppState,
+    seed: crate::domain::reply::Seed,
+    status: &str,
+) -> Vec<Effect> {
+    let draft = crate::domain::Draft {
+        to: seed.to,
+        cc: seed.cc,
+        bcc: String::new(),
+        subject: seed.subject,
+        body: seed.body,
+        in_reply_to: seed.in_reply_to,
+        references: seed.references,
+        ..crate::domain::Draft::default()
+    };
+    state.composer = Some(ComposerState::from_draft(draft));
+    if !matches!(state.active_route(), Some(Route::Composer)) {
+        state.routes.push(Route::Composer);
+    }
+    state.focus = Focus::Composer;
+    state.set_status(status);
     Vec::new()
 }
 

@@ -2085,3 +2085,180 @@ fn discard_delete_failure_opens_the_error_modal() {
         "the discard itself is not rolled back"
     );
 }
+
+// ── Reply / forward seeding (plan §14, Phase 7.3) ────────────────────────
+
+use crate::domain::{Address, Message, MessageHeaders, MessageSummary};
+
+/// The message a reply/forward acts on, in its parsed reader form.
+fn reply_source() -> Message {
+    Message {
+        id: MessageId(String::from("env-reply-1")),
+        mailbox_id: inbox_id(),
+        headers: MessageHeaders {
+            subject: String::from("Plan review"),
+            from: vec![Address {
+                name: Some(String::from("Bob")),
+                email: String::from("bob@example.org"),
+            }],
+            to: vec![Address {
+                name: None,
+                email: String::from("probe@post.local"),
+            }],
+            cc: vec![Address {
+                name: None,
+                email: String::from("carol@example.org"),
+            }],
+            date: Some(mock::now()),
+            message_id: Some(String::from("318@post.local")),
+            in_reply_to: None,
+            references: Some(String::from("000@post.local")),
+        },
+        plain_body: Some(String::from("Please review.\nThanks\n")),
+        html_body: None,
+        attachments: Vec::new(),
+    }
+}
+
+/// Open the reader with `message` already loaded (as a completed
+/// LoadMessage would leave it).
+fn open_reader_with(s: &mut AppState, message: Message) {
+    let summary = MessageSummary {
+        id: message.id.clone(),
+        mailbox_id: message.mailbox_id.clone(),
+        message_id: message.headers.message_id.clone(),
+        from: message.headers.from.clone(),
+        to: message.headers.to.clone(),
+        subject: message.headers.subject.clone(),
+        snippet: None,
+        timestamp: message.headers.date.unwrap_or_else(mock::now),
+        is_read: true,
+        is_starred: false,
+        has_attachments: false,
+    };
+    s.routes
+        .push(Route::Message(crate::app::route::MessageRoute {
+            mailbox_id: message.mailbox_id.clone(),
+            summary,
+        }));
+    s.focus = Focus::Reader;
+    s.open_message = Loadable::Loaded(message);
+}
+
+fn seeded_composer(s: &AppState) -> &crate::app::composer::ComposerState {
+    s.composer.as_ref().expect("seeded composer")
+}
+
+#[test]
+fn reply_seeds_a_composer_on_top_of_the_reader() {
+    let mut s = state();
+    open_reader_with(&mut s, reply_source());
+    no_effects(&reduce(&mut s, &Action::Reply));
+    // Route stack: composer above the still-open reader; Esc from the
+    // composer returns to reading.
+    assert_eq!(s.routes.len(), 3);
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    assert_eq!(s.focus, Focus::Composer);
+    assert_eq!(s.status.message.as_deref(), Some("Reply draft ready"));
+    let composer = seeded_composer(&s);
+    assert_eq!(composer.draft.to, "Bob <bob@example.org>");
+    assert_eq!(composer.draft.subject, "Re: Plan review");
+    assert_eq!(
+        composer.draft.in_reply_to.as_deref(),
+        Some("318@post.local")
+    );
+    assert_eq!(
+        composer.draft.references.as_deref(),
+        Some("000@post.local 318@post.local")
+    );
+    // Quoted body with the attribution; caret starts at the very top.
+    assert!(composer.draft.body.contains("On "));
+    assert!(
+        composer
+            .draft
+            .body
+            .contains("wrote:\n> Please review.\n> Thanks")
+    );
+    // The seeded draft is clean: autosave engages on the first edit.
+    assert!(!composer.draft.is_dirty());
+    assert_eq!(composer.draft.revision, 0);
+}
+
+#[test]
+fn forward_seeds_a_header_block_and_no_recipients() {
+    let mut s = state();
+    open_reader_with(&mut s, reply_source());
+    no_effects(&reduce(&mut s, &Action::Forward));
+    let composer = seeded_composer(&s);
+    assert_eq!(composer.draft.to, "");
+    assert_eq!(composer.draft.subject, "Fwd: Plan review");
+    assert_eq!(composer.draft.in_reply_to, None);
+    assert_eq!(composer.draft.references, None);
+    assert!(
+        composer
+            .draft
+            .body
+            .contains("---------- Forwarded message ---------")
+    );
+    assert!(composer.draft.body.contains("From: Bob <bob@example.org>"));
+    assert!(composer.draft.body.contains("To: probe@post.local"));
+}
+
+#[test]
+fn reply_needs_a_loaded_message() {
+    let mut s = state();
+    // No reader at all.
+    no_effects(&reduce(&mut s, &Action::Reply));
+    no_effects(&reduce(&mut s, &Action::Forward));
+    assert!(s.composer.is_none());
+    // Reader open but the message still loading.
+    let summary = s.selected_message().unwrap().clone();
+    let (id, _kind) = expect_kind(&reduce(&mut s, &Action::Activate));
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Page(mock::mock_page(
+                &inbox_id(),
+                0,
+                mock::PAGE_SIZE,
+            ))),
+        }),
+    );
+    let _ = summary;
+    no_effects(&reduce(&mut s, &Action::Reply));
+    assert!(s.composer.is_none());
+}
+
+#[test]
+fn reply_never_clobbers_an_existing_draft() {
+    let mut s = state();
+    open_reader_with(&mut s, reply_source());
+    no_effects(&reduce(&mut s, &Action::Compose)); // a draft exists already
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('k')));
+    no_effects(&reduce(&mut s, &Action::Reply));
+    let composer = seeded_composer(&s);
+    assert_eq!(composer.draft.to, "k", "existing draft untouched");
+    assert_eq!(
+        s.status.message.as_deref(),
+        Some("A draft is already open — send or discard it first")
+    );
+}
+
+#[test]
+fn leaving_a_seeded_reply_returns_to_the_reader() {
+    let mut s = state();
+    open_reader_with(&mut s, reply_source());
+    reduce(&mut s, &Action::Reply);
+    reduce(&mut s, &Action::BackOrCancel); // Esc: save/leave
+    assert!(matches!(s.active_route(), Some(Route::Message(_))));
+    assert_eq!(s.focus, Focus::MessageList);
+    // The draft stays in state and reopens with its seeded headers.
+    assert!(s.composer.is_some());
+    reduce(&mut s, &Action::Compose);
+    let composer = seeded_composer(&s);
+    assert_eq!(
+        composer.draft.in_reply_to.as_deref(),
+        Some("318@post.local")
+    );
+}

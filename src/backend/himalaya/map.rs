@@ -523,6 +523,29 @@ mod tests {
         );
     }
 
+    /// Acceptance (plan §19 Phase 7): the forward representation is
+    /// fixture-tested. The real `message read --json` probe output flows
+    /// through the production mapping, then the forward seed.
+    #[test]
+    fn forward_seed_from_real_plain_fixture_carries_a_clear_block() {
+        let dto: dto::MessageReadDto =
+            serde_json::from_str(MESSAGE_READ_PLAIN).expect("fixture parses");
+        let message = message(dto, locator());
+        let seed = crate::domain::reply::seed_forward(&message);
+        assert_eq!(seed.subject, "Fwd: Plain text only");
+        assert_eq!(seed.in_reply_to, None, "forwards start a new thread");
+        let body = seed.body;
+        assert!(body.contains("---------- Forwarded message ---------"));
+        assert!(body.contains("From: Bob <bob@example.org>"));
+        assert!(body.contains("Date: 2026-09-02 10:03"));
+        assert!(body.contains("Subject: Plain text only"));
+        assert!(body.contains("To: probe@post.local"));
+        assert!(
+            body.ends_with("\nThis is a plain text message.\nLine two.\n"),
+            "original body follows the block:\n{body}"
+        );
+    }
+
     #[test]
     fn empty_dump_maps_to_renderable_defaults() {
         let dto: dto::MessageReadDto = serde_json::from_str("{}").expect("parses");
