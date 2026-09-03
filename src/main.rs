@@ -98,6 +98,9 @@ async fn run() -> anyhow::Result<()> {
     state.autosave_delay_ms = config.autosave_delay_ms;
     // The external editor argv (Phase 11.4); `None` = builtin editor.
     state.editor_command = config.editor_command.clone();
+    // Post-owned summary cache (ticket haeb): instant warm starts, the
+    // fresh page always loads in the background afterwards.
+    state.page_cache = tmail::app::page_cache::PageCache::open_default(config.account.as_deref());
     // Mouse capture starts in the configured mode (Phase 10.4); `m`
     // toggles it at runtime via `Action::ToggleMouseCapture`.
     state.mouse_capture = config.mouse;

@@ -1193,6 +1193,11 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                 Ok(OperationOutcome::Page(page)) => {
                     state.last_background_error = None;
                     apply_page(state, page.clone());
+                    // Ticket haeb: every successful load refreshes the
+                    // cached page.
+                    if let Some(cache) = &state.page_cache {
+                        cache.store(&request.mailbox_id, None, page);
+                    }
                     Vec::new()
                 }
                 Ok(OperationOutcome::Mailboxes(_)) => {
@@ -1234,6 +1239,10 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                 Ok(OperationOutcome::Page(page)) => {
                     state.last_background_error = None;
                     apply_page(state, page.clone());
+                    // Ticket haeb: search results cache under their query.
+                    if let Some(cache) = &state.page_cache {
+                        cache.store(&request.mailbox_id, Some(&request.query), page);
+                    }
                     Vec::new()
                 }
                 Ok(_) => {
@@ -1965,6 +1974,21 @@ fn request_visible_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
                 offset,
                 limit: state.messages.limit.max(1),
             };
+            // Ticket haeb: the cached page for this exact query renders
+            // immediately — cold contexts only (empty list), so a move
+            // re-sync can never resurrect moved rows from the cache; the
+            // fresh load starts right after and replaces the page.
+            if state.messages.items.is_empty()
+                && let Some(cache) = &state.page_cache
+                && let Some(page) = cache.load(
+                    &request.mailbox_id,
+                    Some(&request.query),
+                    request.offset,
+                    request.limit,
+                )
+            {
+                apply_page(state, page);
+            }
             vec![state.operations.start(OperationKind::Search(request))]
         }
         Some(route) => match route.mailbox_id().cloned() {
@@ -1974,6 +1998,18 @@ fn request_visible_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
                     offset,
                     limit: state.messages.limit.max(1),
                 };
+                // Ticket haeb: cached summaries render instantly in cold
+                // contexts (empty list: startup, mailbox switch) — a move
+                // re-sync has a non-empty list, so it can never resurrect
+                // moved rows from the cache. The fresh load starts right
+                // after and its result overwrites this page.
+                if state.messages.items.is_empty()
+                    && let Some(cache) = &state.page_cache
+                    && let Some(page) =
+                        cache.load(&request.mailbox_id, None, request.offset, request.limit)
+                {
+                    apply_page(state, page);
+                }
                 vec![state.operations.start(OperationKind::LoadPage(request))]
             }
             None => Vec::new(),
@@ -2030,6 +2066,15 @@ fn request_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
         offset,
         limit: state.messages.limit.max(1),
     };
+    // Ticket haeb: in cold contexts (empty list — startup, mailbox switch)
+    // the cached page renders instantly; the fresh load below still runs
+    // and its result overwrites the cache and the page.
+    if state.messages.items.is_empty()
+        && let Some(cache) = &state.page_cache
+        && let Some(page) = cache.load(&request.mailbox_id, None, request.offset, request.limit)
+    {
+        apply_page(state, page);
+    }
     vec![state.operations.start(OperationKind::LoadPage(request))]
 }
 

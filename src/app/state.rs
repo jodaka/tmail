@@ -112,6 +112,10 @@ pub struct AppState {
     /// resolved from the config at startup. `None` means the builtin
     /// editor: `Ctrl+E` is inert.
     pub editor_command: Option<Vec<String>>,
+    /// Post-owned summary cache (ticket haeb, cache.md §2): serves the
+    /// last loaded page instantly while the fresh one loads in the
+    /// background. `None` disables caching entirely.
+    pub page_cache: Option<crate::app::page_cache::PageCache>,
     /// Injected-clock timestamp of the last refresh (manual or automatic),
     /// the timer's arm point. `None` until the first tick arms it.
     pub last_refresh_at: Option<DateTime<FixedOffset>>,
@@ -166,6 +170,7 @@ impl AppState {
             refresh_interval_seconds: 0,
             autosave_delay_ms: crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS,
             editor_command: None,
+            page_cache: None,
             last_refresh_at: None,
             last_background_error: None,
             focus: Focus::MessageList,

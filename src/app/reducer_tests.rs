@@ -4586,3 +4586,62 @@ fn space_advances_to_the_next_row_after_toggling() {
     );
     assert!(s.selected.contains(&last));
 }
+
+// ── Summary cache (ticket haeb) ──────────────────────────────────────────
+
+#[test]
+fn cached_page_serves_instantly_and_the_fresh_load_still_runs() {
+    let mut s = state();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let cache = crate::app::page_cache::PageCache::open(dir.path().to_path_buf());
+    // A cached page for the Sent mailbox (offset 0, limit 20).
+    let cached = crate::domain::Page {
+        items: vec![
+            crate::app::mock::mock_page(&MailboxId(String::from("sent")), 0, 1)
+                .items
+                .remove(0),
+        ],
+        offset: 0,
+        limit: 20,
+        total: None,
+    };
+    cache.store(&MailboxId(String::from("sent")), None, &cached);
+    s.page_cache = Some(cache);
+
+    // Switch to Sent: the cached rows render immediately…
+    reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1)));
+    reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1)));
+    assert!(
+        !s.messages.items.is_empty(),
+        "cached rows visible without waiting for the backend"
+    );
+    assert_eq!(s.messages.items[0].mailbox_id.0, "sent");
+
+    // …and the fresh load still runs: completing it replaces the page.
+    let expected = crate::app::mock::mock_page(&MailboxId(String::from("sent")), 0, 20);
+    let effects = {
+        let req = crate::domain::PageRequest {
+            mailbox_id: MailboxId(String::from("sent")),
+            offset: 0,
+            limit: 20,
+        };
+        let id = s.operations.start(OperationKind::LoadPage(req.clone())).id;
+        reduce(
+            &mut s,
+            &Action::BackendCompleted(OperationResult {
+                id,
+                outcome: Ok(OperationOutcome::Page(expected.clone())),
+            }),
+        )
+    };
+    no_effects(&effects);
+    assert_eq!(s.messages.items.len(), expected.items.len());
+    // The successful load overwrote the cache entry.
+    let cached = s
+        .page_cache
+        .as_ref()
+        .unwrap()
+        .load(&MailboxId(String::from("sent")), None, 0, 20)
+        .expect("cache refreshed");
+    assert_eq!(cached.items.len(), expected.items.len());
+}
