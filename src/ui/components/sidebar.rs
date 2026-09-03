@@ -6,6 +6,7 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
+use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
@@ -22,8 +23,9 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
     }
     let rows = LayoutRows::new(area);
 
-    // Compose affordance: bordered well with a `c` hint (plan §10: `c` =
-    // compose). Not a focus target until the composer exists (Phase 6).
+    // Compose affordance: bordered well (mockup `new-mail.html` button
+    // shape: rounded, like the search field). No inline `c` hint — the
+    // status bar advertises the shortcut.
     let compose_focused = false;
     let compose_style = if compose_focused {
         theme.hover()
@@ -36,14 +38,13 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme
             "Compose",
             Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" ".repeat(rows.compose.width.saturating_sub(13) as usize)),
-        Span::styled(" c", Style::new().fg(theme.dim)),
     ])
     .style(compose_style);
     frame.render_widget(
         Paragraph::new(compose).block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_set(symbols::border::ROUNDED)
                 .border_style(Style::new().fg(theme.border)),
         ),
         rows.compose,

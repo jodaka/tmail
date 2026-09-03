@@ -208,12 +208,9 @@ impl MailBackend for HimalayaCliBackend {
 
     async fn archive(&self, ctx: RequestContext, locator: MessageLocator) -> BackendResult<()> {
         tracing::debug!(operation = %ctx.operation, mailbox = %locator.mailbox.0, "archive");
-        let target = self.mailbox_for_role(MailboxRole::Archive).ok_or_else(|| {
-            BackendError::InvalidRequest(String::from(
-                "no archive mailbox is known; load mailboxes first or set \
-                 [accounts.<account>.mailbox.alias] archive",
-            ))
-        })?;
+        let target = self
+            .verified_role_target(MailboxRole::Archive, "archive")
+            .map_err(BackendError::InvalidRequest)?;
         self.run_move(&ctx, &locator, &target).await
     }
 
@@ -254,12 +251,9 @@ impl MailBackend for HimalayaCliBackend {
         // 3. Add the new revision to the Drafts mailbox with the draft
         //    flag; the confirmed id from stdout is the replacement's
         //    identity (ADR 0002 §D.3).
-        let drafts = self.mailbox_for_role(MailboxRole::Drafts).ok_or_else(|| {
-            BackendError::InvalidRequest(String::from(
-                "no drafts mailbox is known; set \
-                 [accounts.<account>.mailbox.alias] drafts",
-            ))
-        })?;
+        let drafts = self
+            .verified_role_target(MailboxRole::Drafts, "drafts")
+            .map_err(BackendError::InvalidRequest)?;
         let argv = command::message_add_argv(
             self.config_path.as_deref(),
             self.account.as_deref(),
@@ -502,6 +496,49 @@ impl HimalayaCliBackend {
             MailboxRole::Spam => "junk",
         };
         self.aliases.get(alias_key).cloned()
+    }
+
+    /// Resolve the target mailbox for a semantic role against what the
+    /// account actually exposes. Resolution order: the cached listing's
+    /// alias-derived role, then the config alias value — but an alias
+    /// target the listing does not show is refused here, before any child
+    /// process, so a stale or wrong mapping surfaces as an actionable
+    /// message instead of a raw IMAP failure (real-config finding: a Gmail
+    /// account whose `[Gmail]/All Mail` is not IMAP-listed). With no cached
+    /// listing yet, the alias value passes through as before.
+    ///
+    /// [`Self::mailbox_for_role`] remains for best-effort paths (draft
+    /// cleanup) that must never hard-fail on resolution.
+    fn verified_role_target(&self, role: MailboxRole, alias_key: &str) -> Result<String, String> {
+        let listing = self.mailboxes.read().ok().and_then(|guard| guard.clone());
+        if let Some(mailboxes) = listing {
+            if let Some(mailbox) = mailboxes.iter().find(|m| m.role == Some(role)) {
+                return Ok(mailbox.id.0.clone());
+            }
+            if let Some(alias) = self.aliases.get(alias_key) {
+                if mailboxes
+                    .iter()
+                    .any(|m| &m.id.0 == alias || &m.name == alias)
+                {
+                    return Ok(alias.clone());
+                }
+                return Err(format!(
+                    "config maps {alias_key} to `{alias}`, but the account exposes \
+                     no such mailbox; set [accounts.<account>.mailbox.alias] \
+                     {alias_key} to an existing mailbox"
+                ));
+            }
+            return Err(format!(
+                "no {alias_key} mailbox is known; set \
+                 [accounts.<account>.mailbox.alias] {alias_key}"
+            ));
+        }
+        self.aliases.get(alias_key).cloned().ok_or_else(|| {
+            format!(
+                "no {alias_key} mailbox is known; set \
+                 [accounts.<account>.mailbox.alias] {alias_key}"
+            )
+        })
     }
 
     /// Best-effort deletion of one remote copy from `mailbox` (ADR 0002
@@ -1097,6 +1134,102 @@ async fn run_two_phase_delete(
             }
             Err(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod role_target_tests {
+    use super::*;
+    use crate::domain::MailboxId;
+
+    fn new_backend(aliases: &[(&str, &str)]) -> HimalayaCliBackend {
+        HimalayaCliBackend::new(
+            "himalaya",
+            None,
+            Some(String::from("gmail")),
+            aliases
+                .iter()
+                .map(|(k, v)| (String::from(*k), String::from(*v)))
+                .collect(),
+        )
+    }
+
+    fn mailbox(id: &str, name: &str, role: Option<MailboxRole>) -> Mailbox {
+        Mailbox {
+            id: MailboxId(String::from(id)),
+            name: String::from(name),
+            role,
+            unread_count: None,
+            total_count: None,
+        }
+    }
+
+    /// The real captured Gmail listing shape: the account exposes no
+    /// All Mail folder at all, while the config still maps archive to it.
+    fn gmail_like_listing() -> Vec<Mailbox> {
+        vec![
+            mailbox("Inbox", "Inbox", Some(MailboxRole::Inbox)),
+            mailbox(
+                "[Gmail]/Drafts",
+                "[Gmail]/Drafts",
+                Some(MailboxRole::Drafts),
+            ),
+            mailbox("[Gmail]/Trash", "[Gmail]/Trash", Some(MailboxRole::Trash)),
+        ]
+    }
+
+    #[test]
+    fn alias_target_missing_from_the_listing_is_refused_with_guidance() {
+        let backend = new_backend(&[
+            ("archive", "[Gmail]/All Mail"),
+            ("drafts", "[Gmail]/Drafts"),
+        ]);
+        *backend.mailboxes.write().expect("cache") = Some(gmail_like_listing());
+        let err = backend
+            .verified_role_target(MailboxRole::Archive, "archive")
+            .expect_err("missing target must be refused");
+        assert!(err.contains("[Gmail]/All Mail"), "{err}");
+        assert!(err.contains("no such mailbox"), "{err}");
+        assert!(err.contains("mailbox.alias] archive"), "{err}");
+        // The drafts alias exists on the account: it resolves unchanged.
+        assert_eq!(
+            backend
+                .verified_role_target(MailboxRole::Drafts, "drafts")
+                .expect("existing target"),
+            "[Gmail]/Drafts"
+        );
+    }
+
+    #[test]
+    fn listing_role_wins_over_the_alias_value() {
+        let backend = new_backend(&[("archive", "Archive")]);
+        *backend.mailboxes.write().expect("cache") =
+            Some(vec![mailbox("All", "All Mail", Some(MailboxRole::Archive))]);
+        assert_eq!(
+            backend
+                .verified_role_target(MailboxRole::Archive, "archive")
+                .expect("role-resolved"),
+            "All"
+        );
+    }
+
+    #[test]
+    fn without_a_listing_the_alias_falls_through() {
+        // Before the sidebar has loaded there is nothing to verify against;
+        // the historical behavior (attempt the alias) is preserved.
+        let backend = new_backend(&[("archive", "[Gmail]/All Mail")]);
+        assert_eq!(
+            backend
+                .verified_role_target(MailboxRole::Archive, "archive")
+                .expect("alias falls through"),
+            "[Gmail]/All Mail"
+        );
+        // No alias either: the actionable refusal.
+        let backend = new_backend(&[]);
+        let err = backend
+            .verified_role_target(MailboxRole::Archive, "archive")
+            .expect_err("no role, no alias");
+        assert!(err.contains("no archive mailbox is known"), "{err}");
     }
 }
 

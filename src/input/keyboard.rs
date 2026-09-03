@@ -93,6 +93,10 @@ fn char_action(c: char, modifiers: KeyModifiers, focus: Focus) -> Option<Action>
         return None;
     }
     match c {
+        // `q` mirrors Esc everywhere shortcuts are accepted (list, sidebar,
+        // reader, over a modal); text-entry foci never reach this match, so
+        // the letter still types there.
+        'q' => Some(Action::BackOrCancel),
         'c' => Some(Action::Compose),
         'r' => Some(Action::Reply),
         'a' => Some(Action::ReplyAll),

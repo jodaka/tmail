@@ -91,6 +91,44 @@ fn sidebar_focus_keeps_shortcuts_and_slash() {
     assert_eq!(to_action(plain(KeyCode::Up), f), Some(Action::MoveUp));
 }
 
+/// `q` mirrors Esc wherever shortcuts fire: list, sidebar, reader, and
+/// over a modal — and it never fires while text entry is focused.
+#[test]
+fn q_mirrors_esc_outside_text_entry() {
+    for f in [
+        Focus::MessageList,
+        Focus::Sidebar,
+        Focus::Reader,
+        Focus::ErrorModal,
+    ] {
+        assert_eq!(
+            to_action(plain(KeyCode::Char('q')), f),
+            to_action(plain(KeyCode::Esc), f),
+            "q must equal Esc at focus {f}"
+        );
+        assert_eq!(
+            to_action(plain(KeyCode::Char('q')), f),
+            Some(Action::BackOrCancel)
+        );
+    }
+}
+
+#[test]
+fn q_is_text_while_typing() {
+    for f in [Focus::SearchField, Focus::Composer, Focus::Dialog] {
+        let expected = match f {
+            Focus::SearchField => Some(Action::SearchEdit(SearchEdit::Char('q'))),
+            Focus::Composer => Some(Action::ComposerEdit(ComposerEdit::Char('q'))),
+            _ => Some(Action::DialogEdit(DialogEdit::Char('q'))),
+        };
+        assert_eq!(
+            to_action(plain(KeyCode::Char('q')), f),
+            expected,
+            "q must type at focus {f}"
+        );
+    }
+}
+
 #[test]
 fn search_field_swallows_letters_into_text_no_shortcuts() {
     let f = Focus::SearchField;

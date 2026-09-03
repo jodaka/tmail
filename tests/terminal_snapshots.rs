@@ -125,6 +125,24 @@ fn selected_row_uses_accent_fill() {
     assert!(has_accent_bg, "selected row lacks accent fill:\n{text}");
 }
 
+/// The compose well uses rounded corners like the search field and no
+/// longer carries an inline `c` hint (the status bar advertises it).
+#[test]
+fn compose_well_is_rounded_without_an_inline_hint() {
+    let buffer = draw(152, 40);
+    let text = text_of(&buffer);
+    let row = text
+        .lines()
+        .position(|line| line.contains("Compose"))
+        .expect("compose well") as u16;
+    // Rounded corners above and below the content row.
+    assert_eq!(buffer[(1, row - 1)].symbol(), "╭", "top-left corner");
+    assert_eq!(buffer[(1, row + 1)].symbol(), "╰", "bottom-left corner");
+    // No inline `c` hint inside the well.
+    let line = text.lines().nth(row as usize).expect("compose row");
+    assert!(!line.contains(" c"), "inline hint must be gone: {line}");
+}
+
 /// The mockup's `.sidebar` border-right: a hairline divider column between
 /// the folders and the message list, spanning the full body height.
 #[test]
