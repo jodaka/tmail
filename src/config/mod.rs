@@ -147,12 +147,38 @@ pub fn parse(text: &str, path: Option<PathBuf>) -> Config {
     {
         config.downloads_dir = Some(downloads_dir);
     }
+    // Without `[post].account`, drive the account himalaya itself would
+    // pick (no `-a` is forwarded): the one marked `default = true`, else
+    // the sole account. The alias table is per-account, so role resolution
+    // stays dark until this matches (real-config finding: a `default =
+    // true` Gmail account with mailbox aliases resolved nothing).
+    if config.account.is_none() {
+        config.account = default_account(&doc);
+    }
     if let Some(account) = config.account.as_deref() {
         config.aliases = aliases_for(&doc, account);
         config.account_email = account_field(&doc, account, "email");
         config.account_display_name = account_field(&doc, account, "display-name");
     }
     config
+}
+
+/// The account himalaya would pick without an explicit selection: the
+/// `[accounts]` entry marked `default = true`, else the sole account when
+/// the table holds exactly one. `None` (several accounts, no default)
+/// leaves role resolution off rather than guessing.
+fn default_account(doc: &toml::Value) -> Option<String> {
+    let accounts = doc.get("accounts")?.as_table()?;
+    if let Some((name, _)) = accounts
+        .iter()
+        .find(|(_, account)| account.get("default").and_then(toml::Value::as_bool) == Some(true))
+    {
+        return Some(name.clone());
+    }
+    if accounts.len() == 1 {
+        return accounts.keys().next().cloned();
+    }
+    None
 }
 
 /// One string field of `[accounts.<account>]`.
@@ -281,13 +307,93 @@ mod tests {
     }
 
     #[test]
-    fn alias_without_account_is_not_resolved() {
+    fn default_flag_account_resolves_aliases_without_post_section() {
+        // The user-config shape that regressed: himalaya-style account with
+        // `default = true` and mailbox aliases, no `[post]` section.
         let text = r#"
-            [accounts.probe.mailbox.alias]
+            [accounts.gmail]
+            default = true
+            email = "probe@example.org"
+            display-name = "Post Probe"
+
+            [accounts.gmail.imap]
+            server = "imaps://imap.example.org:993"
+
+            [accounts.gmail.mailbox.alias]
             inbox = "INBOX"
+            sent = "[Gmail]/Sent Mail"
+            drafts = "[Gmail]/Drafts"
+            trash = "[Gmail]/Trash"
+            archive = "[Gmail]/All Mail"
         "#;
         let config = parse(text, None);
+        assert_eq!(config.account.as_deref(), Some("gmail"));
+        assert_eq!(
+            config.aliases.get("drafts").map(String::as_str),
+            Some("[Gmail]/Drafts")
+        );
+        assert_eq!(
+            config.aliases.get("archive").map(String::as_str),
+            Some("[Gmail]/All Mail")
+        );
+        assert_eq!(config.account_email.as_deref(), Some("probe@example.org"));
+        assert_eq!(config.account_display_name.as_deref(), Some("Post Probe"));
+    }
+
+    #[test]
+    fn sole_account_resolves_without_default_flag() {
+        let text = r#"
+            [accounts.probe]
+            email = "probe@post.local"
+
+            [accounts.probe.mailbox.alias]
+            drafts = "Drafts"
+        "#;
+        let config = parse(text, None);
+        assert_eq!(config.account.as_deref(), Some("probe"));
+        assert_eq!(
+            config.aliases.get("drafts").map(String::as_str),
+            Some("Drafts")
+        );
+    }
+
+    #[test]
+    fn several_accounts_without_default_stay_unresolved() {
+        let text = r#"
+            [accounts.one]
+            email = "one@post.local"
+
+            [accounts.two]
+            default = false
+            email = "two@post.local"
+        "#;
+        let config = parse(text, None);
+        assert_eq!(config.account, None);
         assert!(config.aliases.is_empty());
+    }
+
+    #[test]
+    fn explicit_post_account_wins_over_default_flag() {
+        let text = r#"
+            [post]
+            account = "two"
+
+            [accounts.one]
+            default = true
+            email = "one@post.local"
+
+            [accounts.one.mailbox.alias]
+            inbox = "ONE Inbox"
+
+            [accounts.two.mailbox.alias]
+            inbox = "TWO Inbox"
+        "#;
+        let config = parse(text, None);
+        assert_eq!(config.account.as_deref(), Some("two"));
+        assert_eq!(
+            config.aliases.get("inbox").map(String::as_str),
+            Some("TWO Inbox")
+        );
     }
 
     #[test]
@@ -303,8 +409,9 @@ mod tests {
         let config = parse(text, None);
         assert_eq!(config.account_email.as_deref(), Some("probe@post.local"));
         assert_eq!(config.account_display_name.as_deref(), Some("Post Probe"));
-        // Without an account selected, no identity resolves.
+        // The sole account resolves even without `[post].account`, so the
+        // draft `From` identity comes along.
         let config = parse("[accounts.probe]\nemail = \"probe@post.local\"\n", None);
-        assert_eq!(config.account_email, None);
+        assert_eq!(config.account_email.as_deref(), Some("probe@post.local"));
     }
 }

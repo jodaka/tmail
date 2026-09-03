@@ -128,9 +128,47 @@ pub(crate) struct PartDto {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct HeaderDto {
     #[serde(default)]
-    pub name: String,
+    pub name: HeaderNameDto,
     #[serde(default)]
     pub value: Option<HeaderValueDto>,
+}
+
+/// mail_parser's serde dumps header names in two shapes: known names as
+/// plain lowercase strings (`"received"`, `"content_type"`) and every
+/// name outside its enum as a tagged map (`{"other":"Delivered-To"}`) —
+/// the shape real mail carries in bulk (Delivered-To, ARC-*, DKIM-,
+/// List-*, X-*). The untagged wrapper plus the catch-all keep any future
+/// name shape from failing the whole message (real-capture finding:
+/// `invalid type: map, expected a string at line 1 column 79`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum HeaderNameDto {
+    Plain(String),
+    Tagged {
+        other: String,
+    },
+    /// Catch-all for name shapes Post does not interpret (they only need
+    /// to parse, not to be read).
+    #[allow(dead_code)]
+    Other(serde_json::Value),
+}
+
+impl Default for HeaderNameDto {
+    fn default() -> Self {
+        Self::Plain(String::new())
+    }
+}
+
+impl HeaderNameDto {
+    /// The name as written on the wire: the plain string, the `other`
+    /// tag's value, or `""` for anything else (never matches a lookup).
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Plain(name) => name,
+            Self::Tagged { other } => other,
+            Self::Other(_) => "",
+        }
+    }
 }
 
 /// Header values are externally tagged on the wire (`{"Text": …}`,

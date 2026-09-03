@@ -156,7 +156,13 @@ fn header<'a>(headers: &'a [dto::HeaderDto], name: &str) -> Option<&'a dto::Head
     let needle = name.replace('-', "_");
     headers
         .iter()
-        .find(|header| header.name.replace('-', "_").eq_ignore_ascii_case(&needle))
+        .find(|header| {
+            header
+                .name
+                .as_str()
+                .replace('-', "_")
+                .eq_ignore_ascii_case(&needle)
+        })
         .and_then(|header| header.value.as_ref())
 }
 
@@ -464,6 +470,12 @@ mod tests {
         include_str!("../../../fixtures/himalaya/message-read-plain.json");
     const MESSAGE_READ_MULTIPART: &str =
         include_str!("../../../fixtures/himalaya/message-read-multipart.json");
+    /// Real probe output captured from a Gmail IMAP account (himalaya
+    /// 2.1.0): header names outside mail_parser's enum arrive as tagged
+    /// maps and `Received` values as structured maps — the shapes real
+    /// mail carries in bulk. Synthetic content, wire shapes verbatim.
+    const MESSAGE_READ_GMAIL: &str =
+        include_str!("../../../fixtures/himalaya/message-read-gmail.json");
 
     fn locator() -> MessageLocator {
         MessageLocator {
@@ -544,6 +556,34 @@ mod tests {
             body.ends_with("\nThis is a plain text message.\nLine two.\n"),
             "original body follows the block:\n{body}"
         );
+    }
+
+    #[test]
+    fn maps_real_gmail_shaped_message_with_tagged_header_names() {
+        let dto: dto::MessageReadDto =
+            serde_json::from_str(MESSAGE_READ_GMAIL).expect("fixture parses");
+        let message = message(dto, locator());
+        // Known names still resolve next to the tagged ones.
+        assert_eq!(message.headers.subject, "Your order has shipped");
+        assert_eq!(message.headers.from.len(), 1);
+        assert_eq!(message.headers.from[0].display(), "Example Shop");
+        assert_eq!(message.headers.to.len(), 1);
+        assert_eq!(
+            message.headers.message_id.as_deref(),
+            Some("1378089180.1165937.1788420358561@mailer.example.com")
+        );
+        let date = message.headers.date.expect("date parses");
+        assert_eq!(date.to_rfc3339(), "2026-09-03T00:26:02-07:00");
+        // Gmail marketing mail ships HTML-only: both body indexes point at
+        // the same part, whose body is the Html variant.
+        assert!(
+            message
+                .html_body
+                .as_deref()
+                .is_some_and(|html| html.contains("<html>"))
+        );
+        assert_eq!(message.plain_body, None);
+        assert!(message.attachments.is_empty());
     }
 
     #[test]
