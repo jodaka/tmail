@@ -93,6 +93,13 @@ async fn run_effect(
             Ok(message) => Some(Ok(OperationOutcome::Message(Box::new(message)))),
             Err(err) => operation_failure(&effect, err).map(Err),
         },
+        // Same backend call as the reader's load (ticket wxtx), different
+        // consumer: the list's faded preview. Failures land in the reducer
+        // as ordinary failures, which it logs and drops for this kind.
+        OperationKind::Preview(locator) => match backend.get_message(ctx, locator).await {
+            Ok(message) => Some(Ok(OperationOutcome::Message(Box::new(message)))),
+            Err(err) => operation_failure(&effect, err).map(Err),
+        },
         OperationKind::SetRead { locator, read } => {
             match backend.set_read(ctx, locator, read).await {
                 Ok(()) => Some(Ok(OperationOutcome::Done)),

@@ -2,17 +2,20 @@
 //! Phase 4). v1 overrides applied (plan §4): no thread count, no collapsed
 //! messages, no thread navigation, no label tags.
 //!
-//! The whole reader is one scrollable document — header block, action row,
-//! hairline, body, attachments — mirroring the mockup's `.reader` scroll
-//! container. Content is built as tone-tagged lines by a pure function
-//! shared with the reducer's scroll clamp, so what is drawn and what the
-//! clamp allows can never disagree.
+//! The document splits into a *fixed header* — subject, meta block, action
+//! row, hairline — and a *scrollable body* (message text and attachments,
+//! ticket 6864): the header stays pinned at the top of the area on every
+//! frame while a long message scrolls beneath it, with a vertical
+//! scrollbar that appears only when the body overflows the viewport.
+//! Content is built as tone-tagged lines by pure functions shared with the
+//! reducer's scroll clamp, so what is drawn and what the clamp allows can
+//! never disagree.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::app::action::ClickTarget;
 use crate::app::action::ReaderAction;
@@ -99,10 +102,10 @@ fn indented(line: RichLine) -> ReaderLine {
     ReaderLine::Rich(RichLine { spans })
 }
 
-/// Build the whole reader document for `width` display columns.
-/// Deterministic and I/O-free; the reducer uses only its length for the
-/// scroll clamp (Phase 3 modal pattern).
-pub(crate) fn content(state: &AppState, width: usize) -> Vec<ReaderLine> {
+/// The fixed header of the reader document (ticket 6864): subject, meta
+/// block, action row, and the hairline that separates them from the body.
+/// Deterministic and I/O-free; never scrolls.
+pub(crate) fn header_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
     let Some(summary) = state.open_summary() else {
         return Vec::new();
     };
@@ -184,6 +187,18 @@ pub(crate) fn content(state: &AppState, width: usize) -> Vec<ReaderLine> {
     }
     lines.push(ReaderLine::Actions(actions));
     lines.push(hairline(w));
+    lines
+}
+
+/// The scrollable part of the reader document (ticket 6864): the message
+/// body and the attachment chips. Rendered from the reducer-maintained
+/// `reader_scroll` anchor in the viewport under the fixed header.
+pub(crate) fn scroll_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
+    if state.open_summary().is_none() {
+        return Vec::new();
+    }
+    let w = width.max(10);
+    let mut lines = Vec::new();
 
     // Body (plan §13: HTML-preferred selection, rich semantic rendering,
     // reflow at the current width; Unicode-safe via ui::text and html2text).
@@ -241,13 +256,31 @@ pub(crate) fn content(state: &AppState, width: usize) -> Vec<ReaderLine> {
     lines
 }
 
-/// Total document length, the number the reducer's scroll clamp uses.
-pub fn content_line_count(state: &AppState, width: usize) -> usize {
-    content(state, width).len()
+/// Whole document: fixed header followed by the scrollable body (tests and
+/// length bookkeeping compose the two pure halves).
+#[cfg(test)]
+pub(crate) fn content(state: &AppState, width: usize) -> Vec<ReaderLine> {
+    let mut lines = header_lines(state, width);
+    lines.extend(scroll_lines(state, width));
+    lines
+}
+
+/// Number of fixed header lines (ticket 6864): the reducer subtracts it
+/// from the viewport so the scroll clamp tracks the body alone.
+pub fn header_line_count(state: &AppState, width: usize) -> usize {
+    header_lines(state, width).len()
+}
+
+/// Number of scrollable body lines — the length the reducer's scroll clamp
+/// clamps against (the fixed header never scrolls).
+pub fn scroll_line_count(state: &AppState, width: usize) -> usize {
+    scroll_lines(state, width).len()
 }
 
 /// Render the reader into `area` (the body area right of the sidebar). The
-/// document scrolls from the reducer-maintained `reader_scroll` anchor.
+/// fixed header draws from the top of `area` on every frame (ticket 6864);
+/// the body scrolls beneath it from the reducer-maintained `reader_scroll`
+/// anchor, with a vertical scrollbar only while it overflows the viewport.
 /// The wrap width derives from the *terminal* size via `reader_width` —
 /// the same call the reducer's scroll clamp makes — never from the sub-rect
 /// alone, whose dimensions would re-run mode selection on the wrong frame
@@ -263,65 +296,123 @@ pub fn render(
         return;
     }
     let width = crate::ui::layout::reader_width(state.size).max(10);
-    let lines = content(state, width);
-    let viewport = area.height as usize;
-    let start = state.reader_scroll.min(lines.len().saturating_sub(1));
-    let visible: Vec<Line<'_>> = lines
+    let header = header_lines(state, width);
+    let body = scroll_lines(state, width);
+
+    // The header never scrolls: subject, meta, and the action row stay on
+    // screen however long the message is (ticket 6864). Its clickable
+    // action segments register at their fixed rows.
+    let header_h = header.len().min(area.height as usize) as u16;
+    for (i, line) in header.iter().take(header_h as usize).enumerate() {
+        let row = Rect {
+            x: area.x,
+            y: area.y + i as u16,
+            width: area.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(reader_spans(line, theme, area.width as usize)),
+            row,
+        );
+        if let ReaderLine::Actions(segments) = line {
+            register_action_hits(hits, row, segments);
+        }
+    }
+
+    // The body viewport is whatever is left under the fixed header.
+    let body_area = Rect {
+        x: area.x,
+        y: area.y + header_h,
+        width: area.width,
+        height: area.height - header_h,
+    };
+    if body_area.height == 0 {
+        return;
+    }
+    let viewport = body_area.height as usize;
+    let total = body.len();
+    let start = state.reader_scroll.min(total.saturating_sub(1));
+    let scrolling = total > viewport;
+    // A visible scrollbar reserves its column: body text clips one column
+    // short so text and scrollbar never overlap. When the message fits,
+    // the full width is used and no scrollbar is drawn.
+    let text_width = if scrolling {
+        (body_area.width as usize).saturating_sub(1)
+    } else {
+        body_area.width as usize
+    };
+    let visible: Vec<Line<'_>> = body
         .iter()
         .skip(start)
         .take(viewport)
-        .map(|line| reader_spans(line, theme, area.width as usize))
+        .map(|line| reader_spans(line, theme, text_width))
         .collect();
-    frame.render_widget(Paragraph::new(visible), area);
-    // Clickable regions (plan §10): attachment chips and the action row.
-    // Both are indexed across the whole document, so scrolling never
-    // shifts the identity of the visible controls.
-    let mut chip_index = 0usize;
-    for (offset, line) in lines.iter().enumerate() {
-        let visible = offset >= start && offset < start + viewport;
-        match line {
-            ReaderLine::Chip { .. } => {
-                if visible {
-                    hits.push(
-                        Rect {
-                            x: area.x,
-                            y: area.y + (offset - start) as u16,
-                            width: area.width,
-                            height: 1,
-                        },
-                        ClickTarget::ReaderAttachment(chip_index),
-                    );
-                }
-                chip_index += 1;
-            }
-            ReaderLine::Actions(segments) => {
-                if !visible {
-                    continue;
-                }
-                let y = area.y + (offset - start) as u16;
-                let mut segment_col = 0usize;
-                for (label, action) in segments {
-                    // Segment regions are exact: each starts where the
-                    // previous one ended plus the ` · ` separator, so a
-                    // click lands on the control it names (plan §10).
-                    let remaining = (area.width as usize).saturating_sub(segment_col);
-                    let width = label.width().min(remaining);
-                    if width > 0 {
-                        hits.push(
-                            Rect {
-                                x: area.x + segment_col as u16,
-                                y,
-                                width: width as u16,
-                                height: 1,
-                            },
-                            ClickTarget::ReaderAction(*action),
-                        );
-                    }
-                    segment_col += label.width() + SEPARATOR.width();
-                }
-            }
-            _ => {}
+    let text_area = if scrolling {
+        Rect {
+            width: body_area.width - 1,
+            ..body_area
         }
+    } else {
+        body_area
+    };
+    frame.render_widget(Paragraph::new(visible), text_area);
+    if scrolling {
+        let mut scrollbar_state = ScrollbarState::new(total).position(start);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("│"))
+                .track_style(Style::new().fg(theme.border).bg(theme.background))
+                .thumb_style(Style::new().fg(theme.dim).bg(theme.background)),
+            body_area,
+            &mut scrollbar_state,
+        );
+    }
+
+    // Clickable attachment chips are indexed across the whole body, so
+    // scrolling never shifts the identity of the visible chips; their
+    // rects follow the scroll offset.
+    let mut chip_index = 0usize;
+    for (offset, line) in body.iter().enumerate() {
+        if matches!(line, ReaderLine::Chip { .. }) {
+            let visible = offset >= start && offset < start + viewport;
+            if visible {
+                hits.push(
+                    Rect {
+                        x: body_area.x,
+                        y: body_area.y + (offset - start) as u16,
+                        width: body_area.width,
+                        height: 1,
+                    },
+                    ClickTarget::ReaderAttachment(chip_index),
+                );
+            }
+            chip_index += 1;
+        }
+    }
+}
+
+/// Exact click regions for the action row's ` · `-joined segments (plan
+/// §10): each starts where the previous one ended plus the separator, so a
+/// click lands on the control it names.
+fn register_action_hits(hits: &mut HitMap, row: Rect, segments: &[(String, ReaderAction)]) {
+    let mut segment_col = 0usize;
+    for (label, action) in segments {
+        let remaining = (row.width as usize).saturating_sub(segment_col);
+        let width = label.width().min(remaining);
+        if width > 0 {
+            hits.push(
+                Rect {
+                    x: row.x + segment_col as u16,
+                    y: row.y,
+                    width: width as u16,
+                    height: 1,
+                },
+                ClickTarget::ReaderAction(*action),
+            );
+        }
+        segment_col += label.width() + SEPARATOR.width();
     }
 }
 
@@ -714,9 +805,38 @@ mod tests {
     #[test]
     fn content_count_matches_document() {
         let state = loaded_state();
-        let count = content_line_count(&state, 100);
-        assert_eq!(count, content(&state, 100).len());
-        assert!(count > 5);
+        // The two counters split the document exactly (ticket 6864): the
+        // reducer clamps with header + scroll lengths, the renderer draws
+        // the same halves.
+        assert_eq!(
+            header_line_count(&state, 100) + scroll_line_count(&state, 100),
+            content(&state, 100).len()
+        );
+        assert!(scroll_line_count(&state, 100) > 5);
+    }
+
+    #[test]
+    fn header_is_fixed_and_body_scrolls() {
+        let state = loaded_state();
+        let header = header_lines(&state, 100);
+        let body = scroll_lines(&state, 100);
+        // The header carries exactly the pinned chrome: subject, meta, the
+        // action row, and the hairline — never body content.
+        let header_text: Vec<String> = header.iter().map(ReaderLine::text).collect();
+        assert!(header_text[0].contains("Welcome to Post"));
+        assert!(header_text.iter().any(|t| t.contains("Archive e")));
+        assert!(
+            header_text
+                .last()
+                .is_some_and(|t| t.starts_with('─') && t.chars().all(|c| c == '─'))
+        );
+        assert!(!header_text.iter().any(|t| t.contains("First line.")));
+        // The body carries the message text and attachments, none of the
+        // pinned chrome.
+        let body_text: Vec<String> = body.iter().map(ReaderLine::text).collect();
+        assert!(body_text.iter().any(|t| t.contains("First line.")));
+        assert!(body_text.iter().any(|t| t.contains("report.pdf")));
+        assert!(!body_text.iter().any(|t| t.contains("Archive e")));
     }
 
     #[test]

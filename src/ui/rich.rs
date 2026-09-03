@@ -202,6 +202,34 @@ pub(crate) fn is_blank(lines: &[RichLine]) -> bool {
     lines.iter().all(|line| line.text().trim().is_empty())
 }
 
+/// One-line plain-text preview of a message body for the list rows (ticket
+/// wxtx): the body converted to plain text and stringified. Body selection
+/// matches the reader (`body_lines`): HTML first, plain fallback when the
+/// HTML is absent or renders blank. Newlines collapse to single spaces so
+/// the preview is one string; it is capped (with a trailing `…`) so a huge
+/// body never bloats the summary or the cached page.
+pub(crate) fn preview_text(message: &crate::domain::Message) -> Option<String> {
+    const MAX_PREVIEW_WIDTH: usize = 200;
+    let html = message.html_body.as_deref().map(|html| {
+        html_to_rich(html, MAX_PREVIEW_WIDTH)
+            .iter()
+            .map(RichLine::text)
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    let plain = message
+        .plain_body
+        .as_deref()
+        .map(|body| body.split_whitespace().collect::<Vec<_>>().join(" "));
+    for text in [html, plain].into_iter().flatten() {
+        let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !collapsed.is_empty() {
+            return Some(crate::ui::text::truncate(&collapsed, MAX_PREVIEW_WIDTH));
+        }
+    }
+    None
+}
+
 /// MIME body selection (plan §13.2/3): prefer the HTML part for the richer
 /// Gmail-like experience; fall back to plain text when HTML is absent or
 /// renders blank (malformed markup recovers inside html5ever, but an empty
@@ -233,6 +261,67 @@ mod tests {
 
     fn text_of(lines: &[RichLine]) -> Vec<String> {
         lines.iter().map(RichLine::text).collect()
+    }
+
+    fn preview_message(plain: Option<String>, html: Option<String>) -> crate::domain::Message {
+        crate::domain::Message {
+            id: crate::domain::MessageId(String::from("m1")),
+            mailbox_id: crate::domain::MailboxId(String::from("inbox")),
+            headers: crate::domain::MessageHeaders::default(),
+            plain_body: plain,
+            html_body: html,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn preview_text_collapses_the_plain_body_to_one_line() {
+        let message = preview_message(
+            Some(String::from(
+                "Dear team,\n\n  shipping   on Friday.\nBest,\nA",
+            )),
+            None,
+        );
+        let preview = preview_text(&message).expect("preview");
+        assert_eq!(preview, "Dear team, shipping on Friday. Best, A");
+        assert!(!preview.contains('\n'));
+    }
+
+    #[test]
+    fn preview_text_prefers_html_and_strips_markup() {
+        let message = preview_message(
+            Some(String::from("plain fallback")),
+            Some(String::from(
+                "<html><body><p>HTML <b>wins</b></p><p>second para</p></body></html>",
+            )),
+        );
+        let preview = preview_text(&message).expect("preview");
+        assert!(preview.starts_with("HTML wins"), "{preview}");
+        assert!(preview.contains("second para"), "{preview}");
+        assert!(!preview.contains("plain fallback"));
+        assert!(!preview.contains('<'));
+    }
+
+    #[test]
+    fn preview_text_caps_long_bodies_with_an_ellipsis() {
+        let long = "word ".repeat(200);
+        let message = preview_message(Some(long), None);
+        let preview = preview_text(&message).expect("preview");
+        assert!(
+            unicode_width::UnicodeWidthStr::width(preview.as_str()) <= 200,
+            "capped, got {}",
+            unicode_width::UnicodeWidthStr::width(preview.as_str())
+        );
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn preview_text_of_an_empty_body_is_none() {
+        assert!(preview_text(&preview_message(None, None)).is_none());
+        assert!(
+            preview_text(&preview_message(Some(String::from("  \n\t ")), None)).is_none(),
+            "whitespace-only bodies carry no preview"
+        );
     }
 
     #[test]

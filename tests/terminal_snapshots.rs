@@ -550,8 +550,12 @@ fn reader_loading_state_renders_placeholder() {
 fn reader_scrolls_body_with_reducer_state() {
     let mut state = reader_state(0);
     state.size = (152, 40);
-    let total = tmail::ui::screens::reader::content_line_count(&state, state.size.0 as usize);
-    let viewport = tmail::ui::layout::reader_rows_visible(state.size);
+    // The body scrolls beneath the fixed header (ticket 6864): the clamp
+    // tracks the body against the viewport under the header.
+    let width = state.size.0 as usize;
+    let total = tmail::ui::screens::reader::scroll_line_count(&state, width);
+    let viewport = tmail::ui::layout::reader_rows_visible(state.size)
+        .saturating_sub(tmail::ui::screens::reader::header_line_count(&state, width));
     assert!(total > viewport, "document must overflow: {total} lines");
     // Scroll to the end the way the reducer does.
     for _ in 0..total {
@@ -1491,4 +1495,79 @@ fn selected_rows_show_the_checkbox_and_star_gets_a_trailing_space() {
         .iter()
         .collect();
     assert_eq!(icon, "* ", "star icon with trailing space");
+}
+
+#[test]
+fn list_rows_render_the_faded_preview() {
+    // Ticket wxtx: the list shows subject + body preview, the preview in
+    // the faded `snippet` color while the subject keeps its own style.
+    let (buffer, _) = draw_with_hits(152, 40);
+    let theme = Theme::default_dark();
+    let text = text_of(&buffer);
+    assert!(
+        text.contains("Re: WIP — 240 mm stainless-clad gyuto — quench done at 760 °C"),
+        "preview composes onto the subject:\n{text}"
+    );
+    // The first data row carries faded preview spans after its subject.
+    let faded = (0..buffer.area.width)
+        .map(|x| buffer[(x, 6)].clone())
+        .filter(|cell| cell.symbol() != " ")
+        .any(|cell| cell.fg == theme.snippet);
+    assert!(faded, "the preview renders in the faded snippet color");
+    // The date still lands in its 8-column cell on the right edge (the
+    // subject cell pads to its grid).
+    let date_cell: String = (144..152).map(|x| buffer[(x, 6)].symbol()).collect();
+    assert!(
+        date_cell.starts_with("10:42"),
+        "date on the right edge: {date_cell:?}"
+    );
+}
+
+#[test]
+fn reader_header_stays_fixed_and_the_scrollbar_tracks_the_body() {
+    // Ticket 6864: the header never scrolls; a long body gets a vertical
+    // scrollbar on the right edge of the body area.
+    let mut state = reader_state(0);
+    state.size = (152, 40);
+    let before = text_of(&buffer_after(&mut state, &[], 152, 40));
+    // Header pinned at the top of the reader area (row 4, under the
+    // topbar), body beneath it.
+    assert!(before.contains("Re: WIP — 240 mm stainless-clad gyuto"));
+    assert!(before.contains("body line 01"), "top of body:\n{before}");
+    // The mock body overflows the viewport: a scrollbar is drawn in the
+    // last column.
+    let thumb = (4..37).any(|y| buffer_after(&mut state, &[], 152, 40)[(151, y)].symbol() == "█");
+    assert!(thumb, "scrollbar visible for a long message");
+
+    // Scroll to the end: the header stays put, the bottom of the body
+    // becomes visible, the top is gone.
+    let downs: Vec<Action> = (0..60).map(|_| Action::MoveDown).collect();
+    let after = text_of(&buffer_after(&mut state, &downs, 152, 40));
+    let header_row = after.lines().nth(4).expect("header row");
+    assert!(
+        header_row.contains("Re: WIP — 240 mm stainless-clad gyuto"),
+        "header stays fixed while the body scrolls:\n{after}"
+    );
+    assert!(
+        after.contains("body line 40"),
+        "bottom of body visible:\n{after}"
+    );
+    assert!(!after.contains("body line 01\n"), "top scrolled away");
+}
+
+#[test]
+fn reader_without_overflow_draws_no_scrollbar() {
+    // A short body fits the viewport: no scrollbar column.
+    let mut state = reader_state(0);
+    state.size = (152, 40);
+    if let Loadable::Loaded(message) = &mut state.open_message {
+        message.plain_body = Some(String::from("one short line\n"));
+    }
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    let none = (4..37).any(|y| buffer[(151, y)].symbol() == "█");
+    assert!(
+        !none,
+        "no scrollbar when the message fits:\n{}",
+        text_of(&buffer)
+    );
 }

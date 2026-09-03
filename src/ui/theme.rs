@@ -24,6 +24,9 @@ pub struct Theme {
     pub muted: Color,
     /// De-emphasized text (`--dim`).
     pub dim: Color,
+    /// Faded message-body preview in the list rows (ticket wxtx): dimmer
+    /// than `dim`, so the preview reads as context, never as content.
+    pub snippet: Color,
     /// Interactive highlight (`--accent`).
     pub accent: Color,
     /// Selected row / active folder fill (`--accent-bg`).
@@ -52,6 +55,7 @@ impl Theme {
             text_soft: Color::Rgb(0xC2, 0xC4, 0xCC),
             muted: Color::Rgb(0x9A, 0x9D, 0xA8),
             dim: Color::Rgb(0x8B, 0x8E, 0x99),
+            snippet: Color::Rgb(0x6B, 0x6F, 0x7B),
             accent: Color::Rgb(0x4E, 0x86, 0xDD),
             accent_bg: Color::Rgb(0x1C, 0x25, 0x34),
             bulk_selected_bg: Color::Rgb(0x2A, 0x22, 0x10),
@@ -86,6 +90,7 @@ impl Theme {
             "text_soft" => self.text_soft = color,
             "muted" => self.muted = color,
             "dim" => self.dim = color,
+            "snippet" => self.snippet = color,
             "accent" => self.accent = color,
             "accent_bg" => self.accent_bg = color,
             "bulk_selected_bg" => self.bulk_selected_bg = color,
@@ -110,6 +115,7 @@ impl Theme {
             text_soft: Color::Rgb(0x3E, 0x41, 0x4B),
             muted: Color::Rgb(0x5C, 0x5F, 0x6A),
             dim: Color::Rgb(0x74, 0x77, 0x82),
+            snippet: Color::Rgb(0x94, 0x97, 0xA1),
             accent: Color::Rgb(0x2D, 0x63, 0xB8),
             accent_bg: Color::Rgb(0xDC, 0xE6, 0xF7),
             bulk_selected_bg: Color::Rgb(0xF7, 0xE8, 0xC8),
@@ -134,6 +140,7 @@ impl Theme {
             text_soft: Color::Reset,
             muted: Color::Reset,
             dim: Color::Reset,
+            snippet: Color::Reset,
             accent: Color::Reset,
             accent_bg: Color::Reset,
             bulk_selected_bg: Color::Reset,
@@ -193,6 +200,13 @@ impl Theme {
 
     pub fn read_text(&self) -> Style {
         Style::new().fg(self.text_soft)
+    }
+
+    /// Faded body preview in the list rows (ticket wxtx): dimmer than the
+    /// subject, so Gmail-style previews read as context. Callers set `bg`
+    /// to the row fill (accent fill included).
+    pub fn snippet_text(&self) -> Style {
+        Style::new().fg(self.snippet)
     }
 
     pub fn star(&self) -> Style {
@@ -262,6 +276,7 @@ mod tests {
         assert_ne!(t.accent, t.accent_bg);
         assert_ne!(t.text, t.muted);
         assert_ne!(t.muted, t.dim);
+        assert_ne!(t.dim, t.snippet);
     }
 
     #[test]
@@ -322,12 +337,13 @@ mod token_tests {
         assert_eq!(theme.text_soft, colors[5]);
         assert_eq!(theme.muted, colors[6]);
         assert_eq!(theme.dim, colors[7]);
-        assert_eq!(theme.accent, colors[8]);
-        assert_eq!(theme.accent_bg, colors[9]);
-        assert_eq!(theme.bulk_selected_bg, colors[10]);
-        assert_eq!(theme.warning, colors[11]);
-        assert_eq!(theme.error, colors[12]);
-        assert_eq!(theme.selection, colors[13]);
+        assert_eq!(theme.snippet, colors[8]);
+        assert_eq!(theme.accent, colors[9]);
+        assert_eq!(theme.accent_bg, colors[10]);
+        assert_eq!(theme.bulk_selected_bg, colors[11]);
+        assert_eq!(theme.warning, colors[12]);
+        assert_eq!(theme.error, colors[13]);
+        assert_eq!(theme.selection, colors[14]);
     }
 
     #[test]

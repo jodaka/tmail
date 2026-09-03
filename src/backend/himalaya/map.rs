@@ -509,10 +509,6 @@ mod tests {
         );
         assert_eq!(message.html_body, None);
         assert!(message.attachments.is_empty());
-        assert_eq!(
-            message.snippet().as_deref(),
-            Some("This is a plain text message.")
-        );
     }
 
     #[test]
@@ -596,7 +592,6 @@ mod tests {
         assert_eq!(message.plain_body, None);
         assert_eq!(message.html_body, None);
         assert!(message.attachments.is_empty());
-        assert_eq!(message.snippet(), None);
     }
 
     #[test]

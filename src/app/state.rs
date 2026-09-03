@@ -84,6 +84,18 @@ pub struct AppState {
     /// instead of writing a duplicate; cleared implicitly with the state.
     pub saved_attachments:
         std::collections::HashMap<(crate::domain::MessageId, usize), std::path::PathBuf>,
+    /// Message ids whose list preview (ticket wxtx) was already satisfied
+    /// this session — fetched, in flight, or served from the on-disk
+    /// message cache. One request per message, ever: a failed preview is
+    /// accepted (it is decorative context), and a message fetched in an
+    /// *earlier* session counts, so startup never re-fetches known mail.
+    pub preview_requested: std::collections::HashSet<crate::domain::MessageId>,
+    /// One-line body previews this session (ticket wxtx), keyed by backend
+    /// message id. `MessageSummary.snippet` does not survive a page load —
+    /// fresh envelope listings carry none — so `apply_page` restores
+    /// previews from here: a periodic refresh or a page change renders the
+    /// same rows it replaced, without re-fetching anything.
+    pub previews: std::collections::HashMap<crate::domain::MessageId, String>,
     /// In-flight backend operations with their ids, retry intents, and
     /// cancellation tokens (plan §9/§11). Results only apply while their
     /// operation is still registered here.
@@ -162,6 +174,8 @@ impl AppState {
             reader_scroll: 0,
             reader_attachment: None,
             saved_attachments: std::collections::HashMap::new(),
+            preview_requested: std::collections::HashSet::new(),
+            previews: std::collections::HashMap::new(),
             operations: OperationRegistry::default(),
             overlay: None,
             composer: None,

@@ -292,26 +292,61 @@ fn message_spans<'a>(
         theme.unread_text().bg(theme.background)
     };
     let subject_style = from_style;
+    // The faded preview (ticket wxtx): dimmer than any subject state, so
+    // the Gmail-style body preview reads as context. It keeps the row's
+    // fill (accent fill included).
+    let snippet_style = Style::new().fg(theme.snippet).bg(bg);
 
-    // Subject plus (full mode only) a dim snippet, composed first so the
-    // combined cell can be padded to the exact column width.
-    let combined = if full {
-        match &message.snippet {
-            Some(snippet) => format!("{} — {snippet}", message.subject),
-            None => message.subject.clone(),
+    // Subject plus (full mode only) the faded body preview, composed so
+    // the combined cell fills exactly the column width: the subject stays
+    // whole when it fits, the preview takes what is left and ends in `…`
+    // when the body text is longer (ticket wxtx). Column anatomy keeps the
+    // mockup grid: marker, icon, from, subject(+preview), date.
+    let mut spans = vec![marker, icon];
+    spans.push(Span::styled(
+        text::fit_left(message.from_display(), from_w),
+        from_style,
+    ));
+    spans.push(Span::styled("  ", base));
+    if full {
+        let sep = " — ";
+        let subject_cell = text::truncate(&message.subject, subject_w);
+        let subject_alone = message.subject.width() > subject_w;
+        let preview_cell = if subject_alone {
+            String::new()
+        } else {
+            message
+                .snippet
+                .as_ref()
+                .map(|snippet| {
+                    let budget = subject_w
+                        .saturating_sub(message.subject.width())
+                        .saturating_sub(sep.width());
+                    if budget > 0 {
+                        format!("{sep}{}", text::truncate(snippet, budget))
+                    } else {
+                        String::new()
+                    }
+                })
+                .unwrap_or_default()
+        };
+        let used = subject_cell.width() + preview_cell.width();
+        spans.push(Span::styled(subject_cell, subject_style));
+        if !preview_cell.is_empty() {
+            spans.push(Span::styled(preview_cell, snippet_style));
         }
+        // Pad the cell to its exact column width so the date stays on the
+        // right edge (mockup grid).
+        spans.push(Span::styled(
+            " ".repeat(subject_w.saturating_sub(used)),
+            base,
+        ));
     } else {
-        message.subject.clone()
-    };
-    let combined = text::clip(&combined, subject_w);
-
-    let mut spans = vec![
-        marker,
-        icon,
-        Span::styled(text::fit_left(message.from_display(), from_w), from_style),
-        Span::styled("  ", base),
-        Span::styled(text::fit_left(&combined, subject_w), subject_style),
-    ];
+        spans.push(Span::styled(
+            text::fit_left(&message.subject, subject_w),
+            subject_style,
+        ));
+    }
     let date_style = if message.is_read && !selected {
         Style::new().fg(theme.dim).bg(bg)
     } else {

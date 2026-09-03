@@ -91,18 +91,6 @@ pub struct Message {
     pub attachments: Vec<Attachment>,
 }
 
-impl Message {
-    /// First non-empty body line, the natural list snippet (Post fills
-    /// snippets only once a full message is fetched; see map.rs).
-    pub fn snippet(&self) -> Option<String> {
-        let body = self.plain_body.as_deref().unwrap_or_default();
-        body.lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(str::to_owned)
-    }
-}
-
 /// One row of a message list (plan §7 `MessageSummary`). Serializable so
 /// the summary cache (ticket haeb) can persist the last loaded page.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

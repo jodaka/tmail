@@ -1197,13 +1197,15 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             match &result.outcome {
                 Ok(OperationOutcome::Page(page)) => {
                     state.last_background_error = None;
-                    apply_page(state, page.clone());
+                    let effects = apply_page(state, page.clone());
                     // Ticket haeb: every successful load refreshes the
-                    // cached page.
+                    // cached page — with the previews applied (ticket
+                    // wxtx), so the next cold start renders rows without
+                    // re-fetching anything.
                     if let Some(cache) = &state.page_cache {
-                        cache.store(&request.mailbox_id, None, page);
+                        cache.store(&request.mailbox_id, None, &state.messages);
                     }
-                    Vec::new()
+                    effects
                 }
                 Ok(OperationOutcome::Mailboxes(_)) => {
                     tracing::warn!(id = %result.id, "mailbox payload for a page operation");
@@ -1243,12 +1245,13 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             match &result.outcome {
                 Ok(OperationOutcome::Page(page)) => {
                     state.last_background_error = None;
-                    apply_page(state, page.clone());
-                    // Ticket haeb: search results cache under their query.
+                    let effects = apply_page(state, page.clone());
+                    // Ticket haeb: search results cache under their query —
+                    // with the previews applied (ticket wxtx).
                     if let Some(cache) = &state.page_cache {
-                        cache.store(&request.mailbox_id, Some(&request.query), page);
+                        cache.store(&request.mailbox_id, Some(&request.query), &state.messages);
                     }
-                    Vec::new()
+                    effects
                 }
                 Ok(_) => {
                     tracing::warn!(id = %result.id, "unexpected payload for a search operation");
@@ -1289,6 +1292,29 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                     // carries Retry/Dismiss (plan §12). Coherent state.
                     state.open_message = Loadable::Failed(failure.detail.clone());
                     open_error_modal(state, failure)
+                }
+            }
+        }
+        OperationKind::Preview(_) => {
+            state.operations.finish(result.id);
+            match &result.outcome {
+                Ok(OperationOutcome::Message(message)) => {
+                    preview_loaded(state, (**message).clone())
+                }
+                Ok(_) => {
+                    tracing::warn!(id = %result.id, "unexpected payload for a preview");
+                    Vec::new()
+                }
+                Err(failure) => {
+                    // A preview is decorative background context (ticket
+                    // wxtx): its failure never interrupts the user and is
+                    // never retried — the row simply keeps no snippet.
+                    tracing::debug!(
+                        id = %result.id,
+                        detail = %failure.detail,
+                        "preview fetch failed; row stays without a snippet"
+                    );
+                    Vec::new()
                 }
             }
         }
@@ -1692,12 +1718,12 @@ fn selected_attachment(state: &AppState) -> Option<(usize, &crate::domain::Attac
     Some((index, attachment))
 }
 
-/// Apply the fetched message: show it, fill the list snippet (Post fills
-/// snippets only from full fetches, see map.rs), and mark unread mail read
-/// after successful load (plan §19 Phase 4) as a separate, retryable flag
-/// operation whose confirmation updates the list.
+/// Apply the fetched message: show it, fill the list snippet (the same
+/// one-line body preview the background previews produce, ticket wxtx),
+/// and mark unread mail read after successful load (plan §19 Phase 4) as a
+/// separate, retryable flag operation whose confirmation updates the list.
 fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
-    let snippet = message.snippet();
+    let snippet = crate::ui::rich::preview_text(&message);
     let message_id = message.id.clone();
     // Ticket haeb: cache the viewed message (bounded by [post.cache]).
     if let Some(cache) = &state.page_cache
@@ -1707,6 +1733,9 @@ fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
     }
     state.open_message = Loadable::Loaded(message);
     if let Some(snippet) = snippet {
+        // The session keeps the preview: page loads and refreshes restore
+        // it instead of re-fetching the message (ticket wxtx).
+        state.previews.insert(message_id.clone(), snippet.clone());
         if let Some(Route::Message(route)) = state.routes.last_mut()
             && route.summary.id == message_id
             && route.summary.snippet.is_none()
@@ -1820,7 +1849,8 @@ fn apply_mailbox_listing(state: &mut AppState, mailboxes: Vec<Mailbox>) -> Vec<E
 
 /// Apply a page result for the active mailbox. The selection is
 /// re-resolved by `Message-ID` first, then backend id (ADR 0001 finding 4:
-/// only the Message-ID is stable across moves).
+/// only the Message-ID is stable across moves). Rows without a body
+/// preview start their background preview fetches (ticket wxtx).
 fn apply_page(state: &mut AppState, page: Page<crate::domain::MessageSummary>) -> Vec<Effect> {
     let previous = state.selected_message();
     let previous_message_id = previous.and_then(|m| m.message_id.clone());
@@ -1841,7 +1871,109 @@ fn apply_page(state: &mut AppState, page: Page<crate::domain::MessageSummary>) -
         .min(len.saturating_sub(1));
     state.list_scroll = state.list_scroll.min(len.saturating_sub(1));
     keep_selection_visible(state);
-    Vec::new()
+    // A fresh envelope listing carries no snippets (ADR 0001 finding 2),
+    // so restore what this session already previewed: a periodic refresh
+    // or a page change must render the same previews it replaces, never
+    // clear them (ticket wxtx).
+    for item in &mut state.messages.items {
+        if item.snippet.is_none()
+            && let Some(text) = state.previews.get(&item.id)
+        {
+            item.snippet = Some(text.clone());
+        }
+    }
+    start_missing_previews(state)
+}
+
+// ── List previews (ticket wxtx) ──────────────────────────────────────────
+
+/// How many preview fetches may run at once: a page can hold dozens of
+/// rows, and each fetch spawns a himalaya child, so the window rolls —
+/// queued rows start as in-flight fetches complete.
+const MAX_IN_FLIGHT_PREVIEWS: usize = 6;
+
+/// Satisfy the visible rows' previews (ticket wxtx), in priority order:
+/// rows this session already previewed were restored by `apply_page`;
+/// rows whose full message is already cached on disk (an earlier fetch,
+/// this session or a previous one) take their preview straight from the
+/// cache — no backend work, and old cached messages are never re-fetched.
+/// Only genuinely unknown messages start a background fetch, each
+/// independently, within the rolling window. Rows beyond the window stay
+/// unrequested so the next apply or preview completion picks them up.
+fn start_missing_previews(state: &mut AppState) -> Vec<Effect> {
+    let mut budget = MAX_IN_FLIGHT_PREVIEWS.saturating_sub(state.operations.previews_in_flight());
+    let mut effects = Vec::new();
+    let candidates: Vec<crate::domain::MessageSummary> = state
+        .messages
+        .items
+        .iter()
+        .filter(|s| s.snippet.is_none() && !state.preview_requested.contains(&s.id))
+        .cloned()
+        .collect();
+    for summary in candidates {
+        let cached = state
+            .page_cache
+            .as_ref()
+            .and_then(|cache| cache.load_message(&summary.mailbox_id, &summary.id.0));
+        let text = cached.as_ref().and_then(crate::ui::rich::preview_text);
+        match text {
+            Some(text) => {
+                // Already fetched (this session or before): serve the
+                // preview from the copy on disk and remember it for the
+                // session. The read refreshed the entry's LRU stamp, so a
+                // previewed message stays cached like a viewed one.
+                state.preview_requested.insert(summary.id.clone());
+                state.previews.insert(summary.id.clone(), text.clone());
+                if let Some(item) = state.messages.items.iter_mut().find(|s| s.id == summary.id) {
+                    item.snippet = Some(text);
+                }
+            }
+            None if cached.is_some() => {
+                // Fetched before, but the body carries no preview text
+                // (an empty body): satisfied, nothing to request.
+                state.preview_requested.insert(summary.id.clone());
+            }
+            None if budget > 0 => {
+                // Genuinely unknown: fetch in the background, once.
+                budget -= 1;
+                state.preview_requested.insert(summary.id.clone());
+                effects.push(state.operations.start_background(OperationKind::Preview(
+                    crate::domain::MessageLocator {
+                        mailbox: summary.mailbox_id.clone(),
+                        id: summary.id.clone(),
+                        message_id: summary.message_id.clone(),
+                    },
+                )));
+            }
+            // Beyond the window: leave unrequested for the rolling refill.
+            None => {}
+        }
+    }
+    effects
+}
+
+/// Apply a fetched preview (ticket wxtx): convert the body to one line of
+/// plain text, remember it for the session, fill the list row's snippet,
+/// cache the message for an instant open, and roll the fetch window. A
+/// result for a message no longer listed (mailbox switched, row moved) is
+/// dropped — but still cached, so it helps if the message returns.
+fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
+    if let Some(cache) = &state.page_cache {
+        cache.store_message(&message.mailbox_id, &message.id.0, &message);
+    }
+    let message_id = message.id.clone();
+    if let Some(text) = crate::ui::rich::preview_text(&message) {
+        state.previews.insert(message_id.clone(), text.clone());
+        if let Some(summary) = state
+            .messages
+            .items
+            .iter_mut()
+            .find(|s| s.id == message_id && s.snippet.is_none())
+        {
+            summary.snippet = Some(text);
+        }
+    }
+    start_missing_previews(state)
 }
 
 // ── Navigation and input ─────────────────────────────────────────────────
@@ -1882,7 +2014,7 @@ fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
 fn page_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
     match state.focus {
         Focus::Reader => {
-            let viewport = crate::ui::layout::reader_rows_visible(state.size).max(1) as i64;
+            let (viewport, _) = reader_scroll_bounds(state);
             scroll_reader(state, delta * viewport);
             Vec::new()
         }
@@ -1890,34 +2022,40 @@ fn page_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
     }
 }
 
-/// Scroll the reader document (Up/Down in reader focus, plan §10: "scroll
-/// focused area"). The line budget comes from the same pure content
-/// function the renderer draws, so the reducer's clamp always matches the
-/// frame.
+/// Scroll the reader body (Up/Down in reader focus, plan §10: "scroll
+/// focused area"). The budget comes from the same pure content functions
+/// the renderer draws, so the reducer's clamp always matches the frame.
+/// The fixed header never scrolls (ticket 6864): the viewport is the rows
+/// under it and the clamp tracks the body alone.
 fn scroll_reader(state: &mut AppState, delta: i64) {
-    let viewport = crate::ui::layout::reader_rows_visible(state.size).max(1) as i64;
-    let total = crate::ui::screens::reader::content_line_count(
-        state,
-        crate::ui::layout::reader_width(state.size).max(10),
-    ) as i64;
+    let (viewport, total) = reader_scroll_bounds(state);
     let max = (total - viewport).max(0);
     let next = (state.reader_scroll as i64 + delta).clamp(0, max);
     state.reader_scroll = next as usize;
 }
 
+/// The reader's scrollable viewport (body rows under the fixed header) and
+/// the scrollable body length, from the same pure functions the renderer
+/// draws — reducer and frame can never disagree (ticket 6864).
+fn reader_scroll_bounds(state: &AppState) -> (i64, i64) {
+    let width = crate::ui::layout::reader_width(state.size).max(10);
+    let viewport = crate::ui::layout::reader_rows_visible(state.size)
+        .saturating_sub(crate::ui::screens::reader::header_line_count(state, width))
+        .max(1) as i64;
+    let total = crate::ui::screens::reader::scroll_line_count(state, width) as i64;
+    (viewport, total)
+}
+
 /// Reflow on terminal resize (plan §13/§19 Phase 5): the document re-wraps
 /// at the new reader width inside the renderer, and the scroll anchor is
-/// clamped to the re-flowed length so the viewport can never point past the
-/// end of the document.
+/// clamped to the re-flowed body length so the viewport can never point
+/// past the end of the document (the fixed header never scrolls, ticket
+/// 6864).
 fn clamp_reader_scroll(state: &mut AppState) {
     if !matches!(state.active_route(), Some(Route::Message(_))) {
         return;
     }
-    let viewport = crate::ui::layout::reader_rows_visible(state.size).max(1) as i64;
-    let total = crate::ui::screens::reader::content_line_count(
-        state,
-        crate::ui::layout::reader_width(state.size).max(10),
-    ) as i64;
+    let (viewport, total) = reader_scroll_bounds(state);
     let max = (total - viewport).max(0);
     state.reader_scroll = (state.reader_scroll as i64).clamp(0, max) as usize;
 }
@@ -1997,6 +2135,7 @@ fn request_visible_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
             // immediately — cold contexts only (empty list), so a move
             // re-sync can never resurrect moved rows from the cache; the
             // fresh load starts right after and replaces the page.
+            let mut effects = Vec::new();
             if state.messages.items.is_empty()
                 && let Some(cache) = &state.page_cache
                 && let Some(page) = cache.load(
@@ -2006,9 +2145,10 @@ fn request_visible_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
                     request.limit,
                 )
             {
-                apply_page(state, page);
+                effects.extend(apply_page(state, page));
             }
-            vec![state.operations.start(OperationKind::Search(request))]
+            effects.push(state.operations.start(OperationKind::Search(request)));
+            effects
         }
         Some(route) => match route.mailbox_id().cloned() {
             Some(mailbox_id) => {
@@ -2022,14 +2162,16 @@ fn request_visible_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
                 // re-sync has a non-empty list, so it can never resurrect
                 // moved rows from the cache. The fresh load starts right
                 // after and its result overwrites this page.
+                let mut effects = Vec::new();
                 if state.messages.items.is_empty()
                     && let Some(cache) = &state.page_cache
                     && let Some(page) =
                         cache.load(&request.mailbox_id, None, request.offset, request.limit)
                 {
-                    apply_page(state, page);
+                    effects.extend(apply_page(state, page));
                 }
-                vec![state.operations.start(OperationKind::LoadPage(request))]
+                effects.push(state.operations.start(OperationKind::LoadPage(request)));
+                effects
             }
             None => Vec::new(),
         },
@@ -2088,13 +2230,15 @@ fn request_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
     // Ticket haeb: in cold contexts (empty list — startup, mailbox switch)
     // the cached page renders instantly; the fresh load below still runs
     // and its result overwrites the cache and the page.
+    let mut effects = Vec::new();
     if state.messages.items.is_empty()
         && let Some(cache) = &state.page_cache
         && let Some(page) = cache.load(&request.mailbox_id, None, request.offset, request.limit)
     {
-        apply_page(state, page);
+        effects.extend(apply_page(state, page));
     }
-    vec![state.operations.start(OperationKind::LoadPage(request))]
+    effects.push(state.operations.start(OperationKind::LoadPage(request)));
+    effects
 }
 
 fn activate(state: &mut AppState) -> Vec<Effect> {
@@ -2675,10 +2819,17 @@ fn auto_refresh_tick(
     if elapsed < state.refresh_interval_seconds {
         return Vec::new();
     }
-    let conflicts = state.overlay.is_some()
-        || matches!(state.active_route(), Some(Route::Composer))
-        || !state.operations.is_empty();
-    if conflicts {
+    // The timer never interrupts interactive work: it stands down while a
+    // modal is open, the composer is on screen, or a *foreground* operation
+    // is in flight (ticket wxtx: silent background preview fetches do not
+    // block it), and retries on the next tick once they clear. The first
+    // tick arms the timer (the reducer has no clock before then).
+    fn conflicts(state: &AppState) -> bool {
+        state.overlay.is_some()
+            || matches!(state.active_route(), Some(Route::Composer))
+            || state.operations.has_foreground()
+    }
+    if conflicts(state) {
         tracing::debug!("auto refresh stood down: conflicting work in flight");
         return Vec::new();
     }

@@ -48,6 +48,11 @@ pub enum OperationKind {
     Search(SearchRequest),
     /// Fetch one full message (plan §19 Phase 4: reader).
     LoadMessage(MessageLocator),
+    /// Fetch one full message purely for the list's faded body preview
+    /// (ticket wxtx): background work that fills `MessageSummary.snippet`
+    /// and the message cache. Independent of every other operation — no
+    /// supersession — and never surfaced: failures are logged only.
+    Preview(MessageLocator),
     /// Mark a message read (`read: true`) or unread.
     SetRead { locator: MessageLocator, read: bool },
     /// Star (`starred: true`) or unstar a message.
@@ -121,6 +126,7 @@ impl OperationKind {
             OperationKind::LoadPage(_) => "Loading messages",
             OperationKind::Search(_) => "Searching",
             OperationKind::LoadMessage(_) => "Loading message",
+            OperationKind::Preview(_) => "Fetching preview",
             OperationKind::SetRead { read: true, .. } => "Marking read",
             OperationKind::SetRead { read: false, .. } => "Marking unread",
             OperationKind::SetStarred { starred: true, .. } => "Starring",
@@ -312,8 +318,11 @@ pub enum OperationOrigin {
 pub struct OperationRegistry {
     next_id: u64,
     entries: HashMap<OperationId, Operation>,
-    /// The most recently started operation still in flight — the one `Esc`
-    /// cancels first (plan §10: "Cancel work, close overlay, or go back").
+    /// The most recently started *foreground* operation still in flight —
+    /// the one `Esc` cancels first (plan §10: "Cancel work, close overlay,
+    /// or go back"). Background-origin work (timer refreshes, ticket wxtx
+    /// previews) never takes the slot: `Esc` must reach interactive work,
+    /// and the spinner names only what `Esc` would cancel.
     foreground: Option<OperationId>,
 }
 
@@ -357,7 +366,12 @@ impl OperationRegistry {
                 origin,
             },
         );
-        self.foreground = Some(id);
+        // Only foreground work takes the `Esc`-cancel / spinner slot
+        // (ticket wxtx): silent background fetches (previews, timer
+        // refreshes) must never absorb `Esc` or announce themselves.
+        if origin == OperationOrigin::Foreground {
+            self.foreground = Some(id);
+        }
         crate::app::effect::Effect { id, kind }
     }
 
@@ -503,13 +517,37 @@ impl OperationRegistry {
         self.entries.is_empty()
     }
 
+    /// Whether any *foreground*-origin operation is in flight. The
+    /// auto-refresh timer stands down for interactive work but never for
+    /// silent background fetches (ticket wxtx previews).
+    pub fn has_foreground(&self) -> bool {
+        self.entries
+            .values()
+            .any(|op| op.origin == OperationOrigin::Foreground)
+    }
+
+    /// How many preview fetches (ticket wxtx) are in flight — the rolling
+    /// fetch window's occupancy.
+    pub fn previews_in_flight(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|op| matches!(op.kind, OperationKind::Preview(_)))
+            .count()
+    }
+
     /// Number of in-flight operations.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     fn latest(&self) -> Option<OperationId> {
-        self.entries.values().max_by_key(|op| op.id).map(|op| op.id)
+        // Only foreground work can hold the slot (see `foreground`): a
+        // background fetch that started later must never inherit it.
+        self.entries
+            .values()
+            .filter(|op| op.origin == OperationOrigin::Foreground)
+            .max_by_key(|op| op.id)
+            .map(|op| op.id)
     }
 }
 
@@ -670,5 +708,39 @@ mod origin_tests {
             registry.get(background.id).map(|op| op.origin),
             Some(OperationOrigin::Background)
         );
+    }
+
+    #[test]
+    fn background_operations_never_take_the_foreground_slot() {
+        let mut registry = OperationRegistry::default();
+        // Ticket wxtx: silent background fetches must never absorb `Esc`
+        // or drive the spinner.
+        let background = registry.start_background(page("inbox", 0));
+        assert!(registry.foreground().is_none());
+        assert!(registry.get(background.id).is_some());
+        // A later foreground op holds the slot; when it completes, the
+        // pointer falls back to nothing — never to the background fetch.
+        let foreground = registry.start(OperationKind::LoadMailboxes);
+        assert_eq!(registry.foreground().map(|op| op.id), Some(foreground.id));
+        registry.finish(foreground.id);
+        assert!(registry.foreground().is_none());
+        assert!(registry.get(background.id).is_some());
+    }
+
+    #[test]
+    fn previews_in_flight_counts_only_preview_operations() {
+        let mut registry = OperationRegistry::default();
+        let locator = MessageLocator {
+            mailbox: MailboxId(String::from("inbox")),
+            id: crate::domain::MessageId(String::from("m1")),
+            message_id: None,
+        };
+        assert_eq!(registry.previews_in_flight(), 0);
+        registry.start_background(OperationKind::Preview(locator.clone()));
+        registry.start_background(OperationKind::Preview(locator));
+        registry.start_background(page("inbox", 0));
+        assert_eq!(registry.previews_in_flight(), 2);
+        // And they do not block the foreground slot:
+        assert!(!registry.has_foreground());
     }
 }

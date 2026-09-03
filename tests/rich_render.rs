@@ -91,7 +91,10 @@ fn reader_state(message: Message) -> AppState {
         } else {
             message.headers.subject.clone()
         },
-        snippet: message.snippet(),
+        // The reader renders from the full message; the list preview is
+        // not part of this fixture (snippet semantics live in
+        // `ui::rich::preview_text`, exercised by its own tests).
+        snippet: None,
         timestamp: message.headers.date.unwrap_or_else(now),
         is_read: false,
         is_starred: false,

@@ -57,8 +57,14 @@ fn tick(s: &mut AppState, offset_seconds: i64) -> Vec<Effect> {
     reduce(s, &Action::Tick { now: Box::new(now) })
 }
 
-/// Complete `id` with an `Ok` page payload for `req` at `offset`.
-fn complete_page_ok(state: &mut AppState, id: OperationId, req: &PageRequest, offset: usize) {
+/// Complete `id` with an `Ok` page payload for `req` at `offset`. Returns
+/// the follow-up effects (e.g. ticket wxtx preview fetches).
+fn complete_page_ok(
+    state: &mut AppState,
+    id: OperationId,
+    req: &PageRequest,
+    offset: usize,
+) -> Vec<Effect> {
     let page = mock::mock_page(&req.mailbox_id, offset, req.limit);
     reduce(
         state,
@@ -66,7 +72,7 @@ fn complete_page_ok(state: &mut AppState, id: OperationId, req: &PageRequest, of
             id,
             outcome: Ok(OperationOutcome::Page(page)),
         }),
-    );
+    )
 }
 
 /// A failure action matching `kind`, as the operation manager builds it.
@@ -780,7 +786,125 @@ fn reader_result_fills_missing_snippet() {
     let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
     complete_message_ok(&mut s, id);
     let snippet = s.messages.items[2].snippet.as_deref();
-    assert_eq!(snippet, Some("body line 01"));
+    // The list preview is the same one-line body text the background
+    // previews produce (ticket wxtx).
+    assert!(
+        snippet.is_some_and(|s| s.starts_with("body line 01") && s.ends_with('…')),
+        "{snippet:?}"
+    );
+}
+
+#[test]
+fn preview_snippets_survive_a_background_refresh() {
+    let mut s = state();
+    let effects = load_sent_without_snippets(&mut s);
+    let previews = expect_previews(&effects);
+    // Two previews land; their rows show previews.
+    for (id, locator) in previews.iter().take(2) {
+        let summary = s
+            .messages
+            .items
+            .iter()
+            .find(|m| m.id == locator.id)
+            .expect("row listed")
+            .clone();
+        complete_preview_ok(&mut s, *id, &summary);
+    }
+    assert_eq!(
+        s.messages
+            .items
+            .iter()
+            .filter(|m| m.snippet.is_some())
+            .count(),
+        2
+    );
+    // A fresh page load (the periodic refresh path) replaces every
+    // summary — the rendered previews must survive it, with no re-fetches
+    // for anything already previewed or in flight (ticket wxtx).
+    let req = PageRequest {
+        mailbox_id: MailboxId(String::from("sent")),
+        offset: 0,
+        limit: 20,
+    };
+    let id = s.operations.start(OperationKind::LoadPage(req.clone())).id;
+    let effects = complete_page_ok(&mut s, id, &req, 0);
+    no_effects(&effects);
+    assert_eq!(
+        s.messages
+            .items
+            .iter()
+            .filter(|m| m.snippet.is_some())
+            .count(),
+        2,
+        "previews survive the page replacement"
+    );
+    // The still-in-flight previews fill their (new) rows when they land.
+    for (id, locator) in previews.iter().skip(2) {
+        let summary = s
+            .messages
+            .items
+            .iter()
+            .find(|m| m.id == locator.id)
+            .expect("row listed")
+            .clone();
+        complete_preview_ok(&mut s, *id, &summary);
+    }
+    assert_eq!(
+        s.messages
+            .items
+            .iter()
+            .filter(|m| m.snippet.is_some())
+            .count(),
+        4
+    );
+}
+
+#[test]
+fn disk_cached_messages_fill_previews_without_fetching() {
+    let mut s = state();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    s.page_cache = Some(crate::app::page_cache::PageCache::open(
+        dir.path().to_path_buf(),
+        crate::app::page_cache::CacheLimits::default(),
+    ));
+    // Messages fetched in an earlier session: every Sent row's full
+    // message is already on disk.
+    for summary in mock::mock_page(&MailboxId(String::from("sent")), 0, 20).items {
+        let message = mock::mock_message(&summary);
+        s.page_cache
+            .as_ref()
+            .unwrap()
+            .store_message(&summary.mailbox_id, &summary.id.0, &message);
+    }
+    // Switch to Sent: the fresh page loads, and every preview is served
+    // from the cache — no background fetches start, nothing re-requests
+    // what was fetched before (ticket wxtx).
+    reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1))); // select
+    let effects = reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1))); // activate
+    let (load, req) = expect_page(&effects);
+    let effects = complete_page_ok(&mut s, load, &req, 0);
+    no_effects(&effects);
+    assert_eq!(
+        s.messages
+            .items
+            .iter()
+            .filter(|m| m.snippet.is_some())
+            .count(),
+        4,
+        "previews fill from the cached copies"
+    );
+    assert!(
+        s.messages
+            .items
+            .iter()
+            .all(|m| s.previews.contains_key(&m.id))
+    );
+    assert!(
+        s.messages
+            .items
+            .iter()
+            .all(|m| s.preview_requested.contains(&m.id))
+    );
 }
 
 #[test]
@@ -1323,8 +1447,13 @@ fn reader_scrolls_within_content_and_clamps() {
     let mut s = state();
     let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
     complete_message_ok(&mut s, id);
-    let viewport = crate::ui::layout::reader_rows_visible(s.size).max(1);
-    let total = crate::ui::screens::reader::content_line_count(&s, s.size.0 as usize);
+    // The scroll viewport is the rows under the fixed header (ticket 6864);
+    // the clamp tracks the body alone.
+    let width = s.size.0 as usize;
+    let viewport = crate::ui::layout::reader_rows_visible(s.size)
+        .saturating_sub(crate::ui::screens::reader::header_line_count(&s, width))
+        .max(1);
+    let total = crate::ui::screens::reader::scroll_line_count(&s, width);
     assert!(
         total > viewport,
         "mock body must overflow the viewport: total {total}, viewport {viewport}"
@@ -1538,7 +1667,7 @@ fn resize_clamps_reader_scroll_after_reflow() {
             height: 20,
         },
     );
-    let deep = crate::ui::screens::reader::content_line_count(&s, narrow);
+    let deep = crate::ui::screens::reader::scroll_line_count(&s, narrow);
     s.reader_scroll = deep;
     // Shrinking the width re-wraps and changes the document length; the
     // anchor must respect the re-flowed budget.
@@ -1549,12 +1678,12 @@ fn resize_clamps_reader_scroll_after_reflow() {
             height: 20,
         },
     );
-    let viewport = crate::ui::layout::reader_rows_visible(s.size).max(1);
-    let total = crate::ui::screens::reader::content_line_count(
-        &s,
-        crate::ui::layout::reader_width(s.size).max(10),
-    ) as i64;
-    let max = (total - viewport as i64).max(0) as usize;
+    let width = crate::ui::layout::reader_width(s.size).max(10);
+    let viewport = crate::ui::layout::reader_rows_visible(s.size)
+        .saturating_sub(crate::ui::screens::reader::header_line_count(&s, width))
+        .max(1) as i64;
+    let total = crate::ui::screens::reader::scroll_line_count(&s, width) as i64;
+    let max = (total - viewport).max(0) as usize;
     assert!(
         s.reader_scroll <= max,
         "scroll {} must clamp to {max}",
@@ -1568,12 +1697,12 @@ fn resize_clamps_reader_scroll_after_reflow() {
             height: 40,
         },
     );
-    let viewport = crate::ui::layout::reader_rows_visible(s.size).max(1);
-    let total = crate::ui::screens::reader::content_line_count(
-        &s,
-        crate::ui::layout::reader_width(s.size).max(10),
-    ) as i64;
-    let max = (total - viewport as i64).max(0) as usize;
+    let width = crate::ui::layout::reader_width(s.size).max(10);
+    let viewport = crate::ui::layout::reader_rows_visible(s.size)
+        .saturating_sub(crate::ui::screens::reader::header_line_count(&s, width))
+        .max(1) as i64;
+    let total = crate::ui::screens::reader::scroll_line_count(&s, width) as i64;
+    let max = (total - viewport).max(0) as usize;
     assert!(s.reader_scroll <= max);
 }
 
@@ -4637,7 +4766,39 @@ fn cached_page_serves_instantly_and_the_fresh_load_still_runs() {
             }),
         )
     };
-    no_effects(&effects);
+    // No further page work — but the rows carry no snippets, so the
+    // background preview fetches start (ticket wxtx).
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e.kind,
+            OperationKind::LoadPage(_) | OperationKind::Search(_)
+        )),
+        "no page work may follow a completed load, got {effects:?}"
+    );
+    let previews: Vec<_> = effects
+        .iter()
+        .filter_map(|e| match &e.kind {
+            OperationKind::Preview(locator) => Some(locator.clone()),
+            _ => None,
+        })
+        .collect();
+    // Every row without a snippet is requested exactly once: the cached
+    // page already fetched its row, the fresh page covers the rest.
+    assert_eq!(
+        previews.len(),
+        expected.items.len() - 1,
+        "the remaining rows fetch after the cached row's request: {effects:?}"
+    );
+    assert_eq!(
+        s.preview_requested.len(),
+        expected.items.len(),
+        "one preview request per row overall"
+    );
+    for (locator, summary) in previews.iter().zip(expected.items.iter().skip(1)) {
+        assert_eq!(&locator.id, &summary.id);
+        assert_eq!(&locator.mailbox, &summary.mailbox_id);
+        assert!(s.preview_requested.contains(&summary.id), "deduped");
+    }
     assert_eq!(s.messages.items.len(), expected.items.len());
     // The successful load overwrote the cache entry.
     let cached = s
@@ -4720,4 +4881,212 @@ fn opening_a_message_serves_the_cached_copy_instantly() {
             .iter()
             .any(|e| matches!(e.kind, OperationKind::LoadMessage(_)))
     );
+}
+
+// ── List previews (ticket wxtx) ──────────────────────────────────────────
+
+/// The `(id, locator)` pairs of every Preview effect.
+fn expect_previews(effects: &[Effect]) -> Vec<(OperationId, crate::domain::MessageLocator)> {
+    effects
+        .iter()
+        .filter_map(|e| match &e.kind {
+            OperationKind::Preview(locator) => Some((e.id, locator.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Switch the fixture to the Sent mailbox (its rows ship without
+/// snippets) and complete the fresh page load. Returns the preview
+/// effects the page apply produced.
+fn load_sent_without_snippets(s: &mut AppState) -> Vec<Effect> {
+    reduce(s, &Action::Click(ClickTarget::Mailbox(1))); // select
+    let effects = reduce(s, &Action::Click(ClickTarget::Mailbox(1))); // activate
+    let (load, req) = expect_page(&effects);
+    complete_page_ok(s, load, &req, 0)
+}
+
+/// Complete one in-flight preview with the mocked full message. Returns
+/// the follow-up effects (the rolling fetch refill).
+fn complete_preview_ok(
+    s: &mut AppState,
+    id: OperationId,
+    summary: &crate::domain::MessageSummary,
+) -> Vec<Effect> {
+    let message = mock::mock_message(summary);
+    reduce(
+        s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(message))),
+        }),
+    )
+}
+
+#[test]
+fn preview_result_fills_the_list_snippet_and_caches_the_message() {
+    let mut s = state();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    s.page_cache = Some(crate::app::page_cache::PageCache::open(
+        dir.path().to_path_buf(),
+        crate::app::page_cache::CacheLimits::default(),
+    ));
+    let effects = load_sent_without_snippets(&mut s);
+    let previews = expect_previews(&effects);
+    assert_eq!(previews.len(), 4, "one preview per Sent row");
+
+    let (id, locator) = previews[0].clone();
+    let op = s.operations.get(id).expect("preview in flight");
+    // Preview fetches are silent background work: they never take the
+    // `Esc`-cancel / spinner slot.
+    assert_eq!(op.origin, OperationOrigin::Background);
+    assert_ne!(s.operations.foreground().map(|o| o.id), Some(id));
+
+    let summary = s
+        .messages
+        .items
+        .iter()
+        .find(|m| m.id == locator.id)
+        .expect("row listed")
+        .clone();
+    complete_preview_ok(&mut s, id, &summary);
+    // The row now carries its one-line body preview…
+    let row = s
+        .messages
+        .items
+        .iter()
+        .find(|m| m.id == locator.id)
+        .unwrap();
+    let snippet = row.snippet.as_deref().expect("snippet filled");
+    assert!(snippet.starts_with("body line 01"), "{snippet}");
+    // …and the full message is cached for an instant open.
+    assert!(
+        s.page_cache
+            .as_ref()
+            .unwrap()
+            .load_message(&locator.mailbox, &locator.id.0)
+            .is_some(),
+        "preview fetch caches the message"
+    );
+}
+
+#[test]
+fn preview_failure_is_silent_and_never_retried() {
+    let mut s = state();
+    let effects = load_sent_without_snippets(&mut s);
+    let (id, locator) = expect_previews(&effects)[0].clone();
+    reduce(
+        &mut s,
+        &failure(
+            id,
+            &OperationKind::Preview(locator.clone()),
+            "himalaya exploded",
+        ),
+    );
+    // Decorative work: no Retry/Dismiss modal, no status noise, and the
+    // row keeps no snippet.
+    assert!(s.overlay.is_none());
+    assert!(s.status.message.is_none());
+    let row = s
+        .messages
+        .items
+        .iter()
+        .find(|m| m.id == locator.id)
+        .unwrap();
+    assert!(row.snippet.is_none());
+    // The id stays requested: a later page apply never re-fetches it.
+    let req = crate::domain::PageRequest {
+        mailbox_id: MailboxId(String::from("sent")),
+        offset: 0,
+        limit: 20,
+    };
+    let id = s.operations.start(OperationKind::LoadPage(req.clone())).id;
+    let effects = complete_page_ok(&mut s, id, &req, 0);
+    assert!(
+        expect_previews(&effects)
+            .iter()
+            .all(|(_, l)| l.id != locator.id),
+        "failed previews are not re-requested"
+    );
+}
+
+#[test]
+fn esc_never_cancels_in_flight_previews() {
+    let mut s = state();
+    let effects = load_sent_without_snippets(&mut s);
+    let previews = expect_previews(&effects);
+    assert!(!previews.is_empty(), "previews in flight");
+    // Open the reader on a row; Sent rows are read, so no flag ops start.
+    s.selection = 0;
+    let (load_id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    complete_message_ok(&mut s, load_id);
+    // Esc closes the reader — the previews are not foreground work for it
+    // to absorb.
+    reduce(&mut s, &Action::BackOrCancel);
+    assert_eq!(s.routes.len(), 1, "reader closed");
+    assert!(
+        previews
+            .iter()
+            .all(|(id, _)| s.operations.get(*id).is_some()),
+        "every preview is still in flight"
+    );
+}
+
+#[test]
+fn auto_refresh_is_not_blocked_by_in_flight_previews() {
+    let mut s = state();
+    timer(&mut s);
+    no_effects(&tick(&mut s, 0));
+    let effects = load_sent_without_snippets(&mut s);
+    assert!(!expect_previews(&effects).is_empty());
+    // The interval elapses while the silent background fetches run: the
+    // timer still fires (only foreground work stands it down).
+    let effects = tick(&mut s, 60);
+    expect_page(&effects);
+}
+
+#[test]
+fn preview_fetches_roll_within_the_window() {
+    let mut s = state();
+    // A page wider than the fetch window (cap: 6), rows without snippets.
+    let mut page = crate::domain::Page {
+        items: Vec::new(),
+        offset: 0,
+        limit: 20,
+        total: Some(10),
+    };
+    for i in 0..10 {
+        let mut summary = mock::mock_page(&inbox_id(), 0, 1).items.remove(0);
+        summary.id = MessageId(format!("p{i}"));
+        summary.snippet = None;
+        page.items.push(summary);
+    }
+    let req = PageRequest {
+        mailbox_id: inbox_id(),
+        offset: 0,
+        limit: 20,
+    };
+    let id = s.operations.start(OperationKind::LoadPage(req)).id;
+    let effects = reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Page(page.clone())),
+        }),
+    );
+    let previews = expect_previews(&effects);
+    assert_eq!(previews.len(), 6, "the window caps concurrent fetches");
+    // Completing one rolls the window: the next queued row starts.
+    let (first, locator) = previews[0].clone();
+    let summary = s
+        .messages
+        .items
+        .iter()
+        .find(|m| m.id == locator.id)
+        .expect("row listed")
+        .clone();
+    let effects = complete_preview_ok(&mut s, first, &summary);
+    let refill = expect_previews(&effects);
+    assert_eq!(refill.len(), 1, "the next queued row starts");
+    assert_eq!(s.preview_requested.len(), 7, "queued rows are tracked");
 }
