@@ -27,7 +27,7 @@ fn reply_to_a_real_himalaya_message_preserves_thread_headers() {
         Some("6053432595490343824@post.local")
     );
 
-    let seed = seed_reply(&message, ReplyKind::Reply);
+    let seed = seed_reply(&message, ReplyKind::Reply, Some("probe@post.local"));
     // In-Reply-To becomes the template's own Message-ID; References grows
     // by it while keeping the original chain.
     assert_eq!(

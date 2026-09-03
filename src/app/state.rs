@@ -79,7 +79,11 @@ pub struct AppState {
     pub focus: Focus,
     /// Last known terminal size; drives the responsive layout (plan §18).
     pub size: (u16, u16),
-    /// The last wall clock delivered by `Action::Tick { now }`: the
+    /// The configured account address (plan §17 `[accounts.<account>].email`).
+    /// Reply-all seeding excludes it from recipients (Phase 7.5); the
+    /// backend independently uses it as the `From` of outgoing mail.
+    pub account_email: Option<String>,
+    /// Last wall clock delivered by `Action::Tick { now }`: the
     /// reducer's only source of time (autosave debounce, saved-at stamps).
     pub clock: Option<DateTime<FixedOffset>>,
     pub status: StatusState,
@@ -108,6 +112,7 @@ impl AppState {
             search_query: String::new(),
             focus: Focus::MessageList,
             size: (152, 40),
+            account_email: None,
             clock: None,
             status: StatusState {
                 mode: StatusMode::Normal,

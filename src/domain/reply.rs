@@ -16,12 +16,15 @@
 use crate::domain::address::{Address, to_field_list};
 use crate::domain::message::Message;
 
-/// Which reply a seeded draft represents (Phase 7.5 adds reply-all
-/// recipient merging).
+/// Which reply a seeded draft represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyKind {
     /// Reply to the sender only.
     Reply,
+    /// Reply to sender and every original recipient: addresses are
+    /// deduplicated case-insensitively by email and the configured
+    /// account's own address is excluded (plan §14, Phase 7.5).
+    ReplyAll,
 }
 
 /// Composer-ready fields of a seeded draft (plan §14). Address fields are
@@ -37,22 +40,60 @@ pub struct Seed {
     pub references: Option<String>,
 }
 
-/// Seed a reply draft: sender as recipient, `Re:` subject, the original
-/// body quoted below an attribution line (the caret lands above it in the
+/// Seed a reply draft: sender (reply) or sender plus every original
+/// recipient (reply-all) as recipients, `Re:` subject, the original body
+/// quoted below an attribution line (the caret lands above it in the
 /// composer), and the threading headers preserved (plan §14: reply
 /// preserves `Message-ID`, `In-Reply-To`, and `References` semantics).
-pub fn seed_reply(message: &Message, kind: ReplyKind) -> Seed {
-    let _ = kind;
+/// `own_email` is the configured account address, excluded from reply-all
+/// recipients (plan §14: "deduplicates addresses and excludes the
+/// configured account's own address").
+pub fn seed_reply(message: &Message, kind: ReplyKind, own_email: Option<&str>) -> Seed {
     let subject = prefixed_subject(&message.headers.subject, "Re:");
     let body = format!("\n\n{}\n{}", wrote_line(message), quote(message));
+    let (to, cc) = match kind {
+        ReplyKind::Reply => (message.headers.from.clone(), Vec::new()),
+        ReplyKind::ReplyAll => reply_all_recipients(message, own_email),
+    };
     Seed {
-        to: to_field_list(&message.headers.from),
-        cc: String::new(),
+        to: to_field_list(&to),
+        cc: to_field_list(&cc),
         subject,
         body,
         in_reply_to: message.headers.message_id.clone(),
         references: extended_references(message),
     }
+}
+
+/// Reply-all recipient merge (plan §14, Phase 7.5): sender and original To
+/// land in To, original Cc stays Cc minus anyone already present.
+/// Deduplication is case-insensitive by email (the only identity that is
+/// practically stable across clients); the first occurrence wins so the
+/// sender's display form is kept, and the account's own address never
+/// appears — replying to yourself must not mail you.
+fn reply_all_recipients(
+    message: &Message,
+    own_email: Option<&str>,
+) -> (Vec<Address>, Vec<Address>) {
+    let mut seen: Vec<String> = own_email.map(str::to_owned).into_iter().collect();
+    let push_unique = |list: &mut Vec<Address>, address: &Address, seen: &mut Vec<String>| {
+        if !seen
+            .iter()
+            .any(|email| email.eq_ignore_ascii_case(&address.email))
+        {
+            seen.push(address.email.clone());
+            list.push(address.clone());
+        }
+    };
+    let mut to = Vec::new();
+    for address in message.headers.from.iter().chain(message.headers.to.iter()) {
+        push_unique(&mut to, address, &mut seen);
+    }
+    let mut cc = Vec::new();
+    for address in &message.headers.cc {
+        push_unique(&mut cc, address, &mut seen);
+    }
+    (to, cc)
 }
 
 /// Seed a forward draft: empty recipients (the user picks them), `Fwd:`
@@ -204,7 +245,7 @@ mod tests {
 
     #[test]
     fn reply_addresses_the_sender_and_preserves_thread_headers() {
-        let seed = seed_reply(&source(), ReplyKind::Reply);
+        let seed = seed_reply(&source(), ReplyKind::Reply, None);
         assert_eq!(seed.to, "Bob <bob@example.org>");
         assert_eq!(seed.cc, "");
         assert_eq!(seed.subject, "Re: Plan review");
@@ -221,7 +262,7 @@ mod tests {
 
     #[test]
     fn reply_quotes_the_body_under_an_attribution_line() {
-        let seed = seed_reply(&source(), ReplyKind::Reply);
+        let seed = seed_reply(&source(), ReplyKind::Reply, None);
         let expected = "\n\nOn 2026-09-02 10:03, Bob <bob@example.org> wrote:\n\
                         > Please review.\n>\n> Thanks";
         assert_eq!(seed.body, expected);
@@ -231,7 +272,7 @@ mod tests {
     fn reply_keeps_an_existing_re_prefix() {
         let mut message = source();
         message.headers.subject = String::from("Re: Plan review");
-        let seed = seed_reply(&message, ReplyKind::Reply);
+        let seed = seed_reply(&message, ReplyKind::Reply, None);
         assert_eq!(seed.subject, "Re: Plan review");
     }
 
@@ -239,7 +280,7 @@ mod tests {
     fn reply_without_a_message_id_starts_a_fresh_thread() {
         let mut message = source();
         message.headers.message_id = None;
-        let seed = seed_reply(&message, ReplyKind::Reply);
+        let seed = seed_reply(&message, ReplyKind::Reply, None);
         assert_eq!(seed.in_reply_to, None);
         assert_eq!(seed.references, None);
     }
@@ -249,13 +290,93 @@ mod tests {
         let mut message = source();
         message.headers.date = None;
         message.plain_body = None;
-        let seed = seed_reply(&message, ReplyKind::Reply);
+        let seed = seed_reply(&message, ReplyKind::Reply, None);
         assert!(seed.body.contains("On an unknown date,"));
         assert!(seed.body.contains("(no plain text body)"));
         message.headers.from.clear();
-        let seed = seed_reply(&message, ReplyKind::Reply);
+        let seed = seed_reply(&message, ReplyKind::Reply, None);
         assert_eq!(seed.to, "");
         assert!(seed.body.contains("(unknown sender)"));
+    }
+
+    #[test]
+    fn reply_all_merges_sender_and_recipients_in_order() {
+        let seed = seed_reply(&source(), ReplyKind::ReplyAll, None);
+        // Sender first, then the original To; Cc keeps the rest.
+        assert_eq!(seed.to, "Bob <bob@example.org>, probe@post.local");
+        assert_eq!(seed.cc, "carol@example.org");
+        // Threading headers are unchanged by recipient merging.
+        assert_eq!(
+            seed.in_reply_to.as_deref(),
+            Some("3180034027954358661@post.local")
+        );
+    }
+
+    #[test]
+    fn reply_all_deduplicates_case_insensitively_keeping_first_form() {
+        let mut message = source();
+        message.headers.to = vec![
+            Address {
+                name: None,
+                email: String::from("BOB@example.org"),
+            },
+            Address {
+                name: Some(String::from("Carol Cc")),
+                email: String::from("carol@example.org"),
+            },
+        ];
+        message.headers.cc = vec![Address {
+            name: None,
+            email: String::from("bob@example.org"),
+        }];
+        let seed = seed_reply(&message, ReplyKind::ReplyAll, None);
+        // The first occurrence of each email wins (the sender's form for
+        // bob); Carol's To entry is her first occurrence, and the later
+        // Cc bob duplicate is dropped entirely.
+        assert_eq!(
+            seed.to,
+            "Bob <bob@example.org>, Carol Cc <carol@example.org>"
+        );
+        assert_eq!(seed.cc, "");
+    }
+
+    #[test]
+    fn reply_all_excludes_the_configured_own_address() {
+        let mut message = source();
+        // The account itself was a Cc recipient; replying must not mail it.
+        message.headers.to.push(Address {
+            name: None,
+            email: String::from("me@post.local"),
+        });
+        message.headers.cc.push(Address {
+            name: Some(String::from("Me")),
+            email: String::from("ME@post.local"),
+        });
+        let seed = seed_reply(&message, ReplyKind::ReplyAll, Some("me@post.local"));
+        assert!(!seed.to.contains("me@post.local"));
+        assert!(!seed.cc.contains("post.local"), "{}", seed.cc);
+        // Without a configured address nothing is excluded.
+        let seed = seed_reply(&message, ReplyKind::ReplyAll, None);
+        assert!(seed.to.contains("me@post.local"));
+    }
+
+    #[test]
+    fn reply_all_to_your_own_message_still_has_recipients_if_others_exist() {
+        // Sent a message to Carol; she replies-all. Everyone else is gone,
+        // the account is excluded, and validation refuses an empty send.
+        let mut message = source();
+        message.headers.from = vec![Address {
+            name: None,
+            email: String::from("me@post.local"),
+        }];
+        message.headers.to = vec![Address {
+            name: None,
+            email: String::from("me@post.local"),
+        }];
+        message.headers.cc.clear();
+        let seed = seed_reply(&message, ReplyKind::ReplyAll, Some("me@post.local"));
+        assert_eq!(seed.to, "", "only the self address was present");
+        assert_eq!(seed.cc, "");
     }
 
     #[test]

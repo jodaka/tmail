@@ -2262,3 +2262,39 @@ fn leaving_a_seeded_reply_returns_to_the_reader() {
         Some("318@post.local")
     );
 }
+
+#[test]
+fn reply_all_merges_recipients_dedups_and_excludes_self() {
+    let mut s = state();
+    s.account_email = Some(String::from("probe@post.local"));
+    let mut message = reply_source();
+    // Carol appears in To and Cc; the account itself was a recipient.
+    message.headers.to.push(Address {
+        name: Some(String::from("Carol")),
+        email: String::from("carol@example.org"),
+    });
+    message.headers.cc.push(Address {
+        name: None,
+        email: String::from("CAROL@example.org"),
+    });
+    message.headers.cc.push(Address {
+        name: None,
+        email: String::from("probe@post.local"),
+    });
+    open_reader_with(&mut s, message);
+    no_effects(&reduce(&mut s, &Action::ReplyAll));
+    assert_eq!(s.status.message.as_deref(), Some("Reply-all draft ready"));
+    let composer = seeded_composer(&s);
+    // Sender first; the account's own address (probe@) is excluded even
+    // though it was in To; Carol keeps her first (To) form, and her Cc
+    // duplicate is dropped.
+    assert_eq!(
+        composer.draft.to,
+        "Bob <bob@example.org>, Carol <carol@example.org>"
+    );
+    assert_eq!(composer.draft.cc, "");
+    assert_eq!(
+        composer.draft.in_reply_to.as_deref(),
+        Some("318@post.local")
+    );
+}

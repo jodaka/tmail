@@ -95,10 +95,10 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::Reply => open_reply(state),
+        Action::ReplyAll => open_reply_all(state),
         Action::Forward => open_forward(state),
-        Action::Send | Action::ReplyAll | Action::LeaveComposer => {
-            // Send lands with the composer send flow (Phase 7.6/7.7);
-            // ReplyAll with the recipient-merge work (Phase 7.5).
+        Action::Send | Action::LeaveComposer => {
+            // Send lands with the composer send flow (Phase 7.6/7.7).
             // LeaveComposer is routed through `back_or_cancel` (plan §10).
             tracing::debug!(?action, "action not yet implemented");
             Vec::new()
@@ -316,8 +316,28 @@ fn open_reply(state: &mut AppState) -> Vec<Effect> {
         state.set_status("A draft is already open — send or discard it first");
         return Vec::new();
     }
-    let seed = crate::domain::reply::seed_reply(message, crate::domain::ReplyKind::Reply);
+    let seed = crate::domain::reply::seed_reply(message, crate::domain::ReplyKind::Reply, None);
     open_seeded_composer(state, seed, "Reply draft ready")
+}
+
+/// Seed a reply-all draft (Phase 7.5): recipients merged, deduplicated,
+/// and the configured account address excluded.
+fn open_reply_all(state: &mut AppState) -> Vec<Effect> {
+    let Some(message) = state.open_message.as_loaded() else {
+        tracing::debug!("reply-all ignored: no loaded message in the reader");
+        return Vec::new();
+    };
+    if state.composer.is_some() {
+        state.set_status("A draft is already open — send or discard it first");
+        return Vec::new();
+    }
+    let own = state.account_email.clone();
+    let seed = crate::domain::reply::seed_reply(
+        message,
+        crate::domain::ReplyKind::ReplyAll,
+        own.as_deref(),
+    );
+    open_seeded_composer(state, seed, "Reply-all draft ready")
 }
 
 /// Seed a forward draft from the open message (reader).

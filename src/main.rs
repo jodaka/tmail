@@ -65,6 +65,8 @@ async fn run() -> anyhow::Result<()> {
 
     let mut guard = terminal::enable()?;
     let mut state = AppState::initial(config.page_size);
+    // Reply-all excludes the configured account address (Phase 7.5).
+    state.account_email = config.account_email.clone();
     if let Ok((width, height)) = crossterm::terminal::size() {
         state.size = (width, height);
     }
