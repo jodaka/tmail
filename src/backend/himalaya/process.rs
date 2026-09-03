@@ -161,13 +161,20 @@ pub(crate) fn decode<T: DeserializeOwned>(output: ChildOutput) -> BackendResult<
 /// Build the error for a non-zero exit. Prefers the JSON error object on
 /// stdout (ADR 0001 finding 1), then stderr, then a generic note.
 fn command_error(output: &ChildOutput) -> BackendError {
-    let detail = detail_from_stdout_json(&output.stdout)
-        .or_else(|| nonempty_lossy(&output.stderr))
-        .unwrap_or_else(|| "no diagnostic output".to_string());
     BackendError::Command {
         code: output.code,
-        detail,
+        detail: error_detail(output),
     }
+}
+
+/// Human-facing diagnostic for a failed child run: the JSON error object on
+/// stdout when present, else stderr, else a generic note. Shared with send
+/// classification (Phase 7.2), which needs the detail without the error
+/// wrapper.
+pub(crate) fn error_detail(output: &ChildOutput) -> String {
+    detail_from_stdout_json(&output.stdout)
+        .or_else(|| nonempty_lossy(&output.stderr))
+        .unwrap_or_else(|| "no diagnostic output".to_string())
 }
 
 /// Extract `{"error": …, "sources": […]}` text from stdout, if present.

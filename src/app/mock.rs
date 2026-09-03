@@ -346,6 +346,8 @@ pub fn mock_message(summary: &MessageSummary) -> Message {
             cc: Vec::new(),
             date: Some(summary.timestamp),
             message_id: summary.message_id.clone(),
+            in_reply_to: None,
+            references: None,
         },
         plain_body: Some(body),
         html_body: None,

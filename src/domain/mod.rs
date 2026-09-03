@@ -14,4 +14,4 @@ pub use draft::{Draft, DraftId, DraftSaveState, DraftSnapshot, RestoredDraft};
 pub use mailbox::{Mailbox, MailboxId, MailboxRole};
 pub use message::{Attachment, Message, MessageHeaders, MessageId, MessageLocator, MessageSummary};
 pub use page::{Page, PageRequest};
-pub use send::SendOutcome;
+pub use send::{OutboundMessage, OutgoingContent, SendBlocker, SendOutcome};

@@ -150,6 +150,9 @@ pub(crate) enum HeaderValueDto {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) enum KnownHeaderValue {
     Text(String),
+    /// `References`-shaped headers arrive as a list of ids (mail_parser
+    /// serde dump); joined into the bare space-separated form.
+    TextList(Vec<String>),
     Address(AddressValueDto),
     DateTime(RawDateTimeDto),
     ContentType(ContentTypeDto),

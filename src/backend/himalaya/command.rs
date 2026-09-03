@@ -145,6 +145,17 @@ pub(crate) fn message_add_argv(
     argv
 }
 
+/// `message send --json` with the raw RFC 5322 message piped on stdin
+/// (ADR 0001 findings table; fixtures/himalaya/send-outcomes.md: success
+/// prints `{"message":"Message successfully sent"}`, failures are JSON
+/// errors with exit 1 — including errors that may mean the message was
+/// already delivered, which Post classifies in the adapter).
+pub(crate) fn message_send_argv(config: Option<&Path>, account: Option<&str>) -> Vec<String> {
+    let mut argv = global_flags(config, account);
+    argv.extend(["message", "send", "--json"].into_iter().map(String::from));
+    argv
+}
+
 fn global_flags(config: Option<&Path>, account: Option<&str>) -> Vec<String> {
     let mut argv = Vec::new();
     if let Some(config) = config {
@@ -292,6 +303,23 @@ mod tests {
         assert_eq!(
             argv,
             vec!["message", "delete", "-m", "INBOX", "env-1", "--json"]
+        );
+    }
+
+    #[test]
+    fn message_send_argv_is_exact() {
+        let argv = message_send_argv(Some(Path::new("/tmp/cfg.toml")), Some("probe"));
+        assert_eq!(
+            argv,
+            vec![
+                "-c",
+                "/tmp/cfg.toml",
+                "-a",
+                "probe",
+                "message",
+                "send",
+                "--json",
+            ]
         );
     }
 }

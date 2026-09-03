@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app::operation::OperationId;
 use crate::domain::{
-    DraftSnapshot, Mailbox, Message, MessageId, MessageLocator, MessageSummary, Page, PageRequest,
-    RestoredDraft,
+    DraftSnapshot, Mailbox, Message, MessageId, MessageLocator, MessageSummary, OutboundMessage,
+    Page, PageRequest, RestoredDraft, SendOutcome,
 };
 
 /// Per-request context handed to every backend call (plan §8).
@@ -129,4 +129,18 @@ pub trait MailBackend: Send + Sync {
     /// journal entry, then best-effort delete every remote copy matching
     /// the draft's identity (two-phase, ADR 0002 §D.4).
     async fn delete_draft(&self, ctx: RequestContext, draft: DraftSnapshot) -> BackendResult<()>;
+
+    /// Deliver one serialized outgoing message through the Himalaya stdin
+    /// contract (plan §14, Phase 7.2): the raw RFC 5322 bytes are piped to
+    /// `message send` (argv only, no shell); Himalaya owns delivery and
+    /// Sent-copy storage. Returns the classified [`SendOutcome`] (plan §12)
+    /// rather than failing: a non-zero exit does NOT mean "not delivered"
+    /// — the classification tells retry and warning behavior apart. Only
+    /// structural refusals (missing identity, no recipients, spawn I/O)
+    /// are `Err`.
+    async fn send_message(
+        &self,
+        ctx: RequestContext,
+        message: OutboundMessage,
+    ) -> BackendResult<SendOutcome>;
 }

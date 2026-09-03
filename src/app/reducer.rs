@@ -11,7 +11,9 @@ use crate::app::action::{Action, SearchEdit};
 use crate::app::composer::{ComposerField, ComposerState};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
-use crate::app::operation::{OperationFailure, OperationKind, OperationOutcome, OperationResult};
+use crate::app::operation::{
+    DraftRemovalReason, OperationFailure, OperationKind, OperationOutcome, OperationResult,
+};
 use crate::app::overlay::{ConfirmButton, DiscardDialog, ErrorDialog, ModalButton, Overlay};
 use crate::app::route::{MailboxRoute, MessageRoute, Route};
 use crate::app::state::{AppState, Loadable};
@@ -279,6 +281,7 @@ fn confirm_discard(state: &mut AppState, draft: crate::domain::DraftSnapshot) ->
     state.set_status("Draft discarded");
     vec![state.operations.start(OperationKind::DeleteDraft {
         draft: Box::new(draft),
+        reason: DraftRemovalReason::Discard,
     })]
 }
 
@@ -540,6 +543,15 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                     Vec::new()
                 }
                 Err(failure) => open_error_modal(state, failure),
+            }
+        }
+        OperationKind::Send { .. } => {
+            state.operations.finish(result.id);
+            // The composer send flow (validation, frozen content, success/
+            // failure/ambiguous UX) lands with Phase 7.6/7.7; nothing can
+            // start a Send operation yet.
+            match &result.outcome {
+                Ok(_) | Err(_) => Vec::new(),
             }
         }
     }

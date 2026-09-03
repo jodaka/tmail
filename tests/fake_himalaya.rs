@@ -58,13 +58,53 @@ impl FakeHimalaya {
         Self::spawn_script(mailbox_mode, envelope_mode, message_mode, flag_mode, SCRIPT)
     }
 
+    /// The fake with a dedicated `message send` behavior mode (`ok`
+    /// | `ambiguous` | `predelivery` | `unclassifiable` | `error-json`
+    /// | `slow`), for the Phase 7 send-outcome contract tests.
+    pub fn spawn_send(
+        mailbox_mode: &'static str,
+        envelope_mode: &'static str,
+        message_mode: &'static str,
+        flag_mode: &'static str,
+        send_mode: &'static str,
+    ) -> Self {
+        Self::spawn_script_send(
+            mailbox_mode,
+            envelope_mode,
+            message_mode,
+            flag_mode,
+            send_mode,
+            SCRIPT,
+        )
+    }
+
     /// The fake built from an explicit script body (custom envelope
-    /// fixtures for draft reconciliation tests).
+    /// fixtures for draft reconciliation tests). The send mode defaults
+    /// to `ok`.
     pub fn spawn_script(
         mailbox_mode: &'static str,
         envelope_mode: &'static str,
         message_mode: &'static str,
         flag_mode: &'static str,
+        script_template: &str,
+    ) -> Self {
+        Self::spawn_script_send(
+            mailbox_mode,
+            envelope_mode,
+            message_mode,
+            flag_mode,
+            "ok",
+            script_template,
+        )
+    }
+
+    /// [`Self::spawn_script`] with the `message send` mode set explicitly.
+    pub fn spawn_script_send(
+        mailbox_mode: &'static str,
+        envelope_mode: &'static str,
+        message_mode: &'static str,
+        flag_mode: &'static str,
+        send_mode: &'static str,
         script_template: &str,
     ) -> Self {
         let dir = TempDir::new().expect("temp dir");
@@ -79,7 +119,8 @@ impl FakeHimalaya {
             .replace("@MAILBOX_MODE@", mailbox_mode)
             .replace("@ENVELOPE_MODE@", envelope_mode)
             .replace("@MESSAGE_MODE@", message_mode)
-            .replace("@FLAG_MODE@", flag_mode);
+            .replace("@FLAG_MODE@", flag_mode)
+            .replace("@SEND_MODE@", send_mode);
 
         let mut file = fs::File::create(&program).expect("write fake script");
         file.write_all(script.as_bytes())
@@ -251,6 +292,36 @@ if [ "$SUB" = "envelope" ]; then
 fi
 
 if [ "$SUB" = "message" ]; then
+  if [ "$OP" = "send" ]; then
+    # Phase 7 send-outcome modes (fixtures/himalaya/send-outcomes.md).
+    case "@SEND_MODE@" in
+      ok)
+        printf '%s' '{"message":"Message successfully sent"}'
+        ;;
+      ambiguous)
+        # Probe-verified ambiguous failure: payload was transmitted, then
+        # the connection died during DATA.
+        printf '%s' '{"error":"SMTP DATA failed: Reached unexpected EOF"}'
+        exit 1
+        ;;
+      predelivery)
+        printf '%s' '{"error":"connect 127.0.0.1:3425: connection refused"}'
+        exit 1
+        ;;
+      unclassifiable)
+        printf '%s' '{"error":"something odd happened"}'
+        exit 1
+        ;;
+      error-json)
+        printf '%s' '{"error":"send refused","sources":["smtp"]}'
+        exit 1
+        ;;
+      slow)
+        sleep 30
+        ;;
+    esac
+    exit 0
+  fi
   case "@MESSAGE_MODE@" in
     ok)
       case "$OP" in

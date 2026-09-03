@@ -33,6 +33,11 @@ pub struct MessageHeaders {
     /// unparseable (the UI falls back to a stable placeholder).
     pub date: Option<DateTime<FixedOffset>>,
     pub message_id: Option<String>,
+    /// Bare `In-Reply-To` id (`None` when absent); what reply seeding
+    /// preserves (plan §14, Phase 7.4).
+    pub in_reply_to: Option<String>,
+    /// Bare, whitespace-separated `References` chain (`None` when absent).
+    pub references: Option<String>,
 }
 
 /// Metadata for one message attachment (plan §7/§15). Bytes are fetched by

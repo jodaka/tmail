@@ -1976,7 +1976,11 @@ fn confirmed_discard_deletes_local_and_remote_state() {
     reduce(&mut s, &Action::FocusNext); // Discard button
     let effects = reduce(&mut s, &Action::Activate);
     let (id, kind) = effect_parts(&effects);
-    let crate::app::operation::OperationKind::DeleteDraft { draft } = &kind else {
+    let crate::app::operation::OperationKind::DeleteDraft {
+        draft,
+        reason: DraftRemovalReason::Discard,
+    } = &kind
+    else {
         panic!("expected DeleteDraft, got {kind:?}");
     };
     assert_eq!(

@@ -110,20 +110,31 @@ async fn run_effect(
                 Err(err) => operation_failure(&effect, err).map(Err),
             }
         }
+        OperationKind::Send { message } => match backend.send_message(ctx, *message).await {
+            // Classified delivery outcomes (plan §12) — including failures
+            // — travel as success payloads; only structural refusals
+            // (spawn I/O, refused request) come back as errors.
+            Ok(outcome) => Some(Ok(OperationOutcome::SendOutcome(outcome))),
+            Err(err) => operation_failure(&effect, err).map(Err),
+        },
     }
 }
 
 /// The snapshot carried by a delete-draft effect.
 fn effect_draft(effect: &Effect) -> crate::domain::DraftSnapshot {
     match &effect.kind {
-        OperationKind::DeleteDraft { draft } => (**draft).clone(),
+        OperationKind::DeleteDraft { draft, .. } => (**draft).clone(),
         other => unreachable!("effect_draft on non-delete kind: {other:?}"),
     }
 }
 
 /// Map a backend error into a modal-ready failure (plan §12): exit status,
 /// sanitized detail, and the typed retry intent. Cancelled operations
-/// produce no failure at all.
+/// produce no failure at all. These failures are always *structural*
+/// (the request could not even run: missing identity, refused request,
+/// spawn I/O) — a send that ran and failed is classified inside
+/// [`SendOutcome`](crate::domain::SendOutcome) instead, so nothing here
+/// is ever ambiguous (plan §12).
 fn operation_failure(effect: &Effect, err: BackendError) -> Option<OperationFailure> {
     if matches!(err, BackendError::Cancelled) {
         return None;
@@ -142,8 +153,9 @@ fn operation_failure(effect: &Effect, err: BackendError) -> Option<OperationFail
         // Sanitized before entering state/UI or logs (plan §12).
         detail: sanitize(&detail),
         retry: Some(effect.retry_spec()),
-        // Send ambiguity is wired when send lands (Phase 7); list/flag
-        // operations are never ambiguous.
+        // Structural failures are never ambiguous: a send that ran is
+        // classified into SendOutcome by the backend (plan §12), and every
+        // other operation is safely retryable.
         ambiguous: false,
     })
 }
@@ -305,6 +317,14 @@ mod tests {
             _draft: crate::domain::DraftSnapshot,
         ) -> BackendResult<()> {
             Ok(())
+        }
+
+        async fn send_message(
+            &self,
+            _req: RequestContext,
+            _message: crate::domain::OutboundMessage,
+        ) -> BackendResult<crate::domain::SendOutcome> {
+            Ok(crate::domain::SendOutcome::Sent)
         }
     }
 

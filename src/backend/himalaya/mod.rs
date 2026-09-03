@@ -18,13 +18,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use mail_builder::MessageBuilder;
+use mail_builder::headers::address::Address as MailAddress;
 
 use crate::backend::journal::DraftJournal;
 use crate::backend::traits::{BackendError, BackendResult, MailBackend, RequestContext};
 use crate::config::Config;
 use crate::domain::{
-    DraftSnapshot, Mailbox, MailboxRole, Message, MessageId, MessageLocator, MessageSummary, Page,
-    PageRequest, RestoredDraft,
+    DraftSnapshot, Mailbox, MailboxRole, Message, MessageId, MessageLocator, MessageSummary,
+    OutboundMessage, Page, PageRequest, RestoredDraft, SendOutcome,
 };
 
 /// Drives the `himalaya` executable with argv-only child processes.
@@ -311,6 +313,31 @@ impl MailBackend for HimalayaCliBackend {
         }
         Ok(())
     }
+
+    async fn send_message(
+        &self,
+        ctx: RequestContext,
+        message: OutboundMessage,
+    ) -> BackendResult<SendOutcome> {
+        tracing::debug!(
+            operation = %ctx.operation,
+            recipients = message.recipient_count(),
+            "send_message"
+        );
+        // 1. Serialize through the library (Phase 7.1) — refusals for a
+        //    missing identity or empty recipient lists happen here, before
+        //    any child process exists.
+        let bytes = self.serialize_outbound(&message)?;
+        // 2. Deliver through the stdin contract (ADR 0001 decision 2,
+        //    plan §11: "Pipe serialized mail to stdin when required").
+        let argv = command::message_send_argv(self.config_path.as_deref(), self.account.as_deref());
+        let output =
+            process::run_with_stdin(&self.program, &argv, Some(&bytes), &ctx.cancellation).await?;
+        // 3. Classify the outcome (plan §12, ADR 0001 finding 12): the
+        //    exit status alone cannot separate "failed before delivery"
+        //    from "may already be delivered".
+        Ok(classify_send(output))
+    }
 }
 
 impl HimalayaCliBackend {
@@ -473,27 +500,8 @@ impl HimalayaCliBackend {
     /// MIME). The stable `Message-ID` (ADR 0002 §D.6) and Post-owned
     /// `X-Post-Draft-Id` header make replacement and reconciliation
     /// possible; only valid parsed addresses are written (the composer
-    /// flags invalid ones and send refuses them in Phase 7).
+    /// flags invalid ones and send refuses them before starting, Phase 7).
     fn serialize_draft(&self, draft: &DraftSnapshot) -> BackendResult<Vec<u8>> {
-        use mail_builder::MessageBuilder;
-        use mail_builder::headers::address::Address as MailAddress;
-
-        /// Parse one composer address field into library addresses (valid
-        /// entries only; invalid ones are flagged in the composer UI and
-        /// refused at send time in Phase 7).
-        fn parse(field: &str) -> Vec<MailAddress<'static>> {
-            crate::domain::address::parse_address_list(field)
-                .into_iter()
-                .filter_map(Result::ok)
-                .map(|a| MailAddress::new_address(a.name, a.email))
-                .collect()
-        }
-
-        /// Header form: omitted when the field is empty.
-        fn addresses(list: Vec<MailAddress<'static>>) -> Option<MailAddress<'static>> {
-            (!list.is_empty()).then_some(MailAddress::List(list))
-        }
-
         if draft.message_id.is_none() {
             return Err(BackendError::InvalidRequest(String::from(
                 "draft is missing a stable Message-ID; it must be minted \
@@ -508,10 +516,7 @@ impl HimalayaCliBackend {
                 mail_builder::headers::raw::Raw::from(draft.local_id.0.clone()),
             );
         if let Some(message_id) = &draft.message_id {
-            // The draft stores the full RFC form `<id-left@id-right>`;
-            // mail-builder adds the angle brackets itself.
-            let bare = message_id.trim_start_matches('<').trim_end_matches('>');
-            builder = builder.message_id(bare);
+            builder = builder.message_id(bare_message_id(message_id));
         }
         if let Some(email) = &self.account_email {
             builder = builder.from(MailAddress::new_address(
@@ -519,16 +524,18 @@ impl HimalayaCliBackend {
                 email.clone(),
             ));
         }
-        // mail_builder takes ownership; build owned lists per field.
-        builder = match addresses(parse(&draft.to)) {
+        // mail_builder takes ownership; build owned lists per field. Draft
+        // fields may hold partially typed addresses (the composer flags
+        // them live); invalid entries are dropped, sends refuse them.
+        builder = match header_addresses(&draft.to) {
             Some(addr) => builder.to(addr),
             None => builder,
         };
-        builder = match addresses(parse(&draft.cc)) {
+        builder = match header_addresses(&draft.cc) {
             Some(addr) => builder.cc(addr),
             None => builder,
         };
-        builder = match addresses(parse(&draft.bcc)) {
+        builder = match header_addresses(&draft.bcc) {
             Some(addr) => builder.bcc(addr),
             None => builder,
         };
@@ -542,6 +549,160 @@ impl HimalayaCliBackend {
                 BackendError::InvalidRequest(format!("draft serialization failed: {err}"))
             })
     }
+
+    /// Serialize one outgoing message as a single-part `text/plain` RFC 5322
+    /// message via the mail-builder library (plan §14, Phase 7.1: never
+    /// hand-concatenate MIME). `From` comes from the configured account
+    /// identity; reply headers ride through unchanged (plan §14); the
+    /// `Message-ID` reuses the draft's stable identity when the send
+    /// derives from a draft (ADR 0002 §D.6) and is minted otherwise.
+    ///
+    /// Recipients are refused here as defense in depth — [`crate::domain::OutboundMessage`]
+    /// is constructed only from validated fields, so this arm is
+    /// unreachable through the reducer.
+    fn serialize_outbound(&self, message: &OutboundMessage) -> BackendResult<Vec<u8>> {
+        if message.recipient_count() == 0 {
+            return Err(BackendError::InvalidRequest(String::from(
+                "outbound message has no recipients",
+            )));
+        }
+        let Some(email) = &self.account_email else {
+            return Err(BackendError::InvalidRequest(String::from(
+                "no account email is configured; set [accounts.<account>].email \
+                 so outgoing mail has a From address",
+            )));
+        };
+        let message_id = match &message.message_id {
+            Some(id) => bare_message_id(id),
+            None => format!(
+                "{}.send@post.local",
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ),
+        };
+        let mut builder = MessageBuilder::new()
+            .date(chrono::Utc::now().timestamp())
+            .message_id(message_id)
+            .from(MailAddress::new_address(
+                self.account_display_name.clone(),
+                email.clone(),
+            ));
+        for (field, addresses) in [
+            ("To", &message.to),
+            ("Cc", &message.cc),
+            ("Bcc", &message.bcc),
+        ] {
+            if addresses.is_empty() {
+                continue;
+            }
+            let list = MailAddress::List(
+                addresses
+                    .iter()
+                    .map(|a| MailAddress::new_address(a.name.clone(), a.email.clone()))
+                    .collect(),
+            );
+            builder = match field {
+                "To" => builder.to(list),
+                "Cc" => builder.cc(list),
+                _ => builder.bcc(list),
+            };
+        }
+        if !message.content.subject.is_empty() {
+            builder = builder.subject(message.content.subject.as_str());
+        }
+        if let Some(in_reply_to) = &message.content.in_reply_to {
+            builder = builder.in_reply_to(bare_message_id(in_reply_to));
+        }
+        if let Some(references) = &message.content.references {
+            let ids: Vec<String> = references.split_whitespace().map(bare_message_id).collect();
+            builder = builder.references(mail_builder::headers::message_id::MessageId::new_list(
+                ids.into_iter(),
+            ));
+        }
+        builder
+            .text_body(message.content.body.as_str())
+            .write_to_vec()
+            .map_err(|err| {
+                BackendError::InvalidRequest(format!("outbound serialization failed: {err}"))
+            })
+    }
+}
+
+/// Parse one composer address field into library addresses (valid entries
+/// only). Draft fields may hold partially typed input — the composer flags
+/// invalid entries live and send refuses them before starting (Phase 7) —
+/// so drafts drop the invalid ones instead of failing the autosave.
+fn header_addresses(field: &str) -> Option<MailAddress<'static>> {
+    let list: Vec<MailAddress<'static>> = crate::domain::address::parse_address_list(field)
+        .into_iter()
+        .filter_map(Result::ok)
+        .map(|a| MailAddress::new_address(a.name, a.email))
+        .collect();
+    (!list.is_empty()).then_some(MailAddress::List(list))
+}
+
+/// Bare id form for mail-builder, which adds the angle brackets itself.
+fn bare_message_id(message_id: &str) -> String {
+    message_id
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .to_string()
+}
+
+/// Classify one finished `message send` run into a [`SendOutcome`] (plan
+/// §12; characterization: `fixtures/himalaya/send-outcomes.md`).
+///
+/// - exit 0 → [`SendOutcome::Sent`], even if the success JSON is odd: the
+///   message was almost certainly delivered, and claiming failure would
+///   invite a duplicate send.
+/// - exit != 0 with a diagnostic matching a *pre-DATA* phase marker
+///   (connection/DNS/TLS/auth failures, unresolved `--save` targets) →
+///   `FailedBeforeDelivery`: nothing was transmitted, retrying is safe.
+/// - everything else → conservatively `Unknown`: killed or unparseable
+///   runs, and transport errors during/after DATA (verified ambiguous —
+///   the sink received the payload while himalaya reported an error).
+///
+/// Cancellation never reaches here: the process layer reports it as
+/// [`BackendError::Cancelled`] before a classification exists.
+fn classify_send(output: process::ChildOutput) -> SendOutcome {
+    if output.code == Some(0) {
+        return SendOutcome::Sent;
+    }
+    let code = output.code;
+    let detail = process::error_detail(&output);
+    if pre_delivery_failure(&detail) {
+        SendOutcome::FailedBeforeDelivery { code, detail }
+    } else {
+        SendOutcome::Unknown { code, detail }
+    }
+}
+
+/// Whether a send diagnostic clearly marks a failure *before* the SMTP
+/// DATA phase (nothing transmitted). Matched case-insensitively against
+/// the Phase 0 probe vocabulary; anything not listed is conservatively
+/// treated as unknown delivery state — except explicit DATA-phase markers,
+/// which are always post-connection and therefore never pre-delivery.
+fn pre_delivery_failure(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("smtp data") {
+        return false;
+    }
+    const PRE_DATA_MARKERS: [&str; 14] = [
+        "connect",            // "connect 127.0.0.1:3425: connection refused"
+        "connection refused", // redundant with the above, kept for clarity
+        "no route",
+        "network is unreachable",
+        "resolve", // DNS resolution failures
+        "lookup",
+        "nodename",
+        "name or service",
+        "tls",
+        "ssl",
+        "certificate",
+        "handshake",
+        "auth",            // SMTP authentication happens before DATA
+        "not a directory", // an unusable `--save` target (probe: pre-delivery)
+    ];
+    PRE_DATA_MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
 /// One remote draft copy to clean up.
@@ -635,5 +796,94 @@ async fn run_two_phase_delete(
             }
             Err(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+
+    fn output(code: Option<i32>, stdout: &str, stderr: &str) -> process::ChildOutput {
+        process::ChildOutput {
+            code,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn exit_zero_is_sent_even_with_odd_output() {
+        // Claiming failure on exit 0 would invite a duplicate send.
+        assert_eq!(
+            classify_send(output(Some(0), "junk", "")),
+            SendOutcome::Sent
+        );
+        assert_eq!(
+            classify_send(output(
+                Some(0),
+                r#"{"message":"Message successfully sent"}"#,
+                ""
+            )),
+            SendOutcome::Sent
+        );
+    }
+
+    #[test]
+    fn connection_failures_are_failed_before_delivery() {
+        let outcome = classify_send(output(
+            Some(1),
+            r#"{"error":"connect 127.0.0.1:3425: connection refused","sources":["smtp"]}"#,
+            "",
+        ));
+        assert_eq!(
+            outcome,
+            SendOutcome::FailedBeforeDelivery {
+                code: Some(1),
+                detail: String::from("connect 127.0.0.1:3425: connection refused (smtp)"),
+            }
+        );
+        assert!(!outcome.is_ambiguous());
+    }
+
+    #[test]
+    fn data_phase_errors_are_unknown() {
+        // Probe-verified AMBIGUOUS: the sink received the payload.
+        let outcome = classify_send(output(
+            Some(1),
+            r#"{"error":"SMTP DATA failed: Reached unexpected EOF"}"#,
+            "",
+        ));
+        assert_eq!(
+            outcome,
+            SendOutcome::Unknown {
+                code: Some(1),
+                detail: String::from("SMTP DATA failed: Reached unexpected EOF"),
+            }
+        );
+        assert!(outcome.is_ambiguous());
+    }
+
+    #[test]
+    fn unclassifiable_errors_are_conservatively_unknown() {
+        let outcome = classify_send(output(Some(1), r#"{"error":"something odd"}"#, ""));
+        assert!(matches!(outcome, SendOutcome::Unknown { .. }));
+        assert!(outcome.is_ambiguous());
+        // No stdout JSON at all falls back to stderr, then the generic note.
+        let outcome = classify_send(output(Some(2), "", "killed by signal?"));
+        assert!(matches!(outcome, SendOutcome::Unknown { .. }));
+        assert_eq!(outcome.detail(), "killed by signal?");
+    }
+
+    #[test]
+    fn pre_delivery_marker_vocabulary() {
+        assert!(pre_delivery_failure("connect 127.0.0.1:1: refused"));
+        assert!(pre_delivery_failure("TLS handshake failed"));
+        assert!(pre_delivery_failure("failed to resolve host"));
+        assert!(pre_delivery_failure("path /x/NoBox is not a directory"));
+        assert!(pre_delivery_failure("authentication failed"));
+        // Explicit DATA-phase markers are never pre-delivery…
+        assert!(!pre_delivery_failure("SMTP DATA failed: timeout"));
+        // …and everything unlisted is conservative.
+        assert!(!pre_delivery_failure("mailbox disappeared"));
     }
 }

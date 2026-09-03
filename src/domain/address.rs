@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 /// A mail address. `name` is the display name when the backend provides one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Address {
     pub name: Option<String>,
     pub email: String,
@@ -10,6 +12,26 @@ impl Address {
         match &self.name {
             Some(name) if !name.is_empty() => name,
             _ => &self.email,
+        }
+    }
+
+    /// Composer-field form (`Name <email>` or bare email) used when reply/
+    /// forward seeds fill the composer (Phase 7). Deliberately round-trips
+    /// through [`Address::parse_entry`]: names that cannot be represented
+    /// without escaping tricks (embedded quotes, angle brackets) fall back
+    /// to the bare address rather than emitting something unparseable.
+    pub fn to_field(&self) -> String {
+        match &self.name {
+            Some(name) if !name.is_empty() && !name.contains('"') => {
+                if name.contains(',') {
+                    format!("\"{name}\" <{}>", self.email)
+                } else if name.contains('<') || name.contains('>') {
+                    self.email.clone()
+                } else {
+                    format!("{name} <{}>", self.email)
+                }
+            }
+            _ => self.email.clone(),
         }
     }
 
@@ -132,6 +154,16 @@ pub fn parse_address_list(input: &str) -> Vec<Result<Address, String>> {
             }
         })
         .collect()
+}
+
+/// Comma-separated composer-field text for a list of addresses (Phase 7
+/// reply/forward seeding); an empty list yields an empty field.
+pub fn to_field_list(addresses: &[Address]) -> String {
+    addresses
+        .iter()
+        .map(Address::to_field)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -263,6 +295,33 @@ mod tests {
         let parsed = parse_address_list("a b, @x.io");
         assert_eq!(parsed.len(), 2);
         assert!(parsed.iter().all(|r| r.is_err()));
+    }
+
+    #[test]
+    fn to_field_round_trips_through_parse_entry() {
+        let plain = addr("Ada Lovelace", "ada@example.org");
+        assert_eq!(plain.to_field(), "Ada Lovelace <ada@example.org>");
+        assert_eq!(Address::parse_entry(&plain.to_field()), Some(plain));
+        // Commas force the quoted form, which parse_entry understands.
+        let comma = addr("Orlov, Maksim", "m@example.org");
+        assert_eq!(comma.to_field(), "\"Orlov, Maksim\" <m@example.org>");
+        assert_eq!(Address::parse_entry(&comma.to_field()), Some(comma));
+        // Unrepresentable names degrade to the bare address.
+        let quoted = addr("Weird \"Name\"", "w@example.org");
+        assert_eq!(quoted.to_field(), "w@example.org");
+        let bracketed = addr("<Webmaster>", "web@example.org");
+        assert_eq!(bracketed.to_field(), "web@example.org");
+        assert_eq!(
+            Address::parse_entry(&bracketed.to_field()).unwrap().email,
+            "web@example.org"
+        );
+    }
+
+    #[test]
+    fn field_list_joins_with_commas() {
+        let list = vec![addr("Ada", "a@x.io"), addr("Bob", "b@x.io")];
+        assert_eq!(to_field_list(&list), "Ada <a@x.io>, Bob <b@x.io>");
+        assert_eq!(to_field_list(&[]), "");
     }
 
     #[test]

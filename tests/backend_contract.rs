@@ -818,3 +818,184 @@ fn save_draft_without_a_known_drafts_mailbox_is_rejected() {
     );
     assert!(fake.argv().is_empty(), "nothing was spawned");
 }
+
+// ── Send (plan §14, Phase 7.1/7.2) ───────────────────────────────────────
+
+use tmail::domain::{OutboundMessage, OutgoingContent};
+
+/// Backend with the configured account identity, as the real wiring builds
+/// it (the `From` of outgoing mail).
+fn backend_with_identity(fake: &FakeHimalaya) -> HimalayaCliBackend {
+    backend(fake, Some("probe")).with_account_identity(
+        Some(String::from("probe@post.local")),
+        Some(String::from("Post Probe")),
+    )
+}
+
+fn outbound() -> OutboundMessage {
+    OutboundMessage::from_fields(
+        "Ada Lovelace <ada@example.org>",
+        "",
+        "",
+        OutgoingContent {
+            subject: String::from("Hello again"),
+            body: String::from("Body line one.\nBody line two.\n"),
+            in_reply_to: None,
+            references: None,
+        },
+        Some(String::from("<123.send@post.local>")),
+    )
+    .expect("valid recipients")
+}
+
+#[test]
+fn send_pipes_the_serialized_message_on_stdin_with_exact_argv() {
+    let fake = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "ok");
+    let outcome =
+        block(backend_with_identity(&fake).send_message(ctx(), outbound())).expect("send succeeds");
+    assert_eq!(outcome, tmail::domain::SendOutcome::Sent);
+    assert_eq!(
+        fake.argv(),
+        vec![vec![
+            "-c".to_string(),
+            fake.config().display().to_string(),
+            "-a".to_string(),
+            "probe".to_string(),
+            "message".to_string(),
+            "send".to_string(),
+            "--json".to_string(),
+        ]]
+    );
+    // The piped bytes are the full RFC 5322 message (CRLF wire format,
+    // library-ordered headers).
+    let stdin = fake.stdin_bytes();
+    let text = String::from_utf8(stdin).expect("serialized mail is UTF-8");
+    assert!(text.contains("To: \"Ada Lovelace\" <ada@example.org>"));
+    assert!(text.contains("Subject: Hello again"));
+    assert!(text.contains("Message-ID: <123.send@post.local>"));
+    assert!(text.contains("Body line one."));
+}
+
+/// Acceptance (plan §19 Phase 7): integration fixtures parse the sent
+/// output back into the expected headers/body. The bytes on the wire are
+/// parsed with `mail-parser` — the library inside Himalaya — through the
+/// same production mapping path.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn sent_output_parses_back_into_expected_headers_and_body() {
+    let fake = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "ok");
+    block(backend_with_identity(&fake).send_message(ctx(), outbound())).expect("sent");
+    let sent = tmail::backend::himalaya::fixtures::parse_raw_message(
+        &fake.stdin_bytes(),
+        "Sent",
+        "sent-1",
+    );
+    assert_eq!(sent.headers.subject, "Hello again");
+    assert_eq!(sent.headers.from.len(), 1);
+    assert_eq!(sent.headers.from[0].display(), "Post Probe");
+    assert_eq!(sent.headers.from[0].email, "probe@post.local");
+    assert_eq!(sent.headers.to.len(), 1);
+    assert_eq!(sent.headers.to[0].display(), "Ada Lovelace");
+    assert_eq!(
+        sent.headers.message_id.as_deref(),
+        Some("123.send@post.local")
+    );
+    // mail-builder writes CRLF line endings on the wire (RFC 5322).
+    assert_eq!(
+        sent.plain_body.as_deref(),
+        Some("Body line one.\r\nBody line two.\r\n")
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn sent_reply_headers_parse_back_into_the_wire_format() {
+    let fake = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "ok");
+    let message = OutboundMessage {
+        content: OutgoingContent {
+            in_reply_to: Some(String::from("6053432595490343824@post.local")),
+            references: Some(String::from(
+                "6053432595490343824@post.local 111@post.local",
+            )),
+            ..outbound().content
+        },
+        ..outbound()
+    };
+    block(backend_with_identity(&fake).send_message(ctx(), message)).expect("sent");
+    let sent = tmail::backend::himalaya::fixtures::parse_raw_message(
+        &fake.stdin_bytes(),
+        "Sent",
+        "sent-1",
+    );
+    assert_eq!(
+        sent.headers.in_reply_to.as_deref(),
+        Some("6053432595490343824@post.local")
+    );
+    assert_eq!(
+        sent.headers.references.as_deref(),
+        Some("6053432595490343824@post.local 111@post.local")
+    );
+}
+
+#[test]
+fn send_outcomes_follow_the_phase_0_characterization() {
+    // Exit 0 → Sent.
+    let fake = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "ok");
+    let outcome = block(backend_with_identity(&fake).send_message(ctx(), outbound())).unwrap();
+    assert_eq!(outcome, tmail::domain::SendOutcome::Sent);
+    // Dead port → FailedBeforeDelivery (nothing transmitted, retry safe).
+    let fake = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "predelivery");
+    let outcome = block(backend_with_identity(&fake).send_message(ctx(), outbound())).unwrap();
+    assert!(matches!(
+        outcome,
+        tmail::domain::SendOutcome::FailedBeforeDelivery { code: Some(1), .. }
+    ));
+    assert!(!outcome.is_ambiguous());
+    // DATA-phase EOF → Unknown (may already be delivered).
+    let fake = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "ambiguous");
+    let outcome = block(backend_with_identity(&fake).send_message(ctx(), outbound())).unwrap();
+    assert!(matches!(
+        outcome,
+        tmail::domain::SendOutcome::Unknown { code: Some(1), .. }
+    ));
+    assert!(outcome.is_ambiguous());
+    // Anything unclassifiable → conservatively Unknown.
+    let fake = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "unclassifiable");
+    let outcome = block(backend_with_identity(&fake).send_message(ctx(), outbound())).unwrap();
+    assert!(matches!(
+        outcome,
+        tmail::domain::SendOutcome::Unknown { .. }
+    ));
+}
+
+#[test]
+fn send_without_an_account_identity_is_refused_before_spawning() {
+    let fake = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "ok");
+    let backend = backend(&fake, Some("probe")); // no identity configured
+    let err = block(backend.send_message(ctx(), outbound())).expect_err("no From identity");
+    assert!(matches!(err, BackendError::InvalidRequest(ref msg) if msg.contains("email")));
+    assert!(fake.argv().is_empty(), "nothing was spawned");
+}
+
+#[test]
+fn send_without_recipients_is_refused_before_spawning() {
+    let fake = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "ok");
+    let message = OutboundMessage::from_fields("", "", "", OutgoingContent::default(), None)
+        .expect_err("no recipients");
+    assert!(
+        matches!(message, tmail::domain::SendBlocker::NoRecipients),
+        "the blocker fires before the backend is reached"
+    );
+    // Defense in depth: a hand-built recipient-free message is refused too.
+    let message = OutboundMessage {
+        to: Vec::new(),
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        content: OutgoingContent::default(),
+        message_id: None,
+    };
+    let err =
+        block(backend_with_identity(&fake).send_message(ctx(), message)).expect_err("no rcpt");
+    assert!(matches!(err, BackendError::InvalidRequest(ref msg) if msg.contains("recipients")));
+    assert!(fake.argv().is_empty(), "nothing was spawned");
+}

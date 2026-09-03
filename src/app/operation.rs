@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::{
-    DraftSnapshot, Mailbox, Message, MessageId, MessageLocator, MessageSummary, Page, PageRequest,
-    RestoredDraft,
+    DraftSnapshot, Mailbox, Message, MessageId, MessageLocator, MessageSummary, OutboundMessage,
+    Page, PageRequest, RestoredDraft, SendOutcome,
 };
 
 /// Opaque identifier carried by every backend request and result (plan §5:
@@ -64,9 +64,29 @@ pub enum OperationKind {
     /// Restore drafts from the crash-safe journal at startup (ADR 0002
     /// §D.5).
     LoadDrafts,
-    /// Delete a draft everywhere (journal + remote) after a confirmed
-    /// discard (plan §14). Boxed snapshot, as with `SaveDraft`.
-    DeleteDraft { draft: Box<DraftSnapshot> },
+    /// Delete a draft everywhere (journal + remote). `Discard` follows a
+    /// confirmed discard (plan §14) and opens the modal on failure;
+    /// `Sent` is the post-send cleanup (ADR 0002: best-effort — delivery
+    /// is already confirmed, so a failure must never claim one). Boxed
+    /// snapshot, as with `SaveDraft`.
+    DeleteDraft {
+        draft: Box<DraftSnapshot>,
+        reason: DraftRemovalReason,
+    },
+    /// Deliver one serialized message through the Himalaya stdin contract
+    /// (plan §14, Phase 7). The message is frozen at send time; retries
+    /// replay the exact bytes under a new operation id. Boxed, as with the
+    /// draft payloads.
+    Send { message: Box<OutboundMessage> },
+}
+
+/// Why a draft is being removed (Phase 7.6): it selects the failure UX.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DraftRemovalReason {
+    /// Confirmed discard (plan §14): failures open Retry/Dismiss.
+    Discard,
+    /// Post-send cleanup (ADR 0002 consequences): best-effort, logged only.
+    Sent,
 }
 
 impl OperationKind {
@@ -84,7 +104,11 @@ impl OperationKind {
             OperationKind::Trash(_) => "Moving to trash",
             OperationKind::SaveDraft { .. } => "Saving draft",
             OperationKind::LoadDrafts => "Restoring drafts",
-            OperationKind::DeleteDraft { .. } => "Discarding draft",
+            OperationKind::DeleteDraft { reason, .. } => match reason {
+                DraftRemovalReason::Discard => "Discarding draft",
+                DraftRemovalReason::Sent => "Cleaning up sent draft",
+            },
+            OperationKind::Send { .. } => "Sending message",
         }
     }
 
@@ -128,11 +152,24 @@ impl OperationKind {
             ) => newer.local_id == older.local_id,
             (OperationKind::LoadDrafts, OperationKind::LoadDrafts) => true,
             (
-                OperationKind::DeleteDraft { draft: newer },
-                OperationKind::DeleteDraft { draft: older },
+                OperationKind::DeleteDraft { draft: newer, .. },
+                OperationKind::DeleteDraft { draft: older, .. },
             ) => newer.local_id == older.local_id,
+            // Sends never supersede anything and are never superseded:
+            // every delivery attempt must run to its classified outcome.
             _ => false,
         }
+    }
+
+    /// Whether `Esc` may cancel this operation (plan §11: "cancel the
+    /// currently foregrounded cancellable operation"). Sends are never
+    /// cancellable: killing himalaya mid-DATA leaves the delivery state
+    /// unknown while the suppressed `Cancelled` result could claim neither
+    /// failure nor success — exactly the ambiguity plan §12 forbids
+    /// hiding. The user can still leave the composer; the send completes
+    /// (or is classified) in the background.
+    pub fn is_cancellable(&self) -> bool {
+        !matches!(self, OperationKind::Send { .. })
     }
 }
 
@@ -162,6 +199,10 @@ pub enum OperationOutcome {
     },
     /// Drafts restored from the journal at startup (ADR 0002 §D.5).
     Drafts(Vec<RestoredDraft>),
+    /// One classified send outcome (plan §12, Phase 7). Successes and
+    /// ambiguous/failed deliveries both arrive here; the reducer decides
+    /// between "sent" and the (possibly duplicate-warning) modal.
+    SendOutcome(SendOutcome),
 }
 
 /// A failure ready for the Retry/Dismiss modal (plan §12). Built by the
@@ -279,8 +320,17 @@ impl OperationRegistry {
     }
 
     /// Cancel the foregrounded cancellable operation (`Esc`, plan §10/§11).
+    /// A non-cancellable foreground operation (a send in flight) is left
+    /// running: `Esc` falls through to navigation instead.
     pub fn cancel_foreground(&mut self) -> Option<Operation> {
         let id = self.foreground?;
+        let cancellable = self
+            .entries
+            .get(&id)
+            .is_some_and(|op| op.kind.is_cancellable());
+        if !cancellable {
+            return None;
+        }
         self.cancel(id)
     }
 
@@ -312,6 +362,14 @@ impl OperationRegistry {
         self.entries
             .values()
             .any(|op| matches!(op.kind, OperationKind::LoadDrafts))
+    }
+
+    /// Whether a message send is currently in flight (Phase 7): a second
+    /// send must wait rather than risk a duplicate delivery.
+    pub fn is_sending(&self) -> bool {
+        self.entries
+            .values()
+            .any(|op| matches!(op.kind, OperationKind::Send { .. }))
     }
 
     /// Whether a save of exactly `revision` of `local_id` is in flight —

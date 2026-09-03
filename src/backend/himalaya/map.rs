@@ -117,6 +117,8 @@ pub(crate) fn message(dto: dto::MessageReadDto, locator: MessageLocator) -> Mess
             cc: address_header(&headers, "cc"),
             date: date_header(&headers, "date"),
             message_id: text_header(&headers, "message-id"),
+            in_reply_to: text_header(&headers, "in-reply-to").map(bare_ids),
+            references: text_header(&headers, "references").map(bare_ids),
         },
         plain_body: None,
         html_body: None,
@@ -161,8 +163,23 @@ fn header<'a>(headers: &'a [dto::HeaderDto], name: &str) -> Option<&'a dto::Head
 fn text_header(headers: &[dto::HeaderDto], name: &str) -> Option<String> {
     match header(headers, name) {
         Some(dto::HeaderValueDto::Known(dto::KnownHeaderValue::Text(text))) => Some(text.clone()),
+        // `References` and friends serialize as a list of ids.
+        Some(dto::HeaderValueDto::Known(dto::KnownHeaderValue::TextList(ids))) => {
+            Some(ids.join(" "))
+        }
         _ => None,
     }
+}
+
+/// Normalize a `Message-ID`-shaped header to bare ids: angle brackets
+/// stripped, runs of whitespace collapsed to single spaces. Bare form is
+/// the identity Post matches on everywhere (ADR 0001 finding 4) and what
+/// reply seeding preserves (plan §14, Phase 7.4).
+fn bare_ids(raw: String) -> String {
+    raw.split_whitespace()
+        .map(|id| id.trim_start_matches('<').trim_end_matches('>').to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn address_header(headers: &[dto::HeaderDto], name: &str) -> Vec<Address> {
@@ -517,6 +534,31 @@ mod tests {
         assert_eq!(message.html_body, None);
         assert!(message.attachments.is_empty());
         assert_eq!(message.snippet(), None);
+    }
+
+    #[test]
+    fn reply_thread_headers_map_to_bare_ids() {
+        // Angle brackets and runs of whitespace are normalized away: bare
+        // ids are the identity Post matches on (ADR 0001 finding 4).
+        let dto: dto::MessageReadDto = serde_json::from_str(
+            r#"{
+                "parts": [{"headers": [
+                    {"name":"message-id","value":{"Text":"3180034027954358661@post.local"}},
+                    {"name":"in-reply-to","value":{"Text":"<6053432595490343824@post.local>"}},
+                    {"name":"references","value":{"Text":"<0@post.local>  <6053432595490343824@post.local>"}}
+                ]}]
+            }"#,
+        )
+        .expect("parses");
+        let message = message(dto, locator());
+        assert_eq!(
+            message.headers.in_reply_to.as_deref(),
+            Some("6053432595490343824@post.local")
+        );
+        assert_eq!(
+            message.headers.references.as_deref(),
+            Some("0@post.local 6053432595490343824@post.local")
+        );
     }
 
     #[test]
