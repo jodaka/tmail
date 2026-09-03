@@ -42,6 +42,7 @@ impl FakeHimalaya {
     /// mailbox: `ok` | `error-json` | `error-stderr` | `slow`
     /// envelope: `ok` | `empty` | `partial` | `malformed` | `non-utf8`
     ///           | `error-json` | `error-stderr` | `slow` | `draft-stray`
+    ///           | `signal`
     /// message (`read`/`move`/`delete`/`add`): `ok` | `error-json` | `slow`
     /// flag (`add`/`remove`): `ok` | `error-json` | `slow`
     pub fn spawn(mailbox_mode: &'static str, envelope_mode: &'static str) -> Self {
@@ -312,6 +313,12 @@ if [ "$SUB" = "envelope" ]; then
       # draft snapshot (<123.draft@post.local>), as reconciliation sweeps
       # must find it.
       printf '%s' '{"envelopes":[{"id":"stray-1","message-id":"123.draft@post.local","in-reply-to":[],"flags":[{"raw":"\\Draft","iana":"draft"}],"subject":"stale","from":[],"date":null}]}'
+      ;;
+    signal)
+      # Die by signal (SIGKILL): the wait status carries no exit code, so
+      # the adapter must still fail typed instead of panicking.
+      kill -9 "$$"
+      sleep 30
       ;;
     slow)
       # Long-running invocation for cancellation tests: hangs for 30s

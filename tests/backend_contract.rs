@@ -367,6 +367,47 @@ fn cancel_during_mailbox_list_reports_cancelled_not_output() {
     });
 }
 
+/// Phase 12.4: a nonexistent executable surfaces as a typed I/O error
+/// (spawn failure), never a panic or a silent success.
+#[test]
+fn missing_executable_is_a_typed_io_error() {
+    let fake = FakeHimalaya::spawn_ok();
+    let missing = fake
+        .program()
+        .parent()
+        .expect("fake dir exists")
+        .join("no-such-himalaya");
+    let backend = HimalayaCliBackend::new(
+        missing.display().to_string(),
+        Some(PathBuf::from(fake.config())),
+        Some(String::from("probe")),
+        aliases(&[]),
+    );
+    match block(backend.list_mailboxes(ctx())) {
+        Err(BackendError::Io(err)) => {
+            assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        }
+        other => panic!("expected Io, got {other:?}"),
+    }
+}
+
+/// Phase 12.4: a child killed by a signal (e.g. OOM killer, external
+/// SIGKILL) leaves a wait status with no exit code; the adapter must
+/// report a typed Command error instead of panicking or hanging.
+#[test]
+fn child_killed_by_a_signal_is_typed_not_a_panic() {
+    let fake = FakeHimalaya::spawn("ok", "signal");
+    let result =
+        block(backend(&fake, Some("probe")).list_messages(ctx(), page_request("INBOX", 0)));
+    match result {
+        Err(BackendError::Command { code, detail }) => {
+            assert_eq!(code, None, "signal death carries no exit code");
+            assert_eq!(detail, "no diagnostic output");
+        }
+        other => panic!("expected Command, got {other:?}"),
+    }
+}
+
 // ── Phase 4: reader and core actions ─────────────────────────────────────
 
 /// `message read -m <mbox> <id> --json` with exact argv, mapped into the

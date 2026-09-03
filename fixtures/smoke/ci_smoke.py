@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""CI smoke (Phase 12.6): terminal lifecycle + command selection per platform.
+
+Runs the real Post binary under a pty against a committed fake `himalaya`
+(fake_himalaya.sh) — no network, no real mail, fully deterministic:
+
+1. happy path: startup renders the fake inbox (proving the editor command
+   resolved, since the config uses `editor = "$EDITOR"`), then Esc quits
+   cleanly: exit code 0, leave-alternate-screen restore in the output, and
+   no panic text (terminal lifecycle, plan §19 Phase 12 acceptance);
+2. editor validation: the same `editor = "$EDITOR"` config with EDITOR
+   unset must fail startup with an "editor" validation issue;
+3. opener environment: the platform opener (`open` on macOS, `xdg-open`
+   on Linux) exists on the runner, matching src/backend/opener.rs's
+   compile-time selection (unit-tested per platform too).
+
+Usage: python3 fixtures/smoke/ci_smoke.py --bin target/debug/tmail
+
+Note: the app redraws on every 250 ms tick, so pty reads use fixed time
+windows, never "read until quiet".
+"""
+
+import argparse
+import fcntl
+import os
+import pty
+import re
+import select
+import shutil
+import struct
+import subprocess
+import sys
+import termios
+import time
+
+ROWS, COLS = 40, 152
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def strip_ansi(text):
+    text = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", text)
+    text = re.sub(r"\x1b[()][0-9A-B]", "", text)
+    return text
+
+
+def read_for(fd, seconds):
+    out = b""
+    end = time.time() + seconds
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.05)
+        if r:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+    return out.decode("utf-8", "replace")
+
+
+def wait_for(fd, needle, timeout=10.0):
+    end = time.time() + timeout
+    acc = ""
+    while time.time() < end:
+        acc += read_for(fd, 0.3)
+        if needle in strip_ansi(acc):
+            return acc
+    raise AssertionError(
+        f"timed out waiting for {needle!r}; got:\n{strip_ansi(acc)[-3000:]}"
+    )
+
+
+def spawn(argv, env_overrides):
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.environ["TERM"] = "xterm-256color"
+        for key, value in env_overrides.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        os.execvp(argv[0], argv)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
+    return pid, fd
+
+
+def wait_exit(pid, fd, timeout=10.0):
+    """Read until the child exits; return (status, all_output)."""
+    end = time.time() + timeout
+    out = ""
+    while time.time() < end:
+        out += read_for(fd, 0.3)
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            out += read_for(fd, 0.3)
+            return status, out
+    raise AssertionError(
+        f"process did not exit within {timeout}s; got:\n{strip_ansi(out)[-3000:]}"
+    )
+
+
+def write_config(path):
+    with open(path, "w") as f:
+        f.write(
+            "[accounts.probe]\n"
+            'email = "probe@post.local"\n'
+            "\n"
+            "[post]\n"
+            'account = "probe"\n'
+            "\n"
+            "[post.composer]\n"
+            'editor = "$EDITOR"\n'
+        )
+
+
+def step_happy(binpath, config, fake_dir):
+    print(
+        "== happy path: render, editor via $EDITOR, clean quit + restore ==", flush=True
+    )
+    pid, fd = spawn(
+        [binpath, config],
+        {"EDITOR": os.path.join(fake_dir, "true-like"), "PATH": os.environ["PATH"]},
+    )
+    try:
+        wait_for(fd, "Welcome")
+        print("   inbox rendered through the fake himalaya OK", flush=True)
+        os.write(fd, b"\x1b")  # Esc: nothing pending → quit
+        status, out = wait_exit(pid, fd)
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (
+            f"exit status {status!r}"
+        )
+        assert "\x1b[?1049l" in out, "terminal did not leave the alternate screen"
+        assert "panicked at" not in out, "panic text leaked into the terminal"
+        print("   exit 0 + alt-screen restore + no panic OK", flush=True)
+    finally:
+        try:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+        except (ChildProcessError, ProcessLookupError):
+            pass
+        os.close(fd)
+
+
+def step_editor_validation(binpath, config):
+    print("== editor validation: $EDITOR unset must fail startup ==", flush=True)
+    pid, fd = spawn([binpath, config], {"EDITOR": None})
+    try:
+        status, out = wait_exit(pid, fd, timeout=8.0)
+        text = strip_ansi(out)
+        assert not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0, (
+            f"startup should have failed, exited {os.WEXITSTATUS(status)}"
+        )
+        assert "editor" in text.lower(), f"no editor issue reported:\n{text[-2000:]}"
+        print("   startup refused with an editor validation issue OK", flush=True)
+    finally:
+        try:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+        except (ChildProcessError, ProcessLookupError):
+            pass
+        os.close(fd)
+
+
+def step_opener_environment():
+    print("== opener environment: platform opener present ==", flush=True)
+    program = "open" if sys.platform == "darwin" else "xdg-open"
+    found = shutil.which(program)
+    assert found, f"platform opener {program!r} missing from this runner"
+    print(f"   {program} found at {found} OK", flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bin", required=True, help="path to the post binary")
+    args = parser.parse_args()
+
+    binpath = os.path.abspath(args.bin)
+    assert os.path.isfile(binpath), f"binary not found: {binpath}"
+
+    # A dedicated bin dir staged on PATH first: `himalaya` (symlink to the
+    # committed fake) and `true-like` (symlink to the system true(1)), so
+    # both the backend program and `$EDITOR` resolution exercise real PATH
+    # lookup on both platforms — with no real himalaya installed.
+    fake_dir = os.path.join(ROOT, "target", "smoke-bin")
+    os.makedirs(fake_dir, exist_ok=True)
+    real_true = shutil.which("true")
+    assert real_true, "system `true` not found"
+    fake = os.path.join(ROOT, "fixtures", "smoke", "fake_himalaya.sh")
+    os.chmod(fake, 0o755)
+    for name, target in (
+        ("himalaya", fake),
+        ("true-like", real_true),
+    ):
+        link = os.path.join(fake_dir, name)
+        if os.path.lexists(link):
+            os.remove(link)
+        os.symlink(target, link)
+
+    # The fake himalaya wins over any installed binary; real tools stay
+    # reachable behind it.
+    env_path = fake_dir + os.pathsep + os.environ["PATH"]
+
+    config = os.path.join(ROOT, "target", "smoke-config.toml")
+    write_config(config)
+
+    old_path = os.environ["PATH"]
+    os.environ["PATH"] = env_path
+    try:
+        step_opener_environment()
+        step_happy(binpath, config, fake_dir)
+        step_editor_validation(binpath, config)
+    finally:
+        os.environ["PATH"] = old_path
+    print("SMOKE OK", flush=True)
+
+
+if __name__ == "__main__":
+    main()

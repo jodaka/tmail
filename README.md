@@ -7,8 +7,36 @@ protocols, accounts, and credentials.
 **Status: Phases 0–10 complete** (shell, Himalaya adapter, operation
 manager/cancellation, reader, MIME/HTML rendering, composer + draft
 autosave, send/reply/forward, attachments, search/refresh, mouse +
-responsive polish + config validation). Implementation proceeds phase by
-phase per `POST_IMPLEMENTATION_PLAN.md`.
+responsive polish + config validation), Phase 12 hardening in progress.
+The external-editor composer flow (Phase 11) is not implemented yet; the
+`editor` setting is validated at startup either way. Implementation
+proceeds phase by phase per `POST_IMPLEMENTATION_PLAN.md`.
+
+## Installation
+
+1. Install the Himalaya CLI (v2.x, with the backend feature you need):
+
+   ```sh
+   brew install himalaya        # macOS (Homebrew)
+   cargo install himalaya       # any platform with Rust
+   ```
+
+   Verify with `himalaya --version` and configure at least one account
+   with `himalaya configure` (or write `~/.config/himalaya/config.toml`
+   yourself — the [Configuration](#configuration) section shows the shape).
+
+2. Build Post from source:
+
+   ```sh
+   git clone <this repository>
+   cd tmail
+   cargo build --release
+   ```
+
+   The binary lands at `target/release/post`.
+
+3. Run it (`cargo run --release` from the checkout, or copy the binary
+   anywhere):
 
 ## Requirements
 
@@ -178,10 +206,8 @@ Notes and limitations:
   `from:x`) — that is himalaya 2.1.0's grammar.
 - There is no all-fields `text` filter; plain words are Post's shorthand
   for `(from "…") or (subject "…") or (body "…")`.
-- Non-ASCII search text (e.g. Cyrillic) currently fails with
-  `IMAP SEARCH failed: BAD` — the IMAP server rejects it via himalaya
-  2.1.0. Folder names and message content render fine; only searching
-  *in* non-ASCII text is affected.
+- See [Known limitations](#known-limitations) for backend-specific search
+  caveats (non-ASCII text on IMAP, text search on Maildir).
 
 ## Mouse
 
@@ -224,6 +250,28 @@ TUI. You keep two ways to select text:
    selects text. Press `m` again to re-enable clicks. The status bar
    always shows which mode you are in.
 
+## Known limitations
+
+**v1 scope** (by design, per `POST_IMPLEMENTATION_PLAN.md` §23): no
+conversation threads, no multiple-account switching, no label management,
+no settings/help UI, no offline sync, and no external-editor composer flow
+yet (Phase 11).
+
+**Search:**
+
+- Non-ASCII search text (e.g. Cyrillic) currently fails with
+  `IMAP SEARCH failed: BAD` — the IMAP server rejects it via himalaya
+  2.1.0. Folder names and message content render fine; only searching
+  *in* non-ASCII text is affected.
+- On local Maildir accounts (himalaya `maildir` backend), text search
+  matches nothing: himalaya delegates text filters to the server, and a
+  Maildir has none. Flag filters do work locally (`flag flagged`,
+  `not flag seen`). Listing, reading, flags, and drafts all work on
+  Maildir (covered by `tests/maildir_integration.rs`).
+
+**Mouse:** with capture enabled, plain click-drag belongs to Post; hold
+`Shift` or press `m` to select text ([details](#mouse)).
+
 ## Troubleshooting
 
 - **Mouse does nothing** — `[post] mouse = true` is missing from the file
@@ -240,6 +288,9 @@ TUI. You keep two ways to select text:
   folder names.
 - **Terminal is a mess after a crash** — Post restores the terminal on
   exit, error, and panic; if a hard kill left it broken, run `reset`.
+- **Text search finds nothing on a Maildir account** — expected: the
+  Maildir backend has no server-side text search. Flag filters work
+  ([details](#known-limitations)).
 
 ## Development
 
@@ -249,13 +300,16 @@ cargo run --bin probe -- <config.toml>   # Phase 0 backend probe harness
 cargo test --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all
+python3 fixtures/smoke/ci_smoke.py --bin target/debug/tmail   # pty smoke (CI runs it too)
 ```
 
 ## Repository layout
 
 - `docs/adr/` — architecture decision records
 - `docs/phase-*.md` — per-phase delivery checklists
+- `.github/workflows/ci.yml` — macOS + Linux CI (fmt, clippy, tests, pty smoke)
 - `fixtures/himalaya/` — sanitized probe fixtures, schemas, seed/sink helpers
+- `fixtures/smoke/` — committed pty smoke: fake himalaya + CI driver
 - `src/backend/` — `MailBackend` trait + Himalaya CLI adapter (DTOs private)
 - `src/config/` — shared one-file configuration (`[post]` + aliases)
 - `src/input/` — keyboard and mouse → action translation

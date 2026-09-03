@@ -71,3 +71,13 @@ mod tests {
     // always spawns the real platform program, so unit tests must not
     // call it.
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::*;
+
+    #[test]
+    fn linux_uses_xdg_open() {
+        assert_eq!(opener_program(), Some("xdg-open"));
+    }
+}
