@@ -2298,3 +2298,231 @@ fn reply_all_merges_recipients_dedups_and_excludes_self() {
         Some("318@post.local")
     );
 }
+
+// ── Send flow (plan §14/§19 Phase 7, Phase 7.6) ──────────────────────────
+
+use crate::app::operation::DraftRemovalReason;
+use crate::domain::{OutboundMessage, SendOutcome};
+
+/// A composed, validly addressed state ready to send.
+fn sendable(s: &mut AppState) {
+    compose(s);
+    let composer = s.composer.as_mut().unwrap();
+    composer.draft.to = String::from("ada@example.org");
+    composer.draft.subject = String::from("Hello");
+    composer.draft.body = String::from("Body");
+}
+
+fn expect_send(effects: &[Effect]) -> (OperationId, OutboundMessage) {
+    match effects {
+        [effect] => match &effect.kind {
+            OperationKind::Send { message } => (effect.id, (**message).clone()),
+            other => panic!("expected a Send effect, got {other:?}"),
+        },
+        other => panic!("expected exactly one effect, got {other:?}"),
+    }
+}
+
+fn complete_send(s: &mut AppState, id: OperationId, outcome: SendOutcome) -> Vec<Effect> {
+    reduce(
+        s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::SendOutcome(outcome)),
+        }),
+    )
+}
+
+#[test]
+fn ctrl_enter_sends_only_from_the_composer() {
+    let mut s = state();
+    no_effects(&reduce(&mut s, &Action::Send));
+    assert!(s.composer.is_none());
+    // A draft may exist without the composer route (left-open draft): the
+    // route gate still applies.
+    compose(&mut s);
+    reduce(&mut s, &Action::BackOrCancel);
+    no_effects(&reduce(&mut s, &Action::Send));
+    assert!(s.composer.is_some(), "draft data preserved");
+    assert!(s.operations.is_empty());
+}
+
+#[test]
+fn send_refuses_an_empty_recipient_list() {
+    let mut s = state();
+    compose(&mut s);
+    // A subject alone is not enough: no To/Cc/Bcc, no send.
+    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, &Action::FocusNext);
+    for c in "hi".chars() {
+        reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char(c)));
+    }
+    no_effects(&reduce(&mut s, &Action::Send));
+    assert_eq!(
+        s.status.message.as_deref(),
+        Some("Cannot send: add at least one recipient")
+    );
+    assert!(
+        s.composer.as_ref().unwrap().draft.to.is_empty(),
+        "draft untouched"
+    );
+}
+
+#[test]
+fn send_refuses_invalid_addresses() {
+    let mut s = state();
+    compose(&mut s);
+    for c in "not an address".chars() {
+        reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char(c)));
+    }
+    no_effects(&reduce(&mut s, &Action::Send));
+    assert_eq!(
+        s.status.message.as_deref(),
+        Some("Cannot send: fix the invalid address entries")
+    );
+    assert!(s.operations.is_empty(), "nothing was started");
+}
+
+#[test]
+fn send_freezes_the_composer_and_starts_one_operation() {
+    let mut s = state();
+    sendable(&mut s);
+    let effects = reduce(&mut s, &Action::Send);
+    let (id, message) = expect_send(&effects);
+    assert_eq!(message.to.len(), 1);
+    assert_eq!(message.to[0].email, "ada@example.org");
+    assert_eq!(message.content.subject, "Hello");
+    assert_eq!(message.content.body, "Body");
+    assert!(s.operations.get(id).is_some());
+    let composer = s.composer.as_ref().unwrap();
+    assert!(composer.sending);
+    assert_eq!(s.status.message.as_deref(), Some("Sending…"));
+    // Edits are frozen while the send runs; the draft keeps its content.
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    let composer = s.composer.as_ref().unwrap();
+    assert_eq!(composer.draft.body, "Body");
+    // A second send is refused.
+    no_effects(&reduce(&mut s, &Action::Send));
+    assert_eq!(s.operations.len(), 1);
+    let _ = id;
+}
+
+#[test]
+fn send_failure_keeps_the_draft_intact() {
+    let mut s = state();
+    sendable(&mut s);
+    let (id, _) = expect_send(&reduce(&mut s, &Action::Send));
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Err(OperationFailure {
+                code: Some(1),
+                detail: String::from("smtp refused"),
+                retry: Some(mailboxes_kind().retry_spec()),
+                ambiguous: false,
+            }),
+        }),
+    );
+    // Draft intact and editable again; no route change.
+    let composer = s.composer.as_ref().unwrap();
+    assert!(!composer.sending);
+    assert_eq!(composer.draft.to, "ada@example.org");
+    assert_eq!(composer.draft.body, "Body");
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    assert!(s.overlay.is_some(), "Retry/Dismiss modal opens");
+}
+
+#[test]
+fn send_success_leaves_the_composer_and_resolves_the_draft() {
+    let mut s = state();
+    sendable(&mut s);
+    // The draft was saved before sending: the remote copy must be swept.
+    let composer = s.composer.as_mut().unwrap();
+    composer.draft.remote_id = Some(MessageId(String::from("remote-draft")));
+    let (id, _) = expect_send(&reduce(&mut s, &Action::Send));
+    let effects = complete_send(&mut s, id, SendOutcome::Sent);
+    // Composer closed, back to the mailbox, status confirms success.
+    assert!(s.composer.is_none());
+    assert_eq!(s.routes.len(), 1);
+    assert_eq!(s.focus, Focus::MessageList);
+    assert_eq!(s.status.message.as_deref(), Some("Message sent"));
+    // One cleanup operation: journal entry + remote copy removal.
+    let (cleanup_id, kind) = effect_parts(&effects);
+    match &kind {
+        OperationKind::DeleteDraft {
+            draft,
+            reason: DraftRemovalReason::Sent,
+        } => {
+            assert_eq!(
+                draft.remote_id,
+                Some(MessageId(String::from("remote-draft")))
+            );
+        }
+        other => panic!("expected DeleteDraft(Sent), got {other:?}"),
+    }
+    assert!(s.operations.get(cleanup_id).is_some());
+}
+
+#[test]
+fn send_success_after_leaving_still_resolves_the_draft() {
+    let mut s = state();
+    sendable(&mut s);
+    let (id, _) = expect_send(&reduce(&mut s, &Action::Send));
+    // The user left mid-send (Esc save/leaves; the draft was clean, so no
+    // forced save runs).
+    reduce(&mut s, &Action::BackOrCancel);
+    assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
+    let effects = complete_send(&mut s, id, SendOutcome::Sent);
+    assert!(s.composer.is_none(), "the sent draft must not linger");
+    assert_eq!(s.routes.len(), 1, "already left: no route to pop");
+    assert_eq!(effect_parts(&effects).1.summary(), "Cleaning up sent draft");
+}
+
+#[test]
+fn sent_draft_cleanup_failure_never_claims_a_failed_send() {
+    let mut s = state();
+    sendable(&mut s);
+    let (id, _) = expect_send(&reduce(&mut s, &Action::Send));
+    let effects = complete_send(&mut s, id, SendOutcome::Sent);
+    let (cleanup_id, kind) = effect_parts(&effects);
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id: cleanup_id,
+            outcome: Err(OperationFailure {
+                code: Some(1),
+                detail: String::from("drafts mailbox gone"),
+                retry: Some(kind.retry_spec()),
+                ambiguous: false,
+            }),
+        }),
+    );
+    // Delivery was confirmed: no modal, no status regression.
+    assert!(s.overlay.is_none());
+    assert_eq!(s.status.message.as_deref(), Some("Message sent"));
+}
+
+#[test]
+fn cleanup_of_a_discarded_draft_still_opens_the_modal_on_failure() {
+    // The Sent-reason quietness must not weaken the discard flow (6.6).
+    let mut s = state();
+    open_discard_dialog(&mut s);
+    reduce(&mut s, &Action::FocusNext); // Discard
+    let effects = reduce(&mut s, &Action::Activate);
+    let (id, kind) = effect_parts(&effects);
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Err(OperationFailure {
+                code: Some(1),
+                detail: String::from("sweep failed"),
+                retry: Some(kind.retry_spec()),
+                ambiguous: false,
+            }),
+        }),
+    );
+    assert!(s.overlay.is_some(), "discard cleanup failures stay visible");
+}

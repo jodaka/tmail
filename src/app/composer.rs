@@ -55,6 +55,10 @@ pub struct ComposerState {
     /// The draft being composed: field text, revision tracking, and the
     /// autosave state machine (plan §14).
     pub draft: Draft,
+    /// A send of this draft is in flight (Phase 7.6): content edits are
+    /// frozen so the bytes on the wire stay exactly what the user saw,
+    /// and a second send cannot start.
+    pub sending: bool,
 }
 
 impl Default for ComposerState {
@@ -72,6 +76,7 @@ impl ComposerState {
             show_bcc: false,
             body: TextArea::from([""]),
             draft: Draft::default(),
+            sending: false,
         }
     }
 
@@ -141,6 +146,7 @@ impl ComposerState {
             show_bcc: !draft.bcc.is_empty(),
             body,
             draft,
+            sending: false,
         }
     }
 

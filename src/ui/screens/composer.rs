@@ -288,18 +288,21 @@ fn hairline(frame: &mut Frame<'_>, x: u16, y: u16, inner_w: usize, theme: &Theme
 }
 
 /// Send + Discard spans; the focused action gets the strong fill (mockup
-/// `.btn-send` / `.compose-action.warn`).
+/// `.btn-send` / `.compose-action.warn`). While a send is in flight
+/// (Phase 7.6) the button reads Sending… and edits are frozen.
 fn action_spans<'a>(composer: &'a ComposerState, focused: bool, theme: &'a Theme) -> Vec<Span<'a>> {
     let send_focused = focused && composer.field == ComposerField::Send;
     let discard_focused = focused && composer.field == ComposerField::Discard;
+    let send_label = if composer.sending {
+        " [ Sending… ] "
+    } else {
+        " [ Send ^↵ ] "
+    };
     let send = if send_focused {
-        Span::styled(
-            " [ Send ^↵ ] ",
-            theme.mode_badge().add_modifier(Modifier::BOLD),
-        )
+        Span::styled(send_label, theme.mode_badge().add_modifier(Modifier::BOLD))
     } else {
         Span::styled(
-            " [ Send ^↵ ] ",
+            send_label,
             Style::new().fg(theme.text_soft).bg(theme.surface),
         )
     };

@@ -16,6 +16,7 @@ use crate::app::operation::{
 };
 use crate::app::overlay::{ConfirmButton, DiscardDialog, ErrorDialog, ModalButton, Overlay};
 use crate::app::route::{MailboxRoute, MessageRoute, Route};
+use crate::app::sanitize::sanitize;
 use crate::app::state::{AppState, Loadable};
 use crate::domain::{
     DraftSaveState, Mailbox, MailboxId, MailboxRole, Message, MessageLocator, Page, PageRequest,
@@ -83,13 +84,19 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             // Editing targets the focused composer control; without a
             // composer open (or without its focus) the edit is inert.
             // Content edits sync the draft and re-arm autosave (plan §14);
-            // caret moves leave the revision untouched.
+            // caret moves leave the revision untouched. While a send of
+            // this draft is in flight (Phase 7.6) all editing is frozen:
+            // the bytes on the wire must stay what the user saw.
             if state.focus == Focus::Composer
                 && let Some(composer) = state.composer.as_mut()
             {
-                composer.apply(edit);
-                if edit.is_content_edit() {
-                    composer.sync_draft(state.clock);
+                if composer.sending {
+                    tracing::debug!("composer edits frozen while sending");
+                } else {
+                    composer.apply(edit);
+                    if edit.is_content_edit() {
+                        composer.sync_draft(state.clock);
+                    }
                 }
             }
             Vec::new()
@@ -97,11 +104,11 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::Reply => open_reply(state),
         Action::ReplyAll => open_reply_all(state),
         Action::Forward => open_forward(state),
-        Action::Send | Action::LeaveComposer => {
-            // Send lands with the composer send flow (Phase 7.6/7.7).
-            // LeaveComposer is routed through `back_or_cancel` (plan §10).
-            tracing::debug!(?action, "action not yet implemented");
-            Vec::new()
+        Action::Send => send_from_composer(state),
+        Action::LeaveComposer => {
+            // Routed through `back_or_cancel` for the keyboard (plan §10);
+            // dispatched directly this is the same save/leave transition.
+            leave_composer(state)
         }
         Action::DiscardDraft => open_discard_confirm(state),
         Action::RetryError | Action::DismissError => {
@@ -440,6 +447,135 @@ fn mark_unread(state: &mut AppState) -> Vec<Effect> {
     }
 }
 
+// ── Send (plan §14, Phase 7.6/7.7) ───────────────────────────────────────
+
+/// Ctrl+Enter / Send button (plan §10). Sends only from the composer: the
+/// route gate makes the action inert anywhere else. Refusals (invalid or
+/// missing recipients, a send already in flight) surface on the status
+/// line — the problem is visible input, not an operational failure — and
+/// start nothing, so the draft is untouched.
+fn send_from_composer(state: &mut AppState) -> Vec<Effect> {
+    if !matches!(state.active_route(), Some(Route::Composer)) {
+        // Ctrl+Enter sends only from the composer (plan §19 Phase 7).
+        tracing::debug!("send ignored outside the composer");
+        return Vec::new();
+    }
+    let Some(composer) = state.composer.as_ref() else {
+        return Vec::new();
+    };
+    if composer.sending {
+        tracing::debug!("send ignored: one is already in flight");
+        return Vec::new();
+    }
+    if state.operations.is_sending() {
+        state.set_status("A send is already in progress");
+        return Vec::new();
+    }
+    let draft = &composer.draft;
+    let message = crate::domain::OutboundMessage::from_fields(
+        &draft.to,
+        &draft.cc,
+        &draft.bcc,
+        crate::domain::OutgoingContent {
+            subject: draft.subject.clone(),
+            body: draft.body.clone(),
+            in_reply_to: draft.in_reply_to.clone(),
+            references: draft.references.clone(),
+        },
+        draft.message_id.clone(),
+    );
+    let message = match message {
+        Ok(message) => message,
+        Err(blocker) => {
+            state.set_status(blocker.to_string());
+            return Vec::new();
+        }
+    };
+    if let Some(composer) = state.composer.as_mut() {
+        composer.sending = true;
+    }
+    state.set_status("Sending…");
+    vec![state.operations.start(OperationKind::Send {
+        message: Box::new(message),
+    })]
+}
+
+/// Apply a classified send outcome (plan §12). Only [`SendOutcome::Sent`]
+/// is definitive; every other outcome opens the modal and keeps the draft
+/// (plan §19 Phase 7: failed send keeps the draft intact). `message` is
+/// the frozen payload, replayed verbatim by retries.
+fn send_completed(
+    state: &mut AppState,
+    outcome: &crate::domain::SendOutcome,
+    message: &crate::domain::OutboundMessage,
+) -> Vec<Effect> {
+    use crate::domain::SendOutcome;
+    match outcome {
+        SendOutcome::Sent => confirm_send(state),
+        other => {
+            // The draft stays exactly as it was, editable again; the modal
+            // carries the typed retry intent.
+            if let Some(composer) = state.composer.as_mut() {
+                composer.sending = false;
+            }
+            let failure = OperationFailure {
+                code: other.code(),
+                detail: {
+                    let detail = sanitize(other.detail());
+                    if detail.is_empty() {
+                        String::from("the send outcome could not be determined")
+                    } else {
+                        detail
+                    }
+                },
+                retry: Some(
+                    OperationKind::Send {
+                        message: Box::new(message.clone()),
+                    }
+                    .retry_spec(),
+                ),
+                ambiguous: other.is_ambiguous(),
+            };
+            state.set_status(if other.is_ambiguous() {
+                "Send outcome unclear"
+            } else {
+                "Send failed"
+            });
+            open_error_modal(state, &failure)
+        }
+    }
+}
+
+/// A confirmed send (plan §19 Phase 7, Phase 7.6): leave the composer,
+/// return to the prior route, and resolve the draft — journal entry and
+/// remote copies removed through the same backend sweep a discard uses
+/// (ADR 0002 §D.4). That cleanup is best-effort (`DraftRemovalReason::Sent`):
+/// delivery is already confirmed, so a leftover copy must never claim a
+/// failure afterwards.
+fn confirm_send(state: &mut AppState) -> Vec<Effect> {
+    state.set_status("Message sent");
+    // The composer may have been left mid-send (Esc saves/leaves); the
+    // draft data — with its stable ids — is what gets resolved here.
+    let snapshot = state
+        .composer
+        .take()
+        .map(|composer| composer.draft.snapshot());
+    if matches!(state.active_route(), Some(Route::Composer)) {
+        state.routes.pop();
+        state.focus = Focus::MessageList;
+    }
+    match snapshot {
+        Some(snapshot) => vec![state.operations.start(OperationKind::DeleteDraft {
+            draft: Box::new(snapshot),
+            reason: DraftRemovalReason::Sent,
+        })],
+        None => {
+            tracing::debug!("send confirmed without a draft to resolve");
+            Vec::new()
+        }
+    }
+}
+
 // ── Backend results (plan §11) ───────────────────────────────────────────
 
 /// Apply a backend result. Results for unknown, cancelled, or superseded
@@ -611,27 +747,51 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                 }
             }
         }
-        OperationKind::DeleteDraft { .. } => {
+        OperationKind::DeleteDraft { reason, .. } => {
             state.operations.finish(result.id);
-            // Confirmation of the remote half of a discard; the local half
-            // was applied optimistically when the confirm dialog was
-            // accepted (Phase 6.6 wires the flow).
+            // A discard applied its local half optimistically when the
+            // confirm dialog was accepted (Phase 6.6); a send removed the
+            // composer on confirmation (Phase 7.6). Failures follow the
+            // removal reason: discards open the modal, post-send cleanup
+            // is best-effort (ADR 0002) and never claims a failed send.
             match &result.outcome {
                 Ok(OperationOutcome::Done) => Vec::new(),
                 Ok(_) => {
-                    tracing::warn!(id = %result.id, "unexpected payload for a draft discard");
+                    tracing::warn!(id = %result.id, "unexpected payload for a draft removal");
                     Vec::new()
                 }
-                Err(failure) => open_error_modal(state, failure),
+                Err(failure) => match reason {
+                    DraftRemovalReason::Discard => open_error_modal(state, failure),
+                    DraftRemovalReason::Sent => {
+                        tracing::warn!(
+                            detail = %failure.detail,
+                            "the sent message's draft copy could not be removed"
+                        );
+                        Vec::new()
+                    }
+                },
             }
         }
-        OperationKind::Send { .. } => {
+        OperationKind::Send { message } => {
             state.operations.finish(result.id);
-            // The composer send flow (validation, frozen content, success/
-            // failure/ambiguous UX) lands with Phase 7.6/7.7; nothing can
-            // start a Send operation yet.
             match &result.outcome {
-                Ok(_) | Err(_) => Vec::new(),
+                Ok(OperationOutcome::SendOutcome(outcome)) => {
+                    send_completed(state, outcome, message)
+                }
+                Ok(_) => {
+                    tracing::warn!(id = %result.id, "unexpected payload for a send");
+                    Vec::new()
+                }
+                Err(failure) => {
+                    // Structural refusal (missing identity, spawn I/O):
+                    // nothing was transmitted, the draft stays intact and
+                    // editable (plan §19 Phase 7: failed send keeps it).
+                    if let Some(composer) = state.composer.as_mut() {
+                        composer.sending = false;
+                    }
+                    state.set_status("Send failed");
+                    open_error_modal(state, failure)
+                }
             }
         }
     }
