@@ -12,6 +12,7 @@ use crate::app::operation::{OperationId, RetrySpec};
 use crate::app::overlay::Overlay;
 use crate::app::route::Route;
 use crate::app::state::AppState;
+use crate::config::ViewMode;
 use crate::domain::{Mailbox, MailboxId, MailboxRole, MessageId, PageRequest};
 
 fn state() -> AppState {
@@ -5058,7 +5059,7 @@ fn auto_page_size_tracks_the_visible_rows_on_resize() {
             height: 20,
         },
     );
-    let rows_20 = crate::ui::layout::message_rows_visible((152, 20)).max(1);
+    let rows_20 = crate::ui::layout::messages_visible((152, 20), ViewMode::Compact).max(1);
     assert_eq!(s.messages.limit, rows_20, "limit matches the visible rows");
     // Growing further changes the limit again and re-loads (background).
     reduce(
@@ -5068,7 +5069,7 @@ fn auto_page_size_tracks_the_visible_rows_on_resize() {
             height: 24,
         },
     );
-    let rows_24 = crate::ui::layout::message_rows_visible((152, 24)).max(1);
+    let rows_24 = crate::ui::layout::messages_visible((152, 24), ViewMode::Compact).max(1);
     assert_ne!(rows_20, rows_24);
     let effects = reduce(
         &mut s,
@@ -5080,13 +5081,35 @@ fn auto_page_size_tracks_the_visible_rows_on_resize() {
     let (id, req) = expect_page(&effects);
     assert_eq!(
         req.limit,
-        crate::ui::layout::message_rows_visible((152, 28)).max(1)
+        crate::ui::layout::messages_visible((152, 28), ViewMode::Compact).max(1)
     );
     assert_eq!(
         s.operations.get(id).map(|op| op.origin),
         Some(OperationOrigin::Background),
         "silent reload"
     );
+}
+
+#[test]
+fn comfortable_view_mode_halves_the_auto_page_size() {
+    // `[post].view_mode = "comfortable"` doubles the line cost of every
+    // message, so an auto-sized page holds half as many (and resize keeps
+    // tracking it).
+    let mut s = state();
+    s.page_size_auto = true;
+    s.view_mode = ViewMode::Comfortable;
+    reduce(
+        &mut s,
+        &Action::Resize {
+            width: 152,
+            height: 40,
+        },
+    );
+    let compact = crate::ui::layout::messages_visible((152, 40), ViewMode::Compact);
+    let comfortable = crate::ui::layout::messages_visible((152, 40), ViewMode::Comfortable);
+    assert_eq!(compact, 31);
+    assert_eq!(comfortable, 15);
+    assert_eq!(s.messages.limit, comfortable);
 }
 
 #[test]

@@ -171,9 +171,10 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             // resize storm; the newest request wins) so the list refills.
             let mut effects = Vec::new();
             if state.page_size_auto {
-                let rows = crate::ui::layout::message_rows_visible(state.size).max(1);
-                if state.messages.limit != rows {
-                    state.messages.limit = rows;
+                let visible =
+                    crate::ui::layout::messages_visible(state.size, state.view_mode).max(1);
+                if state.messages.limit != visible {
+                    state.messages.limit = visible;
                     if !state.messages.items.is_empty() {
                         effects = request_visible_page_background(state, state.messages.offset);
                     }
@@ -2053,10 +2054,11 @@ fn clamp_reader_scroll(state: &mut AppState) {
 }
 
 /// Shift `list_scroll` so the selection stays on screen. Row geometry comes
-/// from the same pure layout math the renderer uses (`message_rows_visible`),
-/// keeping the bookkeeping consistent with what is actually drawn.
+/// from the same pure layout math the renderer uses (`messages_visible`,
+/// view-mode aware: comfortable rows cost two lines), keeping the
+/// bookkeeping consistent with what is actually drawn.
 fn keep_selection_visible(state: &mut AppState) {
-    let visible = crate::ui::layout::message_rows_visible(state.size).max(1);
+    let visible = crate::ui::layout::messages_visible(state.size, state.view_mode).max(1);
     if state.selection < state.list_scroll {
         state.list_scroll = state.selection;
     } else if state.selection >= state.list_scroll + visible {

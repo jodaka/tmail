@@ -26,6 +26,9 @@ archive = "Archive"
 account = "probe"
 # Basic mouse support (click mailbox/rows, wheel scroll).
 mouse = true
+# Message-list density: "compact" (one line per message, default) or
+# "comfortable" (faint separator under every row, more negative space).
+# view_mode = "comfortable"
 
 [post.mail]
 # Message list page size (explicit pagination).

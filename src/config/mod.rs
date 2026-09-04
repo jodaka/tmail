@@ -69,6 +69,39 @@ pub const THEME_TOKENS: [&str; 15] = [
 pub const DEFAULT_CACHE_MAX_MESSAGES: usize = 50;
 pub const DEFAULT_CACHE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Message-list density (`[post].view_mode`), Gmail-style. `Compact` is
+/// the reference one-line-per-message list; `Comfortable` interleaves a
+/// faint horizontal separator under every row, so each message costs two
+/// terminal lines: fewer messages fit on screen and the list gains
+/// negative space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    #[default]
+    Compact,
+    Comfortable,
+}
+
+impl ViewMode {
+    /// Parse a `[post].view_mode` value; `None` when the name is unknown
+    /// (the caller reports the problem and falls back to the default).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "compact" => Some(Self::Compact),
+            "comfortable" => Some(Self::Comfortable),
+            _ => None,
+        }
+    }
+
+    /// Terminal lines each message occupies in the list: one content line
+    /// in compact, content plus a separator line in comfortable.
+    pub fn row_height(self) -> usize {
+        match self {
+            Self::Compact => 1,
+            Self::Comfortable => 2,
+        }
+    }
+}
+
 /// Parse a config-file color: `#rgb` or `#rrggbb` (case-insensitive hex).
 /// Returns the normalized `#rrggbb` form, or `None` when the value is not
 /// a color Post can use.
@@ -154,6 +187,10 @@ pub struct Config {
     /// `[post.ui].clock` (ticket w7f5): show the top-right date/time
     /// clock. Off by default.
     pub ui_clock: bool,
+    /// `[post].view_mode` list density (Gmail-style): `compact` (default)
+    /// or `comfortable`. Comfortable draws a faint horizontal separator
+    /// under every message row, doubling the row height.
+    pub view_mode: ViewMode,
     /// `[post.cache].max_messages` (ticket haeb): maximum number of cached
     /// viewed messages (LRU-evicted). `0` disables message caching.
     pub cache_max_messages: usize,
@@ -195,6 +232,7 @@ impl Default for Config {
             downloads_dir: None,
             mouse: false,
             ui_clock: false,
+            view_mode: ViewMode::Compact,
             cache_max_messages: DEFAULT_CACHE_MAX_MESSAGES,
             cache_max_bytes: DEFAULT_CACHE_MAX_BYTES,
             editor: String::from("builtin"),
@@ -326,6 +364,7 @@ pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssu
     parse_theme(post, &mut config, &mut issues);
     parse_downloads_dir(post, &mut config, &mut issues);
     parse_ui_clock(post, &mut config, &mut issues);
+    parse_view_mode(post, &mut config, &mut issues);
     parse_cache_limits(post, &mut config, &mut issues);
 
     // Without `[post].account`, drive the account himalaya itself would
@@ -486,6 +525,31 @@ fn parse_ui_clock(post: Option<&toml::Value>, config: &mut Config, issues: &mut 
                 "[post.ui].clock must be true or false; using false",
             ));
             false
+        }
+    };
+}
+
+/// `[post].view_mode` (Gmail-style list density): `"compact"` (default)
+/// or `"comfortable"`. Anything else is reported and the default applies.
+fn parse_view_mode(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(value) = post.and_then(|post| post.get("view_mode")) else {
+        return;
+    };
+    config.view_mode = match value.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => match ViewMode::parse(name) {
+            Some(mode) => mode,
+            None => {
+                issues.push(format!(
+                    "[post].view_mode {name:?} is unknown (known: compact, comfortable); using \"compact\""
+                ));
+                ViewMode::Compact
+            }
+        },
+        None => {
+            issues.push(String::from(
+                "[post].view_mode must be \"compact\" or \"comfortable\"; using \"compact\"",
+            ));
+            ViewMode::Compact
         }
     };
 }
@@ -1218,6 +1282,46 @@ mod ui_clock_tests {
         let (_, issues) = parse_with_issues("[post.ui]\nclock = \"yes\"\n", None);
         assert_eq!(issues.items.len(), 1);
         assert!(issues.items[0].contains("clock"), "{issues:?}");
+    }
+}
+
+#[cfg(test)]
+mod view_mode_tests {
+    use super::*;
+
+    #[test]
+    fn view_mode_defaults_to_compact_and_parses_both_values() {
+        let (config, issues) = parse_with_issues("", None);
+        assert!(issues.is_empty());
+        assert_eq!(config.view_mode, ViewMode::Compact, "compact by default");
+
+        let (config, issues) = parse_with_issues("[post]\nview_mode = \"compact\"\n", None);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(config.view_mode, ViewMode::Compact);
+
+        let (config, issues) = parse_with_issues("[post]\nview_mode = \"comfortable\"\n", None);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(config.view_mode, ViewMode::Comfortable);
+    }
+
+    #[test]
+    fn unknown_view_mode_reports_and_falls_back() {
+        let (config, issues) = parse_with_issues("[post]\nview_mode = \"spacious\"\n", None);
+        assert_eq!(config.view_mode, ViewMode::Compact, "default applies");
+        assert_eq!(issues.items.len(), 1, "{issues:?}");
+        assert!(issues.items[0].contains("view_mode"), "{issues:?}");
+        assert!(issues.items[0].contains("comfortable"), "{issues:?}");
+
+        // A non-string value is reported the same way.
+        let (config, issues) = parse_with_issues("[post]\nview_mode = 3\n", None);
+        assert_eq!(config.view_mode, ViewMode::Compact);
+        assert_eq!(issues.items.len(), 1, "{issues:?}");
+    }
+
+    #[test]
+    fn comfortable_rows_cost_double() {
+        assert_eq!(ViewMode::Compact.row_height(), 1);
+        assert_eq!(ViewMode::Comfortable.row_height(), 2);
     }
 }
 

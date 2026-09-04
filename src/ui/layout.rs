@@ -8,6 +8,8 @@
 
 use ratatui::layout::{Constraint, Layout, Rect};
 
+use crate::config::ViewMode;
+
 /// Minimum width for the full layout.
 pub const FULL_MIN_WIDTH: u16 = 120;
 /// Minimum width for the compact layout.
@@ -71,11 +73,14 @@ pub fn split_list(area: Rect) -> (Rect, Rect) {
     (head, rows)
 }
 
-/// Height of the message-list row area for a terminal `size`, computed with
-/// the exact same layout functions the renderer uses. The reducer consumes
-/// this to keep the selection on screen across movement, page loads, and
-/// resize (Phase 2 acceptance); `0` means the list is not drawn at all.
-pub fn message_rows_visible(size: (u16, u16)) -> usize {
+/// Number of messages the list area shows for a terminal `size` under a
+/// view mode, computed with the exact same layout functions the renderer
+/// uses. The reducer consumes this to keep the selection on screen across
+/// movement, page loads, and resize (Phase 2 acceptance) and to size
+/// auto-sized pages (ticket kjfq); `0` means the list is not drawn at all.
+/// Comfortable view mode interleaves a faint separator under every row, so
+/// each message costs [`ViewMode::row_height`] lines and fewer fit.
+pub fn messages_visible(size: (u16, u16), view_mode: ViewMode) -> usize {
     let area = Rect {
         x: 0,
         y: 0,
@@ -89,7 +94,7 @@ pub fn message_rows_visible(size: (u16, u16)) -> usize {
     let (_, body, _) = split_vertical(area);
     let (_, list) = split_body(mode, body);
     let (_, rows) = split_list(list);
-    rows.height as usize
+    rows.height as usize / view_mode.row_height()
 }
 
 /// Height of the reader viewport (the whole body area: the reader document
@@ -151,12 +156,24 @@ mod tests {
     }
 
     #[test]
-    fn message_rows_visible_matches_chrome_budget() {
+    fn messages_visible_matches_chrome_budget() {
+        use crate::config::ViewMode;
         // 40 rows − topbar 4 − statusbar 3 − list head 2 = 31.
-        assert_eq!(message_rows_visible((152, 40)), 31);
+        assert_eq!(messages_visible((152, 40), ViewMode::Compact), 31);
         // Mode does not change the row height, only the sidebar width.
-        assert_eq!(message_rows_visible((100, 30)), 21);
+        assert_eq!(messages_visible((100, 30), ViewMode::Compact), 21);
         // Too small renders no list.
-        assert_eq!(message_rows_visible((80, 15)), 0);
+        assert_eq!(messages_visible((80, 15), ViewMode::Compact), 0);
+    }
+
+    #[test]
+    fn comfortable_view_mode_halves_the_visible_messages() {
+        use crate::config::ViewMode;
+        // Each comfortable message costs content + separator = 2 lines, so
+        // a 31-line list shows 15 messages (the trailing line stays blank
+        // rather than clipping a row block).
+        assert_eq!(messages_visible((152, 40), ViewMode::Comfortable), 15);
+        assert_eq!(messages_visible((100, 30), ViewMode::Comfortable), 10);
+        assert_eq!(messages_visible((80, 15), ViewMode::Comfortable), 0);
     }
 }

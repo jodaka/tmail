@@ -126,6 +126,12 @@ pub struct AppState {
     /// `[post.composer].autosave_delay_ms`). Set from the config at
     /// startup; the reducer applies it with the injected tick clock.
     pub autosave_delay_ms: u64,
+    /// `[post].view_mode` list density (Gmail-style): `comfortable`
+    /// interleaves a faint horizontal separator under every message row,
+    /// so each message takes two terminal lines and fewer fit. Set from
+    /// the config at startup; the renderer and the reducer's visible-row
+    /// math both read it.
+    pub view_mode: crate::config::ViewMode,
     /// The configured external editor as an argv (plan §14, Phase 11),
     /// resolved from the config at startup. `None` means the builtin
     /// editor: `Ctrl+E` is inert.
@@ -190,6 +196,7 @@ impl AppState {
             refresh_interval_seconds: 0,
             page_size_auto: false,
             autosave_delay_ms: crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS,
+            view_mode: crate::config::ViewMode::Compact,
             editor_command: None,
             page_cache: None,
             last_refresh_at: None,

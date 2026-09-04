@@ -49,8 +49,15 @@ pub fn render(
     // (Phase 2 acceptance). When the page holds more rows than fit, a
     // vertical scrollbar takes the last column (ticket kjfq) and the rows
     // clip one column short.
-    let visible_rows = rows.height as usize;
-    let scrolling = state.messages.items.len() > visible_rows;
+    //
+    // Row geometry follows the view mode (`[post].view_mode`): compact
+    // draws one line per message; comfortable splits consecutive messages
+    // with a faint horizontal separator, so each message costs two lines
+    // and fewer fit — the same math as `layout::messages_visible`, which
+    // the reducer uses for scroll and page sizing.
+    let row_height = state.view_mode.row_height();
+    let visible = rows.height as usize / row_height;
+    let scrolling = state.messages.items.len() > visible;
     let row_width = if scrolling {
         rows.width.saturating_sub(1)
     } else {
@@ -58,21 +65,24 @@ pub fn render(
     };
     let bottom = area.y + area.height;
     let mut drew_any_row = false;
-    for (y, (i, message)) in (rows.y..).zip(
-        state
-            .messages
-            .items
-            .iter()
-            .enumerate()
-            .skip(state.list_scroll),
-    ) {
-        if y >= bottom {
+    let mut y = rows.y;
+    for (i, message) in state
+        .messages
+        .items
+        .iter()
+        .enumerate()
+        .skip(state.list_scroll)
+    {
+        // A message renders only when its whole row block fits: a clipped
+        // comfortable separator would disagree with the reducer's notion
+        // of how many rows are visible.
+        if y + row_height as u16 > bottom {
             break;
         }
         drew_any_row = true;
         let selected = i == state.selection;
         let bulk_selected = state.selected.contains(&message.id);
-        let row_area = Rect {
+        let content = Rect {
             x: rows.x,
             y,
             width: row_width,
@@ -88,10 +98,38 @@ pub fn render(
             bulk_selected,
             state.focus == Focus::MessageList,
         );
-        frame.render_widget(Paragraph::new(Line::from(spans)), row_area);
+        frame.render_widget(Paragraph::new(Line::from(spans)), content);
+        // Comfortable density: a hairline under the row (fainter than any
+        // body text) separates consecutive messages with negative space.
+        // It stays inside the message's hit block, so clicking between
+        // rows still targets the message above the line.
+        if row_height > 1 {
+            let separator = Rect {
+                x: rows.x,
+                y: y + 1,
+                width: row_width,
+                height: 1,
+            };
+            frame.render_widget(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(theme.hairline()),
+                separator,
+            );
+        }
         // Clicking a row selects it; clicking the selected row opens it
-        // (arrows + Enter, plan §10).
-        hits.push(row_area, ClickTarget::MessageRow(i));
+        // (arrows + Enter, plan §10). The hit block covers the separator
+        // line too.
+        hits.push(
+            Rect {
+                x: rows.x,
+                y,
+                width: row_width,
+                height: row_height as u16,
+            },
+            ClickTarget::MessageRow(i),
+        );
+        y += row_height as u16;
     }
     if scrolling {
         let mut scrollbar_state =

@@ -96,6 +96,10 @@ async fn run() -> anyhow::Result<()> {
     // Draft autosave debounce (Phase 10.4 wiring of
     // `[post.composer].autosave_delay_ms`).
     state.autosave_delay_ms = config.autosave_delay_ms;
+    // `[post].view_mode` list density (Gmail-style): comfortable splits
+    // message rows with faint horizontal separators, so each message
+    // takes two terminal lines.
+    state.view_mode = config.view_mode;
     // The external editor argv (Phase 11.4); `None` = builtin editor.
     state.editor_command = config.editor_command.clone();
     // Post-owned summary cache (ticket haeb): instant warm starts, the
@@ -116,9 +120,11 @@ async fn run() -> anyhow::Result<()> {
     // Ticket kjfq: `page_size_auto` sizes each page to the number of
     // message rows the terminal can show, so the page fits the list
     // without scrolling; manual pagination keeps `[post.mail].page_size`.
+    // The view mode decides how many lines a message costs.
     state.page_size_auto = config.page_size_auto;
     if config.page_size_auto {
-        state.messages.limit = tmail::ui::layout::message_rows_visible(state.size).max(1);
+        state.messages.limit =
+            tmail::ui::layout::messages_visible(state.size, state.view_mode).max(1);
     }
     tracing::info!(size = ?state.size, "shell started (real backend)");
 

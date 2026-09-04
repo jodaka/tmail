@@ -999,6 +999,69 @@ fn snapshot_too_small_just_below_the_compact_floor() {
     assert_absent(&text, "INBOX", (89, 25));
 }
 
+/// Comfortable view mode (`[post].view_mode = "comfortable"`): every
+/// message row is followed by a faint horizontal separator, so fewer
+/// messages fit and the list gains negative space.
+#[test]
+fn comfortable_view_mode_splits_rows_with_faint_separators() {
+    let mut state = mock_initial_state();
+    state.view_mode = tmail::config::ViewMode::Comfortable;
+    let (buffer, hits) = draw_state_hits(&state, 152, 40);
+    let theme = Theme::default_dark();
+
+    let line = |y: u16| {
+        let mut out = String::new();
+        for x in 0..buffer.area.width {
+            out.push_str(buffer[(x, y)].symbol());
+        }
+        out
+    };
+
+    // Geometry: list rows start at y=6 (topbar 4 + list head 2). Message 0
+    // draws at y=6, its separator at y=7, message 1 at y=8 — two lines per
+    // message instead of one.
+    assert!(line(6).contains("KKF Notifications"), "row 0:\n{}", line(6));
+    assert!(line(8).contains("Maksim Orlov"), "row 1:\n{}", line(8));
+    let separators = line(7).chars().filter(|c| *c == '─').count();
+    assert!(separators > 100, "separator line under row 0:\n{}", line(7));
+
+    // Separators are more faint than the message body text: the hairline
+    // (border) color, never the primary text color.
+    assert_eq!(buffer[(30, 7)].fg, theme.border, "separator color");
+    assert_ne!(buffer[(30, 7)].fg, theme.text);
+
+    // Fewer messages fit: 31 list lines / 2 per message = 15 rows (0..=14).
+    // Message 14 still renders (its separator lands on the last list line,
+    // y=35) but message 15 — visible in compact — is pushed off screen.
+    assert!(
+        line(34).contains("Weekly digest #15"),
+        "row 14:\n{}",
+        line(34)
+    );
+    let tail_separators = line(35).chars().filter(|c| *c == '─').count();
+    assert!(
+        tail_separators > 100,
+        "separator under row 14:\n{}",
+        line(35)
+    );
+    // The last list line (y=36) stays blank apart from the scrollbar
+    // track in the final column: no clipped row block is drawn.
+    assert!(
+        line(36).chars().all(|c| c == ' ' || c == '│'),
+        "no clipped row block:\n{}",
+        line(36)
+    );
+    let text = text_of(&buffer);
+    assert_absent(&text, "Stone grit chart update #16", (152, 40));
+
+    // The separator line belongs to the message above: clicking between
+    // two rows targets the earlier message.
+    assert_eq!(
+        hits.hit_test(30, 7, false),
+        Some(ClickTarget::MessageRow(0))
+    );
+}
+
 #[test]
 fn hit_map_matches_the_drawn_mailbox_screen() {
     let (_, hits) = draw_with_hits(152, 40);
