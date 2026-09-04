@@ -10,6 +10,7 @@ use crate::app::operation::OperationRegistry;
 use crate::app::overlay::Overlay;
 use crate::app::route::Route;
 use crate::domain::{Mailbox, Message, MessageSummary, Page};
+use crate::ui::theme::Theme;
 use chrono::{DateTime, FixedOffset};
 
 /// Async load lifecycle for backend-fed collections (mock-fed in Phase 1).
@@ -47,6 +48,11 @@ pub struct ListStash {
 pub struct StatusState {
     /// One-line transient message; cleared on the next interaction.
     pub message: Option<String>,
+    /// Injected-clock instant the message was set (ticket h1d7): arms the
+    /// `[post].status_timeout` fade-and-clear timer. `None` while no
+    /// message is up, or the clock has not ticked yet (the reducer has no
+    /// time source before the first tick).
+    pub shown_at: Option<DateTime<FixedOffset>>,
 }
 
 #[derive(Clone)]
@@ -132,6 +138,18 @@ pub struct AppState {
     /// the config at startup; the renderer and the reducer's visible-row
     /// math both read it.
     pub view_mode: crate::config::ViewMode,
+    /// `[post].status_timeout` (ticket h1d7): seconds a status message
+    /// stays up before it fades out and clears; `0` (default) keeps it
+    /// until the next message replaces it. Set from the config at
+    /// startup; expiry runs on the injected tick clock.
+    pub status_timeout_seconds: u64,
+    /// Runtime-switchable themes (ticket z0s4): `(name, palette)` in cycle
+    /// order — the two built-ins plus every `[post.themes.<name>]` table,
+    /// precomputed at startup. `t` cycles the list; the shared config
+    /// file is never rewritten, so switching is session-only.
+    pub themes: Vec<(String, Theme)>,
+    /// Index into `themes` of the palette currently on screen.
+    pub theme_index: usize,
     /// The configured external editor as an argv (plan §14, Phase 11),
     /// resolved from the config at startup. `None` means the builtin
     /// editor: `Ctrl+E` is inert.
@@ -197,6 +215,12 @@ impl AppState {
             page_size_auto: false,
             autosave_delay_ms: crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS,
             view_mode: crate::config::ViewMode::Compact,
+            status_timeout_seconds: 0,
+            themes: vec![
+                (String::from("default"), Theme::default_dark()),
+                (String::from("light"), Theme::default_light()),
+            ],
+            theme_index: 0,
             editor_command: None,
             page_cache: None,
             last_refresh_at: None,
@@ -206,7 +230,10 @@ impl AppState {
             size: (152, 40),
             account_email: None,
             clock: None,
-            status: StatusState { message: None },
+            status: StatusState {
+                message: None,
+                shown_at: None,
+            },
             quit_requested: false,
             ticks: 0,
         }
@@ -314,5 +341,20 @@ impl AppState {
 
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status.message = Some(message.into());
+        // The timeout timer (ticket h1d7) arms from the last injected
+        // tick. A message set before the first tick simply has no timer
+        // yet — with the 250 ms tick cadence that is startup only.
+        self.status.shown_at = self.clock;
+    }
+
+    /// The palette currently on screen (ticket z0s4). The list is never
+    /// empty by construction; the fallbacks keep a mangled index (or an
+    /// empty list) harmless instead of panicking mid-frame.
+    pub fn active_theme(&self) -> Theme {
+        self.themes
+            .get(self.theme_index)
+            .or_else(|| self.themes.first())
+            .map(|(_, theme)| *theme)
+            .unwrap_or_else(Theme::default_dark)
     }
 }

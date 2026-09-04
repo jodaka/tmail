@@ -155,10 +155,31 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             });
             Vec::new()
         }
+        Action::CycleTheme => {
+            // Runtime theme switching (ticket z0s4): `t` steps through the
+            // startup palette's list — built-ins first, then every
+            // `[post.themes.<name>]` — wrapping at the end. The renderer
+            // reads the active palette from state, so the next frame
+            // already shows it. Session-only by design.
+            let next = if state.themes.is_empty() {
+                0
+            } else {
+                (state.theme_index + 1) % state.themes.len()
+            };
+            state.theme_index = next;
+            let name = state
+                .themes
+                .get(next)
+                .map(|(name, _)| name.as_str())
+                .unwrap_or("default");
+            state.set_status(format!("Theme: {name}"));
+            Vec::new()
+        }
         Action::Tick { now } => {
             state.ticks += 1;
             let now = **now;
             state.clock = Some(now);
+            clear_expired_status(state, now);
             let mut effects = autosave_tick(state, now);
             effects.extend(auto_refresh_tick(state, now));
             effects
@@ -193,6 +214,25 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
 }
 
 // ── Modal overlays (plan §9/§12) ─────────────────────────────────────────
+
+/// Status-message timeout (ticket h1d7): with `[post].status_timeout > 0`
+/// a message set at `status.shown_at` clears when the window elapses. The
+/// renderer fades it toward the background over the closing 0.3 s of the
+/// window (`statusbar::render`); here it only leaves the state. The
+/// default `0` keeps a message until the next one replaces it.
+fn clear_expired_status(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset>) {
+    if state.status_timeout_seconds == 0 || state.status.message.is_none() {
+        return;
+    }
+    let Some(shown_at) = state.status.shown_at else {
+        return;
+    };
+    let elapsed = (now - shown_at).num_seconds().max(0) as u64;
+    if elapsed >= state.status_timeout_seconds {
+        state.status.message = None;
+        state.status.shown_at = None;
+    }
+}
 
 /// Handle `action` while any modal is open. Returns `None` when no modal
 /// is open (the caller falls through to normal handling). The attachment

@@ -14,6 +14,7 @@
 | Global | `Ctrl+C` | Quit |
 | Global | `Ctrl+A` | Select all visible messages (or clear the selection) |
 | Global | `m` | Toggle mouse capture on/off (see [Mouse](#mouse)) |
+| Global | `t` | Cycle the theme: built-ins first, then `[post.themes.<name>]` |
 | List/reader | `r` / `a` / `f` | Reply / reply-all / forward |
 | List/reader | `e` / `s` / `u` | Archive / star / mark unread |
 | List/reader | `Delete` / `d` | Trash |

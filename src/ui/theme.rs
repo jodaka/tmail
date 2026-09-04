@@ -76,6 +76,73 @@ impl Theme {
         }
     }
 
+    /// Runtime-switchable theme list (ticket z0s4): the two built-ins —
+    /// with the `[post.theme]` color overrides applied to the startup
+    /// theme — plus every `[post.themes.<name>]` user theme built over
+    /// the dark reference palette. A user theme shadowing a built-in name
+    /// replaces it in place, so `[post.themes.default]` redefines the
+    /// default. Returns the list in cycle order together with the index
+    /// of the startup theme.
+    pub fn theme_list(
+        startup_name: &str,
+        startup_overrides: &[(String, String)],
+        user_themes: &[(String, Vec<(String, String)>)],
+    ) -> (Vec<(String, Theme)>, usize) {
+        let apply = |theme: &mut Theme, overrides: &[(String, String)]| {
+            for (token, hex) in overrides {
+                // Validation guarantees known tokens and valid hex; a
+                // stale parse would only skip the override, never crash
+                // startup (the same contract as the [post.theme] path).
+                if let Some(color) =
+                    crate::config::parse_hex_color(hex).and_then(|hex| Theme::color_from_hex(&hex))
+                {
+                    theme.set_token(token, color);
+                }
+            }
+        };
+        let with = |base: Theme, overrides: &[(String, String)]| {
+            let mut theme = base;
+            apply(&mut theme, overrides);
+            theme
+        };
+        let mut list = vec![
+            (
+                String::from("default"),
+                with(
+                    Theme::default_dark(),
+                    if startup_name == "default" {
+                        startup_overrides
+                    } else {
+                        &[]
+                    },
+                ),
+            ),
+            (
+                String::from("light"),
+                with(
+                    Theme::default_light(),
+                    if startup_name == "light" {
+                        startup_overrides
+                    } else {
+                        &[]
+                    },
+                ),
+            ),
+        ];
+        for (name, overrides) in user_themes {
+            let theme = with(Theme::default_dark(), overrides);
+            match list.iter_mut().find(|(existing, _)| existing == name) {
+                Some(slot) => slot.1 = theme,
+                None => list.push((name.clone(), theme)),
+            }
+        }
+        let index = list
+            .iter()
+            .position(|(name, _)| name == startup_name)
+            .unwrap_or(0);
+        (list, index)
+    }
+
     /// Apply one `[post.theme]` color override (ticket wrs7). Unknown
     /// tokens are rejected by config validation; here they are ignored so
     /// a stale file can never blank the UI. Returns whether the token was
@@ -294,6 +361,112 @@ mod tests {
         // Derived styles stay usable: no fg/bg means "default colors".
         let row = t.row_selected();
         assert_eq!(row.bg, Some(Color::Reset));
+    }
+}
+
+#[cfg(test)]
+mod theme_list_tests {
+    use super::*;
+
+    fn user(name: &str, tokens: &[(&str, &str)]) -> (String, Vec<(String, String)>) {
+        (
+            String::from(name),
+            tokens
+                .iter()
+                .map(|(t, h)| (String::from(*t), String::from(*h)))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn builtins_come_first_and_the_startup_theme_is_selected() {
+        let (list, index) = Theme::theme_list("light", &[], &[]);
+        assert_eq!(
+            list.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["default", "light"]
+        );
+        assert_eq!(index, 1);
+        assert_eq!(list[0].1, Theme::default_dark());
+        assert_eq!(list[1].1, Theme::default_light());
+    }
+
+    #[test]
+    fn startup_overrides_land_only_on_the_named_builtin() {
+        let overrides = vec![(String::from("accent"), String::from("#aabbcc"))];
+        let (list, _) = Theme::theme_list("light", &overrides, &[]);
+        // The light base with the override; the dark default stays pure.
+        assert_ne!(list[1].1.accent, Theme::default_light().accent);
+        assert_eq!(list[1].1.accent, Color::Rgb(0xaa, 0xbb, 0xcc));
+        assert_eq!(list[0].1, Theme::default_dark());
+    }
+
+    #[test]
+    fn user_themes_append_over_the_dark_reference() {
+        let users = vec![
+            user("nord", &[("background", "#2e3440"), ("accent", "#88c0d0")]),
+            user("solar", &[("accent", "#b58900")]),
+        ];
+        let (list, index) = Theme::theme_list("default", &[], &users);
+        let names: Vec<_> = list.iter().map(|(n, _)| n.as_str()).collect();
+        // List order follows the config parser's table iteration order
+        // (alphabetical); these names are already sorted.
+        assert_eq!(names, vec!["default", "light", "nord", "solar"]);
+        assert_eq!(index, 0);
+        // Unspecified tokens keep the dark reference values.
+        assert_eq!(list[2].1.background, Color::Rgb(0x2e, 0x34, 0x40));
+        assert_eq!(list[2].1.accent, Color::Rgb(0x88, 0xc0, 0xd0));
+        assert_eq!(list[2].1.text, Theme::default_dark().text);
+        assert_eq!(list[3].1.accent, Color::Rgb(0xb5, 0x89, 0x00));
+    }
+
+    #[test]
+    fn a_user_theme_shadowing_a_builtin_replaces_it_in_place() {
+        let users = vec![user("default", &[("background", "#101014")])];
+        let (list, index) = Theme::theme_list("default", &[], &users);
+        let names: Vec<_> = list.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["default", "light"]);
+        assert_eq!(index, 0, "the shadowed builtin stays the startup slot");
+        assert_eq!(list[0].1.background, Color::Rgb(0x10, 0x10, 0x14));
+        assert_eq!(list[0].1.accent, Theme::default_dark().accent);
+    }
+
+    #[test]
+    fn an_unknown_startup_name_selects_the_first_entry() {
+        let (list, index) = Theme::theme_list("nope", &[], &[]);
+        assert_eq!(index, 0);
+        assert_eq!(list[0].1, Theme::default_dark());
+    }
+}
+
+#[cfg(test)]
+mod default_theme_doc_tests {
+    use super::*;
+    use crate::config::{THEME_TOKENS, parse_with_issues};
+
+    /// `docs/default-theme.toml` documents the built-in dark theme as a
+    /// ready-to-paste `[post.theme]` block (ticket dn04). This pins the
+    /// file to the real palette: every token listed, no parse issues, and
+    /// applying the block over the named theme reproduces
+    /// `default_dark()` exactly — so the documentation cannot drift from
+    /// what Post actually draws.
+    #[test]
+    fn the_documented_default_theme_matches_the_builtin() {
+        let text = include_str!("../../docs/default-theme.toml");
+        let (config, issues) = parse_with_issues(text, None);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(config.theme_name, "default");
+        assert_eq!(
+            config.theme_overrides.len(),
+            THEME_TOKENS.len(),
+            "every token documented: {issues:?}"
+        );
+        let mut theme = Theme::from_name(&config.theme_name);
+        for (token, hex) in &config.theme_overrides {
+            let color =
+                Theme::color_from_hex(hex).unwrap_or_else(|| panic!("{token}: bad hex {hex:?}"));
+            assert!(theme.set_token(token, color), "unknown token {token}");
+        }
+        assert_eq!(theme, Theme::default_dark());
     }
 }
 

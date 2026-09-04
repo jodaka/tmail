@@ -191,6 +191,10 @@ pub struct Config {
     /// or `comfortable`. Comfortable draws a faint horizontal separator
     /// under every message row, doubling the row height.
     pub view_mode: ViewMode,
+    /// `[post].status_timeout` (ticket h1d7): seconds a status message
+    /// stays up before it fades out and clears. `0` (the default) keeps a
+    /// message until the next one replaces it.
+    pub status_timeout: u64,
     /// `[post.cache].max_messages` (ticket haeb): maximum number of cached
     /// viewed messages (LRU-evicted). `0` disables message caching.
     pub cache_max_messages: usize,
@@ -216,6 +220,12 @@ pub struct Config {
     /// pairs, validated at parse time and applied over the named theme in
     /// file order.
     pub theme_overrides: Vec<(String, String)>,
+    /// `[post.themes.<name>]` user themes (ticket z0s4): additional named
+    /// palettes for runtime switching, each a `(token, "#rrggbb")` table
+    /// applied over the dark reference palette. Cycle order is the
+    /// parser's table iteration order (alphabetical by name); a theme
+    /// shadowing a built-in name replaces it.
+    pub theme_tables: Vec<(String, Vec<(String, String)>)>,
 }
 
 impl Default for Config {
@@ -233,6 +243,7 @@ impl Default for Config {
             mouse: false,
             ui_clock: false,
             view_mode: ViewMode::Compact,
+            status_timeout: 0,
             cache_max_messages: DEFAULT_CACHE_MAX_MESSAGES,
             cache_max_bytes: DEFAULT_CACHE_MAX_BYTES,
             editor: String::from("builtin"),
@@ -240,6 +251,7 @@ impl Default for Config {
             autosave_delay_ms: DEFAULT_AUTOSAVE_DELAY_MS,
             theme_name: String::from("default"),
             theme_overrides: Vec::new(),
+            theme_tables: Vec::new(),
         }
     }
 }
@@ -362,9 +374,11 @@ pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssu
     parse_autosave_delay(post, &mut config, &mut issues);
     parse_editor(post, &mut config, &mut issues);
     parse_theme(post, &mut config, &mut issues);
+    parse_theme_tables(post, &mut config, &mut issues);
     parse_downloads_dir(post, &mut config, &mut issues);
     parse_ui_clock(post, &mut config, &mut issues);
     parse_view_mode(post, &mut config, &mut issues);
+    parse_status_timeout(post, &mut config, &mut issues);
     parse_cache_limits(post, &mut config, &mut issues);
 
     // Without `[post].account`, drive the account himalaya itself would
@@ -552,6 +566,72 @@ fn parse_view_mode(post: Option<&toml::Value>, config: &mut Config, issues: &mut
             ViewMode::Compact
         }
     };
+}
+
+/// `[post.themes.<name>]` (ticket z0s4): additional named themes for
+/// runtime switching with `t`. Each table holds the same color tokens as
+/// `[post.theme]` (minus `name`, which the table's key already carries);
+/// values are validated and normalized exactly like `[post.theme]`
+/// colors, unknown tokens are reported, and the cycle order is the
+/// parser's table iteration order (alphabetical by name).
+fn parse_theme_tables(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(themes) = post
+        .and_then(|post| post.get("themes"))
+        .and_then(|themes| themes.as_table())
+    else {
+        return;
+    };
+    for (name, value) in themes {
+        let Some(table) = value.as_table() else {
+            issues.push(format!("[post.themes.{name}] must be a table"));
+            continue;
+        };
+        if name.is_empty() {
+            issues.push(String::from("[post.themes] names must not be empty"));
+            continue;
+        }
+        let mut overrides = Vec::new();
+        for (key, value) in table {
+            if !THEME_TOKENS.contains(&key.as_str()) {
+                issues.push(format!(
+                    "[post.themes.{name}].{key} is unknown (known tokens: {})",
+                    THEME_TOKENS.join(", ")
+                ));
+                continue;
+            }
+            match value.as_str() {
+                Some(hex) => match parse_hex_color(hex) {
+                    Some(normalized) => overrides.push((key.clone(), normalized)),
+                    None => issues.push(format!(
+                        "[post.themes.{name}].{key} must be a hex color like \"#4e86dd\""
+                    )),
+                },
+                None => issues.push(format!(
+                    "[post.themes.{name}].{key} must be a hex color like \"#4e86dd\""
+                )),
+            }
+        }
+        config.theme_tables.push((name.clone(), overrides));
+    }
+}
+
+/// `[post].status_timeout` (ticket h1d7): seconds a status message stays
+/// up before it fades out and clears; `0` (the default) keeps a message
+/// until the next one replaces it. A negative value is nonsense and must
+/// never become a busy timer (plan §17: invalid values report).
+fn parse_status_timeout(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(value) = post.and_then(|post| post.get("status_timeout")) else {
+        return;
+    };
+    match value.as_integer() {
+        Some(seconds) if seconds >= 0 => config.status_timeout = seconds as u64,
+        Some(seconds) => issues.push(format!(
+            "[post].status_timeout must be ≥ 0, not {seconds}; using 0 (disabled)"
+        )),
+        None => issues.push(String::from(
+            "[post].status_timeout must be an integer; using 0 (disabled)",
+        )),
+    }
 }
 
 /// `[post.composer].editor`: `"builtin"`, `"$EDITOR"`, or an explicit
@@ -1322,6 +1402,108 @@ mod view_mode_tests {
     fn comfortable_rows_cost_double() {
         assert_eq!(ViewMode::Compact.row_height(), 1);
         assert_eq!(ViewMode::Comfortable.row_height(), 2);
+    }
+}
+
+#[cfg(test)]
+mod status_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn status_timeout_defaults_to_zero_and_parses_seconds() {
+        let (config, issues) = parse_with_issues("", None);
+        assert!(issues.is_empty());
+        assert_eq!(config.status_timeout, 0, "disabled by default");
+
+        let (config, issues) = parse_with_issues("[post]\nstatus_timeout = 5\n", None);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(config.status_timeout, 5);
+
+        // Explicit 0 stays disabled without complaint.
+        let (config, issues) = parse_with_issues("[post]\nstatus_timeout = 0\n", None);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(config.status_timeout, 0);
+    }
+
+    #[test]
+    fn invalid_status_timeout_reports_and_falls_back() {
+        let (config, issues) = parse_with_issues("[post]\nstatus_timeout = -3\n", None);
+        assert_eq!(config.status_timeout, 0);
+        assert_eq!(issues.items.len(), 1, "{issues:?}");
+        assert!(issues.items[0].contains("status_timeout"), "{issues:?}");
+
+        let (config, issues) = parse_with_issues("[post]\nstatus_timeout = \"soon\"\n", None);
+        assert_eq!(config.status_timeout, 0);
+        assert_eq!(issues.items.len(), 1, "{issues:?}");
+    }
+}
+
+#[cfg(test)]
+mod theme_table_tests {
+    use super::*;
+
+    #[test]
+    fn user_theme_tables_parse_validate_and_normalize() {
+        let text = r##"
+            [post.themes.nord]
+            background = "#2E3440"
+            accent = "#88c0d0"
+
+            [post.themes.solar]
+            accent = "#b58900"
+        "##;
+        let (config, issues) = parse_with_issues(text, None);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(config.theme_tables.len(), 2);
+        assert_eq!(config.theme_tables[0].0, "nord");
+        // Token application order follows file order within a table, but
+        // the TOML map does not promise iteration order; compare as sets.
+        let nord: std::collections::BTreeMap<&str, &str> = config.theme_tables[0]
+            .1
+            .iter()
+            .map(|(t, h)| (t.as_str(), h.as_str()))
+            .collect();
+        assert_eq!(
+            nord,
+            std::collections::BTreeMap::from([("background", "#2e3440"), ("accent", "#88c0d0"),])
+        );
+        assert_eq!(config.theme_tables[1].0, "solar");
+    }
+
+    #[test]
+    fn user_theme_table_problems_report_with_the_table_path() {
+        let text = r##"
+            [post.themes.broken]
+            accent = "blue"
+            font = "#101014"
+        "##;
+        let (config, issues) = parse_with_issues(text, None);
+        // The bad hex is dropped, the unknown token is reported, the
+        // (empty) theme entry still exists.
+        assert_eq!(config.theme_tables.len(), 1);
+        assert!(config.theme_tables[0].1.is_empty());
+        assert_eq!(issues.items.len(), 2, "{issues:?}");
+        assert!(
+            issues
+                .items
+                .iter()
+                .all(|i| i.contains("[post.themes.broken]"))
+        );
+    }
+
+    #[test]
+    fn non_table_user_theme_reports() {
+        let (config, issues) = parse_with_issues("[post.themes]\nflat = 3\n", None);
+        assert!(config.theme_tables.is_empty());
+        assert_eq!(issues.items.len(), 1);
+        assert!(issues.items[0].contains("[post.themes.flat]"));
+    }
+
+    #[test]
+    fn themes_section_defaults_to_empty() {
+        let (config, issues) = parse_with_issues("", None);
+        assert!(issues.is_empty());
+        assert!(config.theme_tables.is_empty());
     }
 }
 

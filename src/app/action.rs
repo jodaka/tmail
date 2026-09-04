@@ -147,6 +147,10 @@ pub enum Action {
     /// as if the mouse were disabled. The reducer only flips the state
     /// flag; the runtime applies the capture mode.
     ToggleMouseCapture,
+    /// `t` (ticket z0s4): cycle the theme palette at runtime — the two
+    /// built-ins first, then every `[post.themes.<name>]` from the config.
+    /// Session-only; the config file is never rewritten.
+    CycleTheme,
     Send,
     /// Save the selected reader attachment to the downloads directory
     /// (plan §15, Phase 8.4).

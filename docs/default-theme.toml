@@ -1,0 +1,55 @@
+# Post default theme (ticket dn04)
+#
+# The built-in "default" dark theme, written out as a ready-to-paste
+# `[post.theme]` block. Every value below is exactly what Post uses when
+# no theme overrides are configured, so you can start from this file and
+# tune only the colors you want to change.
+#
+# Usage: copy the block into your Post config (the same TOML file
+# himalaya reads) and adjust. Any subset of tokens may be listed —
+# unspecified tokens keep the built-in values. `name` selects the base
+# palette ("default" is the dark reference; "light" is the built-in light
+# variant), and the color lines below override it token by token. Set the
+# NO_COLOR environment variable (non-empty) to ignore all of this and
+# render with the terminal's default colors.
+#
+# See `src/ui/theme.rs` for the authoritative palette and README.md
+# ("Theming") for the user-facing guide.
+
+[post.theme]
+name = "default"
+# Page background: fills everything no widget paints over.
+background = "#0f1014"
+# Input wells, list rows, panels (e.g. the search field, code blocks).
+surface = "#1d1f26"
+# Hover / secondary surface (e.g. the focused sidebar folder fill).
+surface2 = "#23252c"
+# Hairlines and control borders: the lines under the list header, the
+# sidebar divider, row separators in the comfortable view mode.
+border = "#3f434e"
+# Primary text: strongest content color (unread rows, headings).
+text = "#eceae3"
+# Soft primary text: read (non-unread) rows and ordinary content.
+text_soft = "#c2c4cc"
+# Secondary text: hints' labels and other supporting copy.
+muted = "#9a9da8"
+# De-emphasized text: relative dates read rows carry in the list.
+dim = "#8b8e99"
+# Faded message-body preview in the list rows: dimmer than any subject,
+# so the Gmail-style preview reads as context, never as content.
+snippet = "#6b6f7b"
+# Interactive highlight: the cursor row bar, selection focus, links,
+# the status message, bulk-selection checkboxes.
+accent = "#4e86dd"
+# Selected row / active folder fill: the background behind the highlighted
+# list row or the folder the cursor sits on.
+accent_bg = "#1c2534"
+# Bulk-selected row highlight (Space-marked rows): visibly distinct from
+# the cursor fill, so checked rows read as "marked", not "focused".
+bulk_selected_bg = "#2a2210"
+# Stars and warnings (the `*` star glyph on starred rows).
+warning = "#d4a45c"
+# Errors: failure details in modals and the status line.
+error = "#d95f51"
+# Focused-control selection fill: text selection inside focused controls.
+selection = "#243045"

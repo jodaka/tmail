@@ -90,6 +90,11 @@ fn list_shortcuts_per_input_contract() {
         Some(Action::ToggleMouseCapture)
     );
     assert_eq!(to_action(plain(KeyCode::Delete), f), Some(Action::Trash));
+    // `t` cycles the theme palette at runtime (ticket z0s4).
+    assert_eq!(
+        to_action(plain(KeyCode::Char('t')), f),
+        Some(Action::CycleTheme)
+    );
 }
 
 #[test]

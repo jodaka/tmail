@@ -150,23 +150,24 @@ pub fn render(
     // Status messages sit in the bottom-right corner (ticket en85): the
     // encoding/size readout they replaced carried nothing the user could
     // act on. Clipped to the space left of the hints so they never
-    // overlap.
+    // overlap, with one column of padding off the right border
+    // (ticket h1d7).
     if let Some(message) = &state.status.message {
         let left_used: usize = spans.iter().map(|s| s.content.width()).sum();
+        // 3 columns of existing slack plus the 1 padding column.
         let budget = (area.width as usize)
             .saturating_sub(left_used)
-            .saturating_sub(3)
+            .saturating_sub(4)
             .max(10);
         let message = text::truncate(message, budget);
         let width = message.width() as u16;
         if width > 0 {
             frame.render_widget(
-                Paragraph::new(Span::styled(
-                    message,
-                    Style::new().fg(theme.accent).bg(theme.background),
-                )),
+                Paragraph::new(Span::styled(message, status_message_style(theme, state))),
                 Rect {
-                    x: area.x + area.width - width,
+                    x: (area.x + area.width)
+                        .saturating_sub(width)
+                        .saturating_sub(1),
                     y: row.y,
                     width,
                     height: 1,
@@ -176,4 +177,53 @@ pub fn render(
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
+}
+
+/// Closing seconds of the timeout window over which the status message
+/// fades into the background (ticket h1d7).
+const STATUS_FADE_SECONDS: f64 = 0.3;
+
+/// Status-message style (ticket h1d7): accent on the page background.
+/// With `[post].status_timeout > 0` the message fades into the background
+/// over the closing [`STATUS_FADE_SECONDS`] of its window; the reducer
+/// clears it when the window elapses. The fade interpolates the two
+/// colors, so the monochrome theme (terminal defaults) renders at full
+/// strength instead.
+fn status_message_style(theme: &Theme, state: &AppState) -> Style {
+    let Some(fg) = as_rgb(theme.accent) else {
+        return Style::new().fg(theme.accent).bg(theme.background);
+    };
+    let Some(bg) = as_rgb(theme.background) else {
+        return Style::new().fg(theme.accent).bg(theme.background);
+    };
+    let alpha = status_alpha(state);
+    Style::new().fg(lerp(fg, bg, alpha)).bg(theme.background)
+}
+
+/// Remaining visibility of the current status message as an opacity in
+/// `0.0..=1.0`: `1.0` until the fade window opens, then linearly to `0.0`
+/// as the timeout elapses.
+fn status_alpha(state: &AppState) -> f64 {
+    if state.status_timeout_seconds == 0 {
+        return 1.0;
+    }
+    let (Some(now), Some(shown_at)) = (state.clock, state.status.shown_at) else {
+        return 1.0;
+    };
+    let elapsed = (now - shown_at).num_milliseconds().max(0) as f64 / 1000.0;
+    let remaining = state.status_timeout_seconds as f64 - elapsed;
+    (remaining / STATUS_FADE_SECONDS).clamp(0.0, 1.0)
+}
+
+fn as_rgb(color: ratatui::style::Color) -> Option<(u8, u8, u8)> {
+    match color {
+        ratatui::style::Color::Rgb(r, g, b) => Some((r, g, b)),
+        _ => None,
+    }
+}
+
+/// Linear interpolation `from` → `to` at `alpha` (1.0 keeps `from`).
+fn lerp(from: (u8, u8, u8), to: (u8, u8, u8), alpha: f64) -> ratatui::style::Color {
+    let mix = |a: u8, b: u8| (a as f64 * alpha + b as f64 * (1.0 - alpha)).round() as u8;
+    ratatui::style::Color::Rgb(mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
 }

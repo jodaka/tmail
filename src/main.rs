@@ -100,6 +100,8 @@ async fn run() -> anyhow::Result<()> {
     // message rows with faint horizontal separators, so each message
     // takes two terminal lines.
     state.view_mode = config.view_mode;
+    // Status-message fade-and-clear window (ticket h1d7); `0` disables it.
+    state.status_timeout_seconds = config.status_timeout;
     // The external editor argv (Phase 11.4); `None` = builtin editor.
     state.editor_command = config.editor_command.clone();
     // Post-owned summary cache (ticket haeb): instant warm starts, the
@@ -129,24 +131,23 @@ async fn run() -> anyhow::Result<()> {
     tracing::info!(size = ?state.size, "shell started (real backend)");
 
     let (mut events, events_control) = events::spawn();
-    // `[post.theme].name` plus any `[post.theme]` color overrides (ticket
-    // wrs7), falling back to plain terminal colors when the environment
-    // asks for no color (plan §18) — NO_COLOR wins over custom colors.
-    let theme = if Theme::no_color_requested() {
-        Theme::monochrome()
-    } else {
-        let mut theme = Theme::from_name(&config.theme_name);
-        for (token, hex) in &config.theme_overrides {
-            // Validation guarantees known tokens and valid hex; a stale
-            // parse would only skip the override, never crash startup.
-            if let Some(color) =
-                tmail::config::parse_hex_color(hex).and_then(|hex| Theme::color_from_hex(&hex))
-            {
-                theme.set_token(token, color);
-            }
+    // Runtime-switchable theme list (ticket z0s4): the two built-ins —
+    // the `[post.theme]` selection with its color overrides (ticket wrs7)
+    // landing on the startup entry — plus every `[post.themes.<name>]`
+    // table. NO_COLOR wins over all of it (plan §18): every palette
+    // becomes monochrome, so switching stays a harmless no-op.
+    let (mut themes, theme_index) = Theme::theme_list(
+        &config.theme_name,
+        &config.theme_overrides,
+        &config.theme_tables,
+    );
+    if Theme::no_color_requested() {
+        for (_, theme) in &mut themes {
+            *theme = Theme::monochrome();
         }
-        theme
-    };
+    }
+    state.themes = themes;
+    state.theme_index = theme_index;
 
     // Backend results re-enter the reducer as actions; the manager spawns
     // one cancellable task per effect.
@@ -177,6 +178,9 @@ async fn run() -> anyhow::Result<()> {
         // The hit map of the frame currently on screen: mouse events are
         // hit-tested against exactly what the user sees (plan §10).
         let mut hits = mouse::HitMap::default();
+        // The palette the reducer last selected (ticket z0s4): `t` swaps
+        // it at runtime, and the next frame picks it up from state.
+        let theme = state.active_theme();
         guard
             .as_mut()
             .expect("terminal guard alive while drawing")

@@ -1614,6 +1614,52 @@ fn status_message_sits_in_the_bottom_right_corner() {
         "status message flush right: {trimmed:?}"
     );
     assert_absent(&text_of(&buffer), "UTF-8", (152, 40));
+    // Ticket h1d7: one column of padding keeps it off the right border.
+    assert_eq!(buffer[(151, 38)].symbol(), " ", "padding column");
+    let message = "Mailboxes loaded";
+    let start = 152 - message.len() as u16 - 1;
+    assert_eq!(buffer[(start, 38)].symbol(), "M", "first message glyph");
+}
+
+#[test]
+fn status_message_fades_over_the_closing_timeout_window() {
+    // Ticket h1d7: with `[post].status_timeout > 0` the message holds its
+    // accent color until the last 0.3 s, then fades into the background.
+    let theme = Theme::default_dark();
+    let mut state = mock_initial_state();
+    state.size = (152, 40);
+    state.status_timeout_seconds = 5;
+    reducer::reduce(
+        &mut state,
+        &Action::Tick {
+            now: Box::new(mock::now()),
+        },
+    );
+    state.set_status("Mailboxes loaded");
+    // A second into the window the message is still at full strength.
+    let buffer = buffer_after(
+        &mut state,
+        &[Action::Tick {
+            now: Box::new(mock::now() + chrono::Duration::seconds(1)),
+        }],
+        152,
+        40,
+    );
+    assert_eq!(buffer[(140, 38)].fg, theme.accent, "full strength early");
+
+    // 4.85 s in: 0.15 s remain, so the fade is exactly halfway to the
+    // background color — visibly dimmer, not yet gone.
+    let buffer = buffer_after(
+        &mut state,
+        &[Action::Tick {
+            now: Box::new(mock::now() + chrono::Duration::milliseconds(4850)),
+        }],
+        152,
+        40,
+    );
+    let fg = buffer[(140, 38)].fg;
+    assert_ne!(fg, theme.accent, "mid-fade is no longer the accent");
+    assert_ne!(fg, theme.background, "mid-fade is not invisible yet");
 }
 
 #[test]
