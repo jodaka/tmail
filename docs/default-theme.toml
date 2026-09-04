@@ -22,8 +22,6 @@ name = "default"
 background = "#0f1014"
 # Input wells, list rows, panels (e.g. the search field, code blocks).
 surface = "#1d1f26"
-# Hover / secondary surface (e.g. the focused sidebar folder fill).
-surface2 = "#23252c"
 # Hairlines and control borders: the lines under the list header, the
 # sidebar divider, row separators in the comfortable view mode.
 border = "#3f434e"

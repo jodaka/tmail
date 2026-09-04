@@ -1622,6 +1622,41 @@ fn status_message_sits_in_the_bottom_right_corner() {
 }
 
 #[test]
+fn search_compose_and_sidebar_cursor_sit_on_plain_backgrounds() {
+    // Ticket e6wn: the search well and the Compose button sit on the page
+    // background (no surface fill; focus shows via the accent border), and
+    // the sidebar cursor row shows the `selection` fill.
+    let theme = Theme::default_dark();
+    let mut state = mock_initial_state();
+    state.size = (152, 40);
+    let idle = buffer_after(&mut state, &[], 152, 40);
+    // Search field interior (x=24..84, y=0..3), past the placeholder text.
+    assert_eq!(idle[(70, 1)].bg, theme.background, "search well (idle)");
+    // Compose well interior, past the label.
+    assert_eq!(idle[(16, 6)].bg, theme.background, "compose well");
+
+    // The focused search field keeps the page background; the accent
+    // border marks focus.
+    state.focus = tmail::app::focus::Focus::SearchField;
+    let focused = buffer_after(&mut state, &[], 152, 40);
+    assert_eq!(
+        focused[(70, 1)].bg,
+        theme.background,
+        "search well (focused)"
+    );
+    assert_eq!(focused[(24, 0)].fg, theme.accent, "focused border");
+
+    // Sidebar cursor row: the selection fill under the second folder;
+    // other rows stay on the page background (folder 0 is the active one).
+    state.focus = tmail::app::focus::Focus::Sidebar;
+    state.mailbox_selection = 1;
+    let sidebar = buffer_after(&mut state, &[], 152, 40);
+    assert_eq!(sidebar[(5, 10)].bg, theme.selection, "sidebar cursor row");
+    assert_eq!(sidebar[(5, 11)].bg, theme.background, "plain folder row");
+    assert_eq!(sidebar[(5, 9)].bg, theme.accent_bg, "active folder row");
+}
+
+#[test]
 fn status_message_fades_over_the_closing_timeout_window() {
     // Ticket h1d7: with `[post].status_timeout > 0` the message holds its
     // accent color until the last 0.3 s, then fades into the background.

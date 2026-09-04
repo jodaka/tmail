@@ -33,13 +33,9 @@ pub fn render(
 
     // Compose affordance: bordered well (mockup `new-mail.html` button
     // shape: rounded, like the search field). No inline `c` hint — the
-    // status bar advertises the shortcut.
-    let compose_focused = false;
-    let compose_style = if compose_focused {
-        theme.hover()
-    } else {
-        Style::new().bg(theme.surface)
-    };
+    // status bar advertises the shortcut. The well sits on the page
+    // background (ticket e6wn).
+    let compose_style = Style::new().bg(theme.background);
     let compose = Line::from(vec![
         Span::styled("+ ", Style::new().fg(theme.accent)),
         Span::styled(
@@ -145,7 +141,10 @@ fn render_folder_row(
     let row_bg = if is_active {
         theme.accent_bg
     } else if cursor {
-        theme.surface2
+        // Focused-control selection fill: the sidebar cursor row is the
+        // one place the `selection` token shows (ticket e6wn removed the
+        // hover-only `surface2`).
+        theme.selection
     } else {
         theme.background
     };

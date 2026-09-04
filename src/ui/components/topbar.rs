@@ -74,16 +74,13 @@ pub fn render(
         } else {
             Style::new().fg(theme.border)
         };
-        let fill = if focused {
-            theme.surface2
-        } else {
-            theme.surface
-        };
+        // The well sits on the page background (ticket e6wn): focus shows
+        // through the accent border and the cursor, never a fill change.
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(symbols::border::ROUNDED)
             .border_style(border_style)
-            .style(Style::new().bg(fill));
+            .style(Style::new().bg(theme.background));
         let query = &state.search_query;
         let prompt = Span::styled("/", Style::new().fg(theme.dim));
         let text = if query.is_empty() && !focused {

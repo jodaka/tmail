@@ -12,8 +12,6 @@ pub struct Theme {
     pub background: Color,
     /// Input wells, list rows, panels (`--surface`).
     pub surface: Color,
-    /// Hover / secondary surface (`--surface-2`).
-    pub surface2: Color,
     /// Hairlines and control borders (`--border`).
     pub border: Color,
     /// Primary text (`--fg`).
@@ -49,7 +47,6 @@ impl Theme {
         Self {
             background: Color::Rgb(0x0F, 0x10, 0x14),
             surface: Color::Rgb(0x1D, 0x1F, 0x26),
-            surface2: Color::Rgb(0x23, 0x25, 0x2C),
             border: Color::Rgb(0x3F, 0x43, 0x4E),
             text: Color::Rgb(0xEC, 0xEA, 0xE3),
             text_soft: Color::Rgb(0xC2, 0xC4, 0xCC),
@@ -151,7 +148,6 @@ impl Theme {
         match token {
             "background" => self.background = color,
             "surface" => self.surface = color,
-            "surface2" => self.surface2 = color,
             "border" => self.border = color,
             "text" => self.text = color,
             "text_soft" => self.text_soft = color,
@@ -176,7 +172,6 @@ impl Theme {
         Self {
             background: Color::Rgb(0xF6, 0xF5, 0xF1),
             surface: Color::Rgb(0xEC, 0xEB, 0xE5),
-            surface2: Color::Rgb(0xE2, 0xE1, 0xDA),
             border: Color::Rgb(0xC9, 0xC7, 0xBE),
             text: Color::Rgb(0x24, 0x26, 0x2E),
             text_soft: Color::Rgb(0x3E, 0x41, 0x4B),
@@ -201,7 +196,6 @@ impl Theme {
         Self {
             background: Color::Reset,
             surface: Color::Reset,
-            surface2: Color::Reset,
             border: Color::Reset,
             text: Color::Reset,
             text_soft: Color::Reset,
@@ -253,11 +247,6 @@ impl Theme {
         } else {
             Style::new().bg(self.bulk_selected_bg)
         }
-    }
-
-    /// Style for the sidebar's focused row (mockup `.folder:hover`).
-    pub fn hover(&self) -> Style {
-        Style::new().bg(self.surface2)
     }
 
     /// Style for unread from/subject (mockup `.mail.unread`).
@@ -339,7 +328,6 @@ mod tests {
     fn tokens_are_distinct() {
         let t = Theme::default_dark();
         assert_ne!(t.background, t.surface);
-        assert_ne!(t.surface, t.surface2);
         assert_ne!(t.accent, t.accent_bg);
         assert_ne!(t.text, t.muted);
         assert_ne!(t.muted, t.dim);
@@ -504,19 +492,18 @@ mod token_tests {
         }
         assert_eq!(theme.background, colors[0]);
         assert_eq!(theme.surface, colors[1]);
-        assert_eq!(theme.surface2, colors[2]);
-        assert_eq!(theme.border, colors[3]);
-        assert_eq!(theme.text, colors[4]);
-        assert_eq!(theme.text_soft, colors[5]);
-        assert_eq!(theme.muted, colors[6]);
-        assert_eq!(theme.dim, colors[7]);
-        assert_eq!(theme.snippet, colors[8]);
-        assert_eq!(theme.accent, colors[9]);
-        assert_eq!(theme.accent_bg, colors[10]);
-        assert_eq!(theme.bulk_selected_bg, colors[11]);
-        assert_eq!(theme.warning, colors[12]);
-        assert_eq!(theme.error, colors[13]);
-        assert_eq!(theme.selection, colors[14]);
+        assert_eq!(theme.border, colors[2]);
+        assert_eq!(theme.text, colors[3]);
+        assert_eq!(theme.text_soft, colors[4]);
+        assert_eq!(theme.muted, colors[5]);
+        assert_eq!(theme.dim, colors[6]);
+        assert_eq!(theme.snippet, colors[7]);
+        assert_eq!(theme.accent, colors[8]);
+        assert_eq!(theme.accent_bg, colors[9]);
+        assert_eq!(theme.bulk_selected_bg, colors[10]);
+        assert_eq!(theme.warning, colors[11]);
+        assert_eq!(theme.error, colors[12]);
+        assert_eq!(theme.selection, colors[13]);
     }
 
     #[test]
