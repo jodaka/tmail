@@ -1656,6 +1656,67 @@ fn search_compose_and_sidebar_cursor_sit_on_plain_backgrounds() {
     assert_eq!(sidebar[(5, 9)].bg, theme.accent_bg, "active folder row");
 }
 
+/// The header's pagination label right-aligns with the date/time column
+/// of the message rows — a few symbols in from the pane border, not stuck
+/// to it. The rows' rightmost glyph is the date (trailing `fit_left` pad
+/// is spaces), so comparing last-glyph columns checks the alignment.
+#[test]
+fn range_label_aligns_with_the_date_column() {
+    let mut state = mock_initial_state();
+    state.size = (152, 40);
+
+    // Compact, 20 items in a 31-row list: no scrollbar. The date text
+    // ("10:42", 5 chars in an 8-wide cell) ends 3 columns in; so must the
+    // label.
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    let header_edge = last_text_col(&buffer, 4);
+    assert_eq!(
+        header_edge,
+        last_text_col(&buffer, 6),
+        "label meets the dates"
+    );
+    assert_eq!(header_edge, find_text_col(&buffer, 6, "10:42") + 4);
+    assert_eq!(header_edge, 148, "three columns in from the border");
+
+    // Comfortable density: the list scrolls (20 items > 15 visible), the
+    // scrollbar shaves one column off the rows, and the label follows.
+    state.view_mode = tmail::config::ViewMode::Comfortable;
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    let header_edge = last_text_col(&buffer, 4);
+    assert_eq!(
+        header_edge,
+        find_text_col(&buffer, 6, "10:42") + 4,
+        "label meets the dates under the scrollbar"
+    );
+    assert_eq!(header_edge, 147);
+}
+
+/// Display column of the last non-space glyph on row `y`.
+fn last_text_col(buffer: &ratatui::buffer::Buffer, y: u16) -> usize {
+    let mut last = 0;
+    for x in 0..buffer.area.width {
+        if buffer[(x, y)].symbol() != " " {
+            last = x as usize;
+        }
+    }
+    last
+}
+
+/// Display column where `needle` starts on row `y` (mock rows carry no
+/// wide glyphs, so char index == display column).
+fn find_text_col(buffer: &ratatui::buffer::Buffer, y: u16, needle: &str) -> usize {
+    let mut line = String::new();
+    for x in 0..buffer.area.width {
+        line.push_str(buffer[(x, y)].symbol());
+    }
+    let byte_idx = line
+        .find(needle)
+        .unwrap_or_else(|| panic!("{needle:?} missing from row {y}: {line}"));
+    // Byte offset → char count → display column (mock rows carry no wide
+    // glyphs, so one char == one column).
+    line[..byte_idx].chars().count()
+}
+
 #[test]
 fn status_message_fades_over_the_closing_timeout_window() {
     // Ticket h1d7: with `[post].status_timeout > 0` the message holds its

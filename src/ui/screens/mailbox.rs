@@ -27,6 +27,14 @@ use crate::ui::layout::LayoutMode;
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
+/// Gap between the rendered date text and the row's right edge: the date
+/// cell is 8 columns wide (row anatomy in `message_spans`) and the common
+/// `format_relative` outputs are 5 columns (`HH:MM`, `Sep 1`), left-aligned
+/// — so dates end 3 columns short of the edge. The header's range label
+/// right-aligns to the same edge, lining it up with the date/time column
+/// instead of leaving it stuck to the pane border.
+const DATE_TEXT_RIGHT_INSET: usize = 3;
+
 /// Render the message list into `area` (already split off from the sidebar).
 #[allow(clippy::too_many_arguments)]
 pub fn render(
@@ -42,7 +50,6 @@ pub fn render(
         return;
     }
     let (head, rows) = crate::ui::layout::split_list(area);
-    render_head(frame, head, state, theme, hits);
 
     // Draw from the reducer-maintained scroll anchor so the selected row is
     // always on screen regardless of movement, page loads, or resize
@@ -63,6 +70,7 @@ pub fn render(
     } else {
         rows.width
     };
+    render_head(frame, head, state, theme, hits, scrolling);
     let bottom = area.y + area.height;
     let mut drew_any_row = false;
     let mut y = rows.y;
@@ -199,6 +207,7 @@ fn render_head(
     state: &AppState,
     theme: &Theme,
     hits: &mut HitMap,
+    scrolling: bool,
 ) {
     if area.height == 0 {
         return;
@@ -263,8 +272,13 @@ fn render_head(
         ));
     }
     if !range.is_empty() {
+        // Right-align the range with the date/time column of the rows
+        // below rather than the pane border: the date cell leaves a
+        // 3-column gap after its 5-character times, and while the
+        // scrollbar shows it shaves one more column off every row.
+        let inset = (DATE_TEXT_RIGHT_INSET + usize::from(scrolling)) as u16;
         let range_area = Rect {
-            x: area.x + area.width - range_w as u16,
+            x: (area.x + area.width).saturating_sub(range_w as u16 + inset),
             y: row.y,
             width: range_w as u16,
             height: 1,
