@@ -276,8 +276,13 @@ if [ "$SUB" = "mailbox" ]; then
       ;;
     slow)
       # Long-running invocation for cancellation tests: hangs for 30s
-      # unless killed. It never gets to print.
-      sleep 30
+      # unless killed. It never gets to print. The sleep runs as a
+      # background grandchild (deterministic process tree: bash stays
+      # alive waiting on it), so a kill that reaches only the direct
+      # child leaves the grandchild holding the pipe write ends — the
+      # regression behind ticket 2b7m.
+      sleep 30 &
+      wait
       ;;
   esac
   exit 0
@@ -322,8 +327,13 @@ if [ "$SUB" = "envelope" ]; then
       ;;
     slow)
       # Long-running invocation for cancellation tests: hangs for 30s
-      # unless killed. It never gets to print.
-      sleep 30
+      # unless killed. It never gets to print. The sleep runs as a
+      # background grandchild (deterministic process tree: bash stays
+      # alive waiting on it), so a kill that reaches only the direct
+      # child leaves the grandchild holding the pipe write ends — the
+      # regression behind ticket 2b7m.
+      sleep 30 &
+      wait
       ;;
   esac
   exit 0
@@ -355,7 +365,8 @@ if [ "$SUB" = "message" ]; then
         exit 1
         ;;
       slow)
-        sleep 30
+        sleep 30 &
+        wait
         ;;
     esac
     exit 0
@@ -384,8 +395,13 @@ if [ "$SUB" = "message" ]; then
       ;;
     slow)
       # Long-running invocation for cancellation tests: hangs for 30s
-      # unless killed. It never gets to print.
-      sleep 30
+      # unless killed. It never gets to print. The sleep runs as a
+      # background grandchild (deterministic process tree: bash stays
+      # alive waiting on it), so a kill that reaches only the direct
+      # child leaves the grandchild holding the pipe write ends — the
+      # regression behind ticket 2b7m.
+      sleep 30 &
+      wait
       ;;
   esac
   exit 0
@@ -403,7 +419,8 @@ if [ "$SUB" = "flag" ]; then
       exit 1
       ;;
     slow)
-      sleep 30
+      sleep 30 &
+      wait
       ;;
   esac
   exit 0
@@ -445,7 +462,8 @@ if [ "$SUB" = "attachment" ]; then
       exit 1
       ;;
     slow)
-      sleep 30
+      sleep 30 &
+      wait
       ;;
   esac
   exit 0

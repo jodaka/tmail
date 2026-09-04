@@ -336,8 +336,25 @@ mod tests {
     #[test]
     fn config_paths_with_spaces_stay_single_argv_entries() {
         let path = PathBuf::from("/tmp/some dir/my config.toml");
-        let argv = mailbox_list_argv(Some(&path), None);
-        assert_eq!(argv[1], "/tmp/some dir/my config.toml");
+        let mailbox_list_argv = mailbox_list_argv(Some(&path), None);
+        assert_eq!(mailbox_list_argv[1], "/tmp/some dir/my config.toml");
+    }
+
+    #[test]
+    fn nonascii_queries_travel_unchanged_through_normalization() {
+        // Ticket fjhg: cyrillic (and any non-ASCII) text must reach
+        // himalaya byte-for-byte. The reported BAD "Could not parse
+        // command" is an upstream himalaya limitation (pimalaya/himalaya
+        // #635, fixed by pimalaya/imap-client#23: SEARCH was sent without
+        // CHARSET UTF-8); Post neither corrupts nor rewrites the query.
+        let normalized = normalize_search_query("Аэрофлот");
+        assert!(normalized.contains("Аэрофлот"), "{normalized}");
+        assert_eq!(normalized.matches("Аэрофлот").count(), 3);
+        // A DSL-looking query with non-ASCII values passes through as is.
+        assert_eq!(
+            normalize_search_query("subject Аэрофлот"),
+            "subject Аэрофлот"
+        );
     }
 
     #[test]

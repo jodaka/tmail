@@ -53,6 +53,12 @@ pub(crate) async fn run_with_stdin(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
+        // Own process group (ticket 2b7m): cancellation can then kill the
+        // whole tree. Killing only the direct child would leave any
+        // grandchild it forked alive *holding the pipe write ends*, and the
+        // output readers below would block on EOF until that grandchild
+        // exits on its own (observed as a 30s cancellation on CI).
+        .process_group(0)
         .spawn()?;
 
     // Write stdin from a dedicated task so a child that never reads cannot
@@ -89,8 +95,14 @@ pub(crate) async fn run_with_stdin(
         biased;
         _ = token.cancelled() => {
             if let Some(pid) = pid {
-                // SAFETY: kill(2) with an int pid/signal; the child is ours.
-                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                // Negative pid targets the child's *process group* (the
+                // child was spawned with `process_group(0)`, so its group
+                // id is its pid): the SIGKILL reaches the child and
+                // everything it forked, closing every pipe write end so
+                // the readers below finish immediately (ticket 2b7m).
+                // SAFETY: kill(2) with an int pgid/signal; the group was
+                // created by this spawn and contains only our child tree.
+                unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
             }
             let _ = child.wait().await;
             if let Some(task) = stdin_task {

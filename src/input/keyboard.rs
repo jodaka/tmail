@@ -119,6 +119,10 @@ fn char_action(c: char, modifiers: KeyModifiers, focus: Focus) -> Option<Action>
         // (an open message is already read).
         'i' => Some(Action::MarkRead),
         'm' => Some(Action::ToggleMouseCapture),
+        // `d` deletes in the message list (trash; ticket h1m2) — with the
+        // whole selection when bulk-selection mode is on. In the reader
+        // `d` saves the selected attachment (plan §15).
+        'd' if focus == Focus::MessageList => Some(Action::Trash),
         'd' => Some(Action::SaveAttachment),
         'o' => Some(Action::OpenAttachment),
         // Space toggles the focused row's bulk-selection mark, list only

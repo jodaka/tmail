@@ -123,6 +123,9 @@ pub fn render(
                 ("space", "select"),
                 ("s", "star"),
                 ("e", "archive"),
+                // `d` deletes (trash) — the focused row, or the whole
+                // selection when bulk-selection mode is on (ticket h1m2).
+                ("d", "delete"),
                 ("c", "compose"),
                 ("/", "search"),
             ]

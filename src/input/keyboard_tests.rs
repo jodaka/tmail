@@ -70,6 +70,13 @@ fn list_shortcuts_per_input_contract() {
         to_action(plain(KeyCode::Char('s')), f),
         Some(Action::ToggleStar)
     );
+    // `d` deletes in the list (trash; ticket h1m2); the reader keeps it
+    // for attachment saves.
+    assert_eq!(to_action(plain(KeyCode::Char('d')), f), Some(Action::Trash));
+    assert_eq!(
+        to_action(plain(KeyCode::Char('d')), Focus::Reader),
+        Some(Action::SaveAttachment)
+    );
     assert_eq!(
         to_action(plain(KeyCode::Char('u')), f),
         Some(Action::MarkUnread)
