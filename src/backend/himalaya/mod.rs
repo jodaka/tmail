@@ -582,7 +582,9 @@ impl HimalayaCliBackend {
                 return Err(format!(
                     "config maps {alias_key} to `{alias}`, but the account exposes \
                      no such mailbox; set [accounts.<account>.mailbox.alias] \
-                     {alias_key} to an existing mailbox"
+                     {alias_key} to an existing mailbox, or enable the folder \
+                     for IMAP access in the provider's settings (Gmail: \
+                     Settings → Labels → Show in IMAP)"
                 ));
             }
             return Err(format!(

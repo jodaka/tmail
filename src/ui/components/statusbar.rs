@@ -113,8 +113,10 @@ pub fn render(
                 ("↑↓", "scroll"),
                 ("esc", "back"),
                 ("r", "reply"),
+                ("f", "forward"),
                 ("e", "archive"),
                 ("s", "star"),
+                ("d", "delete"),
             ]
         } else {
             &[

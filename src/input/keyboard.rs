@@ -42,6 +42,10 @@ pub fn to_action(key: KeyEvent, focus: Focus) -> Option<Action> {
         Backspace if focus == Focus::Composer => {
             Some(Action::ComposerEdit(ComposerEdit::Backspace))
         }
+        // Reader ⌫ trashes the open message (ticket zg41): the removed
+        // action row advertised "Delete ⌫", and ⌫ is the Delete key on
+        // Mac keyboards — where the forward-Delete arm below never fires.
+        Backspace if focus == Focus::Reader => Some(Action::Trash),
         Delete if focus == Focus::SearchField => None,
         Delete if focus == Focus::Dialog => Some(Action::DialogEdit(DialogEdit::Delete)),
         Delete if focus == Focus::Composer => Some(Action::ComposerEdit(ComposerEdit::Delete)),
@@ -119,12 +123,14 @@ fn char_action(c: char, modifiers: KeyModifiers, focus: Focus) -> Option<Action>
         // (an open message is already read).
         'i' => Some(Action::MarkRead),
         'm' => Some(Action::ToggleMouseCapture),
-        // `d` deletes in the message list (trash; ticket h1m2) — with the
-        // whole selection when bulk-selection mode is on. In the reader
-        // `d` saves the selected attachment (plan §15).
-        'd' if focus == Focus::MessageList => Some(Action::Trash),
+        // `d` deletes in the message list and in the reader (trash; the
+        // list binding is ticket h1m2, the reader binding is ticket zg41)
+        // — with the whole selection when bulk-selection mode is on. The
+        // reader's save-attachment moved to `S` to free the key.
+        'd' if focus == Focus::MessageList || focus == Focus::Reader => Some(Action::Trash),
         'd' => Some(Action::SaveAttachment),
         'o' => Some(Action::OpenAttachment),
+        'S' => Some(Action::SaveAttachment),
         // Space toggles the focused row's bulk-selection mark, list only
         // (ticket p0s3): the sidebar has no selection semantics, and the
         // reader scrolls instead of marking.

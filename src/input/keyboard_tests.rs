@@ -70,11 +70,15 @@ fn list_shortcuts_per_input_contract() {
         to_action(plain(KeyCode::Char('s')), f),
         Some(Action::ToggleStar)
     );
-    // `d` deletes in the list (trash; ticket h1m2); the reader keeps it
-    // for attachment saves.
+    // `d` deletes in the list (trash; ticket h1m2) and in the reader
+    // (ticket zg41); the reader's attachment save moved to `S`.
     assert_eq!(to_action(plain(KeyCode::Char('d')), f), Some(Action::Trash));
     assert_eq!(
         to_action(plain(KeyCode::Char('d')), Focus::Reader),
+        Some(Action::Trash)
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Char('S')), Focus::Reader),
         Some(Action::SaveAttachment)
     );
     assert_eq!(
@@ -340,6 +344,27 @@ fn dialog_enter_activates_esc_cancels() {
     assert_eq!(
         to_action(plain(KeyCode::Esc), f),
         Some(Action::BackOrCancel)
+    );
+}
+
+/// Reader Backspace trashes the open message (ticket zg41): the removed
+/// action row advertised "Delete ⌫", and ⌫ is Backspace on Mac keyboards,
+/// where the forward-Delete key never fires. Text-entry foci keep their
+/// edit semantics.
+#[test]
+fn reader_backspace_trashes_like_delete() {
+    assert_eq!(
+        to_action(plain(KeyCode::Backspace), Focus::Reader),
+        Some(Action::Trash)
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Delete), Focus::Reader),
+        Some(Action::Trash)
+    );
+    // The list keeps Backspace unbound (`d` deletes there).
+    assert_eq!(
+        to_action(plain(KeyCode::Backspace), Focus::MessageList),
+        None
     );
 }
 
