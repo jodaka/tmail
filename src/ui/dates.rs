@@ -1,13 +1,12 @@
 //! Centralized date/time display formatting (plan §7: "centralize display
 //! formatting"). Rules:
 //! - today → `HH:MM`
-//! - yesterday → `Yest`
 //! - same year → `Sep 1`
 //! - otherwise → `2025`
 //!
 //! Reader meta line (absolute): `Mon, Sep 1 · 18:32` (mockup `.mm-date`).
 
-use chrono::{DateTime, Datelike, Duration, FixedOffset};
+use chrono::{DateTime, Datelike, FixedOffset};
 
 pub fn format_clock(now: DateTime<FixedOffset>) -> String {
     now.format("%a %b %-d · %H:%M").to_string()
@@ -27,8 +26,6 @@ pub fn format_relative(now: DateTime<FixedOffset>, timestamp: DateTime<FixedOffs
     let day = timestamp.date_naive();
     if day == today {
         timestamp.format("%H:%M").to_string()
-    } else if day == today - Duration::days(1) {
-        String::from("Yest")
     } else if day.year() == today.year() {
         timestamp.format("%b %-d").to_string()
     } else {
@@ -61,7 +58,7 @@ mod tests {
     fn relative_buckets() {
         let n = now();
         assert_eq!(format_relative(n, at(2026, 9, 2, 10, 42)), "10:42");
-        assert_eq!(format_relative(n, at(2026, 9, 1, 18, 3)), "Yest");
+        assert_eq!(format_relative(n, at(2026, 9, 1, 18, 3)), "Sep 1");
         assert_eq!(format_relative(n, at(2026, 8, 28, 9, 0)), "Aug 28");
         assert_eq!(format_relative(n, at(2025, 12, 30, 9, 0)), "2025");
     }

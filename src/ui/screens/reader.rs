@@ -1,11 +1,14 @@
 //! Reader screen: exactly one message (mockup `viewer.html`, plan §19
 //! Phase 4). v1 overrides applied (plan §4): no thread count, no collapsed
-//! messages, no thread navigation, no label tags.
+//! messages, no thread navigation, no label tags. The action buttons are
+//! gone (ticket 3rt5): every action stays bound to its hotkey, only the
+//! clickable row is gone.
 //!
-//! The document splits into a *fixed header* — subject, meta block, action
-//! row, hairline — and a *scrollable body* (message text and attachments,
-//! ticket 6864): the header stays pinned at the top of the area on every
-//! frame while a long message scrolls beneath it, with a vertical
+//! The document splits into a *fixed header* — subject, meta block,
+//! hairline, each field padded two symbols in from the panel edges — and a
+//! *scrollable body* (message text and attachments, ticket 6864): the
+//! header stays pinned at the top of the area on every frame while a long
+//! message scrolls beneath it, with a vertical
 //! scrollbar that appears only when the body overflows the viewport.
 //! Content is built as tone-tagged lines by pure functions shared with the
 //! reducer's scroll clamp, so what is drawn and what the clamp allows can
@@ -18,14 +21,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::app::action::ClickTarget;
-use crate::app::action::ReaderAction;
 use crate::app::state::{AppState, Loadable};
 use crate::input::mouse::HitMap;
 use crate::ui::dates;
 use crate::ui::rich::{RichLine, RichSpan, RichStyle};
 use crate::ui::text;
 use crate::ui::theme::Theme;
-use unicode_width::UnicodeWidthStr;
 
 /// Visual tone of one chrome reader line; the renderer maps tones to theme
 /// styles.
@@ -38,7 +39,7 @@ pub(crate) enum Tone {
 }
 
 /// One line of the reader document: either tone-styled chrome (subject,
-/// meta, actions, attachments) or a rich body line whose spans carry the
+/// meta, attachments) or a rich body line whose spans carry the
 /// HTML semantics mapped by `ui::rich` (plan §13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReaderLine {
@@ -46,10 +47,6 @@ pub(crate) enum ReaderLine {
         tone: Tone,
         text: String,
     },
-    /// The action row (mockup `.thread-actions`): one clickable control per
-    /// segment, each label advertising its keyboard key. Rendered as one
-    /// ` · `-joined line; the mouse layer records a region per segment.
-    Actions(Vec<(String, ReaderAction)>),
     /// One attachment chip (mockup `.att`). `selected` marks the chip the
     /// save/open keys act on; it renders with the cursor marker and the
     /// accent style.
@@ -73,22 +70,25 @@ impl ReaderLine {
     fn text(&self) -> String {
         match self {
             ReaderLine::Chrome { text, .. } => text.clone(),
-            ReaderLine::Actions(segments) => segments
-                .iter()
-                .map(|(label, _)| label.as_str())
-                .collect::<Vec<_>>()
-                .join(SEPARATOR),
             ReaderLine::Chip { text, .. } => text.clone(),
             ReaderLine::Rich(line) => line.text(),
         }
     }
 }
 
-/// Separator between reader action segments (mockup `.thread-actions`).
-const SEPARATOR: &str = " · ";
+/// Fixed-header side padding (ticket 3rt5): every fixed field sits two
+/// symbols in from the left and right edges of the panel.
+const HEADER_PAD: &str = "  ";
 
 /// Body indent (mockup `.m-text` `padding-left: 2ch`).
 const INDENT: &str = "  ";
+
+/// Wrap a fixed-header field in the panel's side padding, truncating the
+/// content to keep the whole line inside the panel width.
+fn padded_field(content: &str, width: usize) -> String {
+    let inner = text::truncate(content, width.saturating_sub(2 * HEADER_PAD.len()));
+    format!("{HEADER_PAD}{inner}{HEADER_PAD}")
+}
 
 /// Prepend the body indent to a rich line as a plain leading span.
 fn indented(line: RichLine) -> ReaderLine {
@@ -103,7 +103,8 @@ fn indented(line: RichLine) -> ReaderLine {
 }
 
 /// The fixed header of the reader document (ticket 6864): subject, meta
-/// block, action row, and the hairline that separates them from the body.
+/// block, and the hairline that separates them from the body. Every field
+/// is padded two symbols in from the panel edges (ticket 3rt5).
 /// Deterministic and I/O-free; never scrolls.
 pub(crate) fn header_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
     let Some(summary) = state.open_summary() else {
@@ -125,7 +126,7 @@ pub(crate) fn header_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
     } else {
         subject.as_str()
     };
-    lines.push(ReaderLine::chrome(Tone::Strong, text::truncate(subject, w)));
+    lines.push(ReaderLine::chrome(Tone::Strong, padded_field(subject, w)));
 
     // Meta block (mockup `.msg-meta`): From / To / Cc / Date. From and To
     // come from the summary snapshot (available before the fetch lands);
@@ -166,26 +167,6 @@ pub(crate) fn header_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
         .unwrap_or(summary.timestamp);
     push_meta(&mut lines, "Date", &date_label(date), w);
 
-    // Action row (mockup `.thread-actions`): one clickable control per
-    // keyboard shortcut, save/open hints only when attachments exist
-    // (plan §15). Clicking a control runs the same action as its key.
-    let mut actions: Vec<(String, ReaderAction)> = vec![
-        (String::from("Reply r"), ReaderAction::Reply),
-        (String::from("Forward f"), ReaderAction::Forward),
-        (String::from("Archive e"), ReaderAction::Archive),
-        (String::from("Star s"), ReaderAction::Star),
-        (String::from("Unread u"), ReaderAction::Unread),
-        (String::from("Delete ⌫"), ReaderAction::Trash),
-    ];
-    if state
-        .open_message
-        .as_loaded()
-        .is_some_and(|m| !m.attachments.is_empty())
-    {
-        actions.push((String::from("Save d"), ReaderAction::SaveAttachment));
-        actions.push((String::from("Open o"), ReaderAction::OpenAttachment));
-    }
-    lines.push(ReaderLine::Actions(actions));
     lines.push(hairline(w));
     lines
 }
@@ -301,9 +282,8 @@ pub fn render(
     let header = header_lines(state, width);
     let body = scroll_lines(state, width);
 
-    // The header never scrolls: subject, meta, and the action row stay on
-    // screen however long the message is (ticket 6864). Its clickable
-    // action segments register at their fixed rows.
+    // The header never scrolls: subject and meta stay on screen however
+    // long the message is (ticket 6864).
     let header_h = header.len().min(area.height as usize) as u16;
     for (i, line) in header.iter().take(header_h as usize).enumerate() {
         let row = Rect {
@@ -316,9 +296,6 @@ pub fn render(
             Paragraph::new(reader_spans(line, theme, area.width as usize)),
             row,
         );
-        if let ReaderLine::Actions(segments) = line {
-            register_action_hits(hits, row, segments);
-        }
     }
 
     // The body viewport is whatever is left under the fixed header.
@@ -401,29 +378,6 @@ pub fn render(
     }
 }
 
-/// Exact click regions for the action row's ` · `-joined segments (plan
-/// §10): each starts where the previous one ended plus the separator, so a
-/// click lands on the control it names.
-fn register_action_hits(hits: &mut HitMap, row: Rect, segments: &[(String, ReaderAction)]) {
-    let mut segment_col = 0usize;
-    for (label, action) in segments {
-        let remaining = (row.width as usize).saturating_sub(segment_col);
-        let width = label.width().min(remaining);
-        if width > 0 {
-            hits.push(
-                Rect {
-                    x: row.x + segment_col as u16,
-                    y: row.y,
-                    width: width as u16,
-                    height: 1,
-                },
-                ClickTarget::ReaderAction(*action),
-            );
-        }
-        segment_col += label.width() + SEPARATOR.width();
-    }
-}
-
 /// Style for one rich span (plan §13 semantic table → theme tokens; no
 /// literal colors here). Flags compose: a link inside a blockquote keeps
 /// its accent so it stays discoverable.
@@ -465,17 +419,6 @@ fn reader_spans<'a>(line: &'a ReaderLine, theme: &'a Theme, width: usize) -> Lin
             };
             Line::from(Span::styled(text::clip(text, width), style))
         }
-        ReaderLine::Actions(segments) => {
-            let joined = segments
-                .iter()
-                .map(|(label, _)| label.as_str())
-                .collect::<Vec<_>>()
-                .join(SEPARATOR);
-            Line::from(Span::styled(
-                text::clip(&joined, width),
-                Style::new().fg(theme.text_soft).bg(theme.background),
-            ))
-        }
         ReaderLine::Chip { text, selected } => {
             let style = if *selected {
                 Style::new()
@@ -504,7 +447,7 @@ fn reader_spans<'a>(line: &'a ReaderLine, theme: &'a Theme, width: usize) -> Lin
 fn push_meta(lines: &mut Vec<ReaderLine>, label: &str, value: &str, width: usize) {
     lines.push(ReaderLine::chrome(
         Tone::Dim,
-        text::truncate(&format!("{label:<5} {value}"), width),
+        padded_field(&format!("{label:<5} {value}"), width),
     ));
 }
 
@@ -617,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn document_contains_header_body_actions_attachments() {
+    fn document_contains_header_body_and_attachments() {
         let state = loaded_state();
         let lines = content(&state, 100);
         let text: Vec<String> = lines.iter().map(ReaderLine::text).collect();
@@ -634,7 +577,10 @@ mod tests {
             text.iter()
                 .any(|t| t.contains("Date") && t.contains("10:47"))
         );
-        assert!(text.iter().any(|t| t.contains("Archive e")));
+        // The action buttons are gone (ticket 3rt5); the actions live on
+        // their hotkeys only.
+        assert!(!text.iter().any(|t| t.contains("Reply r")));
+        assert!(!text.iter().any(|t| t.contains("Archive e")));
         assert!(text.iter().any(|t| t.contains("First line.")));
         assert!(text.iter().any(|t| t.contains("report.pdf")));
         assert!(text.iter().any(|t| t.contains("1.1 MB")));
@@ -643,6 +589,26 @@ mod tests {
             text.iter()
                 .any(|t| t.starts_with('─') && t.chars().all(|c| c == '─'))
         );
+    }
+
+    /// Every fixed field (subject, meta) sits two symbols in from the left
+    /// and right panel edges (ticket 3rt5).
+    #[test]
+    fn header_fields_are_padded_two_symbols_from_both_edges() {
+        let state = loaded_state();
+        let header = header_lines(&state, 100);
+        let text: Vec<String> = header.iter().map(ReaderLine::text).collect();
+        let subject = &text[0];
+        assert!(subject.starts_with("  Welcome to Post"), "{subject:?}");
+        assert!(subject.ends_with("  "), "{subject:?}");
+        let from = text
+            .iter()
+            .find(|t| t.contains("Bob <bob@example.org>"))
+            .expect("From row");
+        assert!(from.starts_with("  From "), "{from:?}");
+        assert!(from.ends_with("  "), "{from:?}");
+        // Padded lines never exceed the panel width.
+        assert!(text.iter().all(|t| t.width() <= 100));
     }
 
     #[test]
@@ -826,11 +792,10 @@ mod tests {
         let state = loaded_state();
         let header = header_lines(&state, 100);
         let body = scroll_lines(&state, 100);
-        // The header carries exactly the pinned chrome: subject, meta, the
-        // action row, and the hairline — never body content.
+        // The header carries exactly the pinned chrome: subject, meta, and
+        // the hairline — never body content, no action row (ticket 3rt5).
         let header_text: Vec<String> = header.iter().map(ReaderLine::text).collect();
         assert!(header_text[0].contains("Welcome to Post"));
-        assert!(header_text.iter().any(|t| t.contains("Archive e")));
         assert!(
             header_text
                 .last()
@@ -842,7 +807,6 @@ mod tests {
         let body_text: Vec<String> = body.iter().map(ReaderLine::text).collect();
         assert!(body_text.iter().any(|t| t.contains("First line.")));
         assert!(body_text.iter().any(|t| t.contains("report.pdf")));
-        assert!(!body_text.iter().any(|t| t.contains("Archive e")));
     }
 
     #[test]

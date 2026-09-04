@@ -7,10 +7,16 @@
 
 use std::path::Path;
 
-/// `mailbox list --json`
+/// `mailbox list --json --counts` (`--counts` populates per-mailbox total
+/// and unread counters; maildir does not implement counts yet, in which
+/// case the fields stay `None` and the sidebar degrades gracefully).
 pub(crate) fn mailbox_list_argv(config: Option<&Path>, account: Option<&str>) -> Vec<String> {
     let mut argv = global_flags(config, account);
-    argv.extend(["mailbox", "list", "--json"].into_iter().map(String::from));
+    argv.extend(
+        ["mailbox", "list", "--json", "--counts"]
+            .into_iter()
+            .map(String::from),
+    );
     argv
 }
 
@@ -290,7 +296,8 @@ mod tests {
                 "probe",
                 "mailbox",
                 "list",
-                "--json"
+                "--json",
+                "--counts"
             ]
         );
     }
@@ -327,7 +334,7 @@ mod tests {
     #[test]
     fn flags_omitted_when_unset() {
         let argv = mailbox_list_argv(None, None);
-        assert_eq!(argv, vec!["mailbox", "list", "--json"]);
+        assert_eq!(argv, vec!["mailbox", "list", "--json", "--counts"]);
         let argv = envelope_list_argv(None, None, "My Folder", 1, 20);
         assert_eq!(argv[0], "envelope");
         assert_eq!(argv[3], "My Folder");

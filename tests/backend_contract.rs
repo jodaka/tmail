@@ -81,6 +81,7 @@ fn mailbox_list_argv_is_exact() {
             "mailbox".to_string(),
             "list".to_string(),
             "--json".to_string(),
+            "--counts".to_string(),
         ]]
     );
 }
@@ -180,6 +181,7 @@ fn argv_without_config_or_account_is_minimal() {
             "mailbox".to_string(),
             "list".to_string(),
             "--json".to_string(),
+            "--counts".to_string(),
         ]]
     );
 }
@@ -550,6 +552,7 @@ fn archive_resolves_target_from_cached_listing() {
                 "mailbox".to_string(),
                 "list".to_string(),
                 "--json".to_string(),
+                "--counts".to_string(),
             ],
             vec![
                 "-c".to_string(),

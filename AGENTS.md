@@ -77,7 +77,6 @@ Do not use OpenCode's internal todo list (`todowrite` / `todoread`).
 For implementation work that would normally be broken into a todo list:
 
 - Use Kata as the task tracking system.
-- Search Kata before creating new work.
 - Create or reuse Kata issues for independently meaningful work items.
 - Keep issue state updated while working.
 - Close Kata issues only after verification.

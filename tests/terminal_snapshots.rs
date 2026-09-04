@@ -530,9 +530,11 @@ fn reader_renders_exactly_one_message_document() {
         text.contains("KKF Notifications"),
         "sender missing:\n{text}"
     );
-    // Action row and hints: exactly one message, no thread navigation
+    // No action row (ticket 3rt5): the actions stay bound to their
+    // hotkeys, the buttons are gone. No thread navigation either
     // (plan §4 overrides); no mode badge.
-    assert!(text.contains("Archive e"), "actions missing:\n{text}");
+    assert_absent(&text, "Archive e", (152, 40));
+    assert_absent(&text, "Reply r", (152, 40));
     assert_absent(&text, "3 of 3", (152, 40));
     assert_absent(&text, "thread", (152, 40));
     assert_absent(&text, "READER", (152, 40));
@@ -555,9 +557,9 @@ fn reader_loading_state_renders_placeholder() {
         !text.contains("body line 01"),
         "body must not exist while loading:\n{text}"
     );
-    // The spinner sits centered in the body area (header ends at row 10;
-    // the body spans 10..37 → center row 23, column 24+63=87).
-    assert_eq!(buffer[(87, 23)].symbol(), "⠋", "centered spinner:\n{text}");
+    // The spinner sits centered in the body area (header ends at row 9;
+    // the body spans 9..37 → center row 22, column 24+63=87).
+    assert_eq!(buffer[(87, 22)].symbol(), "⠋", "centered spinner:\n{text}");
 }
 
 #[test]
@@ -1245,7 +1247,7 @@ fn list_matches_mockup_density_and_hierarchy() {
     let (row_y, star_x) = position_of(&text, "* PayPal");
     let (_, from_x) = position_of(&text, "PayPal");
     let (_, subject_x) = position_of(&text, "Payment received");
-    let (_, date_x) = position_of(&text, "Yest");
+    let (_, date_x) = position_of(&text, "Sep 1");
     assert_eq!(row_y, 9, "rows start under the head");
     assert!(star_x < from_x && from_x < subject_x && subject_x < date_x);
     // Full mode shows snippets inline after the subject (mockup `.snippet`).
@@ -1255,30 +1257,31 @@ fn list_matches_mockup_density_and_hierarchy() {
     );
 }
 
-/// Mockup `viewer.html`: subject, then From/To/Cc/Date meta, then the
-/// action row, then a hairline, then the body — top to bottom, one
-/// message, no thread chrome.
+/// Mockup `viewer.html`: subject, then From/To/Cc/Date meta, then a
+/// hairline, then the body — top to bottom, one message, no thread chrome.
+/// Every fixed field is padded two symbols in from the panel edges and the
+/// action buttons are gone (ticket 3rt5).
 #[test]
 fn reader_matches_mockup_hierarchy() {
     let mut state = reader_state(0);
     let text = draw_after(&mut state, &[], 152, 40);
-    let (subject_y, _) = position_of(&text, "Re: WIP — 240 mm stainless-clad gyuto");
+    let (subject_y, subject_x) = position_of(&text, "Re: WIP — 240 mm stainless-clad gyuto");
     let (from_y, _) = position_of(&text, "From ");
     let (to_y, _) = position_of(&text, "To   ");
     let (date_y, _) = position_of(&text, "Date ");
-    let (actions_y, _) = position_of(&text, "Archive e");
     let (body_y, _) = position_of(&text, "body line 01");
     assert!(subject_y < from_y, "subject first");
     assert!(from_y < to_y && to_y < date_y, "meta block in order");
-    assert!(date_y < actions_y, "actions follow the meta");
-    assert!(actions_y < body_y, "body follows the actions");
-    // A hairline separates actions from the body (mockup `.thread-actions`
-    // border-bottom).
+    assert!(date_y < body_y, "body follows the meta");
+    // The fixed fields sit two columns in from the list edge (ticket 3rt5).
+    assert_eq!(subject_x, 26, "subject padded 2 from the panel edge");
+    // A hairline separates the meta block from the body (mockup
+    // `.msg-meta` border-bottom); no action row precedes it (ticket 3rt5).
     assert!(
         text.lines()
-            .nth(actions_y + 1)
+            .nth(date_y + 1)
             .is_some_and(|l| l.contains('─')),
-        "hairline under the actions"
+        "hairline under the meta block"
     );
 }
 
@@ -1317,60 +1320,6 @@ fn composer_matches_mockup_hierarchy_and_density() {
     // Action row: Send first, Discard after it (mockup `.compose-actions`).
     assert!(send_x < discard_x, "Send precedes Discard");
 }
-
-/// The reader action row is clickable (plan §10 "action button"): each
-/// segment is its own region at the exact columns where its label draws,
-/// and every click maps to the action the key would run (yemf).
-#[test]
-fn hit_map_records_reader_action_row_segments() {
-    use tmail::app::action::{ClickTarget as Target, ReaderAction};
-    let mut state = mock_initial_state();
-    let summary = state.messages.items[0].clone();
-    let message = mock::mock_message(&summary);
-    state.routes.push(Route::Message(MessageRoute {
-        mailbox_id: MailboxId(String::from("inbox")),
-        summary,
-    }));
-    state.open_message = Loadable::Loaded(message);
-    state.focus = Focus::Reader;
-    let (_, hits) = draw_state_hits(&state, 152, 40);
-    // Document geometry at 152×40: subject y=4, From/To/Date y=5..7, so
-    // the action row draws at y=8 starting at the list edge x=24.
-    assert_eq!(
-        hits.hit_test(25, 8, false),
-        Some(Target::ReaderAction(ReaderAction::Reply))
-    );
-    assert_eq!(
-        hits.hit_test(36, 8, false),
-        Some(Target::ReaderAction(ReaderAction::Forward))
-    );
-    assert_eq!(
-        hits.hit_test(47, 8, false),
-        Some(Target::ReaderAction(ReaderAction::Archive))
-    );
-    assert_eq!(
-        hits.hit_test(60, 8, false),
-        Some(Target::ReaderAction(ReaderAction::Star))
-    );
-    // The separator between segments stays inside a segment's region only
-    // by belonging to the preceding label's end — a click on the gap right
-    // before "Archive" hits Archive only inside its label; the gap itself
-    // is the tail of "Forward f"'s trailing separator, owned by Archive's
-    // start: assert the boundary behaves (gap after "Forward f" hits
-    // nothing until Archive's own first column).
-    let archive_x = 24 + "Reply r".width() + 3 + "Forward f".width() + 3;
-    assert_eq!(
-        hits.hit_test(archive_x as u16, 8, false),
-        Some(Target::ReaderAction(ReaderAction::Archive))
-    );
-    assert_eq!(
-        hits.hit_test(archive_x as u16 - 1, 8, false),
-        None,
-        "the separator column binds to no action"
-    );
-}
-
-use unicode_width::UnicodeWidthStr as _;
 
 // ── Bulk selection rendering (ticket p0s3) ───────────────────────────────
 

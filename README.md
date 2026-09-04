@@ -4,13 +4,6 @@ A Gmail-inspired, keyboard-first terminal email client built in Rust with
 Ratatui, backed by the [Himalaya CLI](https://pimalaya.org) for all mail
 protocols, accounts, and credentials.
 
-**Status: Phases 0–11 complete** (shell, Himalaya adapter, operation
-manager/cancellation, reader, MIME/HTML rendering, composer + draft
-autosave, send/reply/forward, attachments, search/refresh, mouse +
-responsive polish + config validation, external editor). Phase 12
-hardening (integration suites, docs, CI) is in progress. Implementation
-proceeds phase by phase per `POST_IMPLEMENTATION_PLAN.md`.
-
 ## Installation
 
 1. Install the Himalaya CLI (v2.x, with the backend feature you need):
@@ -89,44 +82,7 @@ any other file are ignored.**
 | `[post.cache].max_messages` | integer | `50` | How many viewed messages to keep in Post's on-disk cache (ticket haeb) so previously opened mail renders instantly. Least-recently-used entries are evicted first; `0` disables message caching. |
 | `[post.cache].max_bytes` | integer | `10485760` | Total size cap in bytes for the viewed-message cache (default 10 MiB, ticket haeb). Messages larger than the whole budget are never cached. |
 
-### Example
-
-```toml
-# ── Himalaya accounts (himalaya owns this format) ──────────────────
-[accounts.personal]
-email    = "you@example.org"
-default  = true
-# ... himalaya backend/credential blocks ...
-
-[accounts.personal.mailbox.alias]
-inbox   = "INBOX"
-sent    = "Sent"
-drafts  = "Drafts"
-trash   = "[Gmail]/Trash"
-archive = "[Gmail]/All Mail"
-
-# ── Post-owned settings ────────────────────────────────────────────
-[post]
-account = "personal"        # optional; omit to use himalaya's default
-mouse   = true              # REQUIRED for mouse support (default: off)
-
-[post.mail]
-page_size_auto = true        # size pages to the terminal (page_size is ignored)
-page_size = 50               # used only when page_size_auto = false
-refresh_interval_seconds = 60
-
-[post.composer]
-editor = "builtin"
-autosave_delay_ms = 2000
-
-[post.attachments]
-downloads_dir = "~/Downloads"
-
-[post.theme]
-name = "default"
-```
-
-A runnable copy lives in `config.example.toml`.
+Config example is available in `config.example.toml`.
 
 ### Theming
 
@@ -177,33 +133,7 @@ Post reads, from himalaya's own blocks:
   `drafts`, `trash`, `archive`) to the account's real folder names; without
   an alias, archive/trash resolve from what the account actually exposes
 
-## Keyboard
-
-| Context | Key | Action |
-| --- | --- | --- |
-| Global | `↑` / `↓` | Move selection / scroll focused area |
-| Global | `←` / `→` | Previous / next page (reader: page the viewport) |
-| Global | `Enter` | Open / activate focused control |
-| Global | `Esc` (or `q`) | Cancel work → clear selection → close overlay → go back |
-| Global | `Tab` / `Shift+Tab` | Next / previous focus |
-| Global | `/` | Focus search |
-| Global | `c` | Compose |
-| Global | `Ctrl+R` | Manual refresh |
-| Global | `Ctrl+C` | Quit |
-| Global | `Ctrl+A` | Select all visible messages (or clear the selection) |
-| Global | `m` | Toggle mouse capture on/off (see [Mouse](#mouse)) |
-| List/reader | `r` / `a` / `f` | Reply / reply-all / forward |
-| List/reader | `e` / `s` / `u` | Archive / star / mark unread |
-| List/reader | `Delete` | Trash |
-| List | `Space` | Toggle the focused message's selection mark |
-| List | `i` | Mark read (focused row, or the whole selection) |
-| Reader | `d` / `o`, `Tab` | Save / open attachment, cycle chips |
-| Search | printable, `Backspace`, `Enter`, `Esc` | Edit query, submit, leave |
-| Composer | `Enter` | Newline in body; activate focused control |
-| Composer | `Ctrl+Enter` | Send |
-| Composer | `Ctrl+E` | Edit the body in the configured external editor |
-| Composer | `Esc` | Save and leave (never silently discards) |
-| Modal | `↑↓` / `Tab` / `Enter` / `Esc` | Scroll, switch button, confirm, dismiss/keep |
+Keyaboard shortcuts described in `./docs/shortcuts.md`
 
 ## External editor
 
@@ -358,26 +288,6 @@ no settings/help UI, and no offline sync.
 **Mouse:** with capture enabled, plain click-drag belongs to Post; hold
 `Shift` or press `m` to select text ([details](#mouse)).
 
-## Troubleshooting
-
-- **Mouse does nothing** — `[post] mouse = true` is missing from the file
-  Post actually loaded (check the [load order](#which-file-is-loaded)), or
-  the terminal does not pass mouse events through. You can also just
-  press `m` to turn capture on without touching the config.
-- **Cannot select text with the mouse** — mouse capture is on; hold
-  `Shift` while dragging, or press `m` to release the mouse to the
-  terminal ([details](#text-selection-while-the-mouse-is-enabled)).
-- **Post refuses to start listing problems** — fix each item it prints in
-  the config file; it validates everything up front on purpose.
-- **Mailboxes show but archive/trash fail** — add
-  `[accounts.<name>.mailbox.alias]` entries matching your provider's
-  folder names.
-- **Terminal is a mess after a crash** — Post restores the terminal on
-  exit, error, and panic; if a hard kill left it broken, run `reset`.
-- **Text search finds nothing on a Maildir account** — expected: the
-  Maildir backend has no server-side text search. Flag filters work
-  ([details](#known-limitations)).
-
 ## Development
 
 ```sh
@@ -404,6 +314,7 @@ python3 fixtures/smoke/ci_smoke.py --bin target/debug/tmail   # pty smoke (CI ru
 - `tests/backend_contract.rs` — backend contract test suite
 - `POST_IMPLEMENTATION_PLAN.md` — the product/engineering specification
 
-## License
-
-TBD
+## Additional documentation
+`./docs/builtin-be.md` — brief ideas about bundling Himalaya with app
+`./docs/shortcuts.md` — keyboard shortcuts list
+`./docs/summary.md` — implementation history summary

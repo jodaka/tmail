@@ -7,7 +7,7 @@
 //! registered, so stale, cancelled, or superseded results never win
 //! (plan §11). Reducers never perform I/O themselves.
 
-use crate::app::action::{Action, BulkOp, ClickTarget, DialogEdit, ReaderAction, SearchEdit};
+use crate::app::action::{Action, BulkOp, ClickTarget, DialogEdit, SearchEdit};
 use crate::app::composer::{ComposerField, ComposerState};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
@@ -495,7 +495,6 @@ fn click(state: &mut AppState, target: ClickTarget) -> Vec<Effect> {
         ClickTarget::SearchField => reduce(state, &Action::OpenSearch),
         ClickTarget::MessageRow(index) => click_message_row(state, index),
         ClickTarget::ReaderAttachment(index) => click_reader_attachment(state, index),
-        ClickTarget::ReaderAction(action) => click_reader_action(state, action),
         ClickTarget::ComposerField(field) => click_composer_field(state, field),
         // Modal buttons outside a modal cannot happen (their regions are
         // only recorded while the modal renders); the arm keeps the match
@@ -583,27 +582,6 @@ fn click_message_row(state: &mut AppState, index: usize) -> Vec<Effect> {
     state.selection = index;
     keep_selection_visible(state);
     Vec::new()
-}
-
-/// Click a control on the reader action row (plan §10): the advertised
-/// key's action, on the open message. Focus follows the click so the
-/// action path (which keys off `Focus::Reader`) sees the reader context.
-fn click_reader_action(state: &mut AppState, action: ReaderAction) -> Vec<Effect> {
-    if !matches!(state.active_route(), Some(Route::Message(_))) {
-        return Vec::new();
-    }
-    state.focus = Focus::Reader;
-    let action = match action {
-        ReaderAction::Reply => Action::Reply,
-        ReaderAction::Forward => Action::Forward,
-        ReaderAction::Archive => Action::Archive,
-        ReaderAction::Star => Action::ToggleStar,
-        ReaderAction::Unread => Action::MarkUnread,
-        ReaderAction::Trash => Action::Trash,
-        ReaderAction::SaveAttachment => Action::SaveAttachment,
-        ReaderAction::OpenAttachment => Action::OpenAttachment,
-    };
-    reduce(state, &action)
 }
 
 /// Click an attachment chip in the reader (plan §15): select it; clicking

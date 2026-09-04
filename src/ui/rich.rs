@@ -208,14 +208,17 @@ pub(crate) fn is_blank(lines: &[RichLine]) -> bool {
 /// HTML is absent or renders blank. Newlines collapse to single spaces so
 /// the preview is one string; it is capped (with a trailing `…`) so a huge
 /// body never bloats the summary or the cached page.
+///
+/// Unlike the reader's rich render, the HTML conversion is bare text only
+/// (ticket h2em): no table borders, no heading/quote/bullet/link markers —
+/// the list row wants the words, not the layout.
 pub(crate) fn preview_text(message: &crate::domain::Message) -> Option<String> {
     const MAX_PREVIEW_WIDTH: usize = 200;
     let html = message.html_body.as_deref().map(|html| {
-        html_to_rich(html, MAX_PREVIEW_WIDTH)
-            .iter()
-            .map(RichLine::text)
-            .collect::<Vec<_>>()
-            .join(" ")
+        html2text::config::with_decorator(html2text::render::TrivialDecorator::new())
+            .no_table_borders()
+            .string_from_read(html.as_bytes(), MAX_PREVIEW_WIDTH)
+            .unwrap_or_default()
     });
     let plain = message
         .plain_body
@@ -300,6 +303,43 @@ mod tests {
         assert!(preview.contains("second para"), "{preview}");
         assert!(!preview.contains("plain fallback"));
         assert!(!preview.contains('<'));
+    }
+
+    /// The list preview is bare text only (ticket h2em): tables, rules,
+    /// headings, quotes, bullets, and images lose all their formatting
+    /// markers — unlike the reader, which renders them richly.
+    #[test]
+    fn preview_text_drops_html_formatting_markers() {
+        let message = preview_message(
+            None,
+            Some(String::from(
+                "<html><body>\
+                 <h2>Receipt</h2>\
+                 <hr>\
+                 <table><tr><th>Item</th><th>Qty</th></tr>\
+                 <tr><td>Gyuto</td><td>1</td></tr></table>\
+                 <blockquote><p>quoted words</p></blockquote>\
+                 <ul><li>bullet one</li><li>bullet two</li></ul>\
+                 <p><img src=\"x.png\" alt=\"photo\"> done</p>\
+                 </body></html>",
+            )),
+        );
+        let preview = preview_text(&message).expect("preview");
+        for marker in ['─', '│', '┬', '┴', '+', '-', '#', '>', '*', '['] {
+            assert!(!preview.contains(marker), "{marker:?} leaked: {preview}");
+        }
+        for word in [
+            "Receipt",
+            "Item",
+            "Gyuto",
+            "quoted words",
+            "bullet one",
+            "bullet two",
+            "photo",
+            "done",
+        ] {
+            assert!(preview.contains(word), "{word} missing: {preview}");
+        }
     }
 
     #[test]
