@@ -5177,10 +5177,10 @@ fn a_new_status_rearms_the_timeout() {
     assert_eq!(s.status.message, None, "expired five seconds after reset");
 }
 
-// ── Runtime theme switching (ticket z0s4) ────────────────────────────────
+// ── Theme picker (ticket k5ba) ───────────────────────────────────────────
 
-#[test]
-fn theme_cycling_wraps_and_announces() {
+/// Three-palette state for the picker tests.
+fn picker_state() -> AppState {
     let mut s = state();
     s.themes = vec![
         (
@@ -5197,15 +5197,92 @@ fn theme_cycling_wraps_and_announces() {
         ),
     ];
     s.theme_index = 0;
-    no_effects(&reduce(&mut s, &Action::CycleTheme));
-    assert_eq!(s.theme_index, 1);
+    s
+}
+
+#[test]
+fn t_opens_the_picker_with_the_cursor_on_the_active_theme() {
+    let mut s = picker_state();
+    let previous = s.focus;
+    no_effects(&reduce(&mut s, &Action::OpenThemePicker));
+    let Some(Overlay::ThemePicker(dialog)) = &s.overlay else {
+        panic!("picker must open");
+    };
+    assert_eq!(dialog.cursor, 0, "cursor starts on the active palette");
+    assert_eq!(dialog.original, 0);
+    assert_eq!(dialog.previous_focus, previous);
+    assert_eq!(s.focus, Focus::ThemePicker);
+}
+
+#[test]
+fn arrows_preview_the_highlighted_theme_without_wrapping() {
+    let mut s = picker_state();
+    no_effects(&reduce(&mut s, &Action::OpenThemePicker));
+    // Down: the cursor moves and the highlighted palette applies at once.
+    no_effects(&reduce(&mut s, &Action::MoveDown));
+    assert_eq!(s.theme_index, 1, "the highlighted theme is the preview");
+    assert_eq!(s.active_theme(), crate::ui::theme::Theme::default_light());
+    // The cursor clamps like the message list: no wrap past the ends.
+    no_effects(&reduce(&mut s, &Action::MoveDown));
+    assert_eq!(s.theme_index, 2);
+    no_effects(&reduce(&mut s, &Action::MoveDown));
+    assert_eq!(s.theme_index, 2, "no wrap past the last theme");
+    no_effects(&reduce(&mut s, &Action::MoveUp));
+    no_effects(&reduce(&mut s, &Action::MoveUp));
+    no_effects(&reduce(&mut s, &Action::MoveUp));
+    assert_eq!(s.theme_index, 0, "no wrap past the first theme");
+}
+
+#[test]
+fn esc_restores_the_theme_the_picker_opened_with() {
+    let mut s = picker_state();
+    s.theme_index = 1;
+    no_effects(&reduce(&mut s, &Action::OpenThemePicker));
+    // Preview toward the end of the list (the cursor clamps, no wrap)...
+    no_effects(&reduce(&mut s, &Action::MoveDown));
+    no_effects(&reduce(&mut s, &Action::MoveDown));
+    assert_eq!(s.theme_index, 2, "preview applied while navigating");
+    // ...then cancel: the opening palette comes back, nothing else moves.
+    no_effects(&reduce(&mut s, &Action::BackOrCancel));
+    assert!(s.overlay.is_none());
+    assert_eq!(s.theme_index, 1, "the opening palette is restored");
+    assert_eq!(s.active_theme(), crate::ui::theme::Theme::default_light());
+    assert_eq!(s.focus, Focus::MessageList, "the previous focus returns");
+}
+
+#[test]
+fn enter_confirms_the_previewed_theme() {
+    let mut s = picker_state();
+    no_effects(&reduce(&mut s, &Action::OpenThemePicker));
+    no_effects(&reduce(&mut s, &Action::MoveDown));
+    no_effects(&reduce(&mut s, &Action::Activate));
+    assert!(s.overlay.is_none());
+    assert_eq!(s.theme_index, 1, "the previewed palette is kept");
     assert_eq!(s.active_theme(), crate::ui::theme::Theme::default_light());
     assert_eq!(s.status.message.as_deref(), Some("Theme: light"));
-    no_effects(&reduce(&mut s, &Action::CycleTheme));
-    assert_eq!(s.theme_index, 2);
-    no_effects(&reduce(&mut s, &Action::CycleTheme));
-    assert_eq!(s.theme_index, 0, "wraps to the startup palette");
-    assert_eq!(s.status.message.as_deref(), Some("Theme: default"));
+    assert_eq!(s.focus, Focus::MessageList, "the previous focus returns");
+}
+
+#[test]
+fn the_picker_intercepts_every_other_input() {
+    let mut s = picker_state();
+    no_effects(&reduce(&mut s, &Action::OpenThemePicker));
+    // A modal swallows all input (plan §9): shortcuts, edits, and backend
+    // completions must not leak into the app behind the dialog.
+    no_effects(&reduce(&mut s, &Action::Compose));
+    assert!(s.composer.is_none(), "no composer opens behind the picker");
+    no_effects(&reduce(&mut s, &Action::ToggleStar));
+    no_effects(&reduce(&mut s, &Action::DialogEdit(DialogEdit::Char('x'))));
+    assert_eq!(s.theme_index, 0, "nothing moved the preview");
+}
+
+#[test]
+fn the_picker_never_opens_without_themes() {
+    let mut s = state();
+    s.themes.clear();
+    no_effects(&reduce(&mut s, &Action::OpenThemePicker));
+    assert!(s.overlay.is_none());
+    assert_eq!(s.focus, Focus::MessageList);
 }
 
 #[test]

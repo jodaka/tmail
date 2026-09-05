@@ -1,7 +1,8 @@
 //! Mailbox screen: list header + message rows (mockup `list.html`).
 //!
 //! One row per message (the mockup's single-line grid). Unread rows get the
-//! `unread` modifier; the selected row gets the accent fill. The same list
+//! `unread` modifier — under the selection fill too, so a focused unread
+//! row stays bold; the selected row gets the accent fill. The same list
 //! renders search results (Phase 9): the head then names the query, and an
 //! empty result set is a valid, explicit state. No thread count, no labels
 //! column, no tags (plan §4 overrides; labels carry no backend meaning —
@@ -380,8 +381,15 @@ fn message_spans<'a>(
         Span::styled(" ", base)
     };
 
+    // The fill marks selection and the `unread` modifier marks state, so a
+    // focused unread row keeps its bold under the accent fill — selection
+    // alone must not flatten read and unread rows into one look.
     let from_style = if selected || bulk_selected {
-        base.fg(theme.text)
+        if message.is_read {
+            base.fg(theme.text)
+        } else {
+            base.fg(theme.text).add_modifier(theme.unread)
+        }
     } else if message.is_read {
         theme.read_text().bg(theme.background)
     } else {

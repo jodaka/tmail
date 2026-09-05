@@ -90,10 +90,10 @@ fn list_shortcuts_per_input_contract() {
         Some(Action::ToggleMouseCapture)
     );
     assert_eq!(to_action(plain(KeyCode::Delete), f), Some(Action::Trash));
-    // `t` cycles the theme palette at runtime (ticket z0s4).
+    // `t` opens the theme picker (ticket k5ba).
     assert_eq!(
         to_action(plain(KeyCode::Char('t')), f),
-        Some(Action::CycleTheme)
+        Some(Action::OpenThemePicker)
     );
 }
 
@@ -348,6 +348,27 @@ fn dialog_enter_activates_esc_cancels() {
     assert_eq!(to_action(plain(KeyCode::Enter), f), Some(Action::Activate));
     assert_eq!(
         to_action(plain(KeyCode::Esc), f),
+        Some(Action::BackOrCancel)
+    );
+}
+
+// ── Theme picker (ticket k5ba) ───────────────────────────────────────────
+
+/// The picker is a list dialog: its arrows bind exactly like the message
+/// list's (MoveUp/MoveDown — the reducer previews the highlighted theme),
+/// Enter confirms, and Esc/q cancel.
+#[test]
+fn theme_picker_binds_like_the_message_list() {
+    let f = Focus::ThemePicker;
+    assert_eq!(to_action(plain(KeyCode::Up), f), Some(Action::MoveUp));
+    assert_eq!(to_action(plain(KeyCode::Down), f), Some(Action::MoveDown));
+    assert_eq!(to_action(plain(KeyCode::Enter), f), Some(Action::Activate));
+    assert_eq!(
+        to_action(plain(KeyCode::Esc), f),
+        Some(Action::BackOrCancel)
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Char('q')), f),
         Some(Action::BackOrCancel)
     );
 }

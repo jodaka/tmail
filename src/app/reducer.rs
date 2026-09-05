@@ -17,6 +17,7 @@ use crate::app::operation::{
 };
 use crate::app::overlay::{
     AttachmentPathDialog, ConfirmButton, DiscardDialog, ErrorDialog, ModalButton, Overlay,
+    ThemePickerDialog,
 };
 use crate::app::route::{MailboxRoute, MessageRoute, Route, SearchRoute};
 use crate::app::sanitize::sanitize;
@@ -155,26 +156,7 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             });
             Vec::new()
         }
-        Action::CycleTheme => {
-            // Runtime theme switching (ticket z0s4): `t` steps through the
-            // startup palette's list — built-ins first, then every
-            // `[post.themes.<name>]` — wrapping at the end. The renderer
-            // reads the active palette from state, so the next frame
-            // already shows it. Session-only by design.
-            let next = if state.themes.is_empty() {
-                0
-            } else {
-                (state.theme_index + 1) % state.themes.len()
-            };
-            state.theme_index = next;
-            let name = state
-                .themes
-                .get(next)
-                .map(|(name, _)| name.as_str())
-                .unwrap_or("default");
-            state.set_status(format!("Theme: {name}"));
-            Vec::new()
-        }
+        Action::OpenThemePicker => open_theme_picker(state),
         Action::Tick { now } => {
             state.ticks += 1;
             let now = **now;
@@ -246,6 +228,7 @@ fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
             Action::BackendCompleted(_) => None,
             _ => Some(attachment_dialog_reduce(state, action)),
         },
+        Some(Overlay::ThemePicker(_)) => Some(theme_picker_reduce(state, action)),
         None => None,
     }
 }
@@ -501,6 +484,93 @@ fn apply_dialog_edit(dialog: &mut AttachmentPathDialog, edit: &DialogEdit) {
     }
     // A fresh edit supersedes the stale complaint about the old entry.
     dialog.error = None;
+}
+
+/// Open the theme picker (ticket k5ba). The cursor starts on the active
+/// palette — Enter is a no-op until the user moves, and the preview begins
+/// from where the user already is. No-op without a theme list.
+fn open_theme_picker(state: &mut AppState) -> Vec<Effect> {
+    if state.themes.is_empty() {
+        return Vec::new();
+    }
+    let cursor = state.theme_index.min(state.themes.len() - 1);
+    // The scroll window opens with the cursor row on screen: a long theme
+    // list must not hide the palette the user is currently on.
+    let visible = crate::ui::components::theme_picker::visible_rows(state.size).max(1);
+    let scroll = if cursor >= visible {
+        (cursor + 1 - visible).min(crate::ui::components::theme_picker::max_scroll(
+            state.themes.len(),
+            state.size,
+        ))
+    } else {
+        0
+    };
+    state.overlay = Some(Overlay::ThemePicker(ThemePickerDialog {
+        original: state.theme_index,
+        cursor,
+        scroll,
+        previous_focus: state.focus,
+    }));
+    state.focus = Focus::ThemePicker;
+    Vec::new()
+}
+
+/// Theme picker handling (ticket k5ba). Up/Down move the cursor and apply
+/// the highlighted palette at once — the preview the ticket asks for —
+/// with the same clamped (non-wrapping) movement the message list uses.
+/// Enter keeps the previewed palette; Esc restores the palette the picker
+/// opened with. Everything else is swallowed while the picker is open.
+fn theme_picker_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
+    // Viewport math comes from the renderer's layout, so the clamp the
+    // reducer computes always matches what is drawn.
+    let len = state.themes.len();
+    let visible = crate::ui::components::theme_picker::visible_rows(state.size).max(1);
+    let max_scroll = crate::ui::components::theme_picker::max_scroll(len, state.size);
+    let Some(Overlay::ThemePicker(dialog)) = state.overlay.as_mut() else {
+        return Vec::new();
+    };
+    match action {
+        Action::MoveUp | Action::MoveDown => {
+            let delta = if matches!(action, Action::MoveUp) {
+                -1
+            } else {
+                1
+            };
+            let next = (dialog.cursor as i64 + delta).clamp(0, len as i64 - 1) as usize;
+            dialog.cursor = next;
+            dialog.scroll = if next < dialog.scroll {
+                next
+            } else if next >= dialog.scroll + visible {
+                (next + 1 - visible).min(max_scroll)
+            } else {
+                dialog.scroll
+            };
+            // The highlighted theme is the preview: it applies at once.
+            state.theme_index = next;
+        }
+        Action::BackOrCancel => {
+            // Esc never changes the theme: the preview is undone by
+            // restoring the index the picker opened with.
+            state.theme_index = dialog.original.min(len.saturating_sub(1));
+            let focus = dialog.previous_focus;
+            state.overlay = None;
+            state.focus = focus;
+        }
+        Action::Activate => {
+            let name = state
+                .themes
+                .get(state.theme_index)
+                .map(|(name, _)| name.as_str())
+                .unwrap_or("default")
+                .to_owned();
+            let focus = dialog.previous_focus;
+            state.overlay = None;
+            state.focus = focus;
+            state.set_status(format!("Theme: {name}"));
+        }
+        _ => {}
+    }
+    Vec::new()
 }
 
 /// Open the Retry/Dismiss modal for a failed operation (plan §12).
@@ -2038,7 +2108,7 @@ fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
             // A header button: arrows do nothing (ticket p0s3).
         }
         Focus::Reader => scroll_reader(state, delta),
-        Focus::Composer | Focus::Dialog | Focus::ErrorModal => {}
+        Focus::Composer | Focus::Dialog | Focus::ThemePicker | Focus::ErrorModal => {}
     }
     Vec::new()
 }
@@ -2289,8 +2359,12 @@ fn activate(state: &mut AppState) -> Vec<Effect> {
         // Enter participates in selection (ticket p0s3).
         Focus::SelectAllToggle => toggle_select_all(state),
         Focus::Composer => activate_composer(state),
-        // The dialog intercepts Enter itself; unreachable in practice.
-        Focus::Reader | Focus::Dialog | Focus::SearchField | Focus::ErrorModal => {
+        // The dialogs intercept Enter themselves; unreachable in practice.
+        Focus::Reader
+        | Focus::Dialog
+        | Focus::ThemePicker
+        | Focus::SearchField
+        | Focus::ErrorModal => {
             if state.focus == Focus::SearchField {
                 reduce(state, &Action::SubmitSearch)
             } else {

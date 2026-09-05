@@ -111,9 +111,12 @@ fn wheel(state: &AppState, delta: i64) -> Option<Action> {
                 Action::MoveDown
             }
         }
-        Focus::SearchField | Focus::Composer | Focus::Dialog | Focus::SelectAllToggle => {
-            return None;
-        }
+        // Wheeling the picker does not preview themes — arrows only.
+        Focus::SearchField
+        | Focus::Composer
+        | Focus::Dialog
+        | Focus::ThemePicker
+        | Focus::SelectAllToggle => return None,
     };
     Some(action)
 }

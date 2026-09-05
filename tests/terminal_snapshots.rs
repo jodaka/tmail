@@ -5,12 +5,12 @@
 
 use tmail::app::mock::{self, mock_initial_state};
 use tmail::app::operation::{OperationFailure, OperationKind, OperationResult};
-use tmail::app::{Action, reducer};
+use tmail::app::{reducer, Action};
 use tmail::input::mouse::HitMap;
-use tmail::ui::{RenderContext, Theme, dates, render};
+use tmail::ui::{dates, render, RenderContext, Theme};
 
 use ratatui::backend::TestBackend;
-use ratatui::{Terminal, style::Color};
+use ratatui::{style::Color, Terminal};
 
 fn draw(width: u16, height: u16) -> ratatui::buffer::Buffer {
     draw_with_hits(width, height).0
@@ -22,7 +22,9 @@ fn draw(width: u16, height: u16) -> ratatui::buffer::Buffer {
 fn draw_with_hits(width: u16, height: u16) -> (ratatui::buffer::Buffer, HitMap) {
     let mut state = mock_initial_state();
     state.size = (width, height);
-    let theme = Theme::default_dark();
+    // Production renders with the active palette each frame (main), so the
+    // harness does too — the theme picker previews by switching it.
+    let theme = state.active_theme();
     let now = mock::now();
     let ctx = RenderContext::new(now, dates::format_clock(now));
     let backend = TestBackend::new(width, height);
@@ -255,6 +257,172 @@ fn unread_rows_are_brighter_than_read_rows() {
     let _ = Color::Reset;
 }
 
+/// Selection must not erase the unread signal: a focused unread row keeps
+/// its bold under the accent fill, while a focused read row stays regular.
+#[test]
+fn selected_unread_row_stays_bold_and_selected_read_row_does_not() {
+    // The list pane starts after the sidebar divider; the sidebar shares
+    // buffer rows with the list and renders bold unread counters, so the
+    // bold scans below must look at the list columns only.
+    let list_x = tmail::ui::layout::SIDEBAR_WIDTH;
+
+    // Selection 0 (KKF Notifications) is unread and the list holds focus.
+    let mut state = mock_initial_state();
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    let text = text_of(&buffer);
+    let unread_row = text
+        .lines()
+        .position(|line| line.contains("KKF Notifications"))
+        .expect("selected unread row") as u16;
+    let unread_bold = (list_x..buffer.area.width).any(|x| {
+        buffer[(x, unread_row)]
+            .style()
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD)
+    });
+    assert!(unread_bold, "selected unread row must stay bold:\n{text}");
+
+    // Move the cursor onto a read row (PayPal, the fourth message): the
+    // fill moves with it but no bold may appear anywhere on the row.
+    let mut state = mock_initial_state();
+    let buffer = buffer_after(
+        &mut state,
+        &[Action::MoveDown, Action::MoveDown, Action::MoveDown],
+        152,
+        40,
+    );
+    let text = text_of(&buffer);
+    let read_row = text
+        .lines()
+        .position(|line| line.contains("PayPal"))
+        .expect("selected read row") as u16;
+    let read_bold = (list_x..buffer.area.width).any(|x| {
+        buffer[(x, read_row)]
+            .style()
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD)
+    });
+    assert!(!read_bold, "selected read row must not be bold:\n{text}");
+}
+
+/// The theme picker (ticket k5ba): `t` opens a small dialog listing every
+/// palette, the cursor row carries the list's accent fill, and moving the
+/// cursor previews the highlighted palette behind the dialog at once.
+#[test]
+fn theme_picker_lists_previews_and_highlights() {
+    let dark = Theme::default_dark();
+    let light = Theme::default_light();
+
+    // `t` opens the picker; every palette is named, the hint is shown.
+    let mut state = mock_initial_state();
+    let buffer = buffer_after(&mut state, &[Action::OpenThemePicker], 152, 40);
+    let text = text_of(&buffer);
+    assert!(text.contains(" Theme "), "dialog title missing:\n{text}");
+    assert!(text.contains("default"), "builtin palette missing:\n{text}");
+    assert!(text.contains("light"), "builtin palette missing:\n{text}");
+    assert!(text.contains("↵ confirm"), "binding hint missing:\n{text}");
+
+    // The cursor row (the active palette) carries the accent fill like a
+    // focused list row.
+    let cursor_row = text
+        .lines()
+        .position(|line| line.contains("default"))
+        .expect("cursor row") as u16;
+    let highlighted =
+        (0..buffer.area.width).any(|x| buffer[(x, cursor_row)].style().bg == Some(dark.accent_bg));
+    assert!(highlighted, "cursor row lacks the accent fill:\n{text}");
+
+    // Moving the cursor previews the highlighted palette behind the
+    // dialog: the screen background repaints at once (ticket k5ba).
+    let mut state = mock_initial_state();
+    let buffer = buffer_after(
+        &mut state,
+        &[Action::OpenThemePicker, Action::MoveDown],
+        152,
+        40,
+    );
+    let preview_bg = buffer[(buffer.area.width - 1, 0)].style().bg;
+    assert_eq!(
+        preview_bg,
+        Some(light.background),
+        "the highlighted palette must preview behind the dialog"
+    );
+    // And the fill moved to the newly highlighted row.
+    let text = text_of(&buffer);
+    let cursor_row = text
+        .lines()
+        .position(|line| line.contains("light"))
+        .expect("previewed row") as u16;
+    let highlighted =
+        (0..buffer.area.width).any(|x| buffer[(x, cursor_row)].style().bg == Some(light.accent_bg));
+    assert!(highlighted, "previewed row lacks the accent fill:\n{text}");
+}
+
+/// A theme list longer than the dialog scrolls, with a scrollbar in the
+/// last inner column — the message list's anatomy (ticket k5ba).
+#[test]
+fn theme_picker_shows_a_scrollbar_when_the_list_overflows() {
+    let theme = Theme::default_dark();
+    let mut state = mock_initial_state();
+    // Twelve palettes against the dialog's ten visible rows: it scrolls.
+    state.themes = (0..12)
+        .map(|i| (format!("theme-{i:02}"), Theme::default_dark()))
+        .collect();
+
+    // Dialog geometry at 152×40: width 34, height 13 → inner rows at
+    // y = 14..24 (10 rows + hint), scrollbar column at x = 90.
+    let buffer = buffer_after(&mut state, &[Action::OpenThemePicker], 152, 40);
+    let text = text_of(&buffer);
+    assert!(text.contains("theme-00"), "first theme visible:\n{text}");
+    assert!(text.contains("theme-09"), "tenth theme visible:\n{text}");
+    assert!(
+        !text.contains("theme-10"),
+        "eleventh theme stays below the fold:\n{text}"
+    );
+    let scroll_x = 90;
+    // The thumb sits at the top of the track while the window is at the
+    // top, and the track continues below it.
+    assert_eq!(
+        buffer[(scroll_x, 14)].symbol(),
+        "█",
+        "thumb at the top of the track:\n{text}"
+    );
+    assert_eq!(
+        buffer[(scroll_x, 23)].symbol(),
+        "│",
+        "track below the thumb:\n{text}"
+    );
+    // The highlight ends before the scrollbar column, never under it.
+    assert_ne!(
+        buffer[(scroll_x, 14)].style().bg,
+        Some(theme.accent_bg),
+        "the row fill must not run under the scrollbar"
+    );
+
+    // Scrolling to the last theme moves the window and the thumb with it.
+    let downs: Vec<Action> = (0..11).map(|_| Action::MoveDown).collect();
+    let buffer = buffer_after(&mut state, &downs, 152, 40);
+    let text = text_of(&buffer);
+    assert!(
+        text.contains("theme-11"),
+        "the last theme scrolled into view:\n{text}"
+    );
+    assert!(
+        text.contains("theme-02"),
+        "the window keeps the last ten rows:\n{text}"
+    );
+    assert_eq!(
+        buffer[(scroll_x, 23)].symbol(),
+        "█",
+        "thumb at the bottom of the track:\n{text}"
+    );
+    assert_eq!(
+        buffer[(scroll_x, 14)].symbol(),
+        "│",
+        "track above the thumb:\n{text}"
+    );
+}
+
 #[test]
 fn resize_through_actions_switches_modes() {
     // Drive the reducer the same way the runtime does, then render.
@@ -320,12 +488,15 @@ fn buffer_after(
     width: u16,
     height: u16,
 ) -> ratatui::buffer::Buffer {
-    let theme = Theme::default_dark();
     let now = mock::now();
     let ctx = RenderContext::new(now, dates::format_clock(now));
     for action in actions {
         reducer::reduce(state, action);
     }
+    // Production renders with the active palette each frame (main), so the
+    // harness reads it after the actions ran — the theme picker previews
+    // by switching it.
+    let theme = state.active_theme();
     state.size = (width, height);
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend");
@@ -495,9 +666,9 @@ fn ambiguous_failure_shows_duplicate_warning() {
 
 // ── Reader screen (plan §19 Phase 4) ─────────────────────────────────────
 
-use tmail::app::Focus;
 use tmail::app::route::{MessageRoute, Route};
 use tmail::app::state::Loadable;
+use tmail::app::Focus;
 use tmail::domain::{MailboxId, Message, MessageId, Page};
 
 /// A reader-open state: the selected mock summary is open with its mock

@@ -82,6 +82,10 @@ pub enum Overlay {
     /// Attachment path entry (plan §15, Phase 8): type a file path, Post
     /// validates it without a shell, and a confirmed path becomes a chip.
     AttachmentPath(AttachmentPathDialog),
+    /// Theme picker (ticket k5ba): a small list of every available palette.
+    /// Moving the cursor previews the highlighted theme at once; Enter
+    /// keeps it and Esc restores the palette the picker opened with.
+    ThemePicker(ThemePickerDialog),
 }
 
 /// The attachment path-entry dialog (plan §15). Raw text entry with an
@@ -110,5 +114,22 @@ pub struct DiscardDialog {
     /// Keyboard-targeted button; defaults to the safe `Keep`.
     pub button: ConfirmButton,
     /// Focus to restore when the dialog closes (always the composer).
+    pub previous_focus: Focus,
+}
+
+/// The theme picker dialog (ticket k5ba). The list itself lives in
+/// `AppState.themes` — the same entries the renderer cycles — so the
+/// dialog only tracks where the user is inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemePickerDialog {
+    /// Theme index the picker opened with; Esc restores it (the preview
+    /// mutates the live index while navigating).
+    pub original: usize,
+    /// Cursor into `AppState.themes`; the highlighted theme is previewed
+    /// at once (`theme_index` follows the cursor).
+    pub cursor: usize,
+    /// First visible row when the theme list outgrows the dialog.
+    pub scroll: usize,
+    /// Focus to restore when the dialog closes.
     pub previous_focus: Focus,
 }

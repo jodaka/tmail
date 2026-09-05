@@ -123,9 +123,9 @@ fn char_action(c: char, modifiers: KeyModifiers, focus: Focus) -> Option<Action>
         // (an open message is already read).
         'i' => Some(Action::MarkRead),
         'm' => Some(Action::ToggleMouseCapture),
-        // `t` cycles the theme palette at runtime (ticket z0s4): the
-        // built-ins first, then every [post.themes.<name>] from the config.
-        't' => Some(Action::CycleTheme),
+        // `t` opens the theme picker (ticket k5ba): a small list of every
+        // available palette; arrows preview, Enter applies, Esc restores.
+        't' => Some(Action::OpenThemePicker),
         // `d` deletes in the message list and in the reader (trash; the
         // list binding is ticket h1m2, the reader binding is ticket zg41)
         // — with the whole selection when bulk-selection mode is on. The

@@ -80,7 +80,7 @@ any other file are ignored.**
 | `[post.composer].autosave_delay_ms` | integer | `2000` | Draft autosave debounce for the builtin editor. Accepted range: 100–600000. |
 | `[post.attachments].downloads_dir` | string | `$HOME/Downloads` | Directory used by *save attachment*. Must be absolute or start with `~/` (Post expands `~` itself, never via a shell). May not exist yet; must not be an existing file. |
 | `[post.theme].name` | string | `"default"` | Theme name: `"default"` (dark) or `"light"` (ticket wrs7). Set the `NO_COLOR` environment variable (non-empty) to render without any colors at all — it also ignores theme overrides. |
-| `[post.themes.<name>]` | table | none | Extra named themes for runtime switching (ticket z0s4): same color tokens as `[post.theme]` (no `name` key — the table's name is the theme's name), values are hex colors applied over the dark reference palette. Press `t` in Post to cycle: built-ins first, then these alphabetically by name. A theme named `default` or `light` replaces that built-in. Switching is session-only — the config file is never rewritten. |
+| `[post.themes.<name>]` | table | none | Extra named themes for runtime switching (ticket z0s4): same color tokens as `[post.theme]` (no `name` key — the table's name is the theme's name), values are hex colors applied over the dark reference palette. Press `t` in Post to pick one from the theme dialog: built-ins first, then these alphabetically by name. A theme named `default` or `light` replaces that built-in. Switching is session-only — the config file is never rewritten. |
 | `[post.ui].clock` | bool | `false` | Show the date/time clock in the top-right corner (ticket w7f5). Off by default. |
 | `[post.cache].max_messages` | integer | `50` | How many viewed messages to keep in Post's on-disk cache (ticket haeb) so previously opened mail renders instantly. Least-recently-used entries are evicted first; `0` disables message caching. |
 | `[post.cache].max_bytes` | integer | `10485760` | Total size cap in bytes for the viewed-message cache (default 10 MiB, ticket haeb). Messages larger than the whole budget are never cached. |
@@ -113,11 +113,11 @@ The full default palette is written out with per-token usage notes in
 [`docs/default-theme.toml`](docs/default-theme.toml) — a ready-to-paste
 starting point for your own tuning.
 
-#### Multiple themes and runtime switching
+#### Multiple themes and the theme picker
 
 Define any number of extra themes as `[post.themes.<name>]` tables and
-press `t` in Post to cycle through them at runtime (built-ins first, then
-yours in file order; the status line names each switch):
+press `t` in Post to open the theme picker at runtime (built-ins first,
+then yours alphabetically by name):
 
 ```toml
 [post.themes.nord]
@@ -130,8 +130,14 @@ background = "#262220"
 accent = "#e0916c"
 ```
 
+The picker is a small dialog listing every theme: `↑`/`↓` move the
+highlight, and the highlighted theme **previews at once** — the whole
+screen recolors while you navigate. `Enter` keeps the previewed palette
+(the status line names it); `Esc` closes the dialog and restores the
+palette you started with.
+
 Unspecified tokens keep the dark reference values; a theme named
-`default` or `light` replaces that built-in in the cycle. Switching is
+`default` or `light` replaces that built-in in the dialog. Switching is
 session-only — the shared config file is never rewritten.
 
 ### Startup validation

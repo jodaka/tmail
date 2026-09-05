@@ -26,6 +26,9 @@ pub enum Focus {
     /// The attachment path-entry dialog is open (plan §15): a modal text
     /// field that intercepts all input like the error modal.
     Dialog,
+    /// The theme picker dialog is open (ticket k5ba): arrows preview the
+    /// highlighted palette, Enter keeps it, Esc restores the original.
+    ThemePicker,
     /// The Retry/Dismiss error modal is open; it intercepts all input.
     ErrorModal,
 }
@@ -42,7 +45,7 @@ impl Focus {
     pub fn next(self) -> Self {
         match self {
             // The modal foci never cycle; the modal handles Tab itself.
-            Focus::ErrorModal | Focus::Dialog => self,
+            Focus::ErrorModal | Focus::Dialog | Focus::ThemePicker => self,
             // The reader screen has a single focusable area (the scrolling
             // document); Tab is inert there in v1 (plan §10).
             Focus::Reader => self,
@@ -61,7 +64,7 @@ impl Focus {
 
     pub fn previous(self) -> Self {
         match self {
-            Focus::ErrorModal | Focus::Dialog => self,
+            Focus::ErrorModal | Focus::Dialog | Focus::ThemePicker => self,
             Focus::Reader => self,
             Focus::Composer => self,
             _ => {
@@ -80,7 +83,11 @@ impl Focus {
     pub fn accepts_shortcuts(self) -> bool {
         !matches!(
             self,
-            Focus::SearchField | Focus::ErrorModal | Focus::Dialog | Focus::Composer
+            Focus::SearchField
+                | Focus::ErrorModal
+                | Focus::Dialog
+                | Focus::ThemePicker
+                | Focus::Composer
         )
     }
 }
@@ -95,6 +102,7 @@ impl fmt::Display for Focus {
             Focus::Reader => write!(f, "reader"),
             Focus::Composer => write!(f, "composer"),
             Focus::Dialog => write!(f, "dialog"),
+            Focus::ThemePicker => write!(f, "themes"),
             Focus::ErrorModal => write!(f, "modal"),
         }
     }
@@ -133,6 +141,7 @@ mod tests {
         assert!(!Focus::SearchField.accepts_shortcuts());
         assert!(!Focus::Composer.accepts_shortcuts());
         assert!(!Focus::Dialog.accepts_shortcuts());
+        assert!(!Focus::ThemePicker.accepts_shortcuts());
         assert!(Focus::Sidebar.accepts_shortcuts());
         assert!(Focus::MessageList.accepts_shortcuts());
     }
@@ -141,6 +150,8 @@ mod tests {
     fn dialog_focus_is_self_cycle() {
         assert_eq!(Focus::Dialog.next(), Focus::Dialog);
         assert_eq!(Focus::Dialog.previous(), Focus::Dialog);
+        assert_eq!(Focus::ThemePicker.next(), Focus::ThemePicker);
+        assert_eq!(Focus::ThemePicker.previous(), Focus::ThemePicker);
     }
 
     #[test]

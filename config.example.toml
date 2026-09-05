@@ -58,9 +58,9 @@ name = "default"
 # accent = "#8ab4f8"
 # name = "light"  # or switch to the built-in light theme
 
-# Extra named themes for runtime switching with `t` (ticket z0s4): same
-# color tokens as [post.theme] over the dark reference palette; built-ins
-# cycle first. A theme named "default" or "light" replaces that built-in.
+# Extra named themes for the theme picker (`t`, ticket k5ba): same color
+# tokens as [post.theme] over the dark reference palette; built-ins list
+# first. A theme named "default" or "light" replaces that built-in.
 # [post.themes.nord]
 # background = "#2e3440"
 # accent = "#88c0d0"
