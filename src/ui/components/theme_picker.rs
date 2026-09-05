@@ -5,13 +5,13 @@
 //! the picker opened with (that logic lives in the reducer). A list longer
 //! than the dialog scrolls, with a scrollbar like the message list's.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
-use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::overlay::Overlay;

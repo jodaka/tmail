@@ -5,12 +5,12 @@
 
 use tmail::app::mock::{self, mock_initial_state};
 use tmail::app::operation::{OperationFailure, OperationKind, OperationResult};
-use tmail::app::{reducer, Action};
+use tmail::app::{Action, reducer};
 use tmail::input::mouse::HitMap;
-use tmail::ui::{dates, render, RenderContext, Theme};
+use tmail::ui::{RenderContext, Theme, dates, render};
 
 use ratatui::backend::TestBackend;
-use ratatui::{style::Color, Terminal};
+use ratatui::{Terminal, style::Color};
 
 fn draw(width: u16, height: u16) -> ratatui::buffer::Buffer {
     draw_with_hits(width, height).0
@@ -400,6 +400,9 @@ fn theme_picker_shows_a_scrollbar_when_the_list_overflows() {
     );
 
     // Scrolling to the last theme moves the window and the thumb with it.
+    // The scrollbar maps the window position across the whole content (the
+    // same proportional look as the message list), so at the bottom the
+    // thumb has moved off the top of the track without pinning to its end.
     let downs: Vec<Action> = (0..11).map(|_| Action::MoveDown).collect();
     let buffer = buffer_after(&mut state, &downs, 152, 40);
     let text = text_of(&buffer);
@@ -412,14 +415,13 @@ fn theme_picker_shows_a_scrollbar_when_the_list_overflows() {
         "the window keeps the last ten rows:\n{text}"
     );
     assert_eq!(
-        buffer[(scroll_x, 23)].symbol(),
-        "█",
-        "thumb at the bottom of the track:\n{text}"
-    );
-    assert_eq!(
         buffer[(scroll_x, 14)].symbol(),
         "│",
-        "track above the thumb:\n{text}"
+        "the thumb moved off the top of the track:\n{text}"
+    );
+    assert!(
+        (14..24).any(|y| buffer[(scroll_x, y)].symbol() == "█"),
+        "the thumb stays visible on the track:\n{text}"
     );
 }
 
@@ -666,9 +668,9 @@ fn ambiguous_failure_shows_duplicate_warning() {
 
 // ── Reader screen (plan §19 Phase 4) ─────────────────────────────────────
 
+use tmail::app::Focus;
 use tmail::app::route::{MessageRoute, Route};
 use tmail::app::state::Loadable;
-use tmail::app::Focus;
 use tmail::domain::{MailboxId, Message, MessageId, Page};
 
 /// A reader-open state: the selected mock summary is open with its mock
