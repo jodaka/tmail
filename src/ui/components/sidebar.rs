@@ -1,7 +1,8 @@
 //! Sidebar: Compose affordance + mailbox list (mockup `list.html`).
 //!
-//! No labels block and no storage meter: both are v1 overrides / out of
-//! scope (plan §3, §4).
+//! The listing splits into system folders, one blank row, then user
+//! labels (a blank separator instead of the mockup's `LABELS` caption —
+//! user preference); no storage meter: out of scope (plan §3, §4).
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -57,12 +58,26 @@ pub fn render(
     hits.push(rows.compose, ClickTarget::ComposeButton);
 
     // Mailbox list: backend-driven since Phase 2, so all loadable states
-    // render safely (plan §16: empty results are valid).
+    // render safely (plan §16: empty results are valid). The backend hands
+    // the listing folders-first, so the first label follows the blank
+    // separator row; visual rows and state indices diverge there, so `y`
+    // is counted separately from `i`.
     match &state.mailboxes {
         crate::app::state::Loadable::Loaded(mailboxes) if !mailboxes.is_empty() => {
             let active_id = state.active_route().and_then(|r| r.mailbox_id().cloned());
             let bottom = area.y + area.height;
-            for (y, (i, mailbox)) in (rows.folders.y..).zip(mailboxes.iter().enumerate()) {
+            let first_label = mailboxes.iter().position(|m| m.is_label());
+            let mut y = rows.folders.y;
+            for (i, mailbox) in mailboxes.iter().enumerate() {
+                if Some(i) == first_label && i > 0 {
+                    // The blank separator row: the frame's background fill
+                    // already covers it, so nothing is drawn — the row is
+                    // simply skipped and stays unclickable.
+                    if y >= bottom {
+                        break;
+                    }
+                    y += 1;
+                }
                 if y >= bottom {
                     break;
                 }
@@ -78,6 +93,7 @@ pub fn render(
                 // Clicking a folder selects it; clicking the selected one
                 // switches (arrows + Enter, plan §10).
                 hits.push(row_area, ClickTarget::Mailbox(i));
+                y += 1;
             }
         }
         crate::app::state::Loadable::Loaded(_) => {

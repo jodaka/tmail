@@ -25,3 +25,13 @@ pub struct Mailbox {
     pub unread_count: Option<u64>,
     pub total_count: Option<u64>,
 }
+
+impl Mailbox {
+    /// True when this mailbox is a user label rather than a system folder:
+    /// no resolved role, and not under Gmail's reserved `[Gmail]/` IMAP
+    /// prefix (Gmail keeps only its own folders there — Starred, Important,
+    /// … — while user labels sit at the top level, possibly nested with `/`).
+    pub fn is_label(&self) -> bool {
+        self.role.is_none() && !self.id.0.starts_with("[Gmail]/")
+    }
+}

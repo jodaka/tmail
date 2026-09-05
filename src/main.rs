@@ -18,7 +18,7 @@ use tmail::app::{Action, AppState, Effect, reducer};
 use tmail::backend::{
     MailBackend, PathOpener, RequestContext, SystemOpener, himalaya::HimalayaCliBackend,
 };
-use tmail::input::{keyboard, mouse};
+use tmail::input::mouse;
 use tmail::runtime::tasks::OperationManager;
 use tmail::runtime::{events, logging, terminal};
 use tmail::ui::dates::format_clock;
@@ -201,41 +201,28 @@ async fn run() -> anyhow::Result<()> {
 
         tokio::select! {
             event = events.recv() => match event {
-                Some(events::Event::Key(key)) => {
-                    if let Some(action) = keyboard::to_action(key, state.focus) {
+                Some(first) => {
+                    // Drain what already queued behind this event (a
+                    // touchpad gesture arrives as a burst of wheel events):
+                    // the whole batch dispatches between two frames, so a
+                    // keypress is never stuck behind wheel events, and the
+                    // burst costs one draw instead of one per event. The
+                    // cap bounds a single frame's work; leftovers drain on
+                    // the following frames.
+                    let mut batch = Vec::with_capacity(8);
+                    batch.push(first);
+                    while batch.len() < events::MAX_BATCH {
+                        match events.try_recv() {
+                            Ok(next) => batch.push(next),
+                            Err(_) => break,
+                        }
+                    }
+                    for action in events::coalesce(batch, &hits, &state) {
                         tracing::debug!(?action, "dispatch");
                         let effects = reducer::reduce(&mut state, &action);
                         handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
                         sync_mouse_capture(&state, &mut capture_applied);
                     }
-                }
-                Some(events::Event::Mouse(mouse_event)) => {
-                    // Phase 10: hit-test against the frame on screen and
-                    // dispatch the same actions the keyboard produces.
-                    if let Some(action) = mouse::to_action(mouse_event, &hits, &state) {
-                        tracing::debug!(?action, "mouse dispatch");
-                        let effects = reducer::reduce(&mut state, &action);
-                        handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
-                        sync_mouse_capture(&state, &mut capture_applied);
-                    }
-                }
-                Some(events::Event::Resize { width, height }) => {
-                    let effects = reducer::reduce(
-                        &mut state,
-                        &Action::Resize { width, height },
-                    );
-                    handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
-                    sync_mouse_capture(&state, &mut capture_applied);
-                }
-                Some(events::Event::Tick) => {
-                    let effects = reducer::reduce(
-                        &mut state,
-                        &Action::Tick {
-                            now: Box::new(Local::now().fixed_offset()),
-                        },
-                    );
-                    handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
-                    sync_mouse_capture(&state, &mut capture_applied);
                 }
                 None => {
                     tracing::warn!("event stream closed");

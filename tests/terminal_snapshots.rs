@@ -1959,6 +1959,86 @@ fn sidebar_loading_shows_a_centered_spinner() {
 }
 
 #[test]
+fn sidebar_splits_folders_and_labels_with_a_blank_row() {
+    // Gmail-shaped listing (the backend hands it folders-first): system
+    // folders, then one blank separator row, then the labels. Row
+    // positions shift at the blank row, but click targets keep indexing
+    // `state.mailboxes` (ticket wntx).
+    use tmail::app::state::Loadable;
+    use tmail::domain::{Mailbox, MailboxId, MailboxRole};
+
+    let mailbox = |id: &str, name: &str, role: Option<MailboxRole>, unread: Option<u64>| Mailbox {
+        id: MailboxId(String::from(id)),
+        name: String::from(name),
+        role,
+        unread_count: unread,
+        total_count: None,
+    };
+    let mailboxes = vec![
+        mailbox("Inbox", "Inbox", Some(MailboxRole::Inbox), Some(6)),
+        mailbox(
+            "[Gmail]/Sent Mail",
+            "[Gmail]/Sent Mail",
+            Some(MailboxRole::Sent),
+            None,
+        ),
+        mailbox(
+            "[Gmail]/Drafts",
+            "[Gmail]/Drafts",
+            Some(MailboxRole::Drafts),
+            None,
+        ),
+        // No role without a `junk` alias, yet a folder: Gmail reserves
+        // the `[Gmail]/` prefix for its own folders.
+        mailbox("[Gmail]/Spam", "[Gmail]/Spam", None, Some(80)),
+        mailbox("[Gmail]/Starred", "[Gmail]/Starred", None, None),
+        mailbox(
+            "[Gmail]/Trash",
+            "[Gmail]/Trash",
+            Some(MailboxRole::Trash),
+            None,
+        ),
+        mailbox("Notes", "Notes", None, None),
+        mailbox("social", "social", None, Some(1)),
+        mailbox("пароли", "пароли", None, None),
+    ];
+    let mut state = mock_initial_state();
+    state.size = (152, 40);
+    state.mailboxes = Loadable::Loaded(mailboxes);
+    let (buffer, hits) = draw_state_hits(&state, 152, 40);
+    // Folder rows start at y=9; six folders end at y=14, the blank row is
+    // y=15, labels follow. Read only the sidebar's own columns.
+    let row = |y: u16| {
+        (0..23u16)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+    };
+    assert!(
+        row(14).contains("[Gmail]/Trash"),
+        "last folder above the blank row"
+    );
+    assert!(row(15).trim().is_empty(), "blank separator row");
+    assert!(row(16).contains("Notes"), "first label below the blank row");
+    assert!(row(17).contains("social"));
+    assert!(row(18).contains("пароли"), "unicode label");
+    assert_eq!(
+        hits.hit_test(10, 14, false),
+        Some(ClickTarget::Mailbox(5)),
+        "folder click target above the blank row"
+    );
+    assert_eq!(
+        hits.hit_test(10, 15, false),
+        None,
+        "the blank row is not clickable"
+    );
+    assert_eq!(
+        hits.hit_test(10, 16, false),
+        Some(ClickTarget::Mailbox(6)),
+        "label click target keeps its state index"
+    );
+}
+
+#[test]
 fn message_list_shows_a_scrollbar_only_when_rows_overflow() {
     // Ticket kjfq: a page longer than the list shows a vertical scrollbar
     // in the last column; a page that fits shows none.

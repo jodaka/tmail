@@ -17,20 +17,33 @@ use crate::domain::{
 
 /// Map a mailbox listing into domain mailboxes. Alias-derived roles win
 /// over name heuristics.
+///
+/// The result is a stable partition: system folders first, user labels
+/// last, each group in the backend's own order. Gmail IMAP interleaves the
+/// two (a label can sit between `INBOX` and `[Gmail]/Drafts`), and the
+/// sidebar renders the split as folders followed by a `LABELS` caption, so
+/// the ordering must be settled here, at the one place every consumer
+/// shares.
 pub(crate) fn mailboxes(dto: dto::MailboxesDto, aliases: &HashMap<String, String>) -> Vec<Mailbox> {
-    dto.mailboxes
-        .into_iter()
-        .map(|dto| {
-            let role = role_of(&dto.name, &dto.id, aliases);
-            Mailbox {
-                id: MailboxId(dto.id),
-                name: dto.name,
-                role,
-                unread_count: dto.unread,
-                total_count: dto.total,
-            }
-        })
-        .collect()
+    let mut folders = Vec::new();
+    let mut labels = Vec::new();
+    for dto in dto.mailboxes {
+        let role = role_of(&dto.name, &dto.id, aliases);
+        let mailbox = Mailbox {
+            id: MailboxId(dto.id),
+            name: dto.name,
+            role,
+            unread_count: dto.unread,
+            total_count: dto.total,
+        };
+        if mailbox.is_label() {
+            labels.push(mailbox);
+        } else {
+            folders.push(mailbox);
+        }
+    }
+    folders.extend(labels);
+    folders
 }
 
 /// Map one envelope page into a domain page. The total is unknown from
@@ -463,6 +476,39 @@ mod tests {
         assert_eq!(mailboxes[0].total_count, None);
         assert_eq!(mailboxes[1].role, Some(MailboxRole::Inbox));
         assert_eq!(mailboxes[1].unread_count, None);
+    }
+
+    #[test]
+    fn mailbox_list_orders_folders_before_labels() {
+        // Real Gmail IMAP listing shape (probed on himalaya 2.1.0): user
+        // labels interleave with system folders — `Notes` sits between
+        // Inbox and the [Gmail] set — and `[Gmail]/Starred` carries no
+        // role on accounts without a `junk` alias, yet must stay a folder
+        // (Gmail reserves the `[Gmail]/` prefix for its own folders).
+        let dto: dto::MailboxesDto = serde_json::from_str(
+            r#"{"mailboxes":[
+                {"id":"Inbox","name":"Inbox","total":11669,"unread":6},
+                {"id":"Notes","name":"Notes"},
+                {"id":"[Gmail]/Drafts","name":"[Gmail]/Drafts"},
+                {"id":"[Gmail]/Starred","name":"[Gmail]/Starred"},
+                {"id":"social","name":"social"}
+            ]}"#,
+        )
+        .expect("parses");
+        let mailboxes = mailboxes(dto, &aliases(&[("drafts", "[Gmail]/Drafts")]));
+        let ids: Vec<&str> = mailboxes.iter().map(|m| m.id.0.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "Inbox",
+                "[Gmail]/Drafts",
+                "[Gmail]/Starred",
+                "Notes",
+                "social"
+            ]
+        );
+        let labels = mailboxes.iter().position(Mailbox::is_label).unwrap();
+        assert_eq!(labels, 3, "folders first, labels last");
     }
 
     /// Real probe output captured in Phase 0 (ADR 0001 finding 10).

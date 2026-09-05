@@ -14,6 +14,8 @@
 //! reducer's scroll clamp, so what is drawn and what the clamp allows can
 //! never disagree.
 
+use std::rc::Rc;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -244,7 +246,76 @@ pub(crate) fn scroll_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
 #[cfg(test)]
 pub(crate) fn content(state: &AppState, width: usize) -> Vec<ReaderLine> {
     let mut lines = header_lines(state, width);
-    lines.extend(scroll_lines(state, width));
+    lines.extend(scroll_document(state, width).iter().cloned());
+    lines
+}
+
+/// A cached scrollable reader document (perf): building it re-parses the
+/// whole message HTML (html2text) and re-wraps every line, and until the
+/// cache existed both the reducer's scroll clamp and every frame draw did
+/// exactly that — a touchpad momentum burst re-parsed the body hundreds
+/// of times, each parse a frame of lag, and key presses queued behind the
+/// burst went unanswered for seconds. Keyed by everything the document
+/// depends on; a hit serves the shared `Rc` (pointer clone) to both the
+/// clamp and the renderer, so what is drawn and what the clamp allows can
+/// never disagree (both go through [`scroll_document`]).
+#[derive(Debug, Clone)]
+pub(crate) struct CachedReaderDoc {
+    /// The open message the lines were built from.
+    pub message_id: crate::domain::MessageId,
+    /// Wrap width the lines were reflowed at (a resize rebuilds).
+    pub width: usize,
+    /// Attachment-chip cursor baked into the chip markers (tab rebuilds).
+    pub selected_chip: Option<usize>,
+    /// Cheap content fingerprint — html/plain body lengths and attachment
+    /// count — so a same-id body swap cannot serve stale lines.
+    pub fingerprint: (usize, usize, usize),
+    /// The shared lines; a cache hit is one `Rc` clone.
+    pub lines: Rc<Vec<ReaderLine>>,
+}
+
+/// The scrollable reader document for `state`, served from the cache on
+/// [`AppState`] when the open message, wrap width, chip cursor, and body
+/// fingerprint are unchanged (see [`CachedReaderDoc`]). Misses rebuild
+/// through [`scroll_lines`]. Not cached while the message loads or fails:
+/// those documents are at most a placeholder line.
+pub(crate) fn scroll_document(state: &AppState, width: usize) -> Rc<Vec<ReaderLine>> {
+    let width = width.max(10);
+    let Loadable::Loaded(message) = &state.open_message else {
+        return Rc::new(scroll_lines(state, width));
+    };
+    let fingerprint = (
+        message.html_body.as_ref().map_or(0, String::len),
+        message.plain_body.as_ref().map_or(0, String::len),
+        message.attachments.len(),
+    );
+    let selected_chip = state.reader_attachment;
+    let cached_hit = {
+        let cache = state.reader_doc.borrow();
+        cache.as_ref().is_some_and(|cached| {
+            cached.message_id == message.id
+                && cached.width == width
+                && cached.selected_chip == selected_chip
+                && cached.fingerprint == fingerprint
+        })
+    };
+    if cached_hit {
+        let lines = state
+            .reader_doc
+            .borrow()
+            .as_ref()
+            .map(|cached| Rc::clone(&cached.lines))
+            .expect("cache present after a hit check");
+        return lines;
+    }
+    let lines = Rc::new(scroll_lines(state, width));
+    *state.reader_doc.borrow_mut() = Some(CachedReaderDoc {
+        message_id: message.id.clone(),
+        width,
+        selected_chip,
+        fingerprint,
+        lines: Rc::clone(&lines),
+    });
     lines
 }
 
@@ -257,7 +328,7 @@ pub fn header_line_count(state: &AppState, width: usize) -> usize {
 /// Number of scrollable body lines — the length the reducer's scroll clamp
 /// clamps against (the fixed header never scrolls).
 pub fn scroll_line_count(state: &AppState, width: usize) -> usize {
-    scroll_lines(state, width).len()
+    scroll_document(state, width).len()
 }
 
 /// Render the reader into `area` (the body area right of the sidebar). The
@@ -280,7 +351,7 @@ pub fn render(
     }
     let width = crate::ui::layout::reader_width(state.size).max(10);
     let header = header_lines(state, width);
-    let body = scroll_lines(state, width);
+    let body = scroll_document(state, width);
 
     // The header never scrolls: subject and meta stay on screen however
     // long the message is (ticket 6864).
@@ -785,6 +856,72 @@ mod tests {
             content(&state, 100).len()
         );
         assert!(scroll_line_count(&state, 100) > 5);
+    }
+
+    // ── Document cache (perf: the doc must not rebuild per event) ────────
+
+    /// A cache hit serves the same shared lines: two calls in a row share
+    /// one `Rc` allocation.
+    #[test]
+    fn repeated_counts_hit_the_cache() {
+        let state = loaded_state();
+        let first = scroll_document(&state, 100);
+        let second = scroll_document(&state, 100);
+        assert!(Rc::ptr_eq(&first, &second), "second call must hit cache");
+        assert_eq!(scroll_line_count(&state, 100), first.len());
+    }
+
+    /// A width change reflows: the cache re-keys instead of serving stale
+    /// geometry.
+    #[test]
+    fn a_width_change_rebuilds() {
+        let state = loaded_state();
+        let wide = scroll_document(&state, 100);
+        let narrow = scroll_document(&state, 30);
+        assert!(!Rc::ptr_eq(&wide, &narrow));
+        assert!(narrow.len() >= wide.len(), "narrower wrap adds lines");
+        // The new key sticks.
+        assert!(Rc::ptr_eq(&narrow, &scroll_document(&state, 30)));
+    }
+
+    /// Tabbing the attachment cursor rebuilds (chip markers are baked
+    /// into the lines).
+    #[test]
+    fn a_chip_cursor_change_rebuilds() {
+        let mut state = loaded_state();
+        let before = scroll_document(&state, 100);
+        state.reader_attachment = Some(0);
+        let after = scroll_document(&state, 100);
+        assert!(!Rc::ptr_eq(&before, &after));
+        assert_eq!(before.len(), after.len());
+    }
+
+    /// A same-id body swap (e.g. a refetch) must not serve stale lines:
+    /// the fingerprint catches it.
+    #[test]
+    fn a_body_change_rebuilds() {
+        let mut state = loaded_state();
+        scroll_document(&state, 100);
+        if let Loadable::Loaded(message) = &mut state.open_message {
+            message.plain_body = Some(String::from(
+                "First line.\n\nSecond paragraph.\n\nThird paragraph with another long line that will need wrapping to fit the viewport width.\n",
+            ));
+        }
+        let rebuilt = scroll_document(&state, 100);
+        let text: Vec<String> = rebuilt.iter().map(ReaderLine::text).collect();
+        assert!(text.iter().any(|t| t.contains("Third paragraph")));
+    }
+
+    /// Loading/failed documents are placeholders, not cached bodies.
+    #[test]
+    fn unloaded_phases_are_not_cached() {
+        let mut state = loaded_state();
+        scroll_document(&state, 100);
+        state.open_message = Loadable::Loading;
+        assert!(scroll_line_count(&state, 100) == 0);
+        assert!(scroll_document(&state, 100).is_empty());
+        state.open_message = Loadable::Idle;
+        assert_eq!(scroll_line_count(&state, 100), 1);
     }
 
     #[test]

@@ -494,11 +494,12 @@ fn esc_cancels_foreground_work_and_returns_to_stable_state() {
     assert_eq!(s.overlay, None);
     assert_eq!(s.active_route().unwrap().mailbox_id().unwrap().0, "inbox");
     assert!(!s.quit_requested);
-    assert!(s
-        .status
-        .message
-        .as_deref()
-        .is_some_and(|m| m.contains("cancelled")));
+    assert!(
+        s.status
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("cancelled"))
+    );
 }
 
 #[test]
@@ -893,16 +894,18 @@ fn disk_cached_messages_fill_previews_without_fetching() {
         4,
         "previews fill from the cached copies"
     );
-    assert!(s
-        .messages
-        .items
-        .iter()
-        .all(|m| s.previews.contains_key(&m.id)));
-    assert!(s
-        .messages
-        .items
-        .iter()
-        .all(|m| s.preview_requested.contains(&m.id)));
+    assert!(
+        s.messages
+            .items
+            .iter()
+            .all(|m| s.previews.contains_key(&m.id))
+    );
+    assert!(
+        s.messages
+            .items
+            .iter()
+            .all(|m| s.preview_requested.contains(&m.id))
+    );
 }
 
 #[test]
@@ -2898,10 +2901,12 @@ fn reply_seeds_a_composer_on_top_of_the_reader() {
     );
     // Quoted body with the attribution; caret starts at the very top.
     assert!(composer.draft.body.contains("On "));
-    assert!(composer
-        .draft
-        .body
-        .contains("wrote:\n> Please review.\n> Thanks"));
+    assert!(
+        composer
+            .draft
+            .body
+            .contains("wrote:\n> Please review.\n> Thanks")
+    );
     // The seeded draft is clean: autosave engages on the first edit.
     assert!(!composer.draft.is_dirty());
     assert_eq!(composer.draft.revision, 0);
@@ -2917,10 +2922,12 @@ fn forward_seeds_a_header_block_and_no_recipients() {
     assert_eq!(composer.draft.subject, "Fwd: Plan review");
     assert_eq!(composer.draft.in_reply_to, None);
     assert_eq!(composer.draft.references, None);
-    assert!(composer
-        .draft
-        .body
-        .contains("---------- Forwarded message ---------"));
+    assert!(
+        composer
+            .draft
+            .body
+            .contains("---------- Forwarded message ---------")
+    );
     assert!(composer.draft.body.contains("From: Bob <bob@example.org>"));
     assert!(composer.draft.body.contains("To: probe@post.local"));
 }
@@ -4214,11 +4221,12 @@ fn m_toggles_mouse_capture_state() {
     assert!(!s.mouse_capture);
     no_effects(&reduce(&mut s, &Action::ToggleMouseCapture));
     assert!(s.mouse_capture);
-    assert!(s
-        .status
-        .message
-        .as_deref()
-        .is_some_and(|m| m.contains("off —") || m.contains("on —")));
+    assert!(
+        s.status
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("off —") || m.contains("on —"))
+    );
     no_effects(&reduce(&mut s, &Action::ToggleMouseCapture));
     assert!(!s.mouse_capture);
 }
@@ -4332,21 +4340,27 @@ fn bulk_trash_read_and_unread_follow_the_same_pattern() {
 
     let effects = reduce(&mut s, &Action::Trash);
     assert_eq!(effects.len(), count);
-    assert!(effects
-        .iter()
-        .all(|e| matches!(e.kind, OperationKind::Trash(_))));
+    assert!(
+        effects
+            .iter()
+            .all(|e| matches!(e.kind, OperationKind::Trash(_)))
+    );
 
     let effects = reduce(&mut s, &Action::MarkRead);
     assert_eq!(effects.len(), count);
-    assert!(effects
-        .iter()
-        .all(|e| matches!(e.kind, OperationKind::SetRead { read: true, .. })));
+    assert!(
+        effects
+            .iter()
+            .all(|e| matches!(e.kind, OperationKind::SetRead { read: true, .. }))
+    );
 
     let effects = reduce(&mut s, &Action::MarkUnread);
     assert_eq!(effects.len(), count);
-    assert!(effects
-        .iter()
-        .all(|e| matches!(e.kind, OperationKind::SetRead { read: false, .. })));
+    assert!(
+        effects
+            .iter()
+            .all(|e| matches!(e.kind, OperationKind::SetRead { read: false, .. }))
+    );
 }
 
 #[test]
@@ -4606,11 +4620,12 @@ fn editor_failure_keeps_the_draft_and_reports() {
     // The draft keeps its content and the composer is usable again.
     assert_eq!(s.composer.as_ref().unwrap().draft.body, "x");
     assert!(!s.composer.as_ref().unwrap().external_editing);
-    assert!(s
-        .status
-        .message
-        .as_deref()
-        .is_some_and(|m| m.contains("editor exited with code 1")));
+    assert!(
+        s.status
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("editor exited with code 1"))
+    );
 }
 
 #[test]
@@ -4814,9 +4829,11 @@ fn opening_a_message_serves_the_cached_copy_instantly() {
         crate::app::state::Loadable::Loaded(_)
     ));
     // …and the fresh load still runs.
-    assert!(effects
-        .iter()
-        .any(|e| matches!(e.kind, OperationKind::LoadMessage(_))));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e.kind, OperationKind::LoadMessage(_)))
+    );
 }
 
 // ── List previews (ticket wxtx) ──────────────────────────────────────────

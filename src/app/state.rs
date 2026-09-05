@@ -81,6 +81,15 @@ pub struct AppState {
     pub open_message: Loadable<Message>,
     /// First content line currently visible in the reader document.
     pub reader_scroll: usize,
+    /// Cached scrollable reader document (perf, `ui::screens::reader`
+    /// `CachedReaderDoc`): building it re-parses the whole message HTML,
+    /// and it used to run twice per wheel event — once in the reducer's
+    /// scroll clamp, once in the frame draw — so a touchpad momentum burst
+    /// re-parsed the body hundreds of times and starved key handling.
+    /// Interior-mutable because both the clamp path and the renderer hold
+    /// only `&AppState`; the app is single-threaded and no accessor
+    /// re-enters while borrowing, so `RefCell` suffices.
+    pub(crate) reader_doc: std::cell::RefCell<Option<crate::ui::screens::reader::CachedReaderDoc>>,
     /// Cursor within the open message's attachment chips (plan §15): the
     /// chip the save/open keys act on. `None` addresses the first chip;
     /// the reducer clamps with the loaded message's chip count.
@@ -202,6 +211,7 @@ impl AppState {
             list_scroll: 0,
             open_message: Loadable::Idle,
             reader_scroll: 0,
+            reader_doc: std::cell::RefCell::new(None),
             reader_attachment: None,
             saved_attachments: std::collections::HashMap::new(),
             preview_requested: std::collections::HashSet::new(),
