@@ -100,8 +100,9 @@ jobs:
           PY
 
           # Sync the workspace member version in Cargo.lock without touching
-          # third-party dependency versions.
-          cargo update --workspace --offline
+          # third-party dependency versions. No --offline: fresh runners have
+          # an empty cargo cache, so the registry index must be fetched.
+          cargo update --workspace
           grep -A1 '^name = "tmail"$' Cargo.lock | grep -qx "version = \"$new\"" \
             || { echo "::error::Cargo.lock was not synced to $new"; exit 1; }
 
