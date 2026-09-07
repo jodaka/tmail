@@ -18,6 +18,11 @@
 //! chords require exactly those modifiers. `shift` is not representable on
 //! named keys (rejected with a clear error): for characters it is implied
 //! by the character itself, and `shift+tab` has its own `BackTab` code.
+//!
+//! Two chords are special-cased by the terminal layer: Ctrl+`\` `]` `^`
+//! `_` arrive as `Char('4'..'7')` + CONTROL and are remapped to their keys
+//! in `keyboard::normalize_ctrl_chords`, while Ctrl+`[` is not bindable at
+//! all — its byte *is* ESC, so terminals report it as a plain Esc.
 
 use crossterm::event::KeyCode;
 

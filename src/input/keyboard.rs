@@ -11,6 +11,12 @@
 //! Lookup order per key: the focus's own context table (list or reader)
 //! first, then the global table — a context can shadow a global key
 //! without conflicting with it.
+//!
+//! One crossterm quirk is normalized away first: in legacy terminal input
+//! the four chords Ctrl+`\` `]` `^` `_` (the bytes 0x1C–0x1F) carry no
+//! glyph, so crossterm reports them as `Char('4'..'7')` + CONTROL. They
+//! are mapped back to the keys that produce them (`normalize_ctrl_chords`)
+//! so specs like `"Ctrl+]"` match what the user actually pressed.
 
 use crate::app::action::{Action, ComposerEdit, DialogEdit, SearchEdit};
 use crate::app::focus::Focus;
@@ -25,6 +31,7 @@ pub fn to_action(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action>
 /// The translation body; named separately so tests can wrap
 /// [`to_action`] with a default keymap.
 fn to_action_with(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action> {
+    let key = normalize_ctrl_chords(key);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let text_focus = matches!(focus, Focus::SearchField | Focus::Dialog | Focus::Composer);
@@ -125,6 +132,33 @@ fn to_action_with(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action
         return None;
     }
     Some(action)
+}
+
+/// Map crossterm's legacy reporting of Ctrl+`\` `]` `^` `_` back to the
+/// keys the user presses. Legacy terminal input sends those chords as the
+/// single bytes 0x1C–0x1F, which carry no glyph; crossterm therefore
+/// reports them as `Char('4')`–`Char('7')` + CONTROL. The conventional
+/// keys are what a config spec names (`"Ctrl+]"`), so the invented digits
+/// are translated before any binding lookup. Chords only: a chordless
+/// `4`–`7` is text and passes through untouched. (Ctrl+`[` is not
+/// recoverable this way — its byte *is* ESC — so it stays unbindable.)
+fn normalize_ctrl_chords(key: KeyEvent) -> KeyEvent {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return key;
+    }
+    let code = match key.code {
+        KeyCode::Char('4') => KeyCode::Char('\\'),
+        KeyCode::Char('5') => KeyCode::Char(']'),
+        KeyCode::Char('6') => KeyCode::Char('^'),
+        KeyCode::Char('7') => KeyCode::Char('_'),
+        _ => return key,
+    };
+    KeyEvent {
+        code,
+        modifiers: key.modifiers,
+        kind: key.kind,
+        state: key.state,
+    }
 }
 
 #[cfg(test)]

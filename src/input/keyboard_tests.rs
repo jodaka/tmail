@@ -6,6 +6,7 @@
 //! behavior has its own tests in `input::keymap`.
 
 use super::*;
+use crate::config::KeybindingTable;
 use crate::input::keymap::KeyMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -479,4 +480,65 @@ fn ctrl_e_opens_the_external_editor_in_the_composer_only() {
     // draft body (plan §14).
     assert_eq!(to_action(ctrl_e, Focus::MessageList), None);
     assert_eq!(to_action(ctrl_e, Focus::Sidebar), None);
+}
+
+#[test]
+fn legacy_ctrl_chords_match_the_keys_the_user_presses() {
+    // Legacy terminal input delivers Ctrl+] as the byte 0x1D, which
+    // crossterm reports as Char('5') + CONTROL (see
+    // `normalize_ctrl_chords`). The default keymap binds none of the four
+    // legacy chords, so rebuild one the way a user config does.
+    let tables = [KeybindingTable {
+        context: String::from("global"),
+        entries: vec![(
+            String::from("next_page"),
+            vec![String::from("→"), String::from("Ctrl+]")],
+        )],
+    }];
+    let keymap = KeyMap::build(&tables).keymap;
+    let f = Focus::MessageList;
+    // The event crossterm actually produces for Ctrl+] pages next.
+    assert_eq!(
+        to_action_with(&keymap, key(KeyCode::Char('5'), KeyModifiers::CONTROL), f),
+        Some(Action::PageNext)
+    );
+    // The other three legacy bytes map to their conventional keys too
+    // (0x1C→`\`, 0x1E→`^`, 0x1F→`_`).
+    let tables = [KeybindingTable {
+        context: String::from("global"),
+        entries: vec![(
+            String::from("compose"),
+            vec![
+                String::from("Ctrl+\\"),
+                String::from("Ctrl+^"),
+                String::from("Ctrl+_"),
+            ],
+        )],
+    }];
+    let keymap = KeyMap::build(&tables).keymap;
+    for (reported, pressed) in [('4', '\\'), ('6', '^'), ('7', '_')] {
+        assert_eq!(
+            to_action_with(
+                &keymap,
+                key(KeyCode::Char(reported), KeyModifiers::CONTROL),
+                f
+            ),
+            Some(Action::Compose),
+            "Char({reported})+Ctrl must fire the {pressed:?} binding"
+        );
+    }
+    // Chordless digits are text, never a remap — in the search field…
+    assert_eq!(
+        to_action(plain(KeyCode::Char('5')), Focus::SearchField),
+        Some(Action::SearchEdit(SearchEdit::Char('5')))
+    );
+    // …and the normalized chord still only types there (']' from the
+    // remapped byte), firing no binding.
+    assert_eq!(
+        to_action(
+            key(KeyCode::Char('5'), KeyModifiers::CONTROL),
+            Focus::SearchField
+        ),
+        Some(Action::SearchEdit(SearchEdit::Char(']')))
+    );
 }
