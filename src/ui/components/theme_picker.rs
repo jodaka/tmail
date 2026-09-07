@@ -118,7 +118,7 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
         // same way in both lists.
         let (marker, row_style) = if selected {
             (
-                "▏",
+                "▎",
                 Style::new()
                     .fg(theme.accent)
                     .bg(theme.accent_bg)

@@ -376,7 +376,7 @@ fn message_spans<'a>(
     // Accent bar in the marker column (mockup `.folder.active` bar): marks
     // the focused row while the list holds focus.
     let marker = if selected && focused {
-        Span::styled("▏", Style::new().fg(theme.accent).bg(bg))
+        Span::styled("▎", Style::new().fg(theme.accent).bg(bg))
     } else {
         Span::styled(" ", base)
     };

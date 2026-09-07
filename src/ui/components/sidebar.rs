@@ -179,7 +179,7 @@ fn render_folder_row(
     .bg(row_bg);
     // Inset accent bar marking the focused row (mockup `.folder.active`):
     // the cursor row while the sidebar holds focus.
-    let marker = if cursor { "▏" } else { " " };
+    let marker = if cursor { "▎" } else { " " };
     let marker_style = if cursor {
         Style::new().fg(theme.accent)
     } else {

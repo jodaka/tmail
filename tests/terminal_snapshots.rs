@@ -191,7 +191,7 @@ fn focus_marker_follows_the_focused_pane() {
         .expect("active folder row") as u16;
     assert_eq!(
         buffer[(tmail::ui::layout::SIDEBAR_WIDTH, list_row)].symbol(),
-        "▏",
+        "▎",
         "list focused: selected message shows the bar"
     );
     assert_eq!(
@@ -216,7 +216,7 @@ fn focus_marker_follows_the_focused_pane() {
         .expect("selected message row") as u16;
     assert_eq!(
         buffer[(0, folder_row)].symbol(),
-        "▏",
+        "▎",
         "sidebar focused: cursor folder shows the bar"
     );
     assert_eq!(
@@ -1681,7 +1681,7 @@ fn selected_rows_show_the_checkbox_and_star_gets_a_trailing_space() {
         .expect("cursor row");
     let line = text.lines().nth(cursor_row).unwrap();
     let cells: Vec<char> = line.chars().collect();
-    // Columns past the list edge are marker (1) + icon (2): ▏/space, then
+    // Columns past the list edge are marker (1) + icon (2): ▎/space, then
     // ☑ or * followed by one space.
     let list_start = tmail::ui::layout::SIDEBAR_WIDTH as usize;
     let icon: String = cells[list_start + 1..list_start + 3].iter().collect();
