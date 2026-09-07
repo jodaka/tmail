@@ -19,35 +19,35 @@
 [post.theme]
 name = "default"
 # Page background: fills everything no widget paints over.
-background = "#0f1014"
+background = "#0a101e"
 # Input wells, list rows, panels (e.g. the search field, code blocks).
-surface = "#1d1f26"
+surface = "#0e182c"
 # Hairlines and control borders: the lines under the list header, the
 # sidebar divider, row separators in the comfortable view mode.
-border = "#3f434e"
+border = "#3a3f4a"
 # Primary text: strongest content color (unread rows, headings).
-text = "#eceae3"
+text = "#e5e5e5"
 # Soft primary text: read (non-unread) rows and ordinary content.
-text_soft = "#c2c4cc"
+text_soft = "#bebfc1"
 # Secondary text: hints' labels and other supporting copy.
-muted = "#9a9da8"
+muted = "#929499"
 # De-emphasized text: relative dates read rows carry in the list.
-dim = "#8b8e99"
+dim = "#787a82"
 # Faded message-body preview in the list rows: dimmer than any subject,
 # so the Gmail-style preview reads as context, never as content.
-snippet = "#6b6f7b"
+snippet = "#5d616a"
 # Interactive highlight: the cursor row bar, selection focus, links,
 # the status message, bulk-selection checkboxes.
-accent = "#4e86dd"
+accent = "#fca311"
 # Selected row / active folder fill: the background behind the highlighted
 # list row or the folder the cursor sits on.
-accent_bg = "#1c2534"
+accent_bg = "#2e261c"
 # Bulk-selected row highlight (Space-marked rows): visibly distinct from
 # the cursor fill, so checked rows read as "marked", not "focused".
-bulk_selected_bg = "#2a2210"
+bulk_selected_bg = "#46351b"
 # Stars and warnings (the `*` star glyph on starred rows).
-warning = "#d4a45c"
+warning = "#fca311"
 # Errors: failure details in modals and the status line.
-error = "#d95f51"
+error = "#e5484d"
 # Focused-control selection fill: text selection inside focused controls.
-selection = "#243045"
+selection = "#533c1a"

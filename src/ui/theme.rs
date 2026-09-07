@@ -1,8 +1,10 @@
 //! Semantic theme tokens (plan §18). No literal colors outside this module.
 //!
-//! Values approximate the `mockups/list.html` oklch palette for a dark
-//! terminal; they are RGB so the look does not depend on a 16-color palette
-//! and degrade gracefully in `no-color` terminals.
+//! The dark reference palette is the "Black & Gold Elegance" scheme
+//! (#0a101e #e5e5e5 #fca311 — derived from the trending Coolors palette,
+//! see `config.toml`'s theme derivations); they are RGB so the look does
+//! not depend on a 16-color palette and degrade gracefully in `no-color`
+//! terminals.
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -45,20 +47,20 @@ pub struct Theme {
 impl Theme {
     pub const fn default_dark() -> Self {
         Self {
-            background: Color::Rgb(0x0F, 0x10, 0x14),
-            surface: Color::Rgb(0x1D, 0x1F, 0x26),
-            border: Color::Rgb(0x3F, 0x43, 0x4E),
-            text: Color::Rgb(0xEC, 0xEA, 0xE3),
-            text_soft: Color::Rgb(0xC2, 0xC4, 0xCC),
-            muted: Color::Rgb(0x9A, 0x9D, 0xA8),
-            dim: Color::Rgb(0x8B, 0x8E, 0x99),
-            snippet: Color::Rgb(0x6B, 0x6F, 0x7B),
-            accent: Color::Rgb(0x4E, 0x86, 0xDD),
-            accent_bg: Color::Rgb(0x1C, 0x25, 0x34),
-            bulk_selected_bg: Color::Rgb(0x2A, 0x22, 0x10),
-            warning: Color::Rgb(0xD4, 0xA4, 0x5C),
-            error: Color::Rgb(0xD9, 0x5F, 0x51),
-            selection: Color::Rgb(0x24, 0x30, 0x45),
+            background: Color::Rgb(0x0A, 0x10, 0x1E),
+            surface: Color::Rgb(0x0E, 0x18, 0x2C),
+            border: Color::Rgb(0x3A, 0x3F, 0x4A),
+            text: Color::Rgb(0xE5, 0xE5, 0xE5),
+            text_soft: Color::Rgb(0xBE, 0xBF, 0xC1),
+            muted: Color::Rgb(0x92, 0x94, 0x99),
+            dim: Color::Rgb(0x78, 0x7A, 0x82),
+            snippet: Color::Rgb(0x5D, 0x61, 0x6A),
+            accent: Color::Rgb(0xFC, 0xA3, 0x11),
+            accent_bg: Color::Rgb(0x2E, 0x26, 0x1C),
+            bulk_selected_bg: Color::Rgb(0x46, 0x35, 0x1B),
+            warning: Color::Rgb(0xFC, 0xA3, 0x11),
+            error: Color::Rgb(0xE5, 0x48, 0x4D),
+            selection: Color::Rgb(0x53, 0x3C, 0x1A),
             unread: Modifier::BOLD,
         }
     }
@@ -429,7 +431,7 @@ mod theme_list_tests {
 #[cfg(test)]
 mod default_theme_doc_tests {
     use super::*;
-    use crate::config::{THEME_TOKENS, parse_with_issues};
+    use crate::config::{parse_with_issues, THEME_TOKENS};
 
     /// `docs/default-theme.toml` documents the built-in dark theme as a
     /// ready-to-paste `[post.theme]` block (ticket dn04). This pins the
