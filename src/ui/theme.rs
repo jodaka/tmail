@@ -431,7 +431,7 @@ mod theme_list_tests {
 #[cfg(test)]
 mod default_theme_doc_tests {
     use super::*;
-    use crate::config::{parse_with_issues, THEME_TOKENS};
+    use crate::config::{THEME_TOKENS, parse_with_issues};
 
     /// `docs/default-theme.toml` documents the built-in dark theme as a
     /// ready-to-paste `[post.theme]` block (ticket dn04). This pins the

@@ -893,8 +893,15 @@ fn composer_focused_field_draws_a_caret_cell() {
 #[test]
 fn composer_flags_invalid_addresses_in_the_warning_color() {
     use tmail::app::action::ComposerEdit;
-    let theme = Theme::default_dark();
+    // The default palette doubles its amber as both `accent` and
+    // `warning` (black-gold), so the scan uses a sentinel warning color:
+    // distinct from every other token, the test cannot false-positive on
+    // accent-drawn cells.
+    let mut theme = Theme::default_dark();
+    theme.warning = ratatui::style::Color::Rgb(0xAB, 0x00, 0x01);
     let mut state = mock_initial_state();
+    state.themes = vec![(String::from("default"), theme)];
+    state.theme_index = 0;
     let mut actions = vec![Action::Compose];
     for c in "broken".chars() {
         actions.push(Action::ComposerEdit(ComposerEdit::Char(c)));
