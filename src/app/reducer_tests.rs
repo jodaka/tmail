@@ -1147,15 +1147,19 @@ fn save_failure_opens_a_retryable_modal() {
 #[test]
 fn keyboard_d_trashes_and_capital_s_saves_in_the_reader() {
     use crate::input::keyboard;
+    use crate::input::keymap::KeyMap;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let keymap = KeyMap::defaults();
     // `d` deletes the open message now (ticket zg41); the attachment save
     // lives on `S`.
     let action = keyboard::to_action(
+        &keymap,
         KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
         Focus::Reader,
     );
     assert_eq!(action, Some(Action::Trash));
     let action = keyboard::to_action(
+        &keymap,
         KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE),
         Focus::Reader,
     );
@@ -1165,14 +1169,16 @@ fn keyboard_d_trashes_and_capital_s_saves_in_the_reader() {
 #[test]
 fn keyboard_d_and_o_map_to_save_and_open() {
     use crate::input::keyboard;
+    use crate::input::keymap::KeyMap;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let keymap = KeyMap::defaults();
     let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
     assert_eq!(
-        keyboard::to_action(key('S'), Focus::Reader),
+        keyboard::to_action(&keymap, key('S'), Focus::Reader),
         Some(Action::SaveAttachment)
     );
     assert_eq!(
-        keyboard::to_action(key('o'), Focus::Reader),
+        keyboard::to_action(&keymap, key('o'), Focus::Reader),
         Some(Action::OpenAttachment)
     );
 }

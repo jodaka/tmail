@@ -15,6 +15,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::action::{BulkOp, ClickTarget};
 use crate::app::route::Route;
 use crate::app::state::AppState;
+use crate::input::keymap::Context;
 use crate::input::mouse::HitMap;
 use crate::ui::text;
 use crate::ui::theme::Theme;
@@ -97,52 +98,91 @@ pub fn render(
             );
             cursor_x += width;
         }
-        spans.push(Span::styled(
-            "  esc clear",
-            Style::new().fg(theme.muted).bg(theme.background),
-        ));
-    } else {
-        let hints: &[(&str, &str)] = if composer {
-            &[
-                ("tab", "next field"),
-                ("esc", "save & leave"),
-                ("^↵", "send"),
-            ]
-        } else if reader {
-            &[
-                ("↑↓", "scroll"),
-                ("esc", "back"),
-                ("r", "reply"),
-                ("f", "forward"),
-                ("e", "archive"),
-                ("s", "star"),
-                ("d", "delete"),
-            ]
-        } else {
-            &[
-                ("↑↓", "move"),
-                ("↵", "open"),
-                ("space", "select"),
-                ("s", "star"),
-                ("e", "archive"),
-                // `d` deletes (trash) — the focused row, or the whole
-                // selection when bulk-selection mode is on (ticket h1m2).
-                ("d", "delete"),
-                ("c", "compose"),
-                ("/", "search"),
-            ]
-        };
-        for (key, label) in hints {
-            spans.push(Span::styled("  ", Style::new().bg(theme.background)));
+        // The clear hint reads the `cancel` binding: rebinding it in the
+        // config keeps this row honest (and an unbound cancel hides it).
+        if let Some(clear) = state.keymap.hint(None, "cancel") {
             spans.push(Span::styled(
-                *key,
-                Style::new().fg(theme.text_soft).bg(theme.background),
-            ));
-            spans.push(Span::styled(
-                format!(" {label}"),
+                format!("  {clear} clear"),
                 Style::new().fg(theme.muted).bg(theme.background),
             ));
         }
+    } else if composer {
+        // The composer's editing keys are not configurable (typing must
+        // type); Tab and Esc are the keymap's focus/cancel bindings, so
+        // their hints read from it. Send stays the fixed Ctrl+Enter chord.
+        let hints: Vec<(Option<String>, &str)> = vec![
+            (
+                state.keymap.hint(None, "focus_next").map(String::from),
+                "next field",
+            ),
+            (
+                state.keymap.hint(None, "cancel").map(String::from),
+                "save & leave",
+            ),
+            (Some(String::from("^↵")), "send"),
+        ];
+        push_hints(theme, &mut spans, &hints);
+    } else if reader {
+        let context = Some(Context::Reader);
+        let hints: Vec<(Option<String>, &str)> = vec![
+            (state.keymap.move_hint(context), "scroll"),
+            (
+                state.keymap.hint(context, "cancel").map(String::from),
+                "back",
+            ),
+            (
+                state.keymap.hint(context, "reply").map(String::from),
+                "reply",
+            ),
+            (
+                state.keymap.hint(context, "forward").map(String::from),
+                "forward",
+            ),
+            (
+                state.keymap.hint(context, "archive").map(String::from),
+                "archive",
+            ),
+            (state.keymap.hint(context, "star").map(String::from), "star"),
+            (
+                state.keymap.hint(context, "trash").map(String::from),
+                "delete",
+            ),
+        ];
+        push_hints(theme, &mut spans, &hints);
+    } else {
+        let context = Some(Context::List);
+        let hints: Vec<(Option<String>, &str)> = vec![
+            (state.keymap.move_hint(context), "move"),
+            (
+                state.keymap.hint(context, "activate").map(String::from),
+                "open",
+            ),
+            (
+                state
+                    .keymap
+                    .hint(context, "toggle_selected")
+                    .map(String::from),
+                "select",
+            ),
+            (state.keymap.hint(context, "star").map(String::from), "star"),
+            (
+                state.keymap.hint(context, "archive").map(String::from),
+                "archive",
+            ),
+            (
+                state.keymap.hint(context, "trash").map(String::from),
+                "delete",
+            ),
+            (
+                state.keymap.hint(context, "compose").map(String::from),
+                "compose",
+            ),
+            (
+                state.keymap.hint(context, "open_search").map(String::from),
+                "search",
+            ),
+        ];
+        push_hints(theme, &mut spans, &hints);
     }
     // Foreground work is announced by the loader in the top bar (in place
     // of the program name, ticket m3by); the status bar keeps hints and
@@ -177,6 +217,28 @@ pub fn render(
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
+}
+
+/// Render one hint per action, skipping unbound ones: an action with an
+/// empty binding list in the config disappears from the row instead of
+/// lying about a key. Hint text is cloned into owned spans so nothing
+/// borrowed from `hints` flows into the frame's lifetime.
+fn push_hints(theme: &Theme, spans: &mut Vec<Span<'_>>, hints: &[(Option<String>, &str)]) {
+    for (key, label) in hints {
+        let Some(key) = key else { continue };
+        spans.push(Span::styled(
+            String::from("  "),
+            Style::new().bg(theme.background),
+        ));
+        spans.push(Span::styled(
+            key.clone(),
+            Style::new().fg(theme.text_soft).bg(theme.background),
+        ));
+        spans.push(Span::styled(
+            format!(" {label}"),
+            Style::new().fg(theme.muted).bg(theme.background),
+        ));
+    }
 }
 
 /// Closing seconds of the timeout window over which the status message

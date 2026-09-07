@@ -66,12 +66,24 @@ async fn run() -> anyhow::Result<()> {
             "the himalaya executable was not found on PATH; install it or point PATH at it",
         ));
     }
+    // The keymap is built here (not inside the config parser): conflicts
+    // and structural checks are policy, not syntax, and their warnings
+    // describe adjustments — the app still starts (configurable
+    // keybindings; syntax problems come back fatal, like theme tokens).
+    let built_keymap = tmail::input::keymap::KeyMap::build(&config.keybindings);
+    issues.extend(built_keymap.errors);
     if !issues.is_empty() {
         let mut message = String::from("configuration problems (fix the file, then start again):");
         for issue in &issues {
             message.push_str(&format!("\n  - {issue}"));
         }
         bail!("{}", message);
+    }
+    // Warnings print before the alternate screen swallows stderr: a
+    // refused conflict or restored default must be visible somewhere.
+    for warning in &built_keymap.warnings {
+        eprintln!("post: warning: {warning}");
+        tracing::warn!(warning, "keybinding config adjusted");
     }
     tracing::info!(
         config = ?config.path,
@@ -89,6 +101,9 @@ async fn run() -> anyhow::Result<()> {
     // external editor owns the terminal (Phase 11).
     let mut guard = Some(terminal::enable(config.mouse)?);
     let mut state = AppState::initial(config.page_size);
+    // The configured keymap replaces the defaults-only seed (the reducer
+    // and hint rows read it through `state`).
+    state.keymap = built_keymap.keymap;
     // Reply-all excludes the configured account address (Phase 7.5).
     state.account_email = config.account_email.clone();
     // Periodic refresh timer (Phase 9.4); `0` disables it.

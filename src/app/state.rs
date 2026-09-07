@@ -90,6 +90,11 @@ pub struct AppState {
     /// only `&AppState`; the app is single-threaded and no accessor
     /// re-enters while borrowing, so `RefCell` suffices.
     pub(crate) reader_doc: std::cell::RefCell<Option<crate::ui::screens::reader::CachedReaderDoc>>,
+    /// The keyboard binding table (configurable keybindings): defaults
+    /// seeded, then reshaped by `[post.keybindings]`. Consulted by the
+    /// translation layer (`input::keyboard`) and the status-bar hints, so
+    /// a rebind can never leave the UI lying about its keys.
+    pub keymap: crate::input::keymap::KeyMap,
     /// Cursor within the open message's attachment chips (plan §15): the
     /// chip the save/open keys act on. `None` addresses the first chip;
     /// the reducer clamps with the loaded message's chip count.
@@ -212,6 +217,7 @@ impl AppState {
             open_message: Loadable::Idle,
             reader_scroll: 0,
             reader_doc: std::cell::RefCell::new(None),
+            keymap: crate::input::keymap::KeyMap::defaults(),
             reader_attachment: None,
             saved_attachments: std::collections::HashMap::new(),
             preview_requested: std::collections::HashSet::new(),

@@ -1,7 +1,20 @@
 //! Keyboard mapping unit tests (plan §10).
+//!
+//! Every test runs against the default keymap (`KeyMap::defaults()`), so
+//! the defaults registry and the translation layer stay honest together:
+//! a registry change that alters behavior fails here, and config-level
+//! behavior has its own tests in `input::keymap`.
 
 use super::*;
+use crate::input::keymap::KeyMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// Test-local translation against the default bindings. Shadows the
+/// keymap-aware `to_action` so the behavioral assertions below stay about
+/// keys and actions, not about plumbing.
+fn to_action(key: KeyEvent, focus: Focus) -> Option<Action> {
+    to_action_with(&KeyMap::defaults(), key, focus)
+}
 
 fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
     KeyEvent::new(code, modifiers)

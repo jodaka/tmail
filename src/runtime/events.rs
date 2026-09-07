@@ -167,7 +167,7 @@ pub fn coalesce(batch: Vec<Event>, hits: &mouse::HitMap, state: &AppState) -> Ve
         let action = match event {
             Event::Key(key) => {
                 key_seen = true;
-                keyboard::to_action(key, state.focus)
+                keyboard::to_action(&state.keymap, key, state.focus)
             }
             Event::Mouse(mouse_event) => {
                 if key_seen

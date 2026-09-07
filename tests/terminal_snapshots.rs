@@ -1611,7 +1611,7 @@ fn selection_mode_status_bar_lists_the_bulk_buttons() {
     assert!(text.contains("[archive]"), "archive button");
     assert!(text.contains("[read]"), "read button");
     assert!(text.contains("[unread]"), "unread button");
-    assert!(text.contains("esc clear"), "clear hint");
+    assert!(text.contains("Esc clear"), "clear hint");
 
     // The [archive] button is clickable where it is drawn.
     let (mut bx, mut by) = (0u16, 0u16);

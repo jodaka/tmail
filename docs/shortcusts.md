@@ -1,5 +1,10 @@
-
+ 
 ## Keyboard
+
+Every shortcut below is the *default*: actions can be reassigned, extended,
+or unbound per context via `[post.keybindings.<context>]` in the config
+(see `config.example.toml` for the full annotated list). The status bar
+hints always follow the configured bindings.
 
 | Context | Key | Action |
 | --- | --- | --- |

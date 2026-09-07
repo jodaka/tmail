@@ -1,145 +1,130 @@
 //! Keyboard → action translation (plan §10 input contract).
 //!
-//! Pure function of the key event and the current focus, so the mapping is
-//! unit-testable without a terminal. Single-letter shortcuts never fire
-//! while a text field is focused; `j`/`k` and `?` are deliberately absent
-//! (plan §4 overrides).
+//! Since configurable keybindings (`[post.keybindings]`), the shortcut
+//! surface lives in the [`KeyMap`] (`input::keymap`): defaults seed it,
+//! the config reshapes it, and this module only consults it. What stays
+//! hardcoded — deliberately — is *text editing*: the search field, modal
+//! fields, and the composer consume printable keys as text and keep their
+//! caret/edit keys (plan §10: typing must type; text-entry behavior is
+//! not a binding and must never be remapped away).
+//!
+//! Lookup order per key: the focus's own context table (list or reader)
+//! first, then the global table — a context can shadow a global key
+//! without conflicting with it.
 
 use crate::app::action::{Action, ComposerEdit, DialogEdit, SearchEdit};
 use crate::app::focus::Focus;
+use crate::input::keymap::KeyMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Translate a key event into an action. `None` = not a bound key.
-pub fn to_action(key: KeyEvent, focus: Focus) -> Option<Action> {
-    use KeyCode::*;
-    match key.code {
-        Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
-        Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Refresh),
-        // Ctrl+A toggles select-all (ticket p0s3); text-entry foci never
-        // intercept keys, so it only fires where shortcuts are accepted.
-        Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) && focus.accepts_shortcuts() => {
-            Some(Action::SelectAll)
-        }
-        // Ctrl+E hands the draft body to the external editor (plan §14,
-        // Phase 11): composer-only, regardless of which field holds focus.
-        Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) && focus == Focus::Composer => {
-            Some(Action::EditExternal)
-        }
-        Esc => Some(Action::BackOrCancel),
-        Enter => Some(enter_action(key.modifiers)),
-        Tab => Some(Action::FocusNext),
-        BackTab => Some(Action::FocusPrevious),
-        Left if focus == Focus::Dialog => Some(Action::DialogEdit(DialogEdit::CursorLeft)),
-        Right if focus == Focus::Dialog => Some(Action::DialogEdit(DialogEdit::CursorRight)),
-        Up if focus == Focus::Dialog => None,
-        Down if focus == Focus::Dialog => None,
-        Up => Some(move_action(key.modifiers, focus, ComposerEdit::CursorUp)),
-        Down => Some(move_action(key.modifiers, focus, ComposerEdit::CursorDown)),
-        Left => Some(move_action(key.modifiers, focus, ComposerEdit::CursorLeft)),
-        Right => Some(move_action(key.modifiers, focus, ComposerEdit::CursorRight)),
-        Backspace if focus == Focus::SearchField => Some(Action::SearchEdit(SearchEdit::Backspace)),
-        Backspace if focus == Focus::Dialog => Some(Action::DialogEdit(DialogEdit::Backspace)),
-        Backspace if focus == Focus::Composer => {
-            Some(Action::ComposerEdit(ComposerEdit::Backspace))
-        }
-        // Reader ⌫ trashes the open message (ticket zg41): the removed
-        // action row advertised "Delete ⌫", and ⌫ is the Delete key on
-        // Mac keyboards — where the forward-Delete arm below never fires.
-        Backspace if focus == Focus::Reader => Some(Action::Trash),
-        Delete if focus == Focus::SearchField => None,
-        Delete if focus == Focus::Dialog => Some(Action::DialogEdit(DialogEdit::Delete)),
-        Delete if focus == Focus::Composer => Some(Action::ComposerEdit(ComposerEdit::Delete)),
-        Delete if focus != Focus::SearchField => Some(Action::Trash),
-        Char('/') if focus.accepts_shortcuts() => Some(Action::OpenSearch),
-        Char(c) => char_action(c, key.modifiers, focus),
-        _ => None,
-    }
+pub fn to_action(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action> {
+    to_action_with(keymap, key, focus)
 }
 
-/// Enter inserts a newline in a composer body (Phase 6); `Ctrl+Enter` sends.
-/// In Phase 1 Enter activates the focused control.
-fn enter_action(modifiers: KeyModifiers) -> Action {
-    if modifiers.contains(KeyModifiers::CONTROL) {
-        Action::Send
-    } else {
-        Action::Activate
+/// The translation body; named separately so tests can wrap
+/// [`to_action`] with a default keymap.
+fn to_action_with(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let text_focus = matches!(focus, Focus::SearchField | Focus::Dialog | Focus::Composer);
+    // Ctrl+Enter sends from anywhere (plan §10, as before); plain Enter is
+    // the keymap's `activate` binding, so it stays rebindable. The
+    // composer's body newline is the reducer's routing of Activate.
+    if key.code == KeyCode::Enter && ctrl {
+        return Some(Action::Send);
     }
-}
-
-/// Arrows move the composer caret (Phase 6); elsewhere they move the
-/// selection / scroll the focused area (plan §10). Shift+arrows are plain
-/// movement, not selection: Post has no text selection in v1.
-fn move_action(modifiers: KeyModifiers, focus: Focus, edit: ComposerEdit) -> Action {
-    if focus == Focus::Composer && !modifiers.contains(KeyModifiers::ALT) {
-        Action::ComposerEdit(edit)
-    } else {
-        match edit {
-            ComposerEdit::CursorUp => Action::MoveUp,
-            ComposerEdit::CursorDown => Action::MoveDown,
-            ComposerEdit::CursorLeft => Action::PagePrevious,
-            _ => Action::PageNext,
+    // Text-entry foci consume their editing keys before any binding
+    // lookup; the structural keys (Esc/Enter/Tab) fall through to the
+    // keymap so cancel/activate/focus stay configurable there too.
+    match focus {
+        Focus::SearchField => match key.code {
+            // Any printable character (chords included — see below) types.
+            KeyCode::Char(c) if !ctrl && !alt => {
+                return Some(Action::SearchEdit(SearchEdit::Char(c)));
+            }
+            KeyCode::Backspace => return Some(Action::SearchEdit(SearchEdit::Backspace)),
+            // Structural keys — and the arrows, which page/move the list
+            // behind the field, as before — fall through to the keymap.
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab => {}
+            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {}
+            // A ctrl/alt chord pierces text entry only as quit/refresh
+            // (below); every other chord still types the character, as
+            // before (Ctrl+A types an `a` into the query).
+            KeyCode::Char(_) => {
+                return match keymap.lookup(&key, focus) {
+                    Some(action @ (Action::Quit | Action::Refresh)) => Some(action),
+                    _ => Some(Action::SearchEdit(SearchEdit::Char(
+                        key.code.as_char().expect("Char code"),
+                    ))),
+                };
+            }
+            _ => return None,
+        },
+        Focus::Dialog => match key.code {
+            KeyCode::Char(c) if !ctrl && !alt => {
+                return Some(Action::DialogEdit(DialogEdit::Char(c)));
+            }
+            KeyCode::Backspace => return Some(Action::DialogEdit(DialogEdit::Backspace)),
+            KeyCode::Delete => return Some(Action::DialogEdit(DialogEdit::Delete)),
+            KeyCode::Left => return Some(Action::DialogEdit(DialogEdit::CursorLeft)),
+            KeyCode::Right => return Some(Action::DialogEdit(DialogEdit::CursorRight)),
+            // Up/Down never leave a single-line modal field (plan §15).
+            KeyCode::Up | KeyCode::Down => return None,
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab => {}
+            // Chords fall through: quit/refresh pierce (below), the rest
+            // are unbound in a modal field.
+            KeyCode::Char(_) => {}
+            _ => return None,
+        },
+        Focus::Composer => {
+            match key.code {
+                KeyCode::Char(c) if !ctrl && !alt => {
+                    return Some(Action::ComposerEdit(ComposerEdit::Char(c)));
+                }
+                KeyCode::Backspace => {
+                    return Some(Action::ComposerEdit(ComposerEdit::Backspace));
+                }
+                KeyCode::Delete => return Some(Action::ComposerEdit(ComposerEdit::Delete)),
+                // Caret moves without Alt; Alt+arrows fall through to the
+                // global bindings (move/page), as before.
+                KeyCode::Left if !alt => {
+                    return Some(Action::ComposerEdit(ComposerEdit::CursorLeft));
+                }
+                KeyCode::Right if !alt => {
+                    return Some(Action::ComposerEdit(ComposerEdit::CursorRight));
+                }
+                KeyCode::Up if !alt => {
+                    return Some(Action::ComposerEdit(ComposerEdit::CursorUp));
+                }
+                KeyCode::Down if !alt => {
+                    return Some(Action::ComposerEdit(ComposerEdit::CursorDown));
+                }
+                // Enter activates the focused control (the reducer routes
+                // it — body focus inserts the newline there); Ctrl+Enter
+                // was handled above.
+                KeyCode::Enter => return Some(Action::Activate),
+                // Ctrl+E hands the body to the external editor (plan §14,
+                // Phase 11): composer-only, regardless of which field holds
+                // focus.
+                KeyCode::Char('e') if ctrl => return Some(Action::EditExternal),
+                KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => {}
+                _ => {}
+            }
+            // Fall through: global chords (quit, refresh) still fire.
         }
+        _ => {}
     }
-}
-
-fn char_action(c: char, modifiers: KeyModifiers, focus: Focus) -> Option<Action> {
-    if focus == Focus::SearchField {
-        // Any printable character goes into the field; no shortcuts fire.
-        return Some(Action::SearchEdit(SearchEdit::Char(c)));
-    }
-    if focus == Focus::Dialog {
-        // Any printable character goes into the dialog entry; no shortcuts
-        // fire while a modal text field is focused (plan §10).
-        return match modifiers {
-            m if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::ALT) => None,
-            _ => Some(Action::DialogEdit(DialogEdit::Char(c))),
-        };
-    }
-    if focus == Focus::Composer {
-        // Any printable character (including '/' and letters) is composed
-        // text; no single-letter shortcuts fire while editing (plan §10).
-        return match modifiers {
-            m if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::ALT) => None,
-            _ => Some(Action::ComposerEdit(ComposerEdit::Char(c))),
-        };
-    }
-    if modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT) {
+    let action = keymap.lookup(&key, focus)?;
+    // Text entry is pierced only by the quit and refresh chords (plan
+    // §10): every other ctrl/alt chord stays out of the fields the user
+    // is typing into, however the keymap is configured. Structural keys
+    // (Esc/Enter/Tab) pass unrestricted.
+    let chord = matches!(key.code, KeyCode::Char(_)) && (ctrl || alt);
+    if text_focus && chord && !matches!(action, Action::Quit | Action::Refresh) {
         return None;
     }
-    match c {
-        // `q` mirrors Esc everywhere shortcuts are accepted (list, sidebar,
-        // reader, over a modal); text-entry foci never reach this match, so
-        // the letter still types there.
-        'q' => Some(Action::BackOrCancel),
-        'c' => Some(Action::Compose),
-        'r' => Some(Action::Reply),
-        'a' => Some(Action::ReplyAll),
-        'f' => Some(Action::Forward),
-        'e' => Some(Action::Archive),
-        's' => Some(Action::ToggleStar),
-        'u' => Some(Action::MarkUnread),
-        // `i` marks read (ticket p0s3): the focused row, or the whole
-        // selection when bulk-selection mode is on. No-op in the reader
-        // (an open message is already read).
-        'i' => Some(Action::MarkRead),
-        'm' => Some(Action::ToggleMouseCapture),
-        // `t` opens the theme picker (ticket k5ba): a small list of every
-        // available palette; arrows preview, Enter applies, Esc restores.
-        't' => Some(Action::OpenThemePicker),
-        // `d` deletes in the message list and in the reader (trash; the
-        // list binding is ticket h1m2, the reader binding is ticket zg41)
-        // — with the whole selection when bulk-selection mode is on. The
-        // reader's save-attachment moved to `S` to free the key.
-        'd' if focus == Focus::MessageList || focus == Focus::Reader => Some(Action::Trash),
-        'd' => Some(Action::SaveAttachment),
-        'o' => Some(Action::OpenAttachment),
-        'S' => Some(Action::SaveAttachment),
-        // Space toggles the focused row's bulk-selection mark, list only
-        // (ticket p0s3): the sidebar has no selection semantics, and the
-        // reader scrolls instead of marking.
-        ' ' if focus == Focus::MessageList => Some(Action::ToggleSelected),
-        _ => None, // No j/k (plan §4), no '?' help.
-    }
+    Some(action)
 }
 
 #[cfg(test)]

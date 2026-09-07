@@ -225,6 +225,22 @@ pub struct Config {
     /// parser's table iteration order (alphabetical by name); a theme
     /// shadowing a built-in name replaces it.
     pub theme_tables: Vec<(String, Vec<(String, String)>)>,
+    /// `[post.keybindings.<context>]` (configurable keybindings): each
+    /// context table's `(action, keys)` entries. Values stay raw here —
+    /// action names, key specs, conflicts, and the structural non-empty
+    /// rule are validated by `input::keymap::KeyMap::build`, which turns
+    /// its findings into fatal errors or startup warnings.
+    pub keybindings: Vec<KeybindingTable>,
+}
+
+/// One `[post.keybindings.<context>]` table: the context name and its
+/// `(action, key specs)` entries in file order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeybindingTable {
+    /// `global`, `list`, or `reader`.
+    pub context: String,
+    /// `(action name, key specs)`; one spec per key, in file order.
+    pub entries: Vec<(String, Vec<String>)>,
 }
 
 impl Default for Config {
@@ -251,6 +267,7 @@ impl Default for Config {
             theme_name: String::from("default"),
             theme_overrides: Vec::new(),
             theme_tables: Vec::new(),
+            keybindings: Vec::new(),
         }
     }
 }
@@ -374,6 +391,7 @@ pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssu
     parse_editor(post, &mut config, &mut issues);
     parse_theme(post, &mut config, &mut issues);
     parse_theme_tables(post, &mut config, &mut issues);
+    parse_keybindings(post, &mut config, &mut issues);
     parse_downloads_dir(post, &mut config, &mut issues);
     parse_ui_clock(post, &mut config, &mut issues);
     parse_view_mode(post, &mut config, &mut issues);
@@ -611,6 +629,73 @@ fn parse_theme_tables(post: Option<&toml::Value>, config: &mut Config, issues: &
             }
         }
         config.theme_tables.push((name.clone(), overrides));
+    }
+}
+
+/// `[post.keybindings.<context>]` (configurable keybindings): each table
+/// maps action names to one key spec or a list of them. Values stay raw —
+/// action names, key specs, conflicts, and the structural non-empty rule
+/// are validated by `input::keymap::KeyMap::build`, which reports its
+/// findings as fatal errors (this list) or startup warnings. Only the
+/// shape is checked here: a context must be a table, an action value must
+/// be a string or an array of strings.
+fn parse_keybindings(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(bindings) = post
+        .and_then(|post| post.get("keybindings"))
+        .and_then(|bindings| bindings.as_table())
+    else {
+        return;
+    };
+    for (context, value) in bindings {
+        let Some(table) = value.as_table() else {
+            issues.push(format!("[post.keybindings.{context}] must be a table"));
+            continue;
+        };
+        if context.is_empty() {
+            issues.push(String::from(
+                "[post.keybindings] context names must not be empty",
+            ));
+            continue;
+        }
+        let mut entries = Vec::new();
+        for (action, value) in table {
+            let specs = match value {
+                toml::Value::String(spec) => vec![spec.clone()],
+                toml::Value::Array(specs) => {
+                    let mut parsed = Vec::with_capacity(specs.len());
+                    let mut ok = true;
+                    for spec in specs {
+                        match spec.as_str() {
+                            Some(spec) => parsed.push(String::from(spec)),
+                            None => {
+                                issues.push(format!(
+                                    "[post.keybindings.{context}].{action} must be a key \
+                                     spec string or an array of them"
+                                ));
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if !ok {
+                        continue;
+                    }
+                    parsed
+                }
+                _ => {
+                    issues.push(format!(
+                        "[post.keybindings.{context}].{action} must be a key spec string \
+                         or an array of them"
+                    ));
+                    continue;
+                }
+            };
+            entries.push((action.clone(), specs));
+        }
+        config.keybindings.push(KeybindingTable {
+            context: context.clone(),
+            entries,
+        });
     }
 }
 
@@ -1549,5 +1634,64 @@ mod cache_limit_tests {
         let (_, issues) = parse_with_issues("[post.cache]\nflavor = \"vanilla\"\n", None);
         assert_eq!(issues.items.len(), 1);
         assert!(issues.items[0].contains("flavor"), "{issues:?}");
+    }
+}
+
+#[cfg(test)]
+mod keybinding_tests {
+    use super::*;
+
+    #[test]
+    fn keybinding_tables_parse_strings_and_lists() {
+        let text = r##"
+            [post.keybindings.global]
+            next_page = ["→", "Ctrl+]"]
+            toggle_mouse = "x"
+            [post.keybindings.reader]
+            trash = []
+        "##;
+        let (config, issues) = parse_with_issues(text, None);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(config.keybindings.len(), 2);
+        assert_eq!(config.keybindings[0].context, "global");
+        // The TOML map does not promise iteration order; find by action.
+        let global = |name: &str| {
+            config.keybindings[0]
+                .entries
+                .iter()
+                .find(|(a, _)| a == name)
+                .map(|(_, k)| k.clone())
+                .expect("entry")
+        };
+        assert_eq!(
+            global("next_page"),
+            vec![String::from("→"), String::from("Ctrl+]")]
+        );
+        // A bare string is a one-key list.
+        assert_eq!(global("toggle_mouse"), vec![String::from("x")]);
+        // The reader table came through with the empty (unbind) list.
+        assert_eq!(config.keybindings[1].context, "reader");
+        assert_eq!(config.keybindings[1].entries[0].1, Vec::<String>::new());
+    }
+
+    #[test]
+    fn keybinding_shape_problems_report_with_the_table_path() {
+        let text = r##"
+            [post.keybindings.broken]
+            star = 7
+            [post.keybindings."flat"]
+            garbage = true
+        "##;
+        let (_, issues) = parse_with_issues(text, None);
+        assert_eq!(issues.items.len(), 2, "{issues:?}");
+        assert!(issues.items[0].contains("[post.keybindings.broken].star"));
+        assert!(issues.items[1].contains("garbage"));
+    }
+
+    #[test]
+    fn keybindings_section_defaults_to_empty() {
+        let (config, issues) = parse_with_issues("[post]\nmouse = true\n", None);
+        assert!(issues.is_empty());
+        assert!(config.keybindings.is_empty());
     }
 }

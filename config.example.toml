@@ -66,6 +66,51 @@ name = "default"
 # accent = "#88c0d0"
 # text = "#eceff4"
 
+# Keyboard shortcuts (configurable keybindings). Every action with its
+# default keys is listed below — uncomment the [post.keybindings.<context>]
+# tables and edit freely. Setting an action's list REPLACES its defaults
+# (an empty list unbinds the action); add a second key by listing both.
+# Key syntax: `+`-joined modifiers (ctrl, alt) then a key — named keys
+# ("esc", "enter", "tab", "backtab", "backspace", "delete", "home", "end",
+# "pageup", "pagedown", "up", "down", "left", "right", "space", "f1"–"f12"),
+# glyphs ("↑" "↓" "←" "→" "⌫" "↵"), or any single character ("j", "?", "]",
+# "S" = the shifted character). A conflict with another action in the same
+# table is refused with a startup warning; the escape hatches (cancel,
+# activate, focus_next, focus_previous, quit) always keep at least one key.
+#
+# [post.keybindings.global]
+# move_up = ["↑"]
+# move_down = ["↓"]
+# previous_page = ["←"]
+# next_page = ["→", "Ctrl+]"]
+# activate = ["↵"]
+# cancel = ["Esc", "q"]
+# focus_next = ["Tab"]
+# focus_previous = ["Shift+Tab"]
+# open_search = ["/"]
+# compose = ["c"]
+# refresh = ["Ctrl+r"]
+# quit = ["Ctrl+c"]
+# select_all = ["Ctrl+a"]
+# toggle_mouse = ["m"]
+# theme = ["t"]
+# reply = ["r"]
+# reply_all = ["a"]
+# forward = ["f"]
+# archive = ["e"]
+# star = ["s"]
+# mark_unread = ["u"]
+# mark_read = ["i"]
+# save_attachment = ["S"]
+# open_attachment = ["o"]
+#
+# [post.keybindings.list]
+# trash = ["d", "Delete"]
+# toggle_selected = ["Space"]
+#
+# [post.keybindings.reader]
+# trash = ["d", "Delete", "⌫"]
+
 [post.cache]
 # Viewed-message cache limits (ticket haeb). Least-recently-used entries
 # are evicted first; max_messages = 0 disables message caching.
