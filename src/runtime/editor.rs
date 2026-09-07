@@ -27,7 +27,7 @@ pub async fn run(program: &[String], body: &str) -> Result<String, String> {
     // (0o600). Plan §21: restrictive permissions, cleaned up on return —
     // the TempDir drop removes the whole tree whatever happens.
     let dir = tempfile::Builder::new()
-        .prefix("post-editor-")
+        .prefix("tmail-editor-")
         .tempdir()
         .map_err(|err| format!("could not create a temporary directory: {err}"))?;
     let path = dir.path().join("body.txt");
@@ -56,7 +56,7 @@ pub async fn run(program: &[String], body: &str) -> Result<String, String> {
 
 /// Write `body` to `path` with owner-only permissions (plan §21: temporary
 /// editor files use restrictive permissions). Unix only; elsewhere the
-/// platform default applies (Post's external-editor flow is macOS/Linux).
+/// platform default applies (Tmail's external-editor flow is macOS/Linux).
 fn write_secure(path: &Path, body: &str) -> anyhow::Result<()> {
     use std::io::Write;
     let mut file = fs::File::create(path).context("create temporary file")?;
@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn temporary_files_are_owner_only() {
-        let path = std::env::temp_dir().join("post-editor-perm-test");
+        let path = std::env::temp_dir().join("tmail-editor-perm-test");
         write_secure(&path, "x").expect("write");
         let meta = fs::metadata(&path).expect("file exists");
         #[cfg(unix)]

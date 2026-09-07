@@ -148,7 +148,7 @@ pub enum Action {
     /// flag; the runtime applies the capture mode.
     ToggleMouseCapture,
     /// `t` (ticket k5ba): open the theme picker over the current screen —
-    /// a small list of the two built-ins plus every `[post.themes.<name>]`
+    /// a small list of the two built-ins plus every `[tmail.themes.<name>]`
     /// from the config. Arrows preview the highlighted palette at once,
     /// Enter keeps it, Esc restores the opening palette. Session-only;
     /// the config file is never rewritten.

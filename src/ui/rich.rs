@@ -88,8 +88,8 @@ pub(crate) fn html_to_rich(html: &str, width: usize) -> Vec<RichLine> {
 /// - `Code`/`Preformat` → code (whitespace preserved by html2text);
 /// - `Image(src)` → the attached title text *is* the alt text; the src is
 ///   deliberately dropped (no alt-text leakage of remote URLs, no fetch);
-/// - `Colour`/`BgColour`/`Strikeout`/`Default` → ignored (Post theme wins,
-///   plan §13: "Sender color/background: Ignore; use Post theme").
+/// - `Colour`/`BgColour`/`Strikeout`/`Default` → ignored (Tmail theme wins,
+///   plan §13: "Sender color/background: Ignore; use Tmail theme").
 ///
 /// Heading (`# `) and blockquote (`> `) markers are plain text prefixes in
 /// html2text's rich output rather than annotations, so they are detected on
@@ -151,7 +151,7 @@ fn style_from_annotations(annotations: &[RichAnnotation]) -> RichStyle {
             | RichAnnotation::Strikeout
             | RichAnnotation::Default
             // The enum is `#[non_exhaustive]`: future annotations degrade to
-            // the Post theme instead of failing the render.
+            // the Tmail theme instead of failing the render.
             | _ => {}
         }
     }

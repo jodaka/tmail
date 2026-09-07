@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CI smoke (Phase 12.6): terminal lifecycle + command selection per platform.
 
-Runs the real Post binary under a pty against a committed fake `himalaya`
+Runs the real Tmail binary under a pty against a committed fake `himalaya`
 (fake_himalaya.sh) — no network, no real mail, fully deterministic:
 
 1. happy path: startup renders the fake inbox (proving the editor command
@@ -104,12 +104,12 @@ def write_config(path):
     with open(path, "w") as f:
         f.write(
             "[accounts.probe]\n"
-            'email = "probe@post.local"\n'
+            'email = "probe@tmail.local"\n'
             "\n"
-            "[post]\n"
+            "[tmail]\n"
             'account = "probe"\n'
             "\n"
-            "[post.composer]\n"
+            "[tmail.composer]\n"
             'editor = "$EDITOR"\n'
         )
 
@@ -238,7 +238,7 @@ def step_opener_environment():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bin", required=True, help="path to the post binary")
+    parser.add_argument("--bin", required=True, help="path to the tmail binary")
     args = parser.parse_args()
 
     binpath = os.path.abspath(args.bin)

@@ -32,7 +32,7 @@ fn locator(mailbox: &str, id: &str) -> MessageLocator {
     MessageLocator {
         mailbox: MailboxId(String::from(mailbox)),
         id: MessageId(String::from(id)),
-        message_id: Some(String::from("1@post.local")),
+        message_id: Some(String::from("1@tmail.local")),
     }
 }
 
@@ -138,7 +138,7 @@ fn envelope_rows_map_to_domain_summaries() {
 
     let first = &page.items[0];
     assert_eq!(first.id.0, "env-1");
-    assert_eq!(first.message_id.as_deref(), Some("1@post.local"));
+    assert_eq!(first.message_id.as_deref(), Some("1@tmail.local"));
     assert_eq!(first.from[0].display(), "Ada");
     assert_eq!(first.subject, "Welcome");
     assert!(first.is_starred);
@@ -439,8 +439,8 @@ fn message_read_argv_is_exact_and_maps_domain_message() {
     assert_eq!(message.mailbox_id.0, "INBOX");
     assert_eq!(message.headers.subject, "Contract test");
     assert_eq!(message.headers.from[0].display(), "Ada");
-    assert_eq!(message.headers.to[0].email, "probe@post.local");
-    assert_eq!(message.headers.message_id.as_deref(), Some("1@post.local"));
+    assert_eq!(message.headers.to[0].email, "probe@tmail.local");
+    assert_eq!(message.headers.message_id.as_deref(), Some("1@tmail.local"));
     assert_eq!(
         message.headers.date.map(|d| d.to_rfc3339()),
         Some("2026-09-02T10:03:40+03:00".to_string())
@@ -667,7 +667,7 @@ use tmail::domain::{DraftId, DraftSnapshot};
 fn draft_snapshot(revision: u64, remote_id: Option<&str>) -> DraftSnapshot {
     DraftSnapshot {
         local_id: DraftId(String::from("local-123")),
-        message_id: Some(String::from("<123.draft@post.local>")),
+        message_id: Some(String::from("<123.draft@tmail.local>")),
         in_reply_to: None,
         references: None,
         remote_id: remote_id.map(|id| MessageId(String::from(id))),
@@ -697,8 +697,8 @@ fn backend_with_journal(fake: &FakeHimalaya) -> (HimalayaCliBackend, TempDir) {
     )
     .with_journal(DraftJournal::open(dir.path().to_path_buf()))
     .with_account_identity(
-        Some(String::from("probe@post.local")),
-        Some(String::from("Post Probe")),
+        Some(String::from("probe@tmail.local")),
+        Some(String::from("Tmail Probe")),
     );
     (backend, dir)
 }
@@ -734,7 +734,7 @@ fn save_draft_adds_with_draft_flag_and_pipes_the_message() {
         ["list", "-m", "Drafts", "-p", "1", "-s", "100", "--json"]
     );
     // The serialized RFC 5322 message travels on stdin: library-built
-    // headers, the stable Message-ID, Post's draft metadata, and the body.
+    // headers, the stable Message-ID, Tmail's draft metadata, and the body.
     let stdin = String::from_utf8_lossy(&fake.stdin_bytes()).into_owned();
     assert!(
         stdin.contains("To: \"Maksim Orlov\" <m.orlov@example.org>"),
@@ -746,12 +746,12 @@ fn save_draft_adds_with_draft_flag_and_pipes_the_message() {
     );
     assert!(stdin.contains("Cc: <cc@example.org>"), "{stdin}");
     assert!(
-        stdin.contains("Message-ID: <123.draft@post.local>"),
+        stdin.contains("Message-ID: <123.draft@tmail.local>"),
         "{stdin}"
     );
-    assert!(stdin.contains("X-Post-Draft-Id: local-123"), "{stdin}");
+    assert!(stdin.contains("X-Tmail-Draft-Id: local-123"), "{stdin}");
     assert!(
-        stdin.contains("From: \"Post Probe\" <probe@post.local>"),
+        stdin.contains("From: \"Tmail Probe\" <probe@tmail.local>"),
         "{stdin}"
     );
     // Non-ASCII subjects are RFC 2047-encoded by the library.
@@ -803,7 +803,7 @@ fn save_draft_replaces_the_old_remote_only_after_confirm() {
 #[test]
 fn save_draft_sweeps_stray_copies_by_message_id_two_phase() {
     // The envelope listing reports a stale copy of this draft's Message-ID
-    // ("123.draft@post.local"): the sweep must delete it from Drafts and
+    // ("123.draft@tmail.local"): the sweep must delete it from Drafts and
     // then purge it from trash (ADR 0002 §D.4/§D.5).
     let fake = FakeHimalaya::spawn_full("ok", "draft-stray", "ok", "ok");
     let (backend, _dir) = backend_with_journal(&fake);
@@ -874,8 +874,8 @@ use tmail::domain::{OutboundMessage, OutgoingContent};
 /// it (the `From` of outgoing mail).
 fn backend_with_identity(fake: &FakeHimalaya) -> HimalayaCliBackend {
     backend(fake, Some("probe")).with_account_identity(
-        Some(String::from("probe@post.local")),
-        Some(String::from("Post Probe")),
+        Some(String::from("probe@tmail.local")),
+        Some(String::from("Tmail Probe")),
     )
 }
 
@@ -890,7 +890,7 @@ fn outbound() -> OutboundMessage {
             in_reply_to: None,
             references: None,
         },
-        Some(String::from("<123.send@post.local>")),
+        Some(String::from("<123.send@tmail.local>")),
     )
     .expect("valid recipients")
 }
@@ -919,7 +919,7 @@ fn send_pipes_the_serialized_message_on_stdin_with_exact_argv() {
     let text = String::from_utf8(stdin).expect("serialized mail is UTF-8");
     assert!(text.contains("To: \"Ada Lovelace\" <ada@example.org>"));
     assert!(text.contains("Subject: Hello again"));
-    assert!(text.contains("Message-ID: <123.send@post.local>"));
+    assert!(text.contains("Message-ID: <123.send@tmail.local>"));
     assert!(text.contains("Body line one."));
 }
 
@@ -939,13 +939,13 @@ fn sent_output_parses_back_into_expected_headers_and_body() {
     );
     assert_eq!(sent.headers.subject, "Hello again");
     assert_eq!(sent.headers.from.len(), 1);
-    assert_eq!(sent.headers.from[0].display(), "Post Probe");
-    assert_eq!(sent.headers.from[0].email, "probe@post.local");
+    assert_eq!(sent.headers.from[0].display(), "Tmail Probe");
+    assert_eq!(sent.headers.from[0].email, "probe@tmail.local");
     assert_eq!(sent.headers.to.len(), 1);
     assert_eq!(sent.headers.to[0].display(), "Ada Lovelace");
     assert_eq!(
         sent.headers.message_id.as_deref(),
-        Some("123.send@post.local")
+        Some("123.send@tmail.local")
     );
     // mail-builder writes CRLF line endings on the wire (RFC 5322).
     assert_eq!(
@@ -960,9 +960,9 @@ fn sent_reply_headers_parse_back_into_the_wire_format() {
     let fake = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "ok");
     let message = OutboundMessage {
         content: OutgoingContent {
-            in_reply_to: Some(String::from("6053432595490343824@post.local")),
+            in_reply_to: Some(String::from("6053432595490343824@tmail.local")),
             references: Some(String::from(
-                "6053432595490343824@post.local 111@post.local",
+                "6053432595490343824@tmail.local 111@tmail.local",
             )),
             ..outbound().content
         },
@@ -976,11 +976,11 @@ fn sent_reply_headers_parse_back_into_the_wire_format() {
     );
     assert_eq!(
         sent.headers.in_reply_to.as_deref(),
-        Some("6053432595490343824@post.local")
+        Some("6053432595490343824@tmail.local")
     );
     assert_eq!(
         sent.headers.references.as_deref(),
-        Some("6053432595490343824@post.local 111@post.local")
+        Some("6053432595490343824@tmail.local 111@tmail.local")
     );
 }
 
@@ -1073,7 +1073,7 @@ fn attachment_save_downloads_into_a_private_tempdir_then_lands_in_the_dest() {
     assert_eq!(bytes, b"PDF-PAYLOAD-01", "exact bytes land");
 
     // One invocation, exact argv except the private tempdir name, which is
-    // Post-generated and unpredictable by design. The directory travels as
+    // Tmail-generated and unpredictable by design. The directory travels as
     // a single argv entry (never shell-split).
     let argv = &fake.argv();
     assert_eq!(argv.len(), 1);
@@ -1132,7 +1132,7 @@ fn attachment_save_never_silently_overwrites() {
 
 #[test]
 fn attachment_save_reduces_hostile_filenames_to_one_component() {
-    // The MIME metadata claims `../../evil.bin`. Post must not escape the
+    // The MIME metadata claims `../../evil.bin`. Tmail must not escape the
     // destination: only the final component may land there.
     let fake = FakeHimalaya::spawn_attachment("traversal");
     let dest = tempfile::TempDir::new().expect("dest dir");

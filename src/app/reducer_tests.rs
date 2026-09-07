@@ -707,7 +707,7 @@ fn complete_message_ok(s: &mut AppState, id: OperationId) -> Vec<Effect> {
 }
 
 /// Complete an in-flight mutation with a `Done` outcome. Returns the
-/// follow-up effects (e.g. the post-move page re-sync).
+/// follow-up effects (e.g. the tmail-move page re-sync).
 fn complete_done(s: &mut AppState, id: OperationId) -> Vec<Effect> {
     reduce(
         s,
@@ -996,7 +996,7 @@ fn reader_with_attachments() -> AppState {
     let mut s = state();
     let summary = s.messages.items[0].clone();
     let mut message = mock::mock_message(&summary);
-    message.headers.message_id = Some(String::from("att-1@post.local"));
+    message.headers.message_id = Some(String::from("att-1@tmail.local"));
     message.attachments = vec![
         crate::domain::Attachment {
             name: Some(String::from("report.pdf")),
@@ -2486,7 +2486,7 @@ fn restored_draft(to: &str, revision: u64, saved_revision: u64) -> crate::domain
     crate::domain::RestoredDraft {
         draft: crate::domain::DraftSnapshot {
             local_id: crate::domain::DraftId(String::from("local-crash-1")),
-            message_id: Some(String::from("<crash-1@post.local>")),
+            message_id: Some(String::from("<crash-1@tmail.local>")),
             in_reply_to: None,
             references: None,
             remote_id: Some(MessageId(String::from("remote-crash"))),
@@ -2837,16 +2837,16 @@ fn reply_source() -> Message {
             }],
             to: vec![Address {
                 name: None,
-                email: String::from("probe@post.local"),
+                email: String::from("probe@tmail.local"),
             }],
             cc: vec![Address {
                 name: None,
                 email: String::from("carol@example.org"),
             }],
             date: Some(mock::now()),
-            message_id: Some(String::from("318@post.local")),
+            message_id: Some(String::from("318@tmail.local")),
             in_reply_to: None,
-            references: Some(String::from("000@post.local")),
+            references: Some(String::from("000@tmail.local")),
         },
         plain_body: Some(String::from("Please review.\nThanks\n")),
         html_body: None,
@@ -2899,11 +2899,11 @@ fn reply_seeds_a_composer_on_top_of_the_reader() {
     assert_eq!(composer.draft.subject, "Re: Plan review");
     assert_eq!(
         composer.draft.in_reply_to.as_deref(),
-        Some("318@post.local")
+        Some("318@tmail.local")
     );
     assert_eq!(
         composer.draft.references.as_deref(),
-        Some("000@post.local 318@post.local")
+        Some("000@tmail.local 318@tmail.local")
     );
     // Quoted body with the attribution; caret starts at the very top.
     assert!(composer.draft.body.contains("On "));
@@ -2935,7 +2935,7 @@ fn forward_seeds_a_header_block_and_no_recipients() {
             .contains("---------- Forwarded message ---------")
     );
     assert!(composer.draft.body.contains("From: Bob <bob@example.org>"));
-    assert!(composer.draft.body.contains("To: probe@post.local"));
+    assert!(composer.draft.body.contains("To: probe@tmail.local"));
 }
 
 #[test]
@@ -2993,14 +2993,14 @@ fn leaving_a_seeded_reply_returns_to_the_reader() {
     let composer = seeded_composer(&s);
     assert_eq!(
         composer.draft.in_reply_to.as_deref(),
-        Some("318@post.local")
+        Some("318@tmail.local")
     );
 }
 
 #[test]
 fn reply_all_merges_recipients_dedups_and_excludes_self() {
     let mut s = state();
-    s.account_email = Some(String::from("probe@post.local"));
+    s.account_email = Some(String::from("probe@tmail.local"));
     let mut message = reply_source();
     // Carol appears in To and Cc; the account itself was a recipient.
     message.headers.to.push(Address {
@@ -3013,7 +3013,7 @@ fn reply_all_merges_recipients_dedups_and_excludes_self() {
     });
     message.headers.cc.push(Address {
         name: None,
-        email: String::from("probe@post.local"),
+        email: String::from("probe@tmail.local"),
     });
     open_reader_with(&mut s, message);
     no_effects(&reduce(&mut s, &Action::ReplyAll));
@@ -3029,7 +3029,7 @@ fn reply_all_merges_recipients_dedups_and_excludes_self() {
     assert_eq!(composer.draft.cc, "");
     assert_eq!(
         composer.draft.in_reply_to.as_deref(),
-        Some("318@post.local")
+        Some("318@tmail.local")
     );
 }
 
@@ -4118,7 +4118,7 @@ fn click_composer_send_button_sends_like_ctrl_enter() {
     let mut s = state();
     reduce(&mut s, &Action::Compose);
     if let Some(composer) = s.composer.as_mut() {
-        composer.draft.to = String::from("probe@post.local");
+        composer.draft.to = String::from("probe@tmail.local");
         composer.draft.subject = String::from("hello");
     }
     // Seed the clock so the send path can mint draft ids.
@@ -5098,7 +5098,7 @@ fn auto_page_size_tracks_the_visible_rows_on_resize() {
 
 #[test]
 fn comfortable_view_mode_halves_the_auto_page_size() {
-    // `[post].view_mode = "comfortable"` doubles the line cost of every
+    // `[tmail].view_mode = "comfortable"` doubles the line cost of every
     // message, so an auto-sized page holds half as many (and resize keeps
     // tracking it).
     let mut s = state();

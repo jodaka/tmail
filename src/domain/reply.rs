@@ -1,6 +1,6 @@
 //! Reply and forward draft seeding (plan §14, Phase 7.3).
 //!
-//! Post constructs the seeds itself, with fixture tests, rather than
+//! Tmail constructs the seeds itself, with fixture tests, rather than
 //! consuming the verified Himalaya reply templates at runtime: production
 //! builds never parse MIME (ADR 0001 — `mail-parser` is test-fixtures
 //! only), and the templates are raw RFC 5322 output. Everything the seeds
@@ -222,7 +222,7 @@ mod tests {
                 }],
                 to: vec![Address {
                     name: None,
-                    email: String::from("probe@post.local"),
+                    email: String::from("probe@tmail.local"),
                 }],
                 cc: vec![Address {
                     name: None,
@@ -231,9 +231,9 @@ mod tests {
                 date: Some(
                     DateTime::parse_from_rfc3339("2026-09-02T10:03:40+03:00").expect("valid date"),
                 ),
-                message_id: Some(String::from("3180034027954358661@post.local")),
+                message_id: Some(String::from("3180034027954358661@tmail.local")),
                 in_reply_to: None,
-                references: Some(String::from("000@post.local")),
+                references: Some(String::from("000@tmail.local")),
             },
             plain_body: Some(String::from("Please review.\n\nThanks\n")),
             html_body: None,
@@ -252,11 +252,11 @@ mod tests {
         // The original Message-ID becomes In-Reply-To and extends References.
         assert_eq!(
             seed.in_reply_to.as_deref(),
-            Some("3180034027954358661@post.local")
+            Some("3180034027954358661@tmail.local")
         );
         assert_eq!(
             seed.references.as_deref(),
-            Some("000@post.local 3180034027954358661@post.local")
+            Some("000@tmail.local 3180034027954358661@tmail.local")
         );
     }
 
@@ -303,12 +303,12 @@ mod tests {
     fn reply_all_merges_sender_and_recipients_in_order() {
         let seed = seed_reply(&source(), ReplyKind::ReplyAll, None);
         // Sender first, then the original To; Cc keeps the rest.
-        assert_eq!(seed.to, "Bob <bob@example.org>, probe@post.local");
+        assert_eq!(seed.to, "Bob <bob@example.org>, probe@tmail.local");
         assert_eq!(seed.cc, "carol@example.org");
         // Threading headers are unchanged by recipient merging.
         assert_eq!(
             seed.in_reply_to.as_deref(),
-            Some("3180034027954358661@post.local")
+            Some("3180034027954358661@tmail.local")
         );
     }
 
@@ -346,18 +346,18 @@ mod tests {
         // The account itself was a Cc recipient; replying must not mail it.
         message.headers.to.push(Address {
             name: None,
-            email: String::from("me@post.local"),
+            email: String::from("me@tmail.local"),
         });
         message.headers.cc.push(Address {
             name: Some(String::from("Me")),
-            email: String::from("ME@post.local"),
+            email: String::from("ME@tmail.local"),
         });
-        let seed = seed_reply(&message, ReplyKind::ReplyAll, Some("me@post.local"));
-        assert!(!seed.to.contains("me@post.local"));
-        assert!(!seed.cc.contains("post.local"), "{}", seed.cc);
+        let seed = seed_reply(&message, ReplyKind::ReplyAll, Some("me@tmail.local"));
+        assert!(!seed.to.contains("me@tmail.local"));
+        assert!(!seed.cc.contains("tmail.local"), "{}", seed.cc);
         // Without a configured address nothing is excluded.
         let seed = seed_reply(&message, ReplyKind::ReplyAll, None);
-        assert!(seed.to.contains("me@post.local"));
+        assert!(seed.to.contains("me@tmail.local"));
     }
 
     #[test]
@@ -367,14 +367,14 @@ mod tests {
         let mut message = source();
         message.headers.from = vec![Address {
             name: None,
-            email: String::from("me@post.local"),
+            email: String::from("me@tmail.local"),
         }];
         message.headers.to = vec![Address {
             name: None,
-            email: String::from("me@post.local"),
+            email: String::from("me@tmail.local"),
         }];
         message.headers.cc.clear();
-        let seed = seed_reply(&message, ReplyKind::ReplyAll, Some("me@post.local"));
+        let seed = seed_reply(&message, ReplyKind::ReplyAll, Some("me@tmail.local"));
         assert_eq!(seed.to, "", "only the self address was present");
         assert_eq!(seed.cc, "");
     }
@@ -390,7 +390,7 @@ mod tests {
                         From: Bob <bob@example.org>\n\
                         Date: 2026-09-02 10:03\n\
                         Subject: Plan review\n\
-                        To: probe@post.local\n\
+                        To: probe@tmail.local\n\
                         Cc: carol@example.org\n\
                         \n\
                         Please review.\n\nThanks\n";

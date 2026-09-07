@@ -3,7 +3,7 @@
 //! `fixtures/himalaya/reply-template.eml` is actual `himalaya message
 //! reply` output captured by the Phase 0 probe (ADR 0001 finding 11). The
 //! seed functions run against it after the production mapping path, so the
-//! reply threading headers Post preserves are exactly what a real exchange
+//! reply threading headers Tmail preserves are exactly what a real exchange
 //! carries. Feature-gated like the rest of the fixture pipeline: production
 //! builds never parse MIME (ADR 0001).
 
@@ -24,10 +24,10 @@ fn reply_to_a_real_himalaya_message_preserves_thread_headers() {
     );
     assert_eq!(
         message.headers.in_reply_to.as_deref(),
-        Some("6053432595490343824@post.local")
+        Some("6053432595490343824@tmail.local")
     );
 
-    let seed = seed_reply(&message, ReplyKind::Reply, Some("probe@post.local"));
+    let seed = seed_reply(&message, ReplyKind::Reply, Some("probe@tmail.local"));
     // In-Reply-To becomes the template's own Message-ID; References grows
     // by it while keeping the original chain.
     assert_eq!(
@@ -37,17 +37,17 @@ fn reply_to_a_real_himalaya_message_preserves_thread_headers() {
     assert_eq!(
         seed.references.as_deref(),
         Some(
-            "6053432595490343824@post.local \
+            "6053432595490343824@tmail.local \
               18d179bfb9f51e28.d8b23411a1e22891.1aaa20328b43cd8d@RFT-R993YF"
         )
     );
-    assert_eq!(seed.to, "Post Probe <probe@post.local>");
+    assert_eq!(seed.to, "Tmail Probe <probe@tmail.local>");
     assert_eq!(
         seed.subject,
-        "Re: Re: Welcome to Post".replace("Re: Re:", "Re:"),
+        "Re: Re: Welcome to Tmail".replace("Re: Re:", "Re:"),
     );
-    // "Re: Welcome to Post" already carries the prefix: kept as-is.
-    assert_eq!(seed.subject, "Re: Welcome to Post");
+    // "Re: Welcome to Tmail" already carries the prefix: kept as-is.
+    assert_eq!(seed.subject, "Re: Welcome to Tmail");
     assert!(
         seed.body.contains("> Hello,"),
         "the quoted body includes the template's quoted text:\n{}",
@@ -63,7 +63,7 @@ fn forward_of_a_real_himalaya_message_has_a_header_block() {
     assert_eq!(seed.references, None);
     let body = seed.body;
     assert!(body.contains("---------- Forwarded message ---------"));
-    assert!(body.contains("From: Post Probe <probe@post.local>"));
-    assert!(body.contains("Subject: Re: Welcome to Post"));
+    assert!(body.contains("From: Tmail Probe <probe@tmail.local>"));
+    assert!(body.contains("Subject: Re: Welcome to Tmail"));
     assert!(body.contains("To: Ada Lovelace <ada@example.org>"));
 }

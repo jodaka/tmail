@@ -504,14 +504,14 @@ mod tests {
     #[test]
     fn chars_land_in_the_focused_field() {
         let mut c = composer();
-        for ch in "max@post".chars() {
+        for ch in "max@tmail".chars() {
             c.apply(&ComposerEdit::Char(ch));
         }
-        assert_eq!(c.draft.to, "max@post");
-        assert_eq!(c.cursor, 8);
+        assert_eq!(c.draft.to, "max@tmail");
+        assert_eq!(c.cursor, 9);
         c.focus_next(); // CcToggle
         c.apply(&ComposerEdit::Char('x'));
-        assert_eq!(c.draft.to, "max@post", "toggle rows take no text");
+        assert_eq!(c.draft.to, "max@tmail", "toggle rows take no text");
     }
 
     #[test]

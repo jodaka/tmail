@@ -67,13 +67,13 @@ pub struct HimalayaCliBackend {
     /// operations inside the backend adapter). `Arc` keeps the struct
     /// cheaply cloneable.
     mailboxes: Arc<RwLock<Option<Vec<Mailbox>>>>,
-    /// Post-owned crash-safe draft journal (ADR 0002 §D.1): every revision
+    /// Tmail-owned crash-safe draft journal (ADR 0002 §D.1): every revision
     /// is recorded here before any remote call.
     journal: DraftJournal,
     /// Configured account identity, used as the `From` header of drafts.
     account_email: Option<String>,
     account_display_name: Option<String>,
-    /// `[post.attachments].downloads_dir` (plan §17), as written; a leading
+    /// `[tmail.attachments].downloads_dir` (plan §17), as written; a leading
     /// `~` is expanded at use time. `None` falls back to `$HOME/Downloads`.
     downloads_dir: Option<PathBuf>,
 }
@@ -92,7 +92,7 @@ impl HimalayaCliBackend {
             aliases,
             mailboxes: Arc::new(RwLock::new(None)),
             journal: DraftJournal::open_default()
-                .unwrap_or_else(|| DraftJournal::open(PathBuf::from("/dev/null/post-drafts"))),
+                .unwrap_or_else(|| DraftJournal::open(PathBuf::from("/dev/null/tmail-drafts"))),
             account_email: None,
             account_display_name: None,
             downloads_dir: None,
@@ -105,7 +105,7 @@ impl HimalayaCliBackend {
         self
     }
 
-    /// Backend wired from the loaded Post configuration.
+    /// Backend wired from the loaded Tmail configuration.
     pub fn from_config(config: &Config) -> Self {
         Self::new(
             "himalaya",
@@ -165,7 +165,7 @@ impl MailBackend for HimalayaCliBackend {
                 "page limit must be non-zero",
             )));
         }
-        // Himalaya pages are 1-based and Post requests page-aligned offsets;
+        // Himalaya pages are 1-based and Tmail requests page-aligned offsets;
         // aligning here keeps an off-grid offset from silently reading a
         // different page than requested (ADR 0001 finding 8).
         let aligned = page.offset - page.offset % page.limit;
@@ -274,7 +274,7 @@ impl MailBackend for HimalayaCliBackend {
     async fn trash(&self, ctx: RequestContext, locator: MessageLocator) -> BackendResult<()> {
         tracing::debug!(operation = %ctx.operation, mailbox = %locator.mailbox.0, "trash");
         // `message delete` is trash-first on the himalaya side (ADR 0001
-        // finding 5); no Post-side target resolution needed.
+        // finding 5); no Tmail-side target resolution needed.
         let argv = command::message_delete_argv(
             self.config_path.as_deref(),
             self.account.as_deref(),
@@ -430,7 +430,7 @@ impl MailBackend for HimalayaCliBackend {
             ))
         })?;
 
-        // 2. Download the part into a Post-owned private tempdir — never
+        // 2. Download the part into a Tmail-owned private tempdir — never
         //    straight into the destination, so nothing there can be
         //    touched until the collision-checked write is ready. The dir
         //    travels as one argv entry: no shell, whatever the path.
@@ -693,8 +693,8 @@ impl HimalayaCliBackend {
 
     /// Serialize one draft revision as a single-part `text/plain` RFC 5322
     /// message via the mail-builder library (plan §14: never hand-concatenate
-    /// MIME). The stable `Message-ID` (ADR 0002 §D.6) and Post-owned
-    /// `X-Post-Draft-Id` header make replacement and reconciliation
+    /// MIME). The stable `Message-ID` (ADR 0002 §D.6) and Tmail-owned
+    /// `X-Tmail-Draft-Id` header make replacement and reconciliation
     /// possible; only valid parsed addresses are written (the composer
     /// flags invalid ones and send refuses them before starting, Phase 7).
     fn serialize_draft(&self, draft: &DraftSnapshot) -> BackendResult<Vec<u8>> {
@@ -708,7 +708,7 @@ impl HimalayaCliBackend {
         let mut builder = MessageBuilder::new()
             .date(chrono::Utc::now().timestamp())
             .header(
-                "X-Post-Draft-Id",
+                "X-Tmail-Draft-Id",
                 mail_builder::headers::raw::Raw::from(draft.local_id.0.clone()),
             );
         if let Some(message_id) = &draft.message_id {
@@ -774,7 +774,7 @@ impl HimalayaCliBackend {
         let message_id = match &message.message_id {
             Some(id) => bare_message_id(id),
             None => format!(
-                "{}.send@post.local",
+                "{}.send@tmail.local",
                 chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
             ),
         };
@@ -862,7 +862,7 @@ fn bare_message_id(message_id: &str) -> String {
 
 /// Resolve the destination directory for a save (plan §15): the request's
 /// explicit directory wins, then the configured downloads dir, then the
-/// platform default. `~` is expanded here — inside Post, never a shell.
+/// platform default. `~` is expanded here — inside Tmail, never a shell.
 fn resolve_downloads_dir(
     request_dir: Option<&Path>,
     configured: Option<&Path>,
@@ -981,7 +981,7 @@ fn split_stem_ext(name: &str) -> (String, String) {
 }
 
 /// Validate one attachment source path (plan §15, Phase 8): expand `~` in
-/// Post (never a shell), then require an existing, regular, readable file
+/// Tmail (never a shell), then require an existing, regular, readable file
 /// within the acceptable size. Every refusal is detailed so the composer
 /// dialog can show it next to the still-editable entry (Phase 8
 /// acceptance: "missing/unreadable files produce retryable detailed
@@ -1077,7 +1077,7 @@ fn classify_send(output: process::ChildOutput) -> SendOutcome {
 /// DATA phase (nothing transmitted). Matched case-insensitively against
 /// the Phase 0 probe vocabulary; anything not listed is conservatively
 /// treated as unknown delivery state — except explicit DATA-phase markers,
-/// which are always post-connection and therefore never pre-delivery.
+/// which are always tmail-connection and therefore never pre-delivery.
 fn pre_delivery_failure(detail: &str) -> bool {
     let lower = detail.to_ascii_lowercase();
     if lower.contains("smtp data") {
@@ -1481,7 +1481,7 @@ mod attachment_mime_tests {
 
     fn backend() -> HimalayaCliBackend {
         HimalayaCliBackend::new("himalaya", None, None, HashMap::new())
-            .with_account_identity(Some(String::from("probe@post.local")), None)
+            .with_account_identity(Some(String::from("probe@tmail.local")), None)
     }
 
     fn outbound(attachments: Vec<OutboundAttachment>) -> OutboundMessage {

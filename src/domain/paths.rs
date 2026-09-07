@@ -1,6 +1,6 @@
 //! Path helpers for attachment sources and destinations (plan §15).
 //!
-//! `~` is expanded inside Post — never through a shell — so paths with
+//! `~` is expanded inside Tmail — never through a shell — so paths with
 //! spaces or special characters stay single argv entries end to end
 //! (Phase 8 acceptance). Everything here is pure: the home directory is
 //! injected, which keeps the helpers unit-testable without touching the
@@ -50,7 +50,7 @@ pub fn media_type_for(filename: &str) -> &'static str {
 }
 
 /// Expand a leading `~` or `~/…` against `home` (plan §15: expansion
-/// happens in Post, not through a shell). `~user` forms are left literal —
+/// happens in Tmail, not through a shell). `~user` forms are left literal —
 /// resolving other users' homes is out of scope and would need a shell or
 /// libc lookup. Without a home directory nothing is expanded.
 pub fn expand_tilde(input: &Path, home: Option<&Path>) -> PathBuf {

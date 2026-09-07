@@ -1,4 +1,4 @@
-//! Post-owned cache (ticket haeb, cache.md §2): the last loaded page of
+//! Tmail-owned cache (ticket haeb, cache.md §2): the last loaded page of
 //! message summaries per mailbox, the mailbox listing, and viewed full
 //! messages — persisted so warm starts and mailbox switches render
 //! instantly and refresh in the background.
@@ -13,7 +13,7 @@
 //!
 //! Storage is bounded: per-mailbox pages are capped at
 //! [`MAX_FILES_PER_MAILBOX`] files; the viewed-message cache is capped by
-//! [`CacheLimits`] (entry count and total bytes, from `[post.cache]`).
+//! [`CacheLimits`] (entry count and total bytes, from `[tmail.cache]`).
 //! The oldest modifications are evicted first.
 
 use std::fs;
@@ -70,7 +70,7 @@ fn now_ms() -> u64 {
 const MAX_FILES_PER_MAILBOX: usize = 8;
 
 /// Caps for the viewed-message cache (ticket haeb): entries and total
-/// bytes, both configurable via `[post.cache]`. When either is exceeded,
+/// bytes, both configurable via `[tmail.cache]`. When either is exceeded,
 /// the oldest modifications are evicted first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheLimits {
@@ -121,12 +121,12 @@ impl PageCache {
     }
 
     /// The default cache root, scoped to the driven account (or
-    /// `"default"`): `$POST_DATA_DIR/cache/<account>` when set, else the
-    /// platform user-data dir (`~/Library/Application Support/post/cache`
-    /// on macOS, `~/.local/share/post/cache` elsewhere). `None` when no
+    /// `"default"`): `$TMAIL_DATA_DIR/cache/<account>` when set, else the
+    /// platform user-data dir (`~/Library/Application Support/tmail/cache`
+    /// on macOS, `~/.local/share/tmail/cache` elsewhere). `None` when no
     /// home is known — caching stays off.
     pub fn open_default(account: Option<&str>, limits: CacheLimits) -> Option<Self> {
-        if let Some(dir) = std::env::var_os("POST_DATA_DIR") {
+        if let Some(dir) = std::env::var_os("TMAIL_DATA_DIR") {
             return Some(Self::scoped(
                 PathBuf::from(dir).join("cache"),
                 account,
@@ -140,7 +140,7 @@ impl PageCache {
         } else {
             ".local/share"
         });
-        dir.push("post");
+        dir.push("tmail");
         dir.push("cache");
         Some(Self::scoped(dir, account, limits))
     }
@@ -398,7 +398,7 @@ mod tests {
         MessageSummary {
             id: MessageId(String::from(id)),
             mailbox_id: MailboxId(String::from("/root/maildir/INBOX")),
-            message_id: Some(String::from("<1@post.local>")),
+            message_id: Some(String::from("<1@tmail.local>")),
             from: Vec::new(),
             to: Vec::new(),
             subject: String::from(subject),

@@ -1,17 +1,17 @@
-# Post v1 configuration (Phase 0 reference shape)
+# Tmail v1 configuration (Phase 0 reference shape)
 #
-# Post and Himalaya share ONE file: this is the same config the Himalaya CLI
-# reads (verified: himalaya 2.1.0 tolerates unknown root tables like [post]).
+# Tmail and Himalaya share ONE file: this is the same config the Himalaya CLI
+# reads (verified: himalaya 2.1.0 tolerates unknown root tables like [tmail]).
 # Himalaya account/credential blocks stay untouched and keep their format:
 # https://github.com/pimalaya/himalaya/blob/master/config.sample.toml
 
 # ── Himalaya accounts (example below is the disposable Maildir probe) ──────
 [accounts.probe]
-email = "probe@post.local"
-display-name = "Post Probe"
+email = "probe@tmail.local"
+display-name = "Tmail Probe"
 
 [accounts.probe.maildir]
-root = "~/tmp/post-probe-maildir"
+root = "~/tmp/tmail-probe-maildir"
 
 [accounts.probe.mailbox.alias]
 inbox = "INBOX"
@@ -20,9 +20,9 @@ drafts = "Drafts"
 trash = "Archive"
 archive = "Archive"
 
-# ── Post-owned settings ────────────────────────────────────────────────────
-[post]
-# Name of the account (root table in this file) Post drives.
+# ── Tmail-owned settings ────────────────────────────────────────────────────
+[tmail]
+# Name of the account (root table in this file) Tmail drives.
 account = "probe"
 # Basic mouse support (click mailbox/rows, wheel scroll).
 mouse = true
@@ -33,7 +33,7 @@ mouse = true
 # 0 (default) keeps it until the next message replaces it.
 # status_timeout = 5
 
-[post.mail]
+[tmail.mail]
 # Message list page size (explicit pagination).
 page_size_auto = true
 # Used only when page_size_auto = false.
@@ -41,17 +41,17 @@ page_size = 50
 # Periodic background refresh, 0 disables. Foreground work is never preempted.
 refresh_interval_seconds = 60
 
-[post.composer]
+[tmail.composer]
 # "builtin", "$EDITOR", or an explicit command like "nvim".
 editor = "builtin"
 # Debounce for draft autosave in the builtin editor.
 autosave_delay_ms = 2000
 
-[post.attachments]
-# Directory used by "save attachment" (expanded in Post, never via a shell).
+[tmail.attachments]
+# Directory used by "save attachment" (expanded in Tmail, never via a shell).
 downloads_dir = "~/Downloads"
 
-[post.theme]
+[tmail.theme]
 name = "default"
 # Fine-tune any color token with a hex value (ticket wrs7):
 # background = "#0a101e"
@@ -59,15 +59,15 @@ name = "default"
 # name = "light"  # or switch to the built-in light theme
 
 # Extra named themes for the theme picker (`t`, ticket k5ba): same color
-# tokens as [post.theme] over the dark reference palette; built-ins list
+# tokens as [tmail.theme] over the dark reference palette; built-ins list
 # first. A theme named "default" or "light" replaces that built-in.
-# [post.themes.nord]
+# [tmail.themes.nord]
 # background = "#2e3440"
 # accent = "#88c0d0"
 # text = "#eceff4"
 
 # Keyboard shortcuts (configurable keybindings). Every action with its
-# default keys is listed below — uncomment the [post.keybindings.<context>]
+# default keys is listed below — uncomment the [tmail.keybindings.<context>]
 # tables and edit freely. Setting an action's list REPLACES its defaults
 # (an empty list unbinds the action); add a second key by listing both.
 # Key syntax: `+`-joined modifiers (ctrl, alt) then a key — named keys
@@ -78,7 +78,7 @@ name = "default"
 # table is refused with a startup warning; the escape hatches (cancel,
 # activate, focus_next, focus_previous, quit) always keep at least one key.
 #
-# [post.keybindings.global]
+# [tmail.keybindings.global]
 # move_up = ["↑"]
 # move_down = ["↓"]
 # previous_page = ["←"]
@@ -104,14 +104,14 @@ name = "default"
 # save_attachment = ["S"]
 # open_attachment = ["o"]
 #
-# [post.keybindings.list]
+# [tmail.keybindings.list]
 # trash = ["d", "Delete"]
 # toggle_selected = ["Space"]
 #
-# [post.keybindings.reader]
+# [tmail.keybindings.reader]
 # trash = ["d", "Delete", "⌫"]
 
-[post.cache]
+[tmail.cache]
 # Viewed-message cache limits (ticket haeb). Least-recently-used entries
 # are evicted first; max_messages = 0 disables message caching.
 # max_messages = 50

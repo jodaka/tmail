@@ -1,6 +1,6 @@
 //! Keyboard → action translation (plan §10 input contract).
 //!
-//! Since configurable keybindings (`[post.keybindings]`), the shortcut
+//! Since configurable keybindings (`[tmail.keybindings]`), the shortcut
 //! surface lives in the [`KeyMap`] (`input::keymap`): defaults seed it,
 //! the config reshapes it, and this module only consults it. What stays
 //! hardcoded — deliberately — is *text editing*: the search field, modal

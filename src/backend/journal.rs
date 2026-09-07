@@ -1,9 +1,9 @@
-//! Post-owned crash-safe draft journal (ADR 0002 §D.1).
+//! Tmail-owned crash-safe draft journal (ADR 0002 §D.1).
 //!
 //! This is draft *state*, not a mail cache: every revision is recorded here
 //! before any remote call, so a crash mid-remote-save can never lose text
 //! the user typed. Writes are versioned, temp-file + atomic-rename
-//! (`<local-id>.json`), one file per draft under the Post data directory.
+//! (`<local-id>.json`), one file per draft under the Tmail data directory.
 //!
 //! The journal is exercised by backend implementations (the draft save is
 //! one backend operation per ADR 0002 consequences) and read back at
@@ -43,13 +43,13 @@ impl DraftJournal {
         Self { dir }
     }
 
-    /// The default journal directory: `$POST_DATA_DIR/drafts` when set,
+    /// The default journal directory: `$TMAIL_DATA_DIR/drafts` when set,
     /// else the platform user-data dir under `$HOME`
-    /// (`~/Library/Application Support/post/drafts` on macOS,
-    /// `~/.local/share/post/drafts` elsewhere). `None` when no home is
+    /// (`~/Library/Application Support/tmail/drafts` on macOS,
+    /// `~/.local/share/tmail/drafts` elsewhere). `None` when no home is
     /// known; saving then fails loudly instead of silently vanishing.
     pub fn open_default() -> Option<Self> {
-        if let Some(dir) = std::env::var_os("POST_DATA_DIR") {
+        if let Some(dir) = std::env::var_os("TMAIL_DATA_DIR") {
             return Some(Self::open(PathBuf::from(dir).join("drafts")));
         }
         let home = std::env::var_os("HOME")?;
@@ -59,7 +59,7 @@ impl DraftJournal {
         } else {
             ".local/share"
         });
-        dir.push("post");
+        dir.push("tmail");
         dir.push("drafts");
         Some(Self::open(dir))
     }
@@ -199,7 +199,7 @@ mod tests {
     fn snapshot(local_id: &str, revision: u64, body: &str) -> DraftSnapshot {
         DraftSnapshot {
             local_id: DraftId(String::from(local_id)),
-            message_id: Some(format!("<{local_id}@post.local>")),
+            message_id: Some(format!("<{local_id}@tmail.local>")),
             in_reply_to: None,
             references: None,
             remote_id: None,

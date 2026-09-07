@@ -1,4 +1,4 @@
-//! Post — a Gmail-inspired, keyboard-first terminal email client backed by
+//! Tmail — a Gmail-inspired, keyboard-first terminal email client backed by
 //! the Himalaya CLI. Phase 2: Himalaya adapter and the first Inbox vertical
 //! slice (real mailboxes, page 1 of real messages).
 

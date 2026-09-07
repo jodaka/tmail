@@ -1,8 +1,8 @@
-//! Post-owned configuration (plan §17).
+//! Tmail-owned configuration (plan §17).
 //!
 //! One canonical TOML file is shared with Himalaya (ADR 0001 finding 13:
-//! himalaya 2.1.0 tolerates the unknown `[post]` root table). Post reads its
-//! own `[post]` section plus the selected account's `mailbox.alias` table,
+//! himalaya 2.1.0 tolerates the unknown `[tmail]` root table). Tmail reads its
+//! own `[tmail]` section plus the selected account's `mailbox.alias` table,
 //! which the backend adapter uses to resolve mailbox roles (ADR 0001: the
 //! UI never guesses folder names).
 //!
@@ -22,27 +22,27 @@ use crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS;
 
 /// Default page size when the config does not provide a usable one
 /// (plan §16/§17: explicit pagination, default 20).
-/// Default `[post.mail].page_size` for manual pagination (ticket kjfq).
+/// Default `[tmail.mail].page_size` for manual pagination (ticket kjfq).
 pub const DEFAULT_PAGE_SIZE: usize = 50;
-/// Default `[post.mail].page_size_auto` (ticket kjfq): size pages to the
+/// Default `[tmail.mail].page_size_auto` (ticket kjfq): size pages to the
 /// terminal so the whole page fits the list without scrolling.
 pub const DEFAULT_PAGE_SIZE_AUTO: bool = true;
 
 /// Default periodic refresh interval in seconds (plan §11/§19 Phase 9);
-/// `[post.mail].refresh_interval_seconds = 0` disables the timer.
+/// `[tmail.mail].refresh_interval_seconds = 0` disables the timer.
 pub const DEFAULT_REFRESH_INTERVAL_SECONDS: u64 = 60;
 
-/// Bounds of `[post.composer].autosave_delay_ms`: below the floor every
+/// Bounds of `[tmail.composer].autosave_delay_ms`: below the floor every
 /// keystroke would race a save; above the ceiling the debounce is not a
 /// debounce any more (plan §17: invalid autosave values are reported).
 pub const AUTOSAVE_DELAY_MIN_MS: u64 = 100;
 pub const AUTOSAVE_DELAY_MAX_MS: u64 = 600_000;
 
-/// The theme names Post knows (plan §17/§18): the dark reference theme and
+/// The theme names Tmail knows (plan §17/§18): the dark reference theme and
 /// a light variant.
 pub const THEME_NAMES: [&str; 2] = ["default", "light"];
 
-/// The `[post.theme]` color tokens a user may override (ticket wrs7), as
+/// The `[tmail.theme]` color tokens a user may override (ticket wrs7), as
 /// hex strings like `"#4e86dd"`. Kept beside the config parser because the
 /// token list is part of the file's grammar; [`crate::ui::theme::Theme`]
 /// applies them (a test pins the two lists together).
@@ -63,12 +63,12 @@ pub const THEME_TOKENS: [&str; 14] = [
     "selection",
 ];
 
-/// Defaults for `[post.cache]` (ticket haeb): 50 viewed messages, 10 MiB
+/// Defaults for `[tmail.cache]` (ticket haeb): 50 viewed messages, 10 MiB
 /// total. The page/mailbox caches are tiny and not user-limited.
 pub const DEFAULT_CACHE_MAX_MESSAGES: usize = 50;
 pub const DEFAULT_CACHE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
-/// Message-list density (`[post].view_mode`), Gmail-style. `Compact` is
+/// Message-list density (`[tmail].view_mode`), Gmail-style. `Compact` is
 /// the reference one-line-per-message list; `Comfortable` interleaves a
 /// faint horizontal separator under every row, so each message costs two
 /// terminal lines: fewer messages fit on screen and the list gains
@@ -81,7 +81,7 @@ pub enum ViewMode {
 }
 
 impl ViewMode {
-    /// Parse a `[post].view_mode` value; `None` when the name is unknown
+    /// Parse a `[tmail].view_mode` value; `None` when the name is unknown
     /// (the caller reports the problem and falls back to the default).
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -103,7 +103,7 @@ impl ViewMode {
 
 /// Parse a config-file color: `#rgb` or `#rrggbb` (case-insensitive hex).
 /// Returns the normalized `#rrggbb` form, or `None` when the value is not
-/// a color Post can use.
+/// a color Tmail can use.
 pub fn parse_hex_color(value: &str) -> Option<String> {
     let hex = value.strip_prefix('#')?;
     if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -151,19 +151,19 @@ impl LoadIssues {
 pub struct Config {
     /// Config file forwarded to himalaya with `-c`, when one was resolved.
     pub path: Option<PathBuf>,
-    /// `[post].account`: the himalaya account Post drives. `None` lets
+    /// `[tmail].account`: the himalaya account Tmail drives. `None` lets
     /// himalaya pick its default account (and disables alias-based role
     /// resolution, which is per-account).
     pub account: Option<String>,
-    /// `[post.mail].page_size`, defaulting to [`DEFAULT_PAGE_SIZE`]; a
+    /// `[tmail.mail].page_size`, defaulting to [`DEFAULT_PAGE_SIZE`]; a
     /// non-positive or absent value falls back to the default. Ignored
     /// while [`Config::page_size_auto`] is on.
     pub page_size: usize,
-    /// `[post.mail].page_size_auto` (ticket kjfq): size each page to the
+    /// `[tmail.mail].page_size_auto` (ticket kjfq): size each page to the
     /// number of message rows the terminal can show, so the page fits the
     /// list without scrolling. On by default; overrides `page_size`.
     pub page_size_auto: bool,
-    /// `[post.mail].refresh_interval_seconds` (plan §11/§19 Phase 9):
+    /// `[tmail.mail].refresh_interval_seconds` (plan §11/§19 Phase 9):
     /// the periodic background-refresh interval; `0` disables the timer.
     /// Absent defaults to 60; a negative value disables (treated as 0).
     pub refresh_interval_seconds: u64,
@@ -175,57 +175,57 @@ pub struct Config {
     pub account_email: Option<String>,
     /// `[accounts.<account>].display-name`, when configured.
     pub account_display_name: Option<String>,
-    /// `[post.attachments].downloads_dir` (plan §17), as written — a
+    /// `[tmail.attachments].downloads_dir` (plan §17), as written — a
     /// leading `~` is expanded by the backend when the directory is used.
     /// `None` falls back to the platform default (`$HOME/Downloads`).
     pub downloads_dir: Option<PathBuf>,
-    /// `[post].mouse` (plan §10): enable mouse capture and click/wheel
+    /// `[tmail].mouse` (plan §10): enable mouse capture and click/wheel
     /// translation. Off by default: capture changes what terminal text
     /// selection does, so it stays opt-in.
     pub mouse: bool,
-    /// `[post.ui].clock` (ticket w7f5): show the top-right date/time
+    /// `[tmail.ui].clock` (ticket w7f5): show the top-right date/time
     /// clock. Off by default.
     pub ui_clock: bool,
-    /// `[post].view_mode` list density (Gmail-style): `compact` (default)
+    /// `[tmail].view_mode` list density (Gmail-style): `compact` (default)
     /// or `comfortable`. Comfortable draws a faint horizontal separator
     /// under every message row, doubling the row height.
     pub view_mode: ViewMode,
-    /// `[post].status_timeout` (ticket h1d7): seconds a status message
+    /// `[tmail].status_timeout` (ticket h1d7): seconds a status message
     /// stays up before it fades out and clears. `0` (the default) keeps a
     /// message until the next one replaces it.
     pub status_timeout: u64,
-    /// `[post.cache].max_messages` (ticket haeb): maximum number of cached
+    /// `[tmail.cache].max_messages` (ticket haeb): maximum number of cached
     /// viewed messages (LRU-evicted). `0` disables message caching.
     pub cache_max_messages: usize,
-    /// `[post.cache].max_bytes` (ticket haeb): total size cap in bytes for
+    /// `[tmail.cache].max_bytes` (ticket haeb): total size cap in bytes for
     /// the viewed-message cache.
     pub cache_max_bytes: u64,
-    /// `[post.composer].editor` (plan §14/§17): `"builtin"`, `"$EDITOR"`,
+    /// `[tmail.composer].editor` (plan §14/§17): `"builtin"`, `"$EDITOR"`,
     /// or an explicit command. The external-editor flow itself is Phase 11;
     /// v1 validates the value so a broken entry is reported up front.
     pub editor: String,
-    /// `[post.composer].editor` resolved into an argv (Phase 11.4):
+    /// `[tmail.composer].editor` resolved into an argv (Phase 11.4):
     /// `None` is the builtin editor; `Some` is program + arguments,
     /// spawned directly, never a shell. Resolution: `"builtin"` → `None`;
     /// `"$EDITOR"` → the environment value split on whitespace; anything
     /// else is the value itself split on whitespace.
     pub editor_command: Option<Vec<String>>,
-    /// `[post.composer].autosave_delay_ms` (plan §14): the draft autosave
+    /// `[tmail.composer].autosave_delay_ms` (plan §14): the draft autosave
     /// debounce for the builtin editor.
     pub autosave_delay_ms: u64,
-    /// `[post.theme].name` (plan §17/§18); see [`THEME_NAMES`].
+    /// `[tmail.theme].name` (plan §17/§18); see [`THEME_NAMES`].
     pub theme_name: String,
-    /// `[post.theme]` color overrides (ticket wrs7): `(token, "#rrggbb")`
+    /// `[tmail.theme]` color overrides (ticket wrs7): `(token, "#rrggbb")`
     /// pairs, validated at parse time and applied over the named theme in
     /// file order.
     pub theme_overrides: Vec<(String, String)>,
-    /// `[post.themes.<name>]` user themes (ticket z0s4): additional named
+    /// `[tmail.themes.<name>]` user themes (ticket z0s4): additional named
     /// palettes for runtime switching, each a `(token, "#rrggbb")` table
     /// applied over the dark reference palette. Cycle order is the
     /// parser's table iteration order (alphabetical by name); a theme
     /// shadowing a built-in name replaces it.
     pub theme_tables: Vec<(String, Vec<(String, String)>)>,
-    /// `[post.keybindings.<context>]` (configurable keybindings): each
+    /// `[tmail.keybindings.<context>]` (configurable keybindings): each
     /// context table's `(action, keys)` entries. Values stay raw here —
     /// action names, key specs, conflicts, and the structural non-empty
     /// rule are validated by `input::keymap::KeyMap::build`, which turns
@@ -233,7 +233,7 @@ pub struct Config {
     pub keybindings: Vec<KeybindingTable>,
 }
 
-/// One `[post.keybindings.<context>]` table: the context name and its
+/// One `[tmail.keybindings.<context>]` table: the context name and its
 /// `(action, key specs)` entries in file order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeybindingTable {
@@ -273,10 +273,10 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load the configuration: the CLI path wins, then `POST_CONFIG`, then
+    /// Load the configuration: the CLI path wins, then `TMAIL_CONFIG`, then
     /// the well-known himalaya config locations. A file that exists but
     /// cannot be parsed still pins `path` (himalaya must receive `-c` and
-    /// will report the real problem) while Post itself runs on defaults —
+    /// will report the real problem) while Tmail itself runs on defaults —
     /// and the parse failure is reported as an issue.
     pub fn load_with_issues(cli_path: Option<&Path>) -> (Self, LoadIssues) {
         let path = resolve_path(cli_path);
@@ -309,13 +309,13 @@ impl Config {
 }
 
 /// Resolve the config file path. An explicitly provided path (CLI arg or
-/// `POST_CONFIG`) is used even when missing so the real error surfaces; the
+/// `TMAIL_CONFIG`) is used even when missing so the real error surfaces; the
 /// well-known defaults are only used when they exist.
 fn resolve_path(cli_path: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = cli_path {
         return Some(path.to_path_buf());
     }
-    if let Some(path) = std::env::var_os("POST_CONFIG") {
+    if let Some(path) = std::env::var_os("TMAIL_CONFIG") {
         return Some(PathBuf::from(path));
     }
     default_candidates().into_iter().find(|p| p.exists())
@@ -362,43 +362,43 @@ pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssu
             return (config, issues);
         }
     };
-    let post = doc.get("post");
+    let tmail = doc.get("tmail");
 
-    if let Some(account) = post
-        .and_then(|post| post.get("account"))
+    if let Some(account) = tmail
+        .and_then(|tmail| tmail.get("account"))
         .and_then(toml::Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
     {
         config.account = Some(account);
     }
-    config.mouse = post
-        .and_then(|post| post.get("mouse"))
+    config.mouse = tmail
+        .and_then(|tmail| tmail.get("mouse"))
         .map(|value| match value.as_bool() {
             Some(mouse) => mouse,
             None => {
                 issues.push(String::from(
-                    "[post].mouse must be true or false; using false",
+                    "[tmail].mouse must be true or false; using false",
                 ));
                 false
             }
         })
         .unwrap_or(false);
-    parse_page_size(post, &mut config, &mut issues);
-    parse_page_size_auto(post, &mut config, &mut issues);
-    parse_refresh_interval(post, &mut config, &mut issues);
-    parse_autosave_delay(post, &mut config, &mut issues);
-    parse_editor(post, &mut config, &mut issues);
-    parse_theme(post, &mut config, &mut issues);
-    parse_theme_tables(post, &mut config, &mut issues);
-    parse_keybindings(post, &mut config, &mut issues);
-    parse_downloads_dir(post, &mut config, &mut issues);
-    parse_ui_clock(post, &mut config, &mut issues);
-    parse_view_mode(post, &mut config, &mut issues);
-    parse_status_timeout(post, &mut config, &mut issues);
-    parse_cache_limits(post, &mut config, &mut issues);
+    parse_page_size(tmail, &mut config, &mut issues);
+    parse_page_size_auto(tmail, &mut config, &mut issues);
+    parse_refresh_interval(tmail, &mut config, &mut issues);
+    parse_autosave_delay(tmail, &mut config, &mut issues);
+    parse_editor(tmail, &mut config, &mut issues);
+    parse_theme(tmail, &mut config, &mut issues);
+    parse_theme_tables(tmail, &mut config, &mut issues);
+    parse_keybindings(tmail, &mut config, &mut issues);
+    parse_downloads_dir(tmail, &mut config, &mut issues);
+    parse_ui_clock(tmail, &mut config, &mut issues);
+    parse_view_mode(tmail, &mut config, &mut issues);
+    parse_status_timeout(tmail, &mut config, &mut issues);
+    parse_cache_limits(tmail, &mut config, &mut issues);
 
-    // Without `[post].account`, drive the account himalaya itself would
+    // Without `[tmail].account`, drive the account himalaya itself would
     // pick (no `-a` is forwarded): the one marked `default = true`, else
     // the sole account. The alias table is per-account, so role resolution
     // stays dark until this matches (real-config finding: a `default =
@@ -413,7 +413,7 @@ pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssu
             .is_some();
         if !exists {
             issues.push(format!(
-                "[post].account selects {account:?} but [accounts.{account}] does not exist"
+                "[tmail].account selects {account:?} but [accounts.{account}] does not exist"
             ));
         }
         config.aliases = aliases_for(&doc, account);
@@ -423,49 +423,49 @@ pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssu
     (config, issues)
 }
 
-fn parse_page_size(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    match post
-        .and_then(|post| post.get("mail"))
+fn parse_page_size(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    match tmail
+        .and_then(|tmail| tmail.get("mail"))
         .and_then(|mail| mail.get("page_size"))
     {
         None => {}
         Some(value) => match value.as_integer() {
             Some(size) if size > 0 => config.page_size = size as usize,
             Some(size) => issues.push(format!(
-                "[post.mail].page_size must be a positive integer, not {size}; using {}",
+                "[tmail.mail].page_size must be a positive integer, not {size}; using {}",
                 DEFAULT_PAGE_SIZE
             )),
             None => issues.push(format!(
-                "[post.mail].page_size must be an integer; using {DEFAULT_PAGE_SIZE}"
+                "[tmail.mail].page_size must be an integer; using {DEFAULT_PAGE_SIZE}"
             )),
         },
     }
 }
 
-/// `[post.mail].page_size_auto` (ticket kjfq): a boolean; anything else
+/// `[tmail.mail].page_size_auto` (ticket kjfq): a boolean; anything else
 /// is reported and the default (true) applies.
-fn parse_page_size_auto(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    match post
-        .and_then(|post| post.get("mail"))
+fn parse_page_size_auto(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    match tmail
+        .and_then(|tmail| tmail.get("mail"))
         .and_then(|mail| mail.get("page_size_auto"))
     {
         None => {}
         Some(value) => match value.as_bool() {
             Some(auto) => config.page_size_auto = auto,
             None => issues.push(String::from(
-                "[post.mail].page_size_auto must be true or false; using true",
+                "[tmail.mail].page_size_auto must be true or false; using true",
             )),
         },
     }
 }
 
 fn parse_refresh_interval(
-    post: Option<&toml::Value>,
+    tmail: Option<&toml::Value>,
     config: &mut Config,
     issues: &mut LoadIssues,
 ) {
-    let Some(value) = post
-        .and_then(|post| post.get("mail"))
+    let Some(value) = tmail
+        .and_then(|tmail| tmail.get("mail"))
         .and_then(|mail| mail.get("refresh_interval_seconds"))
     else {
         return;
@@ -476,19 +476,19 @@ fn parse_refresh_interval(
         Some(seconds) if seconds >= 0 => config.refresh_interval_seconds = seconds as u64,
         Some(seconds) => {
             issues.push(format!(
-                "[post.mail].refresh_interval_seconds must be ≥ 0, not {seconds}; using 0 (disabled)"
+                "[tmail.mail].refresh_interval_seconds must be ≥ 0, not {seconds}; using 0 (disabled)"
             ));
             config.refresh_interval_seconds = 0;
         }
         None => issues.push(format!(
-            "[post.mail].refresh_interval_seconds must be an integer; using {DEFAULT_REFRESH_INTERVAL_SECONDS}"
+            "[tmail.mail].refresh_interval_seconds must be an integer; using {DEFAULT_REFRESH_INTERVAL_SECONDS}"
         )),
     }
 }
 
-fn parse_autosave_delay(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    let Some(value) = post
-        .and_then(|post| post.get("composer"))
+fn parse_autosave_delay(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(value) = tmail
+        .and_then(|tmail| tmail.get("composer"))
         .and_then(|composer| composer.get("autosave_delay_ms"))
     else {
         return;
@@ -501,20 +501,20 @@ fn parse_autosave_delay(post: Option<&toml::Value>, config: &mut Config, issues:
             config.autosave_delay_ms = delay as u64;
         }
         Some(delay) => issues.push(format!(
-            "[post.composer].autosave_delay_ms must be between {AUTOSAVE_DELAY_MIN_MS} and {AUTOSAVE_DELAY_MAX_MS} ms, not {delay}{fallback}"
+            "[tmail.composer].autosave_delay_ms must be between {AUTOSAVE_DELAY_MIN_MS} and {AUTOSAVE_DELAY_MAX_MS} ms, not {delay}{fallback}"
         )),
         None => issues.push(format!(
-            "[post.composer].autosave_delay_ms must be an integer{fallback}"
+            "[tmail.composer].autosave_delay_ms must be an integer{fallback}"
         )),
     }
 }
 
-/// `[post.cache]` (ticket haeb): limits for the viewed-message cache.
+/// `[tmail.cache]` (ticket haeb): limits for the viewed-message cache.
 /// `max_messages = 0` disables message caching; the summary/page cache
 /// itself is tiny and always on.
-fn parse_cache_limits(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    let Some(table) = post
-        .and_then(|post| post.get("cache"))
+fn parse_cache_limits(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(table) = tmail
+        .and_then(|tmail| tmail.get("cache"))
         .and_then(|c| c.as_table())
     else {
         return;
@@ -524,27 +524,27 @@ fn parse_cache_limits(post: Option<&toml::Value>, config: &mut Config, issues: &
             "max_messages" => match value.as_integer() {
                 Some(count) if count >= 0 => config.cache_max_messages = count as usize,
                 _ => issues.push(String::from(
-                    "[post.cache].max_messages must be a non-negative integer",
+                    "[tmail.cache].max_messages must be a non-negative integer",
                 )),
             },
             "max_bytes" => match value.as_integer() {
                 Some(bytes) if bytes >= 0 => config.cache_max_bytes = bytes as u64,
                 _ => issues.push(String::from(
-                    "[post.cache].max_bytes must be a non-negative integer",
+                    "[tmail.cache].max_bytes must be a non-negative integer",
                 )),
             },
             other => issues.push(format!(
-                "[post.cache].{other} is unknown (known: max_messages, max_bytes)"
+                "[tmail.cache].{other} is unknown (known: max_messages, max_bytes)"
             )),
         }
     }
 }
 
-/// `[post.ui].clock` (ticket w7f5): show the top-right date/time clock.
+/// `[tmail.ui].clock` (ticket w7f5): show the top-right date/time clock.
 /// Off by default.
-fn parse_ui_clock(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    let Some(value) = post
-        .and_then(|post| post.get("ui"))
+fn parse_ui_clock(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(value) = tmail
+        .and_then(|tmail| tmail.get("ui"))
         .and_then(|ui| ui.get("clock"))
     else {
         return;
@@ -553,17 +553,17 @@ fn parse_ui_clock(post: Option<&toml::Value>, config: &mut Config, issues: &mut 
         Some(clock) => clock,
         None => {
             issues.push(String::from(
-                "[post.ui].clock must be true or false; using false",
+                "[tmail.ui].clock must be true or false; using false",
             ));
             false
         }
     };
 }
 
-/// `[post].view_mode` (Gmail-style list density): `"compact"` (default)
+/// `[tmail].view_mode` (Gmail-style list density): `"compact"` (default)
 /// or `"comfortable"`. Anything else is reported and the default applies.
-fn parse_view_mode(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    let Some(value) = post.and_then(|post| post.get("view_mode")) else {
+fn parse_view_mode(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(value) = tmail.and_then(|tmail| tmail.get("view_mode")) else {
         return;
     };
     config.view_mode = match value.as_str().map(str::trim).filter(|s| !s.is_empty()) {
@@ -571,47 +571,47 @@ fn parse_view_mode(post: Option<&toml::Value>, config: &mut Config, issues: &mut
             Some(mode) => mode,
             None => {
                 issues.push(format!(
-                    "[post].view_mode {name:?} is unknown (known: compact, comfortable); using \"compact\""
+                    "[tmail].view_mode {name:?} is unknown (known: compact, comfortable); using \"compact\""
                 ));
                 ViewMode::Compact
             }
         },
         None => {
             issues.push(String::from(
-                "[post].view_mode must be \"compact\" or \"comfortable\"; using \"compact\"",
+                "[tmail].view_mode must be \"compact\" or \"comfortable\"; using \"compact\"",
             ));
             ViewMode::Compact
         }
     };
 }
 
-/// `[post.themes.<name>]` (ticket z0s4): additional named themes for
+/// `[tmail.themes.<name>]` (ticket z0s4): additional named themes for
 /// runtime switching with `t`. Each table holds the same color tokens as
-/// `[post.theme]` (minus `name`, which the table's key already carries);
-/// values are validated and normalized exactly like `[post.theme]`
+/// `[tmail.theme]` (minus `name`, which the table's key already carries);
+/// values are validated and normalized exactly like `[tmail.theme]`
 /// colors, unknown tokens are reported, and the cycle order is the
 /// parser's table iteration order (alphabetical by name).
-fn parse_theme_tables(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    let Some(themes) = post
-        .and_then(|post| post.get("themes"))
+fn parse_theme_tables(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(themes) = tmail
+        .and_then(|tmail| tmail.get("themes"))
         .and_then(|themes| themes.as_table())
     else {
         return;
     };
     for (name, value) in themes {
         let Some(table) = value.as_table() else {
-            issues.push(format!("[post.themes.{name}] must be a table"));
+            issues.push(format!("[tmail.themes.{name}] must be a table"));
             continue;
         };
         if name.is_empty() {
-            issues.push(String::from("[post.themes] names must not be empty"));
+            issues.push(String::from("[tmail.themes] names must not be empty"));
             continue;
         }
         let mut overrides = Vec::new();
         for (key, value) in table {
             if !THEME_TOKENS.contains(&key.as_str()) {
                 issues.push(format!(
-                    "[post.themes.{name}].{key} is unknown (known tokens: {})",
+                    "[tmail.themes.{name}].{key} is unknown (known tokens: {})",
                     THEME_TOKENS.join(", ")
                 ));
                 continue;
@@ -620,11 +620,11 @@ fn parse_theme_tables(post: Option<&toml::Value>, config: &mut Config, issues: &
                 Some(hex) => match parse_hex_color(hex) {
                     Some(normalized) => overrides.push((key.clone(), normalized)),
                     None => issues.push(format!(
-                        "[post.themes.{name}].{key} must be a hex color like \"#4e86dd\""
+                        "[tmail.themes.{name}].{key} must be a hex color like \"#4e86dd\""
                     )),
                 },
                 None => issues.push(format!(
-                    "[post.themes.{name}].{key} must be a hex color like \"#4e86dd\""
+                    "[tmail.themes.{name}].{key} must be a hex color like \"#4e86dd\""
                 )),
             }
         }
@@ -632,28 +632,28 @@ fn parse_theme_tables(post: Option<&toml::Value>, config: &mut Config, issues: &
     }
 }
 
-/// `[post.keybindings.<context>]` (configurable keybindings): each table
+/// `[tmail.keybindings.<context>]` (configurable keybindings): each table
 /// maps action names to one key spec or a list of them. Values stay raw —
 /// action names, key specs, conflicts, and the structural non-empty rule
 /// are validated by `input::keymap::KeyMap::build`, which reports its
 /// findings as fatal errors (this list) or startup warnings. Only the
 /// shape is checked here: a context must be a table, an action value must
 /// be a string or an array of strings.
-fn parse_keybindings(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    let Some(bindings) = post
-        .and_then(|post| post.get("keybindings"))
+fn parse_keybindings(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(bindings) = tmail
+        .and_then(|tmail| tmail.get("keybindings"))
         .and_then(|bindings| bindings.as_table())
     else {
         return;
     };
     for (context, value) in bindings {
         let Some(table) = value.as_table() else {
-            issues.push(format!("[post.keybindings.{context}] must be a table"));
+            issues.push(format!("[tmail.keybindings.{context}] must be a table"));
             continue;
         };
         if context.is_empty() {
             issues.push(String::from(
-                "[post.keybindings] context names must not be empty",
+                "[tmail.keybindings] context names must not be empty",
             ));
             continue;
         }
@@ -669,7 +669,7 @@ fn parse_keybindings(post: Option<&toml::Value>, config: &mut Config, issues: &m
                             Some(spec) => parsed.push(String::from(spec)),
                             None => {
                                 issues.push(format!(
-                                    "[post.keybindings.{context}].{action} must be a key \
+                                    "[tmail.keybindings.{context}].{action} must be a key \
                                      spec string or an array of them"
                                 ));
                                 ok = false;
@@ -684,7 +684,7 @@ fn parse_keybindings(post: Option<&toml::Value>, config: &mut Config, issues: &m
                 }
                 _ => {
                     issues.push(format!(
-                        "[post.keybindings.{context}].{action} must be a key spec string \
+                        "[tmail.keybindings.{context}].{action} must be a key spec string \
                          or an array of them"
                     ));
                     continue;
@@ -699,37 +699,37 @@ fn parse_keybindings(post: Option<&toml::Value>, config: &mut Config, issues: &m
     }
 }
 
-/// `[post].status_timeout` (ticket h1d7): seconds a status message stays
+/// `[tmail].status_timeout` (ticket h1d7): seconds a status message stays
 /// up before it fades out and clears; `0` (the default) keeps a message
 /// until the next one replaces it. A negative value is nonsense and must
 /// never become a busy timer (plan §17: invalid values report).
-fn parse_status_timeout(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    let Some(value) = post.and_then(|post| post.get("status_timeout")) else {
+fn parse_status_timeout(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(value) = tmail.and_then(|tmail| tmail.get("status_timeout")) else {
         return;
     };
     match value.as_integer() {
         Some(seconds) if seconds >= 0 => config.status_timeout = seconds as u64,
         Some(seconds) => issues.push(format!(
-            "[post].status_timeout must be ≥ 0, not {seconds}; using 0 (disabled)"
+            "[tmail].status_timeout must be ≥ 0, not {seconds}; using 0 (disabled)"
         )),
         None => issues.push(String::from(
-            "[post].status_timeout must be an integer; using 0 (disabled)",
+            "[tmail].status_timeout must be an integer; using 0 (disabled)",
         )),
     }
 }
 
-/// `[post.composer].editor`: `"builtin"`, `"$EDITOR"`, or an explicit
+/// `[tmail.composer].editor`: `"builtin"`, `"$EDITOR"`, or an explicit
 /// command (program + arguments, resolved without a shell — plan §14).
-fn parse_editor(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    let Some(value) = post
-        .and_then(|post| post.get("composer"))
+fn parse_editor(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(value) = tmail
+        .and_then(|tmail| tmail.get("composer"))
         .and_then(|composer| composer.get("editor"))
     else {
         return;
     };
     let Some(editor) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
         issues.push(String::from(
-            "[post.composer].editor must be a non-empty string; using \"builtin\"",
+            "[tmail.composer].editor must be a non-empty string; using \"builtin\"",
         ));
         return;
     };
@@ -740,7 +740,7 @@ fn parse_editor(post: Option<&toml::Value>, config: &mut Config, issues: &mut Lo
         }
         Err(problem) => {
             issues.push(format!(
-                "[post.composer].editor: {problem}; using \"builtin\""
+                "[tmail.composer].editor: {problem}; using \"builtin\""
             ));
         }
     }
@@ -782,7 +782,7 @@ fn validate_editor_with(editor: &str, editor_env: Option<String>) -> Result<(), 
             .map(|_| ())
             .ok_or_else(|| String::from("$EDITOR is not set in the environment"));
     }
-    // Explicit command: Post never spawns a shell, so metacharacters have
+    // Explicit command: Tmail never spawns a shell, so metacharacters have
     // no meaning and only invite confusion (plan §14 step 4).
     if editor.contains(['|', '&', ';', '<', '>', '`', '$', '\\', '"', '\'']) {
         return Err(
@@ -817,12 +817,12 @@ pub fn program_exists(program: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn parse_theme(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    let Some(theme) = post.and_then(|post| post.get("theme")) else {
+fn parse_theme(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(theme) = tmail.and_then(|tmail| tmail.get("theme")) else {
         return;
     };
     let Some(table) = theme.as_table() else {
-        issues.push(String::from("[post.theme] must be a table"));
+        issues.push(String::from("[tmail.theme] must be a table"));
         return;
     };
     // The table walk is deterministic; a token written twice applies its
@@ -833,10 +833,10 @@ fn parse_theme(post: Option<&toml::Value>, config: &mut Config, issues: &mut Loa
             "name" => match value.as_str() {
                 Some(name) if THEME_NAMES.contains(&name) => config.theme_name = name.to_owned(),
                 Some(name) => issues.push(format!(
-                    "[post.theme].name {name:?} is unknown (known: {})",
+                    "[tmail.theme].name {name:?} is unknown (known: {})",
                     THEME_NAMES.join(", ")
                 )),
-                None => issues.push(String::from("[post.theme].name must be a string")),
+                None => issues.push(String::from("[tmail.theme].name must be a string")),
             },
             token if THEME_TOKENS.contains(&token) => match value.as_str() {
                 Some(hex) => match parse_hex_color(hex) {
@@ -844,24 +844,24 @@ fn parse_theme(post: Option<&toml::Value>, config: &mut Config, issues: &mut Loa
                         .theme_overrides
                         .push((String::from(token), normalized)),
                     None => issues.push(format!(
-                        "[post.theme].{token} must be a hex color like \"#4e86dd\""
+                        "[tmail.theme].{token} must be a hex color like \"#4e86dd\""
                     )),
                 },
                 None => issues.push(format!(
-                    "[post.theme].{token} must be a hex color like \"#4e86dd\""
+                    "[tmail.theme].{token} must be a hex color like \"#4e86dd\""
                 )),
             },
             other => issues.push(format!(
-                "[post.theme].{other} is unknown (known tokens: {})",
+                "[tmail.theme].{other} is unknown (known tokens: {})",
                 THEME_TOKENS.join(", ")
             )),
         }
     }
 }
 
-fn parse_downloads_dir(post: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    let Some(value) = post
-        .and_then(|post| post.get("attachments"))
+fn parse_downloads_dir(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(value) = tmail
+        .and_then(|tmail| tmail.get("attachments"))
         .and_then(|attachments| attachments.get("downloads_dir"))
         .and_then(toml::Value::as_str)
         .filter(|value| !value.is_empty())
@@ -871,7 +871,7 @@ fn parse_downloads_dir(post: Option<&toml::Value>, config: &mut Config, issues: 
     let dir = PathBuf::from(value);
     match validate_downloads_dir(&dir) {
         Ok(()) => config.downloads_dir = Some(dir),
-        Err(problem) => issues.push(format!("[post.attachments].downloads_dir: {problem}")),
+        Err(problem) => issues.push(format!("[tmail.attachments].downloads_dir: {problem}")),
     }
 }
 
@@ -882,7 +882,7 @@ fn validate_downloads_dir(dir: &Path) -> Result<(), String> {
     let text = dir.to_string_lossy();
     if !text.starts_with('/') && !text.starts_with('~') {
         return Err(format!(
-            "{value:?} must be an absolute path or start with ~/ (expanded in Post, never via a shell)",
+            "{value:?} must be an absolute path or start with ~/ (expanded in Tmail, never via a shell)",
             value = text
         ));
     }
@@ -898,7 +898,7 @@ fn validate_downloads_dir(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Expand a leading `~` with `$HOME` (plan §15: expansion in Post, never
+/// Expand a leading `~` with `$HOME` (plan §15: expansion in Tmail, never
 /// through a shell). `None` when `~` is used but `$HOME` is missing.
 fn expand_home(path: &Path) -> Option<PathBuf> {
     let text = path.to_string_lossy();
@@ -962,22 +962,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_post_section_and_aliases() {
+    fn parses_tmail_section_and_aliases() {
         let text = r#"
             [accounts.probe]
-            email = "probe@post.local"
+            email = "probe@tmail.local"
 
             [accounts.probe.maildir]
-            root = "~/tmp/post-probe-maildir"
+            root = "~/tmp/tmail-probe-maildir"
 
             [accounts.probe.mailbox.alias]
             inbox = "INBOX"
             trash = "Archive"
 
-            [post]
+            [tmail]
             account = "probe"
 
-            [post.mail]
+            [tmail.mail]
             page_size = 7
         "#;
         let config = parse(text, None);
@@ -1011,7 +1011,7 @@ mod tests {
 
     #[test]
     fn nonpositive_page_size_falls_back_to_default() {
-        let text = "[post.mail]\npage_size = 0\n";
+        let text = "[tmail.mail]\npage_size = 0\n";
         assert_eq!(parse(text, None).page_size, DEFAULT_PAGE_SIZE);
     }
 
@@ -1019,21 +1019,21 @@ mod tests {
     fn page_size_auto_defaults_on_and_parses_both_ways() {
         // Ticket kjfq: auto-sized pages are the default; `page_size` is
         // only honored when the auto mode is switched off.
-        let text = "[post.mail]\npage_size = 7\n";
+        let text = "[tmail.mail]\npage_size = 7\n";
         let config = parse(text, None);
         assert!(config.page_size_auto);
         assert_eq!(config.page_size, 7, "parsed even while ignored");
 
-        let config = parse("[post.mail]\npage_size_auto = false\n", None);
+        let config = parse("[tmail.mail]\npage_size_auto = false\n", None);
         assert!(!config.page_size_auto);
 
-        let config = parse("[post.mail]\npage_size_auto = true\n", None);
+        let config = parse("[tmail.mail]\npage_size_auto = true\n", None);
         assert!(config.page_size_auto);
     }
 
     #[test]
     fn nonboolean_page_size_auto_falls_back_to_default() {
-        let text = "[post.mail]\npage_size_auto = \"yes\"\n";
+        let text = "[tmail.mail]\npage_size_auto = \"yes\"\n";
         let (config, issues) = parse_with_issues(text, None);
         assert!(config.page_size_auto, "default applies");
         assert!(!issues.is_empty(), "the problem is reported");
@@ -1044,15 +1044,15 @@ mod tests {
         // Absent: the plan default (Phase 9.4).
         assert_eq!(parse("", None).refresh_interval_seconds, 60);
         // Explicit value wins; 0 disables the timer.
-        let text = "[post.mail]\nrefresh_interval_seconds = 120\n";
+        let text = "[tmail.mail]\nrefresh_interval_seconds = 120\n";
         assert_eq!(parse(text, None).refresh_interval_seconds, 120);
-        let text = "[post.mail]\nrefresh_interval_seconds = 0\n";
+        let text = "[tmail.mail]\nrefresh_interval_seconds = 0\n";
         assert_eq!(parse(text, None).refresh_interval_seconds, 0);
         // A negative value is nonsense: treated as disabled, never a loop.
-        let text = "[post.mail]\nrefresh_interval_seconds = -5\n";
+        let text = "[tmail.mail]\nrefresh_interval_seconds = -5\n";
         assert_eq!(parse(text, None).refresh_interval_seconds, 0);
         // Non-numeric falls back to the default.
-        let text = "[post.mail]\nrefresh_interval_seconds = \"soon\"\n";
+        let text = "[tmail.mail]\nrefresh_interval_seconds = \"soon\"\n";
         assert_eq!(parse(text, None).refresh_interval_seconds, 60);
     }
 
@@ -1060,18 +1060,18 @@ mod tests {
     fn downloads_dir_is_parsed_as_written() {
         // `~` is NOT expanded here; the backend expands it so the whole
         // path pipeline stays shell-free and testable (plan §15).
-        let text = "[post.attachments]\ndownloads_dir = \"~/My Downloads\"\n";
+        let text = "[tmail.attachments]\ndownloads_dir = \"~/My Downloads\"\n";
         assert_eq!(
             parse(text, None).downloads_dir,
             Some(PathBuf::from("~/My Downloads"))
         );
         // Empty or non-string values fall back to None.
         assert_eq!(
-            parse("[post.attachments]\ndownloads_dir = \"\"\n", None).downloads_dir,
+            parse("[tmail.attachments]\ndownloads_dir = \"\"\n", None).downloads_dir,
             None
         );
         assert_eq!(
-            parse("[post.attachments]\ndownloads_dir = 3\n", None).downloads_dir,
+            parse("[tmail.attachments]\ndownloads_dir = 3\n", None).downloads_dir,
             None
         );
         assert_eq!(parse("", None).downloads_dir, None);
@@ -1080,7 +1080,7 @@ mod tests {
     #[test]
     fn non_string_alias_values_are_ignored() {
         let text = r#"
-            [post]
+            [tmail]
             account = "probe"
 
             [accounts.probe.mailbox.alias]
@@ -1096,14 +1096,14 @@ mod tests {
     }
 
     #[test]
-    fn default_flag_account_resolves_aliases_without_post_section() {
+    fn default_flag_account_resolves_aliases_without_tmail_section() {
         // The user-config shape that regressed: himalaya-style account with
-        // `default = true` and mailbox aliases, no `[post]` section.
+        // `default = true` and mailbox aliases, no `[tmail]` section.
         let text = r#"
             [accounts.gmail]
             default = true
             email = "probe@example.org"
-            display-name = "Post Probe"
+            display-name = "Tmail Probe"
 
             [accounts.gmail.imap]
             server = "imaps://imap.example.org:993"
@@ -1126,14 +1126,14 @@ mod tests {
             Some("[Gmail]/All Mail")
         );
         assert_eq!(config.account_email.as_deref(), Some("probe@example.org"));
-        assert_eq!(config.account_display_name.as_deref(), Some("Post Probe"));
+        assert_eq!(config.account_display_name.as_deref(), Some("Tmail Probe"));
     }
 
     #[test]
     fn sole_account_resolves_without_default_flag() {
         let text = r#"
             [accounts.probe]
-            email = "probe@post.local"
+            email = "probe@tmail.local"
 
             [accounts.probe.mailbox.alias]
             drafts = "Drafts"
@@ -1150,11 +1150,11 @@ mod tests {
     fn several_accounts_without_default_stay_unresolved() {
         let text = r#"
             [accounts.one]
-            email = "one@post.local"
+            email = "one@tmail.local"
 
             [accounts.two]
             default = false
-            email = "two@post.local"
+            email = "two@tmail.local"
         "#;
         let config = parse(text, None);
         assert_eq!(config.account, None);
@@ -1162,14 +1162,14 @@ mod tests {
     }
 
     #[test]
-    fn explicit_post_account_wins_over_default_flag() {
+    fn explicit_tmail_account_wins_over_default_flag() {
         let text = r#"
-            [post]
+            [tmail]
             account = "two"
 
             [accounts.one]
             default = true
-            email = "one@post.local"
+            email = "one@tmail.local"
 
             [accounts.one.mailbox.alias]
             inbox = "ONE Inbox"
@@ -1189,19 +1189,19 @@ mod tests {
     fn account_identity_is_parsed_for_draft_from_headers() {
         let text = r#"
             [accounts.probe]
-            email = "probe@post.local"
-            display-name = "Post Probe"
+            email = "probe@tmail.local"
+            display-name = "Tmail Probe"
 
-            [post]
+            [tmail]
             account = "probe"
         "#;
         let config = parse(text, None);
-        assert_eq!(config.account_email.as_deref(), Some("probe@post.local"));
-        assert_eq!(config.account_display_name.as_deref(), Some("Post Probe"));
-        // The sole account resolves even without `[post].account`, so the
+        assert_eq!(config.account_email.as_deref(), Some("probe@tmail.local"));
+        assert_eq!(config.account_display_name.as_deref(), Some("Tmail Probe"));
+        // The sole account resolves even without `[tmail].account`, so the
         // draft `From` identity comes along.
-        let config = parse("[accounts.probe]\nemail = \"probe@post.local\"\n", None);
-        assert_eq!(config.account_email.as_deref(), Some("probe@post.local"));
+        let config = parse("[accounts.probe]\nemail = \"probe@tmail.local\"\n", None);
+        assert_eq!(config.account_email.as_deref(), Some("probe@tmail.local"));
     }
 
     // ── Phase 10.4: one-file completion and startup validation ──────────
@@ -1209,26 +1209,26 @@ mod tests {
     #[test]
     fn parses_the_reference_shape() {
         let text = r#"
-            [post]
+            [tmail]
             account = "probe"
             mouse = true
 
-            [post.mail]
+            [tmail.mail]
             page_size = 50
             refresh_interval_seconds = 0
 
-            [post.composer]
+            [tmail.composer]
             editor = "builtin"
             autosave_delay_ms = 4000
 
-            [post.attachments]
+            [tmail.attachments]
             downloads_dir = "~/Downloads"
 
-            [post.theme]
+            [tmail.theme]
             name = "default"
 
             [accounts.probe]
-            email = "probe@post.local"
+            email = "probe@tmail.local"
         "#;
         let (config, issues) = parse_with_issues(text, None);
         assert!(issues.is_empty(), "{issues:?}");
@@ -1242,7 +1242,7 @@ mod tests {
 
     #[test]
     fn non_bool_mouse_reports_and_disables() {
-        let (config, issues) = parse_with_issues("[post]\nmouse = \"yes\"\n", None);
+        let (config, issues) = parse_with_issues("[tmail]\nmouse = \"yes\"\n", None);
         assert!(!config.mouse);
         assert_eq!(issues.items.len(), 1);
         assert!(issues.items[0].contains("mouse"));
@@ -1251,21 +1251,21 @@ mod tests {
     #[test]
     fn out_of_bounds_autosave_delay_reports_and_falls_back() {
         for delay in [50_i64, 1_000_000] {
-            let text = format!("[post.composer]\nautosave_delay_ms = {delay}\n");
+            let text = format!("[tmail.composer]\nautosave_delay_ms = {delay}\n");
             let (config, issues) = parse_with_issues(&text, None);
             assert_eq!(config.autosave_delay_ms, DEFAULT_AUTOSAVE_DELAY_MS);
             assert_eq!(issues.items.len(), 1, "{delay}");
             assert!(issues.items[0].contains("autosave_delay_ms"));
         }
         let (config, issues) =
-            parse_with_issues("[post.composer]\nautosave_delay_ms = 500\n", None);
+            parse_with_issues("[tmail.composer]\nautosave_delay_ms = 500\n", None);
         assert!(issues.is_empty());
         assert_eq!(config.autosave_delay_ms, 500);
     }
 
     #[test]
     fn unknown_theme_name_reports() {
-        let (config, issues) = parse_with_issues("[post.theme]\nname = \"solarized\"\n", None);
+        let (config, issues) = parse_with_issues("[tmail.theme]\nname = \"solarized\"\n", None);
         assert_eq!(config.theme_name, "default");
         assert_eq!(issues.items.len(), 1);
         assert!(issues.items[0].contains("solarized"));
@@ -1280,7 +1280,7 @@ mod tests {
                 .unwrap_err()
                 .contains("$EDITOR is not set")
         );
-        // Shell metacharacters are rejected: Post never spawns a shell.
+        // Shell metacharacters are rejected: Tmail never spawns a shell.
         assert!(
             validate_editor_with("nvim -c 'set nu'", None)
                 .unwrap_err()
@@ -1303,7 +1303,7 @@ mod tests {
     #[test]
     fn unknown_editor_program_reports_and_falls_back() {
         let (config, issues) = parse_with_issues(
-            "[post.composer]\neditor = \"definitely-not-a-real-program-xyz\"\n",
+            "[tmail.composer]\neditor = \"definitely-not-a-real-program-xyz\"\n",
             None,
         );
         assert_eq!(config.editor, "builtin");
@@ -1313,7 +1313,7 @@ mod tests {
 
     #[test]
     fn missing_selected_account_reports() {
-        let (config, issues) = parse_with_issues("[post]\naccount = \"ghost\"\n", None);
+        let (config, issues) = parse_with_issues("[tmail]\naccount = \"ghost\"\n", None);
         assert_eq!(config.account.as_deref(), Some("ghost"));
         assert_eq!(issues.items.len(), 1);
         assert!(issues.items[0].contains("[accounts.ghost]"));
@@ -1322,7 +1322,7 @@ mod tests {
     #[test]
     fn relative_downloads_dir_reports() {
         let (config, issues) = parse_with_issues(
-            "[post.attachments]\ndownloads_dir = \"Downloads/out\"\n",
+            "[tmail.attachments]\ndownloads_dir = \"Downloads/out\"\n",
             None,
         );
         assert_eq!(config.downloads_dir, None);
@@ -1343,7 +1343,7 @@ mod tests {
         // A malformed line quoting a secret-shaped value must not surface
         // the value in the reported detail.
         let (config, issues) = parse_with_issues(
-            "[post]\naccount = \"probe\"\npassword = \"hunter2 )\"\n",
+            "[tmail]\naccount = \"probe\"\npassword = \"hunter2 )\"\n",
             None,
         );
         let _ = config;
@@ -1376,7 +1376,7 @@ mod theme_override_tests {
     #[test]
     fn theme_overrides_parse_validate_and_normalize() {
         let (config, issues) = parse_with_issues(
-            "[post.theme]\nname = \"light\"\naccent = \"#ABC\"\nbackground = \"#101014\"\n",
+            "[tmail.theme]\nname = \"light\"\naccent = \"#ABC\"\nbackground = \"#101014\"\n",
             None,
         );
         assert!(issues.is_empty(), "{issues:?}");
@@ -1392,19 +1392,19 @@ mod theme_override_tests {
 
     #[test]
     fn bad_hex_reports_the_token() {
-        let (_, issues) = parse_with_issues("[post.theme]\naccent = \"blue\"\n", None);
+        let (_, issues) = parse_with_issues("[tmail.theme]\naccent = \"blue\"\n", None);
         assert_eq!(issues.items.len(), 1);
         assert!(issues.items[0].contains("accent"), "{issues:?}");
         assert!(issues.items[0].contains("hex"), "{issues:?}");
 
-        let (_, issues) = parse_with_issues("[post.theme]\naccent = 7\n", None);
+        let (_, issues) = parse_with_issues("[tmail.theme]\naccent = 7\n", None);
         assert_eq!(issues.items.len(), 1);
         assert!(issues.items[0].contains("accent"), "{issues:?}");
     }
 
     #[test]
     fn unknown_theme_token_reports_the_known_ones() {
-        let (_, issues) = parse_with_issues("[post.theme]\nfont = \"x\"\n", None);
+        let (_, issues) = parse_with_issues("[tmail.theme]\nfont = \"x\"\n", None);
         assert_eq!(issues.items.len(), 1);
         assert!(issues.items[0].contains("font"), "{issues:?}");
         assert!(issues.items[0].contains("background"), "{issues:?}");
@@ -1412,7 +1412,7 @@ mod theme_override_tests {
 
     #[test]
     fn light_theme_name_is_known() {
-        let (config, issues) = parse_with_issues("[post.theme]\nname = \"light\"\n", None);
+        let (config, issues) = parse_with_issues("[tmail.theme]\nname = \"light\"\n", None);
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(config.theme_name, "light");
     }
@@ -1421,7 +1421,7 @@ mod theme_override_tests {
     fn issues_carry_no_file_contents_for_theme_errors() {
         // The error names the token and the expected shape, never the
         // offending value's raw content beyond the token context.
-        let (_, issues) = parse_with_issues("[post.theme]\naccent = \"#zz\"\n", None);
+        let (_, issues) = parse_with_issues("[tmail.theme]\naccent = \"#zz\"\n", None);
         assert!(issues.items.iter().all(|i| !i.contains("zz")));
     }
 }
@@ -1436,14 +1436,14 @@ mod ui_clock_tests {
         assert!(issues.is_empty());
         assert!(!config.ui_clock, "clock off by default");
 
-        let (config, issues) = parse_with_issues("[post.ui]\nclock = true\n", None);
+        let (config, issues) = parse_with_issues("[tmail.ui]\nclock = true\n", None);
         assert!(issues.is_empty(), "{issues:?}");
         assert!(config.ui_clock);
     }
 
     #[test]
     fn non_bool_clock_reports() {
-        let (_, issues) = parse_with_issues("[post.ui]\nclock = \"yes\"\n", None);
+        let (_, issues) = parse_with_issues("[tmail.ui]\nclock = \"yes\"\n", None);
         assert_eq!(issues.items.len(), 1);
         assert!(issues.items[0].contains("clock"), "{issues:?}");
     }
@@ -1459,25 +1459,25 @@ mod view_mode_tests {
         assert!(issues.is_empty());
         assert_eq!(config.view_mode, ViewMode::Compact, "compact by default");
 
-        let (config, issues) = parse_with_issues("[post]\nview_mode = \"compact\"\n", None);
+        let (config, issues) = parse_with_issues("[tmail]\nview_mode = \"compact\"\n", None);
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(config.view_mode, ViewMode::Compact);
 
-        let (config, issues) = parse_with_issues("[post]\nview_mode = \"comfortable\"\n", None);
+        let (config, issues) = parse_with_issues("[tmail]\nview_mode = \"comfortable\"\n", None);
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(config.view_mode, ViewMode::Comfortable);
     }
 
     #[test]
     fn unknown_view_mode_reports_and_falls_back() {
-        let (config, issues) = parse_with_issues("[post]\nview_mode = \"spacious\"\n", None);
+        let (config, issues) = parse_with_issues("[tmail]\nview_mode = \"spacious\"\n", None);
         assert_eq!(config.view_mode, ViewMode::Compact, "default applies");
         assert_eq!(issues.items.len(), 1, "{issues:?}");
         assert!(issues.items[0].contains("view_mode"), "{issues:?}");
         assert!(issues.items[0].contains("comfortable"), "{issues:?}");
 
         // A non-string value is reported the same way.
-        let (config, issues) = parse_with_issues("[post]\nview_mode = 3\n", None);
+        let (config, issues) = parse_with_issues("[tmail]\nview_mode = 3\n", None);
         assert_eq!(config.view_mode, ViewMode::Compact);
         assert_eq!(issues.items.len(), 1, "{issues:?}");
     }
@@ -1499,24 +1499,24 @@ mod status_timeout_tests {
         assert!(issues.is_empty());
         assert_eq!(config.status_timeout, 0, "disabled by default");
 
-        let (config, issues) = parse_with_issues("[post]\nstatus_timeout = 5\n", None);
+        let (config, issues) = parse_with_issues("[tmail]\nstatus_timeout = 5\n", None);
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(config.status_timeout, 5);
 
         // Explicit 0 stays disabled without complaint.
-        let (config, issues) = parse_with_issues("[post]\nstatus_timeout = 0\n", None);
+        let (config, issues) = parse_with_issues("[tmail]\nstatus_timeout = 0\n", None);
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(config.status_timeout, 0);
     }
 
     #[test]
     fn invalid_status_timeout_reports_and_falls_back() {
-        let (config, issues) = parse_with_issues("[post]\nstatus_timeout = -3\n", None);
+        let (config, issues) = parse_with_issues("[tmail]\nstatus_timeout = -3\n", None);
         assert_eq!(config.status_timeout, 0);
         assert_eq!(issues.items.len(), 1, "{issues:?}");
         assert!(issues.items[0].contains("status_timeout"), "{issues:?}");
 
-        let (config, issues) = parse_with_issues("[post]\nstatus_timeout = \"soon\"\n", None);
+        let (config, issues) = parse_with_issues("[tmail]\nstatus_timeout = \"soon\"\n", None);
         assert_eq!(config.status_timeout, 0);
         assert_eq!(issues.items.len(), 1, "{issues:?}");
     }
@@ -1529,11 +1529,11 @@ mod theme_table_tests {
     #[test]
     fn user_theme_tables_parse_validate_and_normalize() {
         let text = r##"
-            [post.themes.nord]
+            [tmail.themes.nord]
             background = "#2E3440"
             accent = "#88c0d0"
 
-            [post.themes.solar]
+            [tmail.themes.solar]
             accent = "#b58900"
         "##;
         let (config, issues) = parse_with_issues(text, None);
@@ -1557,7 +1557,7 @@ mod theme_table_tests {
     #[test]
     fn user_theme_table_problems_report_with_the_table_path() {
         let text = r##"
-            [post.themes.broken]
+            [tmail.themes.broken]
             accent = "blue"
             font = "#101014"
         "##;
@@ -1571,16 +1571,16 @@ mod theme_table_tests {
             issues
                 .items
                 .iter()
-                .all(|i| i.contains("[post.themes.broken]"))
+                .all(|i| i.contains("[tmail.themes.broken]"))
         );
     }
 
     #[test]
     fn non_table_user_theme_reports() {
-        let (config, issues) = parse_with_issues("[post.themes]\nflat = 3\n", None);
+        let (config, issues) = parse_with_issues("[tmail.themes]\nflat = 3\n", None);
         assert!(config.theme_tables.is_empty());
         assert_eq!(issues.items.len(), 1);
-        assert!(issues.items[0].contains("[post.themes.flat]"));
+        assert!(issues.items[0].contains("[tmail.themes.flat]"));
     }
 
     #[test]
@@ -1607,7 +1607,7 @@ mod cache_limit_tests {
         );
 
         let (config, issues) = parse_with_issues(
-            "[post.cache]\nmax_messages = 10\nmax_bytes = 1048576\n",
+            "[tmail.cache]\nmax_messages = 10\nmax_bytes = 1048576\n",
             None,
         );
         assert!(issues.is_empty(), "{issues:?}");
@@ -1618,7 +1618,7 @@ mod cache_limit_tests {
     #[test]
     fn invalid_cache_limits_report() {
         let (_, issues) = parse_with_issues(
-            "[post.cache]\nmax_messages = -1\nmax_bytes = \"big\"\n",
+            "[tmail.cache]\nmax_messages = -1\nmax_bytes = \"big\"\n",
             None,
         );
         assert_eq!(issues.items.len(), 2, "{issues:?}");
@@ -1631,7 +1631,7 @@ mod cache_limit_tests {
             "{issues:?}"
         );
 
-        let (_, issues) = parse_with_issues("[post.cache]\nflavor = \"vanilla\"\n", None);
+        let (_, issues) = parse_with_issues("[tmail.cache]\nflavor = \"vanilla\"\n", None);
         assert_eq!(issues.items.len(), 1);
         assert!(issues.items[0].contains("flavor"), "{issues:?}");
     }
@@ -1644,10 +1644,10 @@ mod keybinding_tests {
     #[test]
     fn keybinding_tables_parse_strings_and_lists() {
         let text = r##"
-            [post.keybindings.global]
+            [tmail.keybindings.global]
             next_page = ["→", "Ctrl+]"]
             toggle_mouse = "x"
-            [post.keybindings.reader]
+            [tmail.keybindings.reader]
             trash = []
         "##;
         let (config, issues) = parse_with_issues(text, None);
@@ -1677,20 +1677,20 @@ mod keybinding_tests {
     #[test]
     fn keybinding_shape_problems_report_with_the_table_path() {
         let text = r##"
-            [post.keybindings.broken]
+            [tmail.keybindings.broken]
             star = 7
-            [post.keybindings."flat"]
+            [tmail.keybindings."flat"]
             garbage = true
         "##;
         let (_, issues) = parse_with_issues(text, None);
         assert_eq!(issues.items.len(), 2, "{issues:?}");
-        assert!(issues.items[0].contains("[post.keybindings.broken].star"));
+        assert!(issues.items[0].contains("[tmail.keybindings.broken].star"));
         assert!(issues.items[1].contains("garbage"));
     }
 
     #[test]
     fn keybindings_section_defaults_to_empty() {
-        let (config, issues) = parse_with_issues("[post]\nmouse = true\n", None);
+        let (config, issues) = parse_with_issues("[tmail]\nmouse = true\n", None);
         assert!(issues.is_empty());
         assert!(config.keybindings.is_empty());
     }

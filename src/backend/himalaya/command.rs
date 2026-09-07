@@ -56,7 +56,7 @@ const SEARCH_PREDICATES: [&str; 10] = [
 ];
 
 /// Gmail-style search (plan §16, user feedback): a query with no DSL
-/// predicate is full text — the user types `plati` and Post matches
+/// predicate is full text — the user types `plati` and Tmail matches
 /// sender, subject, or body. Because this himalaya version has no `text`
 /// predicate, that becomes an `or` chain over the three fields, with the
 /// whole query as one quoted value (spaces stay inside the value; embedded
@@ -228,7 +228,7 @@ pub(crate) fn message_add_argv(
 /// (ADR 0001 findings table; fixtures/himalaya/send-outcomes.md: success
 /// prints `{"message":"Message successfully sent"}`, failures are JSON
 /// errors with exit 1 — including errors that may mean the message was
-/// already delivered, which Post classifies in the adapter).
+/// already delivered, which Tmail classifies in the adapter).
 pub(crate) fn message_send_argv(config: Option<&Path>, account: Option<&str>) -> Vec<String> {
     let mut argv = global_flags(config, account);
     argv.extend(["message", "send", "--json"].into_iter().map(String::from));
@@ -237,8 +237,8 @@ pub(crate) fn message_send_argv(config: Option<&Path>, account: Option<&str>) ->
 
 /// `attachment download -m <mailbox> -d <dir> <message-id> <part-id>
 /// --json` (Phase 8.4, ADR 0001). The destination directory is passed as
-/// one argv entry — paths with spaces never see a shell — and Post points
-/// it at a private tempdir so collision handling stays in Post's hands.
+/// one argv entry — paths with spaces never see a shell — and Tmail points
+/// it at a private tempdir so collision handling stays in Tmail's hands.
 pub(crate) fn attachment_download_argv(
     config: Option<&Path>,
     account: Option<&str>,
@@ -353,7 +353,7 @@ mod tests {
         // himalaya byte-for-byte. The reported BAD "Could not parse
         // command" is an upstream himalaya limitation (pimalaya/himalaya
         // #635, fixed by pimalaya/imap-client#23: SEARCH was sent without
-        // CHARSET UTF-8); Post neither corrupts nor rewrites the query.
+        // CHARSET UTF-8); Tmail neither corrupts nor rewrites the query.
         let normalized = normalize_search_query("Аэрофлот");
         assert!(normalized.contains("Аэрофлот"), "{normalized}");
         assert_eq!(normalized.matches("Аэрофлот").count(), 3);
@@ -563,7 +563,7 @@ mod tests {
             "INBOX",
             "env-1",
             3,
-            Path::new("/tmp/My Downloads/post-dl"),
+            Path::new("/tmp/My Downloads/tmail-dl"),
         );
         assert_eq!(
             argv,
@@ -577,7 +577,7 @@ mod tests {
                 "-m",
                 "INBOX",
                 "-d",
-                "/tmp/My Downloads/post-dl",
+                "/tmp/My Downloads/tmail-dl",
                 "env-1",
                 "3",
                 "--json",

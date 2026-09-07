@@ -58,7 +58,7 @@ pub fn render(
     // vertical scrollbar takes the last column (ticket kjfq) and the rows
     // clip one column short.
     //
-    // Row geometry follows the view mode (`[post].view_mode`): compact
+    // Row geometry follows the view mode (`[tmail].view_mode`): compact
     // draws one line per message; comfortable splits consecutive messages
     // with a faint horizontal separator, so each message costs two lines
     // and fewer fit — the same math as `layout::messages_visible`, which

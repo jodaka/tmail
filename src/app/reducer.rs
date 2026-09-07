@@ -197,7 +197,7 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
 
 // ── Modal overlays (plan §9/§12) ─────────────────────────────────────────
 
-/// Status-message timeout (ticket h1d7): with `[post].status_timeout > 0`
+/// Status-message timeout (ticket h1d7): with `[tmail].status_timeout > 0`
 /// a message set at `status.shown_at` clears when the window elapses. The
 /// renderer fades it toward the background over the closing 0.3 s of the
 /// window (`statusbar::render`); here it only leaves the state. The
@@ -1493,7 +1493,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             // A discard applied its local half optimistically when the
             // confirm dialog was accepted (Phase 6.6); a send removed the
             // composer on confirmation (Phase 7.6). Failures follow the
-            // removal reason: discards open the modal, post-send cleanup
+            // removal reason: discards open the modal, tmail-send cleanup
             // is best-effort (ADR 0002) and never claims a failed send.
             match &result.outcome {
                 Ok(OperationOutcome::Done) => Vec::new(),
@@ -1828,7 +1828,7 @@ fn selected_attachment(state: &AppState) -> Option<(usize, &crate::domain::Attac
 fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
     let snippet = crate::ui::rich::preview_text(&message);
     let message_id = message.id.clone();
-    // Ticket haeb: cache the viewed message (bounded by [post.cache]).
+    // Ticket haeb: cache the viewed message (bounded by [tmail.cache]).
     if let Some(cache) = &state.page_cache
         && let Some(Route::Message(route)) = state.active_route()
     {

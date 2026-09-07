@@ -1,8 +1,8 @@
-# What Post is
+# What Tmail is
 
 A terminal e-mail client (Rust 1.95, edition 2024, ratatui) that delegates all mail
 protocol work to the `himalaya` CLI (2.1.0, +smtp +imap +jmap +gmail +msgraph +maildir).
-Post owns UI, state, drafts, and safety logic; Himalaya owns protocols, credentials,
+Tmail owns UI, state, drafts, and safety logic; Himalaya owns protocols, credentials,
 MIME parsing, and delivery.
 
 ## Architecture (as built through Phase 9)
@@ -32,9 +32,9 @@ MIME parsing, and delivery.
 
 ## ADR 0001 — Himalaya CLI as the exclusive mail backend (2026-09-02)
 
-**Decision.** Post v1 shells out to the installed `himalaya` binary only, through one
+**Decision.** Tmail v1 shells out to the installed `himalaya` binary only, through one
 `MailBackend` trait. No protocol code, no Pimalaya library dependency (revisit only
-with measured evidence and explicit user approval). Post writes its own `[post]`
+with measured evidence and explicit user approval). Tmail writes its own `[tmail]`
 section into the same TOML file himalaya reads (verified tolerated — himalaya ignores
 unknown root tables). Errors are typed with sanitized details. A fake `himalaya` +
 argv assertions is the contract-test strategy; a startup `himalaya --version` check
@@ -59,19 +59,19 @@ mitigates version drift.
   alias); flag commands echo affected flags, not resulting state (authoritative flag
   state comes from `envelope list` / `message read`).
 - All shared commands accept `-m <mailbox>` and fall back to the inbox alias when
-  omitted — Post always passes the mailbox explicitly.
-- Pagination is 1-based (`-p`, `-s`); Post maps its 0-based `PageRequest{offset,
+  omitted — Tmail always passes the mailbox explicitly.
+- Pagination is 1-based (`-p`, `-s`); Tmail maps its 0-based `PageRequest{offset,
   limit}` to `p = offset/limit + 1`, `s = limit`. Out-of-range pages exit 0 with an
   empty `envelopes` array (valid empty page).
 - `message read --json` is a verbose but complete `mail_parser` serde dump; header
   names use underscores (`content_type`, `message_id`) — the mapper normalizes
   `-`/`_` on both sides.
-- Reply/forward CLI templates exist but Post seeds replies itself (production builds
+- Reply/forward CLI templates exist but Tmail seeds replies itself (production builds
   never parse MIME; `mail-parser` is a test-only dependency).
 - Send outcomes (`fixtures/himalaya/send-outcomes.md`): exit 0 ⇒ `Sent` (even with
   odd output — claiming failure on exit 0 invites duplicates); non-zero with
   pre-DATA markers (connect/DNS/TLS/auth/`--save`) ⇒ `FailedBeforeDelivery`
-  (retry-safe); post-DATA EOF/unclassifiable ⇒ conservative `Unknown` (ambiguous).
+  (retry-safe); tmail-DATA EOF/unclassifiable ⇒ conservative `Unknown` (ambiguous).
   `SentButCopyFailed` is pre-validated away by himalaya.
 
 ## ADR 0002 — Draft storage and replacement strategy (2026-09-02)
@@ -82,14 +82,14 @@ survives moves; the Gmail-specific drafts API is provider-specific and forbidden
 
 **Decision.**
 
-1. Crash-safe Post-owned local journal (`<local-id>.json` + `.eml`, temp file +
+1. Crash-safe Tmail-owned local journal (`<local-id>.json` + `.eml`, temp file +
    fsync + atomic rename, versioned from day one). Every revision is journaled
    **before** any remote call.
 2. Remote saves coalesce: only the newest revision is ever pushed; a save of
    revision N can never mark N+1 clean; edits during a save force another save.
 3. Replacement is add-then-delete: `message add -m Drafts --flag draft` (library-
-   built RFC 5322 via `mail-builder`, stable `Message-ID`, Post-owned
-   `X-Post-Draft-Id`), confirm the new id, only then delete the old remote copy.
+   built RFC 5322 via `mail-builder`, stable `Message-ID`, Tmail-owned
+   `X-Tmail-Draft-Id`), confirm the new id, only then delete the old remote copy.
 4. Old-draft deletion is two-phase and best-effort: delete → locate by Message-ID in
    trash → delete again. Phase-2 failure leaves a copy in trash — acceptable, never
    data loss, reconciled opportunistically (every save sweeps Drafts for stray
@@ -100,15 +100,15 @@ survives moves; the Gmail-specific drafts API is provider-specific and forbidden
 
 ### Config
 
-- One shared TOML file (himalaya accounts + `[post]`). Resolution: CLI arg →
-  `POST_CONFIG` → `~/.config/himalaya` → `~/Library/Application Support/himalaya`;
+- One shared TOML file (himalaya accounts + `[tmail]`). Resolution: CLI arg →
+  `TMAIL_CONFIG` → `~/.config/himalaya` → `~/Library/Application Support/himalaya`;
   unreadable/malformed files fall back to defaults while `-c` is still forwarded.
-- Post keys: `[post]` account/page_size; `[accounts.<account>].email` (account
+- Tmail keys: `[tmail]` account/page_size; `[accounts.<account>].email` (account
   identity for draft `From` and reply-all self-exclusion);
-  `[post.mail].refresh_interval_seconds` (default 60, `0` disables, negative treated
-  as 0); `[post.attachments].downloads_dir`.
-- `POST_DATA_DIR` overrides the draft journal root (default:
-  `~/Library/Application Support/post/drafts` on macOS, `~/.local/share/post/drafts`
+  `[tmail.mail].refresh_interval_seconds` (default 60, `0` disables, negative treated
+  as 0); `[tmail.attachments].downloads_dir`.
+- `TMAIL_DATA_DIR` overrides the draft journal root (default:
+  `~/Library/Application Support/tmail/drafts` on macOS, `~/.local/share/tmail/drafts`
   elsewhere).
 
 ### Operations / state
@@ -172,7 +172,7 @@ survives moves; the Gmail-specific drafts API is provider-specific and forbidden
   order); Tab cycles the cursor; `d` saves via a frozen retryable request, `o`
   opens (save-then-open chain on the confirmed, possibly collision-renamed path;
   same-session saves are reused without a duplicate download).
-- Downloads dir resolution: explicit request dir → `[post.attachments].downloads_dir`
+- Downloads dir resolution: explicit request dir → `[tmail.attachments].downloads_dir`
   → `$HOME/Downloads`; missing dirs are created. Destination names reduce to a
   single component (traversal-proof); existing downloads are never silently
   overwritten (collision walk `name (1).ext`, …); the UI reports the path actually

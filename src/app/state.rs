@@ -49,7 +49,7 @@ pub struct StatusState {
     /// One-line transient message; cleared on the next interaction.
     pub message: Option<String>,
     /// Injected-clock instant the message was set (ticket h1d7): arms the
-    /// `[post].status_timeout` fade-and-clear timer. `None` while no
+    /// `[tmail].status_timeout` fade-and-clear timer. `None` while no
     /// message is up, or the clock has not ticked yet (the reducer has no
     /// time source before the first tick).
     pub shown_at: Option<DateTime<FixedOffset>>,
@@ -91,7 +91,7 @@ pub struct AppState {
     /// re-enters while borrowing, so `RefCell` suffices.
     pub(crate) reader_doc: std::cell::RefCell<Option<crate::ui::screens::reader::CachedReaderDoc>>,
     /// The keyboard binding table (configurable keybindings): defaults
-    /// seeded, then reshaped by `[post.keybindings]`. Consulted by the
+    /// seeded, then reshaped by `[tmail.keybindings]`. Consulted by the
     /// translation layer (`input::keyboard`) and the status-bar hints, so
     /// a rebind can never leave the UI lying about its keys.
     pub keymap: crate::input::keymap::KeyMap,
@@ -132,33 +132,33 @@ pub struct AppState {
     /// while no search is open above a mailbox.
     pub search_return: Option<ListStash>,
     /// Periodic refresh interval in seconds (plan §11/§19 Phase 9,
-    /// `[post.mail].refresh_interval_seconds`); `0` disables the timer.
+    /// `[tmail.mail].refresh_interval_seconds`); `0` disables the timer.
     /// Set from the config at startup; the reducer never reads a clock for
     /// it — arming uses the injected `Action::Tick` wall clock.
     pub refresh_interval_seconds: u64,
-    /// Ticket kjfq (`[post.mail].page_size_auto`): size each page to the
+    /// Ticket kjfq (`[tmail.mail].page_size_auto`): size each page to the
     /// number of message rows the terminal can show, overriding
     /// `page_size`. Set from the config at startup; the reducer recomputes
     /// the limit from `size` on every resize so the page always matches
     /// the visible rows.
     pub page_size_auto: bool,
     /// Draft autosave debounce in milliseconds (plan §14,
-    /// `[post.composer].autosave_delay_ms`). Set from the config at
+    /// `[tmail.composer].autosave_delay_ms`). Set from the config at
     /// startup; the reducer applies it with the injected tick clock.
     pub autosave_delay_ms: u64,
-    /// `[post].view_mode` list density (Gmail-style): `comfortable`
+    /// `[tmail].view_mode` list density (Gmail-style): `comfortable`
     /// interleaves a faint horizontal separator under every message row,
     /// so each message takes two terminal lines and fewer fit. Set from
     /// the config at startup; the renderer and the reducer's visible-row
     /// math both read it.
     pub view_mode: crate::config::ViewMode,
-    /// `[post].status_timeout` (ticket h1d7): seconds a status message
+    /// `[tmail].status_timeout` (ticket h1d7): seconds a status message
     /// stays up before it fades out and clears; `0` (default) keeps it
     /// until the next message replaces it. Set from the config at
     /// startup; expiry runs on the injected tick clock.
     pub status_timeout_seconds: u64,
     /// Runtime-switchable themes (ticket z0s4): `(name, palette)` in cycle
-    /// order — the two built-ins plus every `[post.themes.<name>]` table,
+    /// order — the two built-ins plus every `[tmail.themes.<name>]` table,
     /// precomputed at startup. `t` cycles the list; the shared config
     /// file is never rewritten, so switching is session-only.
     pub themes: Vec<(String, Theme)>,
@@ -168,7 +168,7 @@ pub struct AppState {
     /// resolved from the config at startup. `None` means the builtin
     /// editor: `Ctrl+E` is inert.
     pub editor_command: Option<Vec<String>>,
-    /// Post-owned summary cache (ticket haeb, cache.md §2): serves the
+    /// Tmail-owned summary cache (ticket haeb, cache.md §2): serves the
     /// last loaded page instantly while the fresh one loads in the
     /// background. `None` disables caching entirely.
     pub page_cache: Option<crate::app::page_cache::PageCache>,
@@ -181,7 +181,7 @@ pub struct AppState {
     pub last_background_error: Option<String>,
     pub focus: Focus,
     /// Whether terminal mouse capture is currently active (plan §10,
-    /// `[post].mouse`). Set from the config at startup and flipped by
+    /// `[tmail].mouse`). Set from the config at startup and flipped by
     /// `Action::ToggleMouseCapture`; the runtime applies the actual
     /// capture mode and keeps the terminal in sync. With capture off, the
     /// terminal's native text selection works untouched.

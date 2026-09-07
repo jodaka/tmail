@@ -588,13 +588,13 @@ mod tests {
         MessageSummary {
             id: MessageId(String::from("m1")),
             mailbox_id: MailboxId(String::from("inbox")),
-            message_id: Some(String::from("1@post.local")),
+            message_id: Some(String::from("1@tmail.local")),
             from: vec![address()],
             to: vec![Address {
                 name: None,
-                email: String::from("probe@post.local"),
+                email: String::from("probe@tmail.local"),
             }],
-            subject: String::from("Welcome to Post"),
+            subject: String::from("Welcome to Tmail"),
             snippet: None,
             timestamp: mock::now(),
             is_read: false,
@@ -635,14 +635,14 @@ mod tests {
         let state = loaded_state();
         let lines = content(&state, 100);
         let text: Vec<String> = lines.iter().map(ReaderLine::text).collect();
-        assert!(text.iter().any(|t| t.contains("Welcome to Post")));
+        assert!(text.iter().any(|t| t.contains("Welcome to Tmail")));
         assert!(
             text.iter()
                 .any(|t| t.contains("From") && t.contains("Bob <bob@example.org>"))
         );
         assert!(
             text.iter()
-                .any(|t| t.contains("To") && t.contains("probe@post.local"))
+                .any(|t| t.contains("To") && t.contains("probe@tmail.local"))
         );
         assert!(
             text.iter()
@@ -670,7 +670,7 @@ mod tests {
         let header = header_lines(&state, 100);
         let text: Vec<String> = header.iter().map(ReaderLine::text).collect();
         let subject = &text[0];
-        assert!(subject.starts_with("  Welcome to Post"), "{subject:?}");
+        assert!(subject.starts_with("  Welcome to Tmail"), "{subject:?}");
         assert!(subject.ends_with("  "), "{subject:?}");
         let from = text
             .iter()
@@ -932,7 +932,7 @@ mod tests {
         // The header carries exactly the pinned chrome: subject, meta, and
         // the hairline — never body content, no action row (ticket 3rt5).
         let header_text: Vec<String> = header.iter().map(ReaderLine::text).collect();
-        assert!(header_text[0].contains("Welcome to Post"));
+        assert!(header_text[0].contains("Welcome to Tmail"));
         assert!(
             header_text
                 .last()

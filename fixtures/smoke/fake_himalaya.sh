@@ -41,7 +41,7 @@ if [ "$SUB" = "mailbox" ]; then
 fi
 
 if [ "$SUB" = "envelope" ]; then
-  printf '%s' '{"envelopes":[{"id":"env-1","message-id":"1@post.local","in-reply-to":[],"flags":[{"raw":"\\Flagged","iana":"flagged"}],"subject":"Welcome","from":[{"name":"Ada","email":"ada@example.org"}],"to":[{"name":null,"email":"probe@post.local"}],"date":"2026-09-02T10:03:40+03:00","size":319,"has-attachment":false}]}'
+  printf '%s' '{"envelopes":[{"id":"env-1","message-id":"1@tmail.local","in-reply-to":[],"flags":[{"raw":"\\Flagged","iana":"flagged"}],"subject":"Welcome","from":[{"name":"Ada","email":"ada@example.org"}],"to":[{"name":null,"email":"probe@tmail.local"}],"date":"2026-09-02T10:03:40+03:00","size":319,"has-attachment":false}]}'
   exit 0
 fi
 

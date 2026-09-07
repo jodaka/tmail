@@ -246,7 +246,7 @@ fn push_hints(theme: &Theme, spans: &mut Vec<Span<'_>>, hints: &[(Option<String>
 const STATUS_FADE_SECONDS: f64 = 0.3;
 
 /// Status-message style (ticket h1d7): accent on the page background.
-/// With `[post].status_timeout > 0` the message fades into the background
+/// With `[tmail].status_timeout > 0` the message fades into the background
 /// over the closing [`STATUS_FADE_SECONDS`] of its window; the reducer
 /// clears it when the window elapses. The fade interpolates the two
 /// colors, so the monochrome theme (terminal defaults) renders at full

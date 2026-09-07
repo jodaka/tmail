@@ -1,9 +1,9 @@
-# Bundling Himalaya with Post (ticket xjgx)
+# Bundling Himalaya with Tmail (ticket xjgx)
 
-Research question: Post currently requires a system-installed `himalaya`
+Research question: Tmail currently requires a system-installed `himalaya`
 CLI (checked at startup, refusing with an actionable error when missing).
 What would it take to ship Himalaya **along with** the app, so the binary
-"just works" after installing Post alone? Definition of done for this
+"just works" after installing Tmail alone? Definition of done for this
 ticket is this document: options, pros/cons, and a high-level migration
 plan. No code changes are proposed for v1.
 
@@ -12,16 +12,16 @@ plan. No code changes are proposed for v1.
 - Himalaya is a single, self-contained Rust binary; no runtime
   dependencies. License is Apache-2.0 OR MIT — bundling and redistribution
   are permitted with attribution (include the license texts).
-- Official release artifacts cover the platforms Post targets and more
+- Official release artifacts cover the platforms Tmail targets and more
   (v2.1.0): `aarch64-darwin` (5.7 MB tgz), `x86_64-darwin`, `x86_64-linux`,
   `aarch64-linux`, plus armv6/7, i686, Windows. Cargo features compiled
   in: smtp, imap, jmap, gmail, msgraph, m2dir, pimdir, maildir,
-  rustls-ring — i.e. the pre-built binary covers every backend Post needs.
-- Post already gates on the executable at startup (`himalaya --version`,
+  rustls-ring — i.e. the pre-built binary covers every backend Tmail needs.
+- Tmail already gates on the executable at startup (`himalaya --version`,
   config validation) and pins behavior via JSON-schema/fixture contract
   tests (ADR 0001 finding 14), so a bundled binary is version-controllable
   with existing machinery.
-- Post's process model (one CLI invocation per operation, argv-only) is
+- Tmail's process model (one CLI invocation per operation, argv-only) is
   orthogonal to where the binary lives; only the resolution path changes.
 
 ## 1. Options
@@ -29,39 +29,39 @@ plan. No code changes are proposed for v1.
 ### A. Status quo — system-installed CLI (current)
 
 User installs himalaya themselves (`brew`, `cargo install`, install.sh);
-Post refuses to start without it.
+Tmail refuses to start without it.
 
 - **Pros:** zero packaging work; users control their own himalaya version
   (it may already serve other tooling); no signing/licensing burden.
 - **Cons:** a hard pre-install step; version drift between "whatever the
-  user has" and the version Post was tested against; the #1 onboarding
+  user has" and the version Tmail was tested against; the #1 onboarding
   friction for a non-CLI-savvy user.
 
-### B. Sidecar binary in Post's release artifacts (recommended)
+### B. Sidecar binary in Tmail's release artifacts (recommended)
 
-Post's release pipeline ships `himalaya` next to `post` per platform. At
-startup Post looks for `himalaya` in the executable's own directory first,
+Tmail's release pipeline ships `himalaya` next to `tmail` per platform. At
+startup Tmail looks for `himalaya` in the executable's own directory first,
 then falls back to `PATH`.
 
-- **Pros:** one-download install; exact version coupling (Post is tested
+- **Pros:** one-download install; exact version coupling (Tmail is tested
   against the bundled binary, killing version drift); no runtime
   extraction, no first-run surprises; keeps the ADR 0001 process boundary
   untouched — the adapter code does not change at all.
 - **Cons:** release pipeline grows (download asset, verify checksum,
-  package per platform, per-arch); Post's artifact carries ~6 MB extra;
-  macOS code-signing/notarization should cover both binaries; Post's
+  package per platform, per-arch); Tmail's artifact carries ~6 MB extra;
+  macOS code-signing/notarization should cover both binaries; Tmail's
   release cadence now gates on bumping a himalaya pin.
 
-### C. Embed the binary in `post` and extract on first run
+### C. Embed the binary in `tmail` and extract on first run
 
-`include_bytes!` the himalaya binary; write it to Post's data directory
+`include_bytes!` the himalaya binary; write it to Tmail's data directory
 (0o755) at first launch.
 
 - **Pros:** literally one file to distribute.
 - **Cons:** all of B's packaging work *plus* first-run extraction:
   binary grows ~6 MB, an executables-writing step that macOS Gatekeeper
   and enterprise AV policies dislike, cache-invalidation logic on upgrade
-  (extracted copy must always match the Post version), and a data-dir
+  (extracted copy must always match the Tmail version), and a data-dir
   dependency at startup. Strictly worse than B unless the distribution
   channel demands a single file.
 
@@ -75,7 +75,7 @@ spawn latency, and JSON DTO layer entirely.
   external binary; typed errors end to end.
 - **Cons:** contradicts ADR 0001 decision 1 (no Pimalaya library
   dependency; revisit only with measured evidence and explicit user
-  approval, plan §22); Post would re-implement behaviors it currently gets
+  approval, plan §22); Tmail would re-implement behaviors it currently gets
   from the CLI for free — send-outcome classification, pagination mapping,
   trash-first semantics, JSON error shapes (ADR 0001 findings 1–13);
   upgrade churn moves from a pinned binary to an API; the measured
@@ -85,7 +85,7 @@ spawn latency, and JSON DTO layer entirely.
 ## 2. Recommendation
 
 - Keep **A** for development and source builds.
-- Adopt **B** when Post ships its first real release artifacts (the
+- Adopt **B** when Tmail ships its first real release artifacts (the
   natural moment is the v1 release, after the Phase 12 gate).
 - Keep **D** parked behind the plan §22 evidence gate; revisit only if
   measured IMAP behavior makes the CLI model unusable *and* the user
@@ -99,7 +99,7 @@ spawn latency, and JSON DTO layer entirely.
    version check compares the bundled binary's `--version` against it.
 2. **CI bundling job**: matrix job downloads the official
    `himalaya.<target>.tgz` matching each release target, verifies the
-   published checksum, and packages `himalaya` beside the `post` binary
+   published checksum, and packages `himalaya` beside the `tmail` binary
    into the per-platform artifacts.
 3. **Runtime resolution**: `HimalayaCliBackend`'s program resolution
    becomes: (a) explicit config override (already possible via the

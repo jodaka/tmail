@@ -1,5 +1,5 @@
 //! The `MailBackend` contract (plan §8): an async, mockable interface around
-//! Post's needs rather than a mirror of every Himalaya command.
+//! Tmail's needs rather than a mirror of every Himalaya command.
 //!
 //! Phase 2 implemented the mailbox and message-list operations; read, flags,
 //! search, send, and drafts extend the trait in their own phases. Every
@@ -71,7 +71,7 @@ pub enum BackendError {
 
 pub type BackendResult<T> = Result<T, BackendError>;
 
-/// Post's view of the mail backend.
+/// Tmail's view of the mail backend.
 #[async_trait]
 pub trait MailBackend: Send + Sync {
     /// All mailboxes the account exposes, with roles resolved by the
@@ -86,7 +86,7 @@ pub trait MailBackend: Send + Sync {
     ) -> BackendResult<Page<MessageSummary>>;
 
     /// One page of search results (plan §16/§19 Phase 9): the query is
-    /// passed to the backend unchanged — Post adds no syntax of its own —
+    /// passed to the backend unchanged — Tmail adds no syntax of its own —
     /// and scoped to `request.mailbox_id`. Shapes and pagination match
     /// [`MailBackend::list_messages`]; the backend does not provide a
     /// total, so the page degrades to next-availability (plan §16).
@@ -165,7 +165,7 @@ pub trait MailBackend: Send + Sync {
     ) -> BackendResult<SendOutcome>;
 
     /// Validate one attachment source for the composer (plan §15, Phase 8):
-    /// expand `~` in Post (never a shell), confirm the path is a regular
+    /// expand `~` in Tmail (never a shell), confirm the path is a regular
     /// readable file within the acceptable size, and return its metadata.
     /// No bytes are held — the file is re-read when the message is
     /// serialized for sending.
@@ -176,7 +176,7 @@ pub trait MailBackend: Send + Sync {
     ) -> BackendResult<DraftAttachment>;
 
     /// Save one incoming attachment (plan §15, Phase 8): download the MIME
-    /// part into a Post-owned temporary directory, then write the bytes to
+    /// part into a Tmail-owned temporary directory, then write the bytes to
     /// the destination through a collision-checked `create_new` — an
     /// existing file is never silently overwritten (the saver picks
     /// `name (1).ext`, `name (2).ext`, … deterministically). The filename

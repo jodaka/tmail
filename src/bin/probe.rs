@@ -1,4 +1,4 @@
-//! Phase 0 probe: verifies that Post can drive the Himalaya CLI through
+//! Phase 0 probe: verifies that Tmail can drive the Himalaya CLI through
 //! tokio::process::Command (no shell), capture stdout/stderr separately, pipe
 //! stdin, and cancel a running child process.
 //!
@@ -147,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
     // ── 2. stdin piping (draft add path used by composer) ───────────────────
     if run_all || step == "stdin" {
         let token = CancellationToken::new();
-        let raw = b"Message-ID: <probe-stdin@post.local>\r\nFrom: probe@post.local\r\n\
+        let raw = b"Message-ID: <probe-stdin@tmail.local>\r\nFrom: probe@tmail.local\r\n\
              To: alice@example.org\r\nSubject: stdin probe\r\n\r\nbody\r\n";
         let out = run_cancellable(
             "himalaya",

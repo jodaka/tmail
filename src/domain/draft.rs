@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::MessageId;
 
 /// Default autosave debounce (plan §14: "debounce 2 seconds"). The
-/// `[post.composer].autosave_delay_ms` setting overrides it within the
+/// `[tmail.composer].autosave_delay_ms` setting overrides it within the
 /// bounds the config layer validates (Phase 10.4).
 pub const DEFAULT_AUTOSAVE_DELAY_MS: u64 = 2_000;
 
@@ -159,7 +159,7 @@ impl Draft {
     }
 
     /// Whether the debounce window has elapsed and an autosave is due.
-    /// `delay_ms` is the configured `[post.composer].autosave_delay_ms`.
+    /// `delay_ms` is the configured `[tmail.composer].autosave_delay_ms`.
     pub fn autosave_due(&self, now: DateTime<FixedOffset>, delay_ms: u64) -> bool {
         let delay = Duration::milliseconds(delay_ms.max(1) as i64);
         self.save == DraftSaveState::Debouncing
@@ -175,7 +175,7 @@ impl Draft {
                 .timestamp_nanos_opt()
                 .unwrap_or(now.timestamp_millis() * 1_000_000);
             self.local_id = Some(DraftId(format!("local-{stamp}")));
-            self.message_id = Some(format!("<{stamp}.draft@post.local>"));
+            self.message_id = Some(format!("<{stamp}.draft@tmail.local>"));
         }
         self.snapshot()
     }
@@ -289,7 +289,7 @@ mod tests {
         assert!(
             message_id
                 .as_deref()
-                .is_some_and(|m| m.starts_with('<') && m.ends_with("@post.local>"))
+                .is_some_and(|m| m.starts_with('<') && m.ends_with("@tmail.local>"))
         );
         // A later save keeps both ids stable (ADR 0002 §D.6).
         d.note_edit(Some(at(10)));
@@ -404,7 +404,7 @@ mod tests {
         // fields; serde defaults keep them loadable (ADR 0002 versioning).
         let legacy = r#"{
             "local_id": "local-1",
-            "message_id": "<1@post.local>",
+            "message_id": "<1@tmail.local>",
             "remote_id": "remote-1",
             "to": "a@b.c",
             "cc": "",

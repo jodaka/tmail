@@ -38,7 +38,7 @@ use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
 /// The seeded message's stable identity.
-const MESSAGE_ID: &str = "integration-1@post.local";
+const MESSAGE_ID: &str = "integration-1@tmail.local";
 
 fn ctx() -> RequestContext {
     RequestContext {
@@ -114,8 +114,8 @@ impl MaildirEnv {
         let config_path = dir.path().join("config.toml");
         let config = format!(
             "[accounts.probe]\n\
-             email = \"probe@post.local\"\n\
-             display-name = \"Post Probe\"\n\
+             email = \"probe@tmail.local\"\n\
+             display-name = \"Tmail Probe\"\n\
              \n\
              [accounts.probe.maildir]\n\
              root = \"{}\"\n\
@@ -135,7 +135,7 @@ impl MaildirEnv {
         // convention: files in cur carry the `:2,` flag suffix).
         let eml = format!(
             "From: Ada Lovelace <ada@example.org>\n\
-             To: probe@post.local\n\
+             To: probe@tmail.local\n\
              Subject: Integration hello\n\
              Date: Wed, 02 Sep 2026 10:00:00 +0000\n\
              Message-ID: <{MESSAGE_ID}>\n\
@@ -160,8 +160,8 @@ impl MaildirEnv {
         )
         .with_journal(DraftJournal::open(dir.path().join("journal")))
         .with_account_identity(
-            Some(String::from("probe@post.local")),
-            Some(String::from("Post Probe")),
+            Some(String::from("probe@tmail.local")),
+            Some(String::from("Tmail Probe")),
         );
 
         // Mailbox ids on maildir are absolute directory paths (probe
@@ -297,7 +297,7 @@ fn flags_round_trip_through_maildir() {
 fn draft_snapshot() -> DraftSnapshot {
     DraftSnapshot {
         local_id: DraftId(String::from("local-integration")),
-        message_id: Some(String::from("<integration-draft@post.local>")),
+        message_id: Some(String::from("<integration-draft@tmail.local>")),
         in_reply_to: None,
         references: None,
         remote_id: None,
@@ -332,7 +332,7 @@ fn drafts_save_journal_and_discard_round_trip() {
     assert_eq!(page.items.len(), 1, "exactly one remote draft copy");
     assert_eq!(
         page.items[0].message_id.as_deref(),
-        Some("integration-draft@post.local"),
+        Some("integration-draft@tmail.local"),
         "Message-ID identifies the draft"
     );
 

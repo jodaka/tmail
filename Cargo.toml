@@ -2,7 +2,7 @@
 name = "tmail"
 version = "0.1.0"
 edition = "2024"
-description = "Post: a Gmail-inspired, keyboard-first terminal email client backed by the Himalaya CLI"
+description = "Tmail: a Gmail-inspired, keyboard-first terminal email client backed by the Himalaya CLI"
 
 [dependencies]
 anyhow = "1"

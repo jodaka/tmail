@@ -60,7 +60,7 @@ fn full_layout_renders_all_regions() {
     let size = (152, 40);
     let text = text_of(&draw(size.0, size.1));
     // Brand + version.
-    assert!(text.contains("post v0.1.0"), "brand missing:\n{text}");
+    assert!(text.contains("tmail v0.1.0"), "brand missing:\n{text}");
     // Search field with placeholder.
     assert!(text.contains("Search mail"), "search placeholder missing");
     // Sidebar: compose + folders with unread counts. No labels, no storage.
@@ -535,7 +535,7 @@ fn spinner_shows_foreground_work_without_blocking_the_frame() {
     let text = text_of(&buffer);
     assert!(text.contains("⠋"), "spinner frame missing:\n{text}");
     assert!(
-        !text.contains("post v0.1.0"),
+        !text.contains("tmail v0.1.0"),
         "brand must yield to the loader:\n{text}"
     );
     // The list head and sidebar still render — work never blocks the frame.
@@ -552,7 +552,7 @@ fn no_spinner_when_idle() {
     let mut state = mock_initial_state();
     let text = draw_after(&mut state, &[], 152, 40);
     assert!(!text.contains("⠋"), "spinner leaked while idle:\n{text}");
-    assert!(text.contains("post v0.1.0"), "brand restored when idle");
+    assert!(text.contains("tmail v0.1.0"), "brand restored when idle");
 }
 
 #[test]
@@ -1179,7 +1179,7 @@ fn snapshot_too_small_just_below_the_compact_floor() {
     assert_absent(&text, "INBOX", (89, 25));
 }
 
-/// Comfortable view mode (`[post].view_mode = "comfortable"`): every
+/// Comfortable view mode (`[tmail].view_mode = "comfortable"`): every
 /// message row is followed by a faint horizontal separator, so fewer
 /// messages fit and the list gains negative space.
 #[test]
@@ -1899,7 +1899,7 @@ fn find_text_col(buffer: &ratatui::buffer::Buffer, y: u16, needle: &str) -> usiz
 
 #[test]
 fn status_message_fades_over_the_closing_timeout_window() {
-    // Ticket h1d7: with `[post].status_timeout > 0` the message holds its
+    // Ticket h1d7: with `[tmail].status_timeout > 0` the message holds its
     // accent color until the last 0.3 s, then fades into the background.
     let theme = Theme::default_dark();
     let mut state = mock_initial_state();

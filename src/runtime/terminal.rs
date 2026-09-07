@@ -25,7 +25,7 @@ impl TerminalGuard {
 }
 
 /// Enter raw mode + alternate screen and install the panic hook. When
-/// `mouse` is set (plan §10, `[post].mouse`), mouse capture is enabled so
+/// `mouse` is set (plan §10, `[tmail].mouse`), mouse capture is enabled so
 /// click/wheel events reach the app; otherwise the terminal keeps its
 /// native selection behavior and no mouse events arrive.
 pub fn enable(mouse: bool) -> io::Result<TerminalGuard> {

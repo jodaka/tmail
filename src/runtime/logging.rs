@@ -22,7 +22,7 @@ pub fn init() -> LoggingGuard {
     let dir = log_dir();
     if let Err(err) = fs::create_dir_all(&dir) {
         // No stderr noise beyond a single line; this must never break startup.
-        eprintln!("post: could not create log dir {}: {err}", dir.display());
+        eprintln!("tmail: could not create log dir {}: {err}", dir.display());
     }
     let appender = tracing_appender::rolling::daily(&dir, "tmail.log");
     let (writer, worker) = tracing_appender::non_blocking(appender);

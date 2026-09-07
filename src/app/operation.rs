@@ -75,7 +75,7 @@ pub enum OperationKind {
     LoadDrafts,
     /// Delete a draft everywhere (journal + remote). `Discard` follows a
     /// confirmed discard (plan §14) and opens the modal on failure;
-    /// `Sent` is the post-send cleanup (ADR 0002: best-effort — delivery
+    /// `Sent` is the tmail-send cleanup (ADR 0002: best-effort — delivery
     /// is already confirmed, so a failure must never claim one). Boxed
     /// snapshot, as with `SaveDraft`.
     DeleteDraft {
@@ -114,7 +114,7 @@ pub enum OperationKind {
 pub enum DraftRemovalReason {
     /// Confirmed discard (plan §14): failures open Retry/Dismiss.
     Discard,
-    /// Post-send cleanup (ADR 0002 consequences): best-effort, logged only.
+    /// Tmail-send cleanup (ADR 0002 consequences): best-effort, logged only.
     Sent,
 }
 

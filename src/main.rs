@@ -1,4 +1,4 @@
-//! Post — application entry point.
+//! Tmail — application entry point.
 //!
 //! Wires config → backend → operation manager → event loop. The reducer
 //! stays I/O-free: state transitions register operations and return
@@ -26,7 +26,7 @@ use tmail::ui::{RenderContext, Theme};
 
 fn main() -> ExitCode {
     let _logging = logging::init();
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "post starting");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "tmail starting");
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -34,7 +34,7 @@ fn main() -> ExitCode {
     {
         Ok(rt) => rt,
         Err(err) => {
-            eprintln!("post: failed to start async runtime: {err}");
+            eprintln!("tmail: failed to start async runtime: {err}");
             return ExitCode::FAILURE;
         }
     };
@@ -45,15 +45,15 @@ fn main() -> ExitCode {
             tracing::error!(%err, "fatal error");
             // Terminal restoration happens in TerminalGuard's Drop; this
             // message lands after the alternate screen is left.
-            eprintln!("post: {err:#}");
+            eprintln!("tmail: {err:#}");
             ExitCode::FAILURE
         }
     }
 }
 
 async fn run() -> anyhow::Result<()> {
-    // Optional explicit config path: `post [path/to/config.toml]`. Without
-    // one, `POST_CONFIG` or the well-known himalaya locations are used.
+    // Optional explicit config path: `tmail [path/to/config.toml]`. Without
+    // one, `TMAIL_CONFIG` or the well-known himalaya locations are used.
     let cli_config = std::env::args().nth(1).map(std::path::PathBuf::from);
     let (config, issues) = tmail::config::Config::load_with_issues(cli_config.as_deref());
     // Startup validation reports every detected problem together, before
@@ -82,7 +82,7 @@ async fn run() -> anyhow::Result<()> {
     // Warnings print before the alternate screen swallows stderr: a
     // refused conflict or restored default must be visible somewhere.
     for warning in &built_keymap.warnings {
-        eprintln!("post: warning: {warning}");
+        eprintln!("tmail: warning: {warning}");
         tracing::warn!(warning, "keybinding config adjusted");
     }
     tracing::info!(
@@ -95,7 +95,7 @@ async fn run() -> anyhow::Result<()> {
     // Platform open-with adapter for saved attachments (plan §15).
     let opener: Arc<dyn PathOpener> = Arc::new(SystemOpener);
 
-    // Mouse capture is opt-in (`[post].mouse`, plan §10): with capture off,
+    // Mouse capture is opt-in (`[tmail].mouse`, plan §10): with capture off,
     // terminal text selection keeps its native behavior and no mouse
     // events arrive at all. The guard is optional: `None` only while the
     // external editor owns the terminal (Phase 11).
@@ -109,9 +109,9 @@ async fn run() -> anyhow::Result<()> {
     // Periodic refresh timer (Phase 9.4); `0` disables it.
     state.refresh_interval_seconds = config.refresh_interval_seconds;
     // Draft autosave debounce (Phase 10.4 wiring of
-    // `[post.composer].autosave_delay_ms`).
+    // `[tmail.composer].autosave_delay_ms`).
     state.autosave_delay_ms = config.autosave_delay_ms;
-    // `[post].view_mode` list density (Gmail-style): comfortable splits
+    // `[tmail].view_mode` list density (Gmail-style): comfortable splits
     // message rows with faint horizontal separators, so each message
     // takes two terminal lines.
     state.view_mode = config.view_mode;
@@ -119,7 +119,7 @@ async fn run() -> anyhow::Result<()> {
     state.status_timeout_seconds = config.status_timeout;
     // The external editor argv (Phase 11.4); `None` = builtin editor.
     state.editor_command = config.editor_command.clone();
-    // Post-owned summary cache (ticket haeb): instant warm starts, the
+    // Tmail-owned summary cache (ticket haeb): instant warm starts, the
     // fresh page always loads in the background afterwards.
     state.page_cache = tmail::app::page_cache::PageCache::open_default(
         config.account.as_deref(),
@@ -136,7 +136,7 @@ async fn run() -> anyhow::Result<()> {
     }
     // Ticket kjfq: `page_size_auto` sizes each page to the number of
     // message rows the terminal can show, so the page fits the list
-    // without scrolling; manual pagination keeps `[post.mail].page_size`.
+    // without scrolling; manual pagination keeps `[tmail.mail].page_size`.
     // The view mode decides how many lines a message costs.
     state.page_size_auto = config.page_size_auto;
     if config.page_size_auto {
@@ -147,8 +147,8 @@ async fn run() -> anyhow::Result<()> {
 
     let (mut events, events_control) = events::spawn();
     // Runtime-switchable theme list (ticket z0s4): the two built-ins —
-    // the `[post.theme]` selection with its color overrides (ticket wrs7)
-    // landing on the startup entry — plus every `[post.themes.<name>]`
+    // the `[tmail.theme]` selection with its color overrides (ticket wrs7)
+    // landing on the startup entry — plus every `[tmail.themes.<name>]`
     // table. NO_COLOR wins over all of it (plan §18): every palette
     // becomes monochrome, so switching stays a harmless no-op.
     let (mut themes, theme_index) = Theme::theme_list(
@@ -208,10 +208,10 @@ async fn run() -> anyhow::Result<()> {
             break;
         }
 
-        // Test hook: `POST_INDUCE_PANIC=1` panics after the first draw to
+        // Test hook: `TMAIL_INDUCE_PANIC=1` panics after the first draw to
         // prove panic-safe terminal restoration (plan §19 Phase 1).
-        if std::env::var_os("POST_INDUCE_PANIC").is_some() {
-            panic!("induced panic: POST_INDUCE_PANIC is set (restoration test)");
+        if std::env::var_os("TMAIL_INDUCE_PANIC").is_some() {
+            panic!("induced panic: TMAIL_INDUCE_PANIC is set (restoration test)");
         }
 
         tokio::select! {

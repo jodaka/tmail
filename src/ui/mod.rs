@@ -113,7 +113,7 @@ pub fn render(
 /// Too-small mode: a clear centered message, nothing overlapping (plan §18).
 fn render_too_small(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
     let message = format!(
-        "Terminal too small ({}×{})\npost needs at least {}×{} columns/rows.\nEnlarge the window or press Esc to quit.",
+        "Terminal too small ({}×{})\ntmail needs at least {}×{} columns/rows.\nEnlarge the window or press Esc to quit.",
         state.size.0,
         state.size.1,
         layout::COMPACT_MIN_WIDTH,

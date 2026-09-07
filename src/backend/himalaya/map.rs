@@ -75,7 +75,7 @@ fn map_envelope(dto: dto::EnvelopeDto, mailbox_id: &MailboxId) -> MessageSummary
         from: dto.from.iter().map(address).collect(),
         to: dto.to.iter().map(address).collect(),
         subject: dto.subject,
-        // `envelope list` carries no snippet (ADR 0001 finding 2); Post
+        // `envelope list` carries no snippet (ADR 0001 finding 2); Tmail
         // fills it only once full messages are fetched (Phase 4+).
         snippet: None,
         timestamp: dto.date.unwrap_or_else(epoch),
@@ -192,7 +192,7 @@ fn text_header(headers: &[dto::HeaderDto], name: &str) -> Option<String> {
 
 /// Normalize a `Message-ID`-shaped header to bare ids: angle brackets
 /// stripped, runs of whitespace collapsed to single spaces. Bare form is
-/// the identity Post matches on everywhere (ADR 0001 finding 4) and what
+/// the identity Tmail matches on everywhere (ADR 0001 finding 4) and what
 /// reply seeding preserves (plan §14, Phase 7.4).
 fn bare_ids(raw: String) -> String {
     raw.split_whitespace()
@@ -388,12 +388,12 @@ mod tests {
         assert_eq!(first.id.0, "1788343420.M446833P1967Q1.RFT-R993YF");
         assert_eq!(
             first.message_id.as_deref(),
-            Some("2717992022958107501@post.local")
+            Some("2717992022958107501@tmail.local")
         );
         assert_eq!(first.mailbox_id, mailbox_id);
         assert_eq!(first.from.len(), 1);
         assert_eq!(first.from[0].display(), "Ada Lovelace");
-        assert_eq!(first.subject, "Welcome to Post");
+        assert_eq!(first.subject, "Welcome to Tmail");
         assert_eq!(first.snippet, None);
         assert!(first.is_starred, "\\Flagged maps to starred");
         assert!(!first.is_read, "no \\Seen flag");
@@ -545,7 +545,7 @@ mod tests {
         assert!(message.headers.cc.is_empty());
         assert_eq!(
             message.headers.message_id.as_deref(),
-            Some("3180034027954358661@post.local")
+            Some("3180034027954358661@tmail.local")
         );
         let date = message.headers.date.expect("date parses");
         assert_eq!(date.to_rfc3339(), "2026-09-02T10:03:40+03:00");
@@ -593,7 +593,7 @@ mod tests {
         assert!(body.contains("From: Bob <bob@example.org>"));
         assert!(body.contains("Date: 2026-09-02 10:03"));
         assert!(body.contains("Subject: Plain text only"));
-        assert!(body.contains("To: probe@post.local"));
+        assert!(body.contains("To: probe@tmail.local"));
         assert!(
             body.ends_with("\nThis is a plain text message.\nLine two.\n"),
             "original body follows the block:\n{body}"
@@ -643,13 +643,13 @@ mod tests {
     #[test]
     fn reply_thread_headers_map_to_bare_ids() {
         // Angle brackets and runs of whitespace are normalized away: bare
-        // ids are the identity Post matches on (ADR 0001 finding 4).
+        // ids are the identity Tmail matches on (ADR 0001 finding 4).
         let dto: dto::MessageReadDto = serde_json::from_str(
             r#"{
                 "parts": [{"headers": [
-                    {"name":"message-id","value":{"Text":"3180034027954358661@post.local"}},
-                    {"name":"in-reply-to","value":{"Text":"<6053432595490343824@post.local>"}},
-                    {"name":"references","value":{"Text":"<0@post.local>  <6053432595490343824@post.local>"}}
+                    {"name":"message-id","value":{"Text":"3180034027954358661@tmail.local"}},
+                    {"name":"in-reply-to","value":{"Text":"<6053432595490343824@tmail.local>"}},
+                    {"name":"references","value":{"Text":"<0@tmail.local>  <6053432595490343824@tmail.local>"}}
                 ]}]
             }"#,
         )
@@ -657,11 +657,11 @@ mod tests {
         let message = message(dto, locator());
         assert_eq!(
             message.headers.in_reply_to.as_deref(),
-            Some("6053432595490343824@post.local")
+            Some("6053432595490343824@tmail.local")
         );
         assert_eq!(
             message.headers.references.as_deref(),
-            Some("0@post.local 6053432595490343824@post.local")
+            Some("0@tmail.local 6053432595490343824@tmail.local")
         );
     }
 

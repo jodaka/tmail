@@ -26,7 +26,7 @@ pub fn render(
         return;
     }
 
-    // Brand row: "post" bold + version dim — or, while foreground work is
+    // Brand row: "tmail" bold + version dim — or, while foreground work is
     // in flight, the loader in its place (ticket m3by: the status spinner
     // lives on top of the program name; the brand returns when loading
     // finishes). Animated from the tick counter (plan §20).
@@ -47,7 +47,7 @@ pub fn render(
     } else {
         let brand = Line::from(vec![
             Span::styled(
-                "post",
+                "tmail",
                 Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -100,7 +100,7 @@ pub fn render(
     }
 
     // Clock, right-aligned on the middle row. Empty string = disabled
-    // (`[post.ui].clock`, ticket w7f5: off by default).
+    // (`[tmail.ui].clock`, ticket w7f5: off by default).
     if !clock.is_empty() && clock.len() < area.width as usize {
         let clock_area = Rect {
             x: area.x + area.width - clock.width() as u16 - 2,

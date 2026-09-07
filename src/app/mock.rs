@@ -223,7 +223,7 @@ fn inbox_seed() -> Vec<MessageSummary> {
         msg(
             "m12",
             addr("GitHub", "notifications@github.example"),
-            "[anton/post] PR #42 · mock data generator",
+            "[anton/tmail] PR #42 · mock data generator",
             Some("opened by @akudris · 2 files changed"),
             7_200,
             true,
@@ -275,7 +275,7 @@ fn small_mailbox(mailbox: &str, count: usize) -> Vec<MessageSummary> {
             id: MessageId(format!("{mailbox}-{i}")),
             mailbox_id: MailboxId(String::from(mailbox)),
             message_id: None,
-            from: vec![addr("Post Probe", "probe@post.local")],
+            from: vec![addr("Tmail Probe", "probe@tmail.local")],
             to: Vec::new(),
             subject: format!("{mailbox} message {}", i + 1),
             snippet: None,

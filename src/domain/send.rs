@@ -314,7 +314,7 @@ mod tests {
                 in_reply_to: Some(String::from("1@x")),
                 references: Some(String::from("0@x 1@x")),
             },
-            Some(String::from("<9@post.local>")),
+            Some(String::from("<9@tmail.local>")),
         )
         .expect("valid");
         let json = serde_json::to_string(&message).expect("serialize");

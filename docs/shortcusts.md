@@ -2,7 +2,7 @@
 ## Keyboard
 
 Every shortcut below is the *default*: actions can be reassigned, extended,
-or unbound per context via `[post.keybindings.<context>]` in the config
+or unbound per context via `[tmail.keybindings.<context>]` in the config
 (see `config.example.toml` for the full annotated list). The status bar
 hints always follow the configured bindings.
 
@@ -19,7 +19,7 @@ hints always follow the configured bindings.
 | Global | `Ctrl+C` | Quit |
 | Global | `Ctrl+A` | Select all visible messages (or clear the selection) |
 | Global | `m` | Toggle mouse capture on/off (see [Mouse](#mouse)) |
-| Global | `t` | Cycle the theme: built-ins first, then `[post.themes.<name>]` |
+| Global | `t` | Cycle the theme: built-ins first, then `[tmail.themes.<name>]` |
 | List/reader | `r` / `a` / `f` | Reply / reply-all / forward |
 | List/reader | `e` / `s` / `u` | Archive / star / mark unread |
 | List/reader | `Delete` / `d` | Trash |

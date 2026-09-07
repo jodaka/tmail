@@ -2,5 +2,5 @@
 /target
 .kata.local.toml
 
-# Local himalaya/Post config (holds credentials; never commit)
+# Local himalaya/Tmail config (holds credentials; never commit)
 config.toml

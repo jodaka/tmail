@@ -1,4 +1,4 @@
-# Post
+# Tmail
 
 A Gmail-inspired, keyboard-first terminal email client built in Rust with
 Ratatui, backed by the [Himalaya CLI](https://pimalaya.org) for all mail
@@ -17,7 +17,7 @@ protocols, accounts, and credentials.
    with `himalaya configure` (or write `~/.config/himalaya/config.toml`
    yourself — the [Configuration](#configuration) section shows the shape).
 
-2. Build Post from source:
+2. Build Tmail from source:
 
    ```sh
    git clone <this repository>
@@ -25,7 +25,7 @@ protocols, accounts, and credentials.
    cargo build --release
    ```
 
-   The binary lands at `target/release/post`.
+   The binary lands at `target/release/tmail`.
 
 3. Run it (`cargo run --release` from the checkout, or copy the binary
    anywhere):
@@ -34,7 +34,7 @@ protocols, accounts, and credentials.
 
 - macOS (required) / Linux (supported); Windows is out of scope
 - Stable Rust (2024 edition)
-- `himalaya` CLI v2.x installed and on `PATH` (Post checks at startup and
+- `himalaya` CLI v2.x installed and on `PATH` (Tmail checks at startup and
   refuses to start with an actionable error if it is missing)
 
 ## Running
@@ -42,60 +42,60 @@ protocols, accounts, and credentials.
 ```sh
 cargo run --release                          # himalaya's default config
 cargo run --release -- path/to/config.toml   # explicit config file
-POST_CONFIG=path/to/config.toml cargo run --release
+TMAIL_CONFIG=path/to/config.toml cargo run --release
 ```
 
 ## Configuration
 
-Post and Himalaya share **one** TOML file. Himalaya's `[accounts.*]`
+Tmail and Himalaya share **one** TOML file. Himalaya's `[accounts.*]`
 blocks (servers, credentials) keep their own format and are never touched
-by Post; Post reads its own `[post…]` tables from the same file (himalaya
+by Tmail; Tmail reads its own `[tmail…]` tables from the same file (himalaya
 2.1.0 tolerates the unknown root tables).
 
 ### Which file is loaded
 
 Exactly one of, in priority order:
 
-1. The path given as the first CLI argument (`post path/to/config.toml`)
-2. The `POST_CONFIG` environment variable
+1. The path given as the first CLI argument (`tmail path/to/config.toml`)
+2. The `TMAIL_CONFIG` environment variable
 3. `~/.config/himalaya/config.toml` (if it exists)
 4. `~/Library/Application Support/himalaya/config.toml` (if it exists)
 
-If none exist, Post runs with defaults and lets himalaya pick its own
-default config. **Only the file Post actually loads is used — settings in
+If none exist, Tmail runs with defaults and lets himalaya pick its own
+default config. **Only the file Tmail actually loads is used — settings in
 any other file are ignored.**
 
-### All `[post]` options
+### All `[tmail]` options
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `[post].account` | string | none | Name of the `[accounts.<name>]` table Post drives (forwarded to himalaya as `-a`). When absent, Post uses the account himalaya itself would pick: the one with `default = true`, else the sole account. **If set, the name must match an existing `[accounts.<name>]` table or startup fails.** |
-| `[post].mouse` | bool | `false` | **Mouse support (off by default).** When `true`, Post enables terminal mouse capture and you can click mailboxes, message rows, the search field, the Compose button, attachment chips, composer controls, and modal buttons, and scroll with the wheel. See [Mouse](#mouse) for exact behavior. Capture changes what terminal text selection does, so it is opt-in. |
-| `[post].view_mode` | string | `"compact"` | Message-list density. `"compact"` (default) draws one line per message; `"comfortable"` splits consecutive messages with a faint horizontal separator, so each message takes two lines — fewer messages fit on screen, with more negative space between rows. |
-| `[post].status_timeout` | integer | `0` | Seconds a status message stays up in the bottom-right corner before it fades into the background (over the last 0.3 s) and clears. `0` keeps a message until the next one replaces it. |
-| `[post.mail].page_size_auto` | bool | `true` | Size each page to the number of message rows the terminal can show (ticket kjfq): the whole page fits the list without scrolling, and resizing re-loads the page. When `true`, `page_size` is ignored. |
-| `[post.mail].page_size` | integer | `50` | Rows per page of the message list with `page_size_auto = false` (explicit pagination with ←/→). Must be positive. A page longer than the list shows a vertical scrollbar. |
-| `[post.mail].refresh_interval_seconds` | integer | `60` | Periodic background refresh; `0` disables the timer. Never preempts foreground work or the composer. |
-| `[post.composer].editor` | string | `"builtin"` | `"builtin"`, `"$EDITOR"` (resolved from the environment), or a plain command like `nvim` (program + arguments, **no shell metacharacters** — Post never spawns a shell). The external-editor flow itself ships in Phase 11; the value is validated at startup either way. |
-| `[post.composer].autosave_delay_ms` | integer | `2000` | Draft autosave debounce for the builtin editor. Accepted range: 100–600000. |
-| `[post.attachments].downloads_dir` | string | `$HOME/Downloads` | Directory used by *save attachment*. Must be absolute or start with `~/` (Post expands `~` itself, never via a shell). May not exist yet; must not be an existing file. |
-| `[post.theme].name` | string | `"default"` | Theme name: `"default"` (dark) or `"light"` (ticket wrs7). Set the `NO_COLOR` environment variable (non-empty) to render without any colors at all — it also ignores theme overrides. |
-| `[post.themes.<name>]` | table | none | Extra named themes for runtime switching (ticket z0s4): same color tokens as `[post.theme]` (no `name` key — the table's name is the theme's name), values are hex colors applied over the dark reference palette. Press `t` in Post to pick one from the theme dialog: built-ins first, then these alphabetically by name. A theme named `default` or `light` replaces that built-in. Switching is session-only — the config file is never rewritten. |
-| `[post.keybindings.<context>]` | table of key lists | built-in defaults | Reassign, extend, or unbind keyboard shortcuts per context — `global`, `list`, `reader` (the context column of the [shortcut docs](docs/shortcusts.md)). An action's list **replaces** its default keys; an empty list unbinds the action. Key syntax: `+`-joined `ctrl`/`alt` modifiers then a named key (`esc`, `enter`, `tab`, `backtab`, `backspace`, `delete`, `home`, `end`, `pageup`, `pagedown`, `up`, `down`, `left`, `right`, `space`, `f1`–`f12`), a glyph (`↑ ↓ ← → ⌫ ↵`), or any single character (`j`, `?`, `]`; `"S"` is the shifted character). A key already bound to another action in the same context is refused with a startup warning; the escape hatches (`cancel`, `activate`, `focus_next`, `focus_previous`, `quit`) always keep at least one binding. The full annotated default list ships in `config.example.toml`. |
-| `[post.ui].clock` | bool | `false` | Show the date/time clock in the top-right corner (ticket w7f5). Off by default. |
-| `[post.cache].max_messages` | integer | `50` | How many viewed messages to keep in Post's on-disk cache (ticket haeb) so previously opened mail renders instantly. Least-recently-used entries are evicted first; `0` disables message caching. |
-| `[post.cache].max_bytes` | integer | `10485760` | Total size cap in bytes for the viewed-message cache (default 10 MiB, ticket haeb). Messages larger than the whole budget are never cached. |
+| `[tmail].account` | string | none | Name of the `[accounts.<name>]` table Tmail drives (forwarded to himalaya as `-a`). When absent, Tmail uses the account himalaya itself would pick: the one with `default = true`, else the sole account. **If set, the name must match an existing `[accounts.<name>]` table or startup fails.** |
+| `[tmail].mouse` | bool | `false` | **Mouse support (off by default).** When `true`, Tmail enables terminal mouse capture and you can click mailboxes, message rows, the search field, the Compose button, attachment chips, composer controls, and modal buttons, and scroll with the wheel. See [Mouse](#mouse) for exact behavior. Capture changes what terminal text selection does, so it is opt-in. |
+| `[tmail].view_mode` | string | `"compact"` | Message-list density. `"compact"` (default) draws one line per message; `"comfortable"` splits consecutive messages with a faint horizontal separator, so each message takes two lines — fewer messages fit on screen, with more negative space between rows. |
+| `[tmail].status_timeout` | integer | `0` | Seconds a status message stays up in the bottom-right corner before it fades into the background (over the last 0.3 s) and clears. `0` keeps a message until the next one replaces it. |
+| `[tmail.mail].page_size_auto` | bool | `true` | Size each page to the number of message rows the terminal can show (ticket kjfq): the whole page fits the list without scrolling, and resizing re-loads the page. When `true`, `page_size` is ignored. |
+| `[tmail.mail].page_size` | integer | `50` | Rows per page of the message list with `page_size_auto = false` (explicit pagination with ←/→). Must be positive. A page longer than the list shows a vertical scrollbar. |
+| `[tmail.mail].refresh_interval_seconds` | integer | `60` | Periodic background refresh; `0` disables the timer. Never preempts foreground work or the composer. |
+| `[tmail.composer].editor` | string | `"builtin"` | `"builtin"`, `"$EDITOR"` (resolved from the environment), or a plain command like `nvim` (program + arguments, **no shell metacharacters** — Tmail never spawns a shell). The external-editor flow itself ships in Phase 11; the value is validated at startup either way. |
+| `[tmail.composer].autosave_delay_ms` | integer | `2000` | Draft autosave debounce for the builtin editor. Accepted range: 100–600000. |
+| `[tmail.attachments].downloads_dir` | string | `$HOME/Downloads` | Directory used by *save attachment*. Must be absolute or start with `~/` (Tmail expands `~` itself, never via a shell). May not exist yet; must not be an existing file. |
+| `[tmail.theme].name` | string | `"default"` | Theme name: `"default"` (dark) or `"light"` (ticket wrs7). Set the `NO_COLOR` environment variable (non-empty) to render without any colors at all — it also ignores theme overrides. |
+| `[tmail.themes.<name>]` | table | none | Extra named themes for runtime switching (ticket z0s4): same color tokens as `[tmail.theme]` (no `name` key — the table's name is the theme's name), values are hex colors applied over the dark reference palette. Press `t` in Tmail to pick one from the theme dialog: built-ins first, then these alphabetically by name. A theme named `default` or `light` replaces that built-in. Switching is session-only — the config file is never rewritten. |
+| `[tmail.keybindings.<context>]` | table of key lists | built-in defaults | Reassign, extend, or unbind keyboard shortcuts per context — `global`, `list`, `reader` (the context column of the [shortcut docs](docs/shortcusts.md)). An action's list **replaces** its default keys; an empty list unbinds the action. Key syntax: `+`-joined `ctrl`/`alt` modifiers then a named key (`esc`, `enter`, `tab`, `backtab`, `backspace`, `delete`, `home`, `end`, `pageup`, `pagedown`, `up`, `down`, `left`, `right`, `space`, `f1`–`f12`), a glyph (`↑ ↓ ← → ⌫ ↵`), or any single character (`j`, `?`, `]`; `"S"` is the shifted character). A key already bound to another action in the same context is refused with a startup warning; the escape hatches (`cancel`, `activate`, `focus_next`, `focus_previous`, `quit`) always keep at least one binding. The full annotated default list ships in `config.example.toml`. |
+| `[tmail.ui].clock` | bool | `false` | Show the date/time clock in the top-right corner (ticket w7f5). Off by default. |
+| `[tmail.cache].max_messages` | integer | `50` | How many viewed messages to keep in Tmail's on-disk cache (ticket haeb) so previously opened mail renders instantly. Least-recently-used entries are evicted first; `0` disables message caching. |
+| `[tmail.cache].max_bytes` | integer | `10485760` | Total size cap in bytes for the viewed-message cache (default 10 MiB, ticket haeb). Messages larger than the whole budget are never cached. |
 
 Config example is available in `config.example.toml`.
 
 ### Theming
 
-Pick a built-in theme with `[post.theme].name` (`"default"` for the dark
+Pick a built-in theme with `[tmail.theme].name` (`"default"` for the dark
 reference look, `"light"` for a paper variant), and fine-tune any of the
 semantic color tokens right in the same file with hex colors:
 
 ```toml
-[post.theme]
+[tmail.theme]
 name = "default"
 background = "#0a101e"   # #rrggbb or the short #rgb form
 accent = "#8ab4f8"
@@ -116,17 +116,17 @@ starting point for your own tuning.
 
 #### Multiple themes and the theme picker
 
-Define any number of extra themes as `[post.themes.<name>]` tables and
-press `t` in Post to open the theme picker at runtime (built-ins first,
+Define any number of extra themes as `[tmail.themes.<name>]` tables and
+press `t` in Tmail to open the theme picker at runtime (built-ins first,
 then yours alphabetically by name):
 
 ```toml
-[post.themes.nord]
+[tmail.themes.nord]
 background = "#2e3440"
 accent = "#88c0d0"
 text = "#eceff4"
 
-[post.themes.warm]
+[tmail.themes.warm]
 background = "#262220"
 accent = "#e0916c"
 ```
@@ -143,27 +143,27 @@ session-only — the shared config file is never rewritten.
 
 ### Startup validation
 
-Before the UI starts, Post validates the whole file and reports **every**
+Before the UI starts, Tmail validates the whole file and reports **every**
 detected problem together (never just the first), then refuses to start:
 
 - file exists but is not valid TOML (parse errors are sanitized)
-- `[post].account` names a missing `[accounts.*]` table
+- `[tmail].account` names a missing `[accounts.*]` table
 - invalid `page_size`, `refresh_interval_seconds`, or `autosave_delay_ms`
 - invalid `editor` (empty, unknown program, shell metacharacters, `$EDITOR` unset)
 - invalid `downloads_dir` (relative path, or an existing file)
-- unknown `[post.theme].name`
+- unknown `[tmail.theme].name`
 - `himalaya` executable not found on `PATH`
 
 Validation errors never echo file contents or secrets.
 
 ### Himalaya account tables (reference)
 
-Post reads, from himalaya's own blocks:
+Tmail reads, from himalaya's own blocks:
 
 - `[accounts.<name>].email` — used as the `From` identity of drafts and to
   exclude yourself from reply-all
 - `[accounts.<name>].display-name` — display identity
-- `[accounts.<name>].default` — account selection when `[post].account` is unset
+- `[accounts.<name>].default` — account selection when `[tmail].account` is unset
 - `[accounts.<name>.mailbox.alias]` — maps semantic roles (`inbox`, `sent`,
   `drafts`, `trash`, `archive`) to the account's real folder names; without
   an alias, archive/trash resolve from what the account actually exposes
@@ -172,17 +172,17 @@ Keyaboard shortcuts described in `./docs/shortcuts.md`
 
 ## External editor
 
-With `[post.composer].editor` set to `"$EDITOR"` (or an explicit command
+With `[tmail.composer].editor` set to `"$EDITOR"` (or an explicit command
 like `nvim`), press `Ctrl+E` inside the composer to edit the draft body in
 your own editor:
 
 1. The draft is saved first (journal + remote), so nothing can be lost.
-2. Post suspends its UI: raw mode and the alternate screen are left, and
+2. Tmail suspends its UI: raw mode and the alternate screen are left, and
    your editor takes over the full terminal.
 3. The body travels through a secure temporary file (owner-only
    permissions, removed afterwards). The editor gets the file path as its
    last argument.
-4. Post waits for the editor to exit — no background autosave runs while
+4. Tmail waits for the editor to exit — no background autosave runs while
    it owns the file — then imports the text and saves once.
 5. The terminal is restored even if the editor fails; a failed run
    imports nothing and the draft stays intact.
@@ -191,7 +191,7 @@ With the default `editor = "builtin"`, `Ctrl+E` does nothing.
 
 ## Cache
 
-Post keeps a small on-disk cache (in its data directory, scoped per
+Tmail keeps a small on-disk cache (in its data directory, scoped per
 account) so warm starts and mailbox switches render instantly and refresh
 in the background:
 
@@ -204,7 +204,7 @@ in the background:
 Cache reads are conservative: only exact-identity hits are used, unparsable
 entries are ignored, and every successful backend load overwrites the
 cached data — the fresh value always wins. The viewed-message cache is
-limited by `[post.cache].max_messages` and `[post.cache].max_bytes`
+limited by `[tmail.cache].max_messages` and `[tmail.cache].max_bytes`
 (least-recently-used eviction; see [Configuration](#configuration)). For
 slow IMAP hosts, [sirup](https://github.com/pimalaya/sirup) can additionally
 amortize the per-invocation connection cost; see `cache.md` for details.
@@ -256,15 +256,15 @@ Notes and limitations:
 
 - Filter keywords are **lowercase** and space-separated (`from x`, not
   `from:x`) — that is himalaya 2.1.0's grammar.
-- There is no all-fields `text` filter; plain words are Post's shorthand
+- There is no all-fields `text` filter; plain words are Tmail's shorthand
   for `(from "…") or (subject "…") or (body "…")`.
 - See [Known limitations](#known-limitations) for backend-specific search
   caveats (non-ASCII text on IMAP, text search on Maildir).
 
 ## Mouse
 
-Mouse support is **off by default** — enable it with `[post] mouse = true`
-(see [Configuration](#configuration)), or press `m` inside Post to toggle
+Mouse support is **off by default** — enable it with `[tmail] mouse = true`
+(see [Configuration](#configuration)), or press `m` inside Tmail to toggle
 capture at any time. With it enabled:
 
 - **Message row** — first click selects the row; clicking the already
@@ -289,22 +289,22 @@ Middle/right click and dragging do nothing.
 
 ### Text selection while the mouse is enabled
 
-Enabling mouse capture tells the terminal to send clicks to Post instead
+Enabling mouse capture tells the terminal to send clicks to Tmail instead
 of using them for selection — that is how click support works in every
 TUI. You keep two ways to select text:
 
 1. **Hold `Shift` while clicking or dragging.** Standard convention
    (iTerm2, Terminal.app, Alacritty, kitty, WezTerm, foot, GNOME Terminal,
    Windows Terminal, …): the terminal handles the selection itself and
-   Post never sees those events.
+   Tmail never sees those events.
 2. **Press `m`.** This turns mouse capture off entirely — the terminal
-   behaves exactly as if Post had no mouse support, so plain click-drag
+   behaves exactly as if Tmail had no mouse support, so plain click-drag
    selects text. Press `m` again to re-enable clicks. The status bar
    always shows which mode you are in.
 
 ## Known limitations
 
-**v1 scope** (by design, per `POST_IMPLEMENTATION_PLAN.md` §23): no
+**v1 scope** (by design, per `TMAIL_IMPLEMENTATION_PLAN.md` §23): no
 conversation threads, no multiple-account switching, no label management,
 no settings/help UI, and no offline sync.
 
@@ -320,7 +320,7 @@ no settings/help UI, and no offline sync.
   `not flag seen`). Listing, reading, flags, and drafts all work on
   Maildir (covered by `tests/maildir_integration.rs`).
 
-**Mouse:** with capture enabled, plain click-drag belongs to Post; hold
+**Mouse:** with capture enabled, plain click-drag belongs to Tmail; hold
 `Shift` or press `m` to select text ([details](#mouse)).
 
 ## Development
@@ -342,12 +342,12 @@ python3 fixtures/smoke/ci_smoke.py --bin target/debug/tmail   # pty smoke (CI ru
 - `fixtures/himalaya/` — sanitized probe fixtures, schemas, seed/sink helpers
 - `fixtures/smoke/` — committed pty smoke: fake himalaya + CI driver
 - `src/backend/` — `MailBackend` trait + Himalaya CLI adapter (DTOs private)
-- `src/config/` — shared one-file configuration (`[post]` + aliases)
+- `src/config/` — shared one-file configuration (`[tmail]` + aliases)
 - `src/input/` — keyboard and mouse → action translation
 - `src/bin/probe.rs` — subprocess probe (argv-only, stdin, cancellation)
 - `tests/fake_himalaya.rs` — fake `himalaya` executable for contract tests
 - `tests/backend_contract.rs` — backend contract test suite
-- `POST_IMPLEMENTATION_PLAN.md` — the product/engineering specification
+- `TMAIL_IMPLEMENTATION_PLAN.md` — the product/engineering specification
 
 ## Additional documentation
 `./docs/builtin-be.md` — brief ideas about bundling Himalaya with app

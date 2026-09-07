@@ -1,5 +1,5 @@
 //! The keymap: configurable key bindings as data (configurable-keybind
-//! research, ticket 00y7; `[post.keybindings]`).
+//! research, ticket 00y7; `[tmail.keybindings]`).
 //!
 //! Bindings live in per-context tables (`global`, `list`, `reader` — the
 //! context column of `docs/shortcusts.md`). [`DEFAULT_GLOBAL`] and friends
@@ -53,7 +53,7 @@ fn contexts_for_focus(focus: Focus) -> [Option<Context>; 2] {
 }
 
 /// One default binding: action name, its key specs, and the action the
-/// reducer receives. Names are the config surface (`[post.keybindings.
+/// reducer receives. Names are the config surface (`[tmail.keybindings.
 /// <context>].<name>`) and mirror the wording of `docs/shortcusts.md`.
 struct DefaultBinding {
     name: &'static str,
@@ -250,7 +250,7 @@ impl KeyMap {
         keymap
     }
 
-    /// Build the keymap from the parsed `[post.keybindings]` tables.
+    /// Build the keymap from the parsed `[tmail.keybindings]` tables.
     pub fn build(tables: &[KeybindingTable]) -> KeymapBuild {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
@@ -264,7 +264,7 @@ impl KeyMap {
                 "reader" => Some(&mut keymap.reader),
                 other => {
                     errors.push(format!(
-                        "[post.keybindings.{other}] is unknown (known contexts: \
+                        "[tmail.keybindings.{other}] is unknown (known contexts: \
                          global, list, reader)"
                     ));
                     None
@@ -273,7 +273,7 @@ impl KeyMap {
             for (action_name, key_specs) in &table.entries {
                 let Some(action) = action_by_name(action_name) else {
                     errors.push(format!(
-                        "[post.keybindings.{}].{action_name} is not a bindable action \
+                        "[tmail.keybindings.{}].{action_name} is not a bindable action \
                          (see config.example.toml for the list)",
                         table.context
                     ));
@@ -284,7 +284,7 @@ impl KeyMap {
                     match parse_spec(spec) {
                         Ok(parsed_spec) => parsed.push(parsed_spec),
                         Err(err) => errors.push(format!(
-                            "[post.keybindings.{}].{action_name}: {err}",
+                            "[tmail.keybindings.{}].{action_name}: {err}",
                             table.context
                         )),
                     }
@@ -301,7 +301,7 @@ impl KeyMap {
                     match owner {
                         Some(existing) if existing != action_name.as_str() => {
                             warnings.push(format!(
-                                "[post.keybindings.{}]: {} is already bound to \
+                                "[tmail.keybindings.{}]: {} is already bound to \
                                  {existing:?}; the {action_name} binding was ignored",
                                 table.context,
                                 spec.display(),
@@ -345,7 +345,7 @@ impl KeyMap {
                 .collect();
             let shown: Vec<String> = specs.iter().map(KeySpec::display).collect();
             warnings.push(format!(
-                "[post.keybindings.global]: action {name:?} must keep at least one \
+                "[tmail.keybindings.global]: action {name:?} must keep at least one \
                  binding; its defaults were restored ({})",
                 shown.join(", ")
             ));
@@ -721,7 +721,7 @@ mod tests {
     fn a_parsed_config_reaches_the_keymap() {
         // End-to-end: config text → parser → keymap → translation.
         let (config, issues) = crate::config::parse_with_issues(
-            "[post.keybindings.global]\nnext_page = [\"→\", \"Ctrl+]\"]\n",
+            "[tmail.keybindings.global]\nnext_page = [\"→\", \"Ctrl+]\"]\n",
             None,
         );
         assert!(issues.is_empty(), "{issues:?}");

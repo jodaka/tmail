@@ -21,7 +21,7 @@ pub const TICK_INTERVAL: Duration = Duration::from_millis(250);
 pub enum Event {
     Key(KeyEvent),
     /// Click or wheel event (Phase 10, plan §10). Arrives only while mouse
-    /// capture is enabled (`[post].mouse`).
+    /// capture is enabled (`[tmail].mouse`).
     Mouse(MouseEvent),
     Resize {
         width: u16,

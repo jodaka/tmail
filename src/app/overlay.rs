@@ -79,7 +79,7 @@ pub enum Overlay {
     /// Composer discard confirmation (plan §14): deleting local and remote
     /// draft state happens only after explicit confirmation.
     ConfirmDiscard(DiscardDialog),
-    /// Attachment path entry (plan §15, Phase 8): type a file path, Post
+    /// Attachment path entry (plan §15, Phase 8): type a file path, Tmail
     /// validates it without a shell, and a confirmed path becomes a chip.
     AttachmentPath(AttachmentPathDialog),
     /// Theme picker (ticket k5ba): a small list of every available palette.

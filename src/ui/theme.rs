@@ -65,7 +65,7 @@ impl Theme {
         }
     }
 
-    /// Theme by `[post.theme].name` (plan §17/§18). Unknown names are
+    /// Theme by `[tmail.theme].name` (plan §17/§18). Unknown names are
     /// rejected by config validation; here they fall back to the default
     /// so a stale file can never blank the UI.
     pub fn from_name(name: &str) -> Self {
@@ -76,10 +76,10 @@ impl Theme {
     }
 
     /// Runtime-switchable theme list (ticket z0s4): the two built-ins —
-    /// with the `[post.theme]` color overrides applied to the startup
-    /// theme — plus every `[post.themes.<name>]` user theme built over
+    /// with the `[tmail.theme]` color overrides applied to the startup
+    /// theme — plus every `[tmail.themes.<name>]` user theme built over
     /// the dark reference palette. A user theme shadowing a built-in name
-    /// replaces it in place, so `[post.themes.default]` redefines the
+    /// replaces it in place, so `[tmail.themes.default]` redefines the
     /// default. Returns the list in cycle order together with the index
     /// of the startup theme.
     pub fn theme_list(
@@ -91,7 +91,7 @@ impl Theme {
             for (token, hex) in overrides {
                 // Validation guarantees known tokens and valid hex; a
                 // stale parse would only skip the override, never crash
-                // startup (the same contract as the [post.theme] path).
+                // startup (the same contract as the [tmail.theme] path).
                 if let Some(color) =
                     crate::config::parse_hex_color(hex).and_then(|hex| Theme::color_from_hex(&hex))
                 {
@@ -142,7 +142,7 @@ impl Theme {
         (list, index)
     }
 
-    /// Apply one `[post.theme]` color override (ticket wrs7). Unknown
+    /// Apply one `[tmail.theme]` color override (ticket wrs7). Unknown
     /// tokens are rejected by config validation; here they are ignored so
     /// a stale file can never blank the UI. Returns whether the token was
     /// known.
@@ -434,11 +434,11 @@ mod default_theme_doc_tests {
     use crate::config::{THEME_TOKENS, parse_with_issues};
 
     /// `docs/default-theme.toml` documents the built-in dark theme as a
-    /// ready-to-paste `[post.theme]` block (ticket dn04). This pins the
+    /// ready-to-paste `[tmail.theme]` block (ticket dn04). This pins the
     /// file to the real palette: every token listed, no parse issues, and
     /// applying the block over the named theme reproduces
     /// `default_dark()` exactly — so the documentation cannot drift from
-    /// what Post actually draws.
+    /// what Tmail actually draws.
     #[test]
     fn the_documented_default_theme_matches_the_builtin() {
         let text = include_str!("../../docs/default-theme.toml");

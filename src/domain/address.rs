@@ -187,14 +187,14 @@ mod tests {
     fn display_falls_back_to_email() {
         let a = Address {
             name: None,
-            email: "probe@post.local".into(),
+            email: "probe@tmail.local".into(),
         };
-        assert_eq!(a.display(), "probe@post.local");
+        assert_eq!(a.display(), "probe@tmail.local");
         let b = Address {
             name: Some(String::new()),
-            email: "probe@post.local".into(),
+            email: "probe@tmail.local".into(),
         };
-        assert_eq!(b.display(), "probe@post.local");
+        assert_eq!(b.display(), "probe@tmail.local");
     }
 
     #[test]

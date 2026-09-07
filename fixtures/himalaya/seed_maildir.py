@@ -23,10 +23,10 @@ HTML_BODY = """<html><body>
 MESSAGES = {
     "INBOX": [
         (
-            "Welcome to Post",
+            "Welcome to Tmail",
             "Ada Lovelace <ada@example.org>",
-            "probe@post.local",
-            "Hello,\n\nWelcome to Post, the terminal mail client.\n\n-- \nAda\n",
+            "probe@tmail.local",
+            "Hello,\n\nWelcome to Tmail, the terminal mail client.\n\n-- \nAda\n",
             False,
             True,
             {},
@@ -34,7 +34,7 @@ MESSAGES = {
         (
             "Plain text only",
             "Bob <bob@example.org>",
-            "probe@post.local",
+            "probe@tmail.local",
             "This is a plain text message.\nLine two.\n",
             False,
             False,
@@ -43,7 +43,7 @@ MESSAGES = {
         (
             "HTML alternative",
             "Carol <carol@example.org>",
-            "probe@post.local",
+            "probe@tmail.local",
             None,
             True,
             False,
@@ -52,16 +52,16 @@ MESSAGES = {
         (
             "Grüße mit emoji 🎉",
             "Dave <dave@example.org>",
-            "probe@post.local",
+            "probe@tmail.local",
             "Unicode body: naïve, 中文, 🚀\n",
             False,
             False,
             {},
         ),
         (
-            "Re: Welcome to Post",
+            "Re: Welcome to Tmail",
             "Ada Lovelace <ada@example.org>",
-            "probe@post.local",
+            "probe@tmail.local",
             "Thanks for the welcome!\n",
             True,
             False,
@@ -72,7 +72,7 @@ MESSAGES = {
         (
             "Old receipt",
             "Shop <shop@example.org>",
-            "probe@post.local",
+            "probe@tmail.local",
             "Your receipt #12345.\n",
             True,
             False,
@@ -92,7 +92,7 @@ def build(subject: str, sender: str, to: str, body: str | None, extra: dict) -> 
     msg["From"] = sender
     msg["To"] = to
     msg["Date"] = time.strftime("%a, %d %b %Y %H:%M:%S %z", time.gmtime())
-    msg["Message-ID"] = f"<{abs(hash((subject, sender, body or '')))}@post.local>"
+    msg["Message-ID"] = f"<{abs(hash((subject, sender, body or '')))}@tmail.local>"
     for key, value in extra.items():
         msg[key] = value
     if body is None:

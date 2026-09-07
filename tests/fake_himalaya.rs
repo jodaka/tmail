@@ -158,7 +158,7 @@ impl FakeHimalaya {
         drop(file);
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755))
             .expect("make fake executable");
-        fs::write(&config, "[post]\naccount = \"probe\"\n").expect("write stub config");
+        fs::write(&config, "[tmail]\naccount = \"probe\"\n").expect("write stub config");
 
         Self {
             program,
@@ -220,7 +220,7 @@ impl FakeHimalaya {
 }
 
 const SCRIPT: &str = r#"#!/usr/bin/env bash
-# Fake himalaya for Post contract tests (generated; do not edit by hand).
+# Fake himalaya for Tmail contract tests (generated; do not edit by hand).
 set -u
 ARGV_LOG="@ARGV_LOG@"
 STDIN_RECORD="@STDIN_RECORD@"
@@ -291,7 +291,7 @@ fi
 if [ "$SUB" = "envelope" ]; then
   case "@ENVELOPE_MODE@" in
     ok)
-      printf '%s' '{"envelopes":[{"id":"env-1","message-id":"1@post.local","in-reply-to":[],"flags":[{"raw":"\\Flagged","iana":"flagged"}],"subject":"Welcome","from":[{"name":"Ada","email":"ada@example.org"}],"to":[{"name":null,"email":"probe@post.local"}],"date":"2026-09-02T10:03:40+03:00","size":319,"has-attachment":false},{"id":"env-2","flags":[{"raw":"\\Seen","iana":"seen"}],"subject":"Plain","from":[{"name":null,"email":"bob@example.org"}],"date":"2026-09-02T10:03:40+03:00"},{"id":"env-3","flags":[],"subject":"Grüße 🎉","from":[],"date":null}]}'
+      printf '%s' '{"envelopes":[{"id":"env-1","message-id":"1@tmail.local","in-reply-to":[],"flags":[{"raw":"\\Flagged","iana":"flagged"}],"subject":"Welcome","from":[{"name":"Ada","email":"ada@example.org"}],"to":[{"name":null,"email":"probe@tmail.local"}],"date":"2026-09-02T10:03:40+03:00","size":319,"has-attachment":false},{"id":"env-2","flags":[{"raw":"\\Seen","iana":"seen"}],"subject":"Plain","from":[{"name":null,"email":"bob@example.org"}],"date":"2026-09-02T10:03:40+03:00"},{"id":"env-3","flags":[],"subject":"Grüße 🎉","from":[],"date":null}]}'
       ;;
     empty)
       printf '%s' '{"envelopes":[]}'
@@ -315,9 +315,9 @@ if [ "$SUB" = "envelope" ]; then
       ;;
     draft-stray)
       # One stale draft copy whose Message-ID matches the contract tests'
-      # draft snapshot (<123.draft@post.local>), as reconciliation sweeps
+      # draft snapshot (<123.draft@tmail.local>), as reconciliation sweeps
       # must find it.
-      printf '%s' '{"envelopes":[{"id":"stray-1","message-id":"123.draft@post.local","in-reply-to":[],"flags":[{"raw":"\\Draft","iana":"draft"}],"subject":"stale","from":[],"date":null}]}'
+      printf '%s' '{"envelopes":[{"id":"stray-1","message-id":"123.draft@tmail.local","in-reply-to":[],"flags":[{"raw":"\\Draft","iana":"draft"}],"subject":"stale","from":[],"date":null}]}'
       ;;
     signal)
       # Die by signal (SIGKILL): the wait status carries no exit code, so
@@ -375,7 +375,7 @@ if [ "$SUB" = "message" ]; then
     ok)
       case "$OP" in
         read)
-          printf '%s' '{"parts":[{"headers":[{"name":"subject","value":{"Text":"Contract test"}},{"name":"from","value":{"Address":{"List":[{"name":"Ada","address":"ada@example.org"}]}}},{"name":"to","value":{"Address":{"List":[{"name":null,"address":"probe@post.local"}]}}},{"name":"message_id","value":{"Text":"1@post.local"}},{"name":"date","value":{"DateTime":{"year":2026,"month":9,"day":2,"hour":10,"minute":3,"second":40,"tz_before_gmt":false,"tz_hour":3,"tz_minute":0}}}],"body":{"Text":"Hello from the fake.\n"}},{"headers":[{"name":"content-type","value":{"ContentType":{"c_type":"application","c_subtype":"pdf","attributes":[{"name":"name","value":"fake.pdf"}]}}}],"body":{"Binary":[1,2,3]}}],"text_body":[0],"html_body":[],"attachments":[1]}'
+          printf '%s' '{"parts":[{"headers":[{"name":"subject","value":{"Text":"Contract test"}},{"name":"from","value":{"Address":{"List":[{"name":"Ada","address":"ada@example.org"}]}}},{"name":"to","value":{"Address":{"List":[{"name":null,"address":"probe@tmail.local"}]}}},{"name":"message_id","value":{"Text":"1@tmail.local"}},{"name":"date","value":{"DateTime":{"year":2026,"month":9,"day":2,"hour":10,"minute":3,"second":40,"tz_before_gmt":false,"tz_hour":3,"tz_minute":0}}}],"body":{"Text":"Hello from the fake.\n"}},{"headers":[{"name":"content-type","value":{"ContentType":{"c_type":"application","c_subtype":"pdf","attributes":[{"name":"name","value":"fake.pdf"}]}}}],"body":{"Binary":[1,2,3]}}],"text_body":[0],"html_body":[],"attachments":[1]}'
           ;;
         move)
           printf '%s' '{"action":"moved"}'

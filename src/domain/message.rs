@@ -68,7 +68,7 @@ pub struct AttachmentRequest {
     /// name only — never as a path — so traversal is impossible.
     pub filename: Option<String>,
     /// Destination directory; `None` uses the configured downloads
-    /// directory (`[post.attachments].downloads_dir`, else the platform
+    /// directory (`[tmail.attachments].downloads_dir`, else the platform
     /// default). A leading `~` is expanded by the backend, never a shell.
     pub dir: Option<std::path::PathBuf>,
 }

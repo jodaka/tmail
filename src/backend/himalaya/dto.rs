@@ -38,7 +38,7 @@ pub(crate) struct EnvelopesDto {
 }
 
 /// One envelope row. There is no snippet field (ADR 0001 finding 2) and no
-/// total, so Post's snippet stays absent and pages have unknown totals.
+/// total, so Tmail's snippet stays absent and pages have unknown totals.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct EnvelopeDto {
     pub id: String,
@@ -57,7 +57,7 @@ pub(crate) struct EnvelopeDto {
     /// ISO-8601 with offset; `None` when the header is missing/unparseable.
     #[serde(default)]
     pub date: Option<DateTime<FixedOffset>>,
-    /// Only populated when the caller opted in (ADR 0001 finding 9); Post
+    /// Only populated when the caller opted in (ADR 0001 finding 9); Tmail
     /// does not opt in for list rows.
     #[serde(rename = "has-attachment", default)]
     pub has_attachment: Option<bool>,
@@ -147,7 +147,7 @@ pub(crate) enum HeaderNameDto {
     Tagged {
         other: String,
     },
-    /// Catch-all for name shapes Post does not interpret (they only need
+    /// Catch-all for name shapes Tmail does not interpret (they only need
     /// to parse, not to be read).
     #[allow(dead_code)]
     Other(serde_json::Value),
@@ -179,7 +179,7 @@ impl HeaderNameDto {
 #[serde(untagged)]
 pub(crate) enum HeaderValueDto {
     Known(KnownHeaderValue),
-    /// Catch-all for value kinds Post does not interpret (they only need
+    /// Catch-all for value kinds Tmail does not interpret (they only need
     /// to parse, not to be read).
     #[allow(dead_code)]
     Other(serde_json::Value),
@@ -304,7 +304,7 @@ pub(crate) struct AttachmentRowDto {
 #[serde(untagged)]
 pub(crate) enum BodyDto {
     Known(KnownBody),
-    /// Catch-all for body kinds Post does not interpret.
+    /// Catch-all for body kinds Tmail does not interpret.
     #[allow(dead_code)]
     Other(serde_json::Value),
 }
