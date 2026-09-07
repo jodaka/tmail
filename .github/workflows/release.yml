@@ -119,7 +119,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock
           git commit -m "chore: bump version to $new"
-          git push origin "HEAD:$GITHUB_REF_NAME" "v$new"
+          git tag -a "v$new" -m "tmail v$new"
+          git push --atomic origin "HEAD:$GITHUB_REF_NAME" "refs/tags/v$new"
 
   build:
     name: Build ${{ matrix.target }}
