@@ -60,7 +60,10 @@ fn full_layout_renders_all_regions() {
     let size = (152, 40);
     let text = text_of(&draw(size.0, size.1));
     // Brand + version.
-    assert!(text.contains("tmail v0.1.0"), "brand missing:\n{text}");
+    assert!(
+        text.contains(concat!("tmail v", env!("CARGO_PKG_VERSION"))),
+        "brand missing:\n{text}"
+    );
     // Search field with placeholder.
     assert!(text.contains("Search mail"), "search placeholder missing");
     // Sidebar: compose + folders with unread counts. No labels, no storage.
@@ -535,7 +538,7 @@ fn spinner_shows_foreground_work_without_blocking_the_frame() {
     let text = text_of(&buffer);
     assert!(text.contains("⠋"), "spinner frame missing:\n{text}");
     assert!(
-        !text.contains("tmail v0.1.0"),
+        !text.contains(concat!("tmail v", env!("CARGO_PKG_VERSION"))),
         "brand must yield to the loader:\n{text}"
     );
     // The list head and sidebar still render — work never blocks the frame.
@@ -552,7 +555,10 @@ fn no_spinner_when_idle() {
     let mut state = mock_initial_state();
     let text = draw_after(&mut state, &[], 152, 40);
     assert!(!text.contains("⠋"), "spinner leaked while idle:\n{text}");
-    assert!(text.contains("tmail v0.1.0"), "brand restored when idle");
+    assert!(
+        text.contains(concat!("tmail v", env!("CARGO_PKG_VERSION"))),
+        "brand restored when idle"
+    );
 }
 
 #[test]
