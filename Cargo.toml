@@ -31,6 +31,23 @@ tempfile = "3"
 mail-parser = { version = "0.11.8", optional = true, features = ["serde"] }
 ratatui-textarea = "0.9.2"
 mail-builder = "0.5.0"
+# Account configuration wizard (ADR 0003): in-process email settings discovery.
+# Pre-1.0 crate — pinned to the exact minor version per ADR §1 constraints.
+io-pim-discovery = { version = "=0.7", default-features = false, features = [
+  "autoconfig",
+  "pacc",
+  "rfc6186",
+  "stream",
+  "rustls-ring",
+] }
+# Format-preserving merge of the wizard account into the shared himalaya
+# config file (ADR 0003 §3.6): plain `toml` drops comments.
+toml_edit = "0.23"
+# Direct handles on io-pim-discovery's own transitive crates: the wizard
+# builds the blocking client with a `pimalaya_stream::tls::Tls` and a
+# `url::Url` DNS resolver (ADR 0003 §3.3).
+pimalaya-stream = { version = "0.3", default-features = false }
+url = "2"
 
 [features]
 test-fixtures = ["dep:mail-parser"]

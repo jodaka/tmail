@@ -19,6 +19,7 @@ use crate::app::effect::Effect;
 use crate::app::operation::{OperationFailure, OperationKind, OperationOutcome, OperationResult};
 use crate::app::sanitize::sanitize;
 use crate::backend::{BackendError, MailBackend, PathOpener, RequestContext};
+use crate::discovery::EmailConfigDiscoverer;
 
 /// Spawns backend tasks for the effects the reducer emits.
 pub struct OperationManager {
@@ -26,6 +27,15 @@ pub struct OperationManager {
     /// Platform open-with adapter for `OpenPath` effects (plan §15,
     /// Phase 8.5): `open`/`xdg-open`, spawned directly.
     opener: Arc<dyn PathOpener>,
+    /// The email settings discoverer for the wizard's `DiscoverConfig`
+    /// effects (ADR 0003 §3.7): injected like the backend and opener,
+    /// so tests and smoke runs swap in a fake.
+    discoverer: Arc<dyn EmailConfigDiscoverer>,
+    /// The himalaya executable the wizard credential test runs
+    /// (ADR 0003 §3.4): the backend's own program name is private to
+    /// the adapter, so the manager carries it for the test invocation.
+    /// Overridable so contract tests point it at the fake.
+    himalaya_program: String,
     results: UnboundedSender<OperationResult>,
 }
 
@@ -33,11 +43,15 @@ impl OperationManager {
     pub fn new(
         backend: Arc<dyn MailBackend>,
         opener: Arc<dyn PathOpener>,
+        discoverer: Arc<dyn EmailConfigDiscoverer>,
+        himalaya_program: String,
         results: UnboundedSender<OperationResult>,
     ) -> Self {
         Self {
             backend,
             opener,
+            discoverer,
+            himalaya_program,
             results,
         }
     }
@@ -47,11 +61,22 @@ impl OperationManager {
     pub fn launch(&self, effect: Effect, ctx: RequestContext) {
         let backend = Arc::clone(&self.backend);
         let opener = Arc::clone(&self.opener);
+        let discoverer = Arc::clone(&self.discoverer);
+        let himalaya_program = self.himalaya_program.clone();
         let results = self.results.clone();
         let id = effect.id;
         tokio::spawn(async move {
             tracing::debug!(id = %id, "operation launched");
-            match run_effect(&backend, &opener, effect, ctx).await {
+            match run_effect(
+                &backend,
+                &opener,
+                &discoverer,
+                &himalaya_program,
+                effect,
+                ctx,
+            )
+            .await
+            {
                 Some(outcome) => {
                     // The channel lives for the whole session; a send
                     // failure means the loop is shutting down and the
@@ -73,6 +98,8 @@ impl OperationManager {
 async fn run_effect(
     backend: &Arc<dyn MailBackend>,
     opener: &Arc<dyn PathOpener>,
+    discoverer: &Arc<dyn EmailConfigDiscoverer>,
+    himalaya_program: &str,
     effect: Effect,
     ctx: RequestContext,
 ) -> Option<Result<OperationOutcome, OperationFailure>> {
@@ -179,6 +206,44 @@ async fn run_effect(
         OperationKind::EditExternally { .. } => {
             tracing::error!(id = %effect.id, "external editor effect reached the operation manager");
             None
+        }
+        // Wizard discovery (ADR 0003 §3.3): the injected discoverer runs
+        // the bounded blocking client on its own worker thread.
+        OperationKind::DiscoverConfig { email } => {
+            let services = discoverer.discover(&email).await;
+            Some(Ok(OperationOutcome::Discovered(services)))
+        }
+        // Wizard credential test (ADR 0003 §3.4): a real `himalaya
+        // mailbox list` against a temporary 0600 config; the detail of a
+        // failure is sanitized below like every other backend error.
+        OperationKind::TestAccount { draft } => {
+            match crate::backend::himalaya::test_account_mailbox_names(
+                himalaya_program,
+                &draft,
+                ctx.cancellation.clone(),
+            )
+            .await
+            {
+                Ok(mailboxes) => Some(Ok(OperationOutcome::TestAccountCompleted { mailboxes })),
+                Err(err) => operation_failure(&effect, err).map(Err),
+            }
+        }
+        // Wizard save (ADR 0003 §3.6): the format-preserving merge runs
+        // here (file I/O), keeping the reducer I/O-free.
+        OperationKind::SaveAccount { path, draft } => {
+            match crate::config::write::save_account(&path, &draft) {
+                Ok(report) => Some(Ok(OperationOutcome::AccountSaved {
+                    path: report.path,
+                    created: report.created,
+                    permissions_warning: report.permissions_warning,
+                })),
+                Err(detail) => Some(Err(OperationFailure {
+                    code: None,
+                    detail: sanitize(&detail),
+                    retry: Some(effect.retry_spec()),
+                    ambiguous: false,
+                })),
+            }
         }
     }
 }
@@ -448,7 +513,16 @@ mod tests {
         opener: Arc<dyn PathOpener>,
     ) -> (OperationManager, UnboundedReceiver<OperationResult>) {
         let (tx, rx) = unbounded_channel();
-        (OperationManager::new(backend, opener, tx), rx)
+        (
+            OperationManager::new(
+                backend,
+                opener,
+                std::sync::Arc::new(crate::discovery::FakeDiscoverer),
+                String::from("himalaya"),
+                tx,
+            ),
+            rx,
+        )
     }
 
     /// A PathOpener double that records the paths it was asked to open.

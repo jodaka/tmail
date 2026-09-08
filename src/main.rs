@@ -6,7 +6,13 @@
 //! typed backend requests with their cancellation tokens, and results flow
 //! back through the task result channel into the same reducer as
 //! `Action::BackendCompleted` (plan §11).
+//!
+//! The account configuration wizard (ADR 0003) joins the wiring: it
+//! triggers on first run (no usable account) or via `tmail --configure`,
+//! reusing the same loop, renderer, event stream, and manager, with the
+//! discoverer injected like the backend and opener.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -18,15 +24,99 @@ use tmail::app::{Action, AppState, Effect, reducer};
 use tmail::backend::{
     MailBackend, PathOpener, RequestContext, SystemOpener, himalaya::HimalayaCliBackend,
 };
+use tmail::discovery::{EmailConfigDiscoverer, FakeDiscoverer, PimDiscoverer};
 use tmail::input::mouse;
 use tmail::runtime::tasks::OperationManager;
 use tmail::runtime::{events, logging, terminal};
 use tmail::ui::dates::format_clock;
 use tmail::ui::{RenderContext, Theme};
 
+/// What the command line asked for. Flags may appear in any order:
+/// `--configure [path]` starts the wizard regardless of config state
+/// (ADR 0003 §3.1), `--theme <name>` overrides the configured palette,
+/// and the positional argument is the config path. Any other `-`
+/// argument is a hard usage error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Invocation {
+    configure: bool,
+    config: Option<PathBuf>,
+    theme: Option<String>,
+}
+
+const USAGE: &str = "usage: tmail [--configure [path]] [--theme <name>] [config.toml]";
+
+fn parse_invocation() -> Result<Invocation, String> {
+    parse_args(std::env::args().skip(1))
+}
+
+fn parse_args<I>(args: I) -> Result<Invocation, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut invocation = Invocation {
+        configure: false,
+        config: None,
+        theme: None,
+    };
+    let mut args = args.into_iter().peekable();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--configure" => {
+                invocation.configure = true;
+                // The optional path value: only when it does not look
+                // like the next flag (which stays for the loop to
+                // classify).
+                if let Some(next) = args.peek()
+                    && !next.starts_with('-')
+                {
+                    let path = args.next().expect("value peeked above");
+                    set_positional(&mut invocation, PathBuf::from(path))?;
+                }
+            }
+            "--theme" => {
+                let name = match args.peek() {
+                    Some(next) if !next.starts_with('-') => {
+                        args.next().expect("value peeked above")
+                    }
+                    _ => return Err(String::from("--theme requires a theme name")),
+                };
+                if invocation.theme.is_some() {
+                    return Err(String::from("--theme given more than once"));
+                }
+                invocation.theme = Some(name);
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown flag {other}"));
+            }
+            other => {
+                set_positional(&mut invocation, PathBuf::from(other))?;
+            }
+        }
+    }
+    Ok(invocation)
+}
+
+/// The single positional argument is the config path; a second one is a
+/// usage error.
+fn set_positional(invocation: &mut Invocation, path: PathBuf) -> Result<(), String> {
+    if invocation.config.is_some() {
+        return Err(String::from("too many arguments"));
+    }
+    invocation.config = Some(path);
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let _logging = logging::init();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "tmail starting");
+
+    let invocation = match parse_invocation() {
+        Ok(invocation) => invocation,
+        Err(message) => {
+            eprintln!("tmail: {message}\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -39,8 +129,8 @@ fn main() -> ExitCode {
         }
     };
 
-    match runtime.block_on(run()) {
-        Ok(()) => ExitCode::SUCCESS,
+    match runtime.block_on(run(invocation)) {
+        Ok(code) => code,
         Err(err) => {
             tracing::error!(%err, "fatal error");
             // Terminal restoration happens in TerminalGuard's Drop; this
@@ -51,16 +141,42 @@ fn main() -> ExitCode {
     }
 }
 
-async fn run() -> anyhow::Result<()> {
-    // Optional explicit config path: `tmail [path/to/config.toml]`. Without
-    // one, `TMAIL_CONFIG` or the well-known himalaya locations are used.
-    let cli_config = std::env::args().nth(1).map(std::path::PathBuf::from);
+/// One session's exit reason (ADR 0003 §3.2 W7): after the wizard saves a
+/// first-run account, the app re-runs configuration and enters the normal
+/// mailbox UI without restarting the process.
+enum SessionOutcome {
+    Exit(ExitCode),
+    /// The wizard completed (first-run): reload the config and start the
+    /// normal UI.
+    Restart,
+}
+
+async fn run(invocation: Invocation) -> anyhow::Result<ExitCode> {
+    loop {
+        match session(&invocation).await? {
+            SessionOutcome::Exit(code) => return Ok(code),
+            SessionOutcome::Restart => continue,
+        }
+    }
+}
+
+async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
+    let cli_config = invocation.config.clone();
+    let manual_wizard = invocation.configure;
+    let requested_theme = invocation.theme.clone();
     let (config, issues) = tmail::config::Config::load_with_issues(cli_config.as_deref());
     // Startup validation reports every detected problem together, before
     // the TUI starts: a broken config is fixed in the file, not navigated
     // in the app (plan §17/§19 Phase 10). Details are actionable and
-    // sanitized; secrets never reach these messages.
-    let mut issues: Vec<String> = issues.iter().cloned().collect();
+    // sanitized; secrets never reach these messages. `--configure` starts
+    // the wizard regardless of config state (ADR 0003 §3.1) — config
+    // issues are the wizard's job there — but the himalaya check stays:
+    // the credential test cannot run without it.
+    let mut issues: Vec<String> = if manual_wizard {
+        Vec::new()
+    } else {
+        issues.iter().cloned().collect()
+    };
     if !tmail::backend::himalaya::executable_available("himalaya") {
         issues.push(String::from(
             "the himalaya executable was not found on PATH; install it or point PATH at it",
@@ -71,7 +187,9 @@ async fn run() -> anyhow::Result<()> {
     // describe adjustments — the app still starts (configurable
     // keybindings; syntax problems come back fatal, like theme tokens).
     let built_keymap = tmail::input::keymap::KeyMap::build(&config.keybindings);
-    issues.extend(built_keymap.errors);
+    if !manual_wizard {
+        issues.extend(built_keymap.errors);
+    }
     if !issues.is_empty() {
         let mut message = String::from("configuration problems (fix the file, then start again):");
         for issue in &issues {
@@ -91,9 +209,30 @@ async fn run() -> anyhow::Result<()> {
         page_size = config.page_size,
         "configuration loaded"
     );
+
+    // First-run trigger (ADR 0003 §3.1): the resolved config yields no
+    // drivable account — no file found anywhere, or a file whose
+    // `[accounts]` table is missing or empty. A file that exists with
+    // accounts is never hijacked, even the multi-account-without-default
+    // case (startup issues explain it, as today).
+    let wizard_needed = manual_wizard
+        || match &config.path {
+            None => true,
+            Some(path) => !tmail::config::accounts_present(path),
+        };
+
     let backend: Arc<dyn MailBackend> = Arc::new(HimalayaCliBackend::from_config(&config));
     // Platform open-with adapter for saved attachments (plan §15).
     let opener: Arc<dyn PathOpener> = Arc::new(SystemOpener);
+    // The email settings discoverer (ADR 0003 §3.3): injected like the
+    // backend and opener. `TMAIL_FAKE_DISCOVERY=1` selects the canned
+    // fake — tests and smoke runs never touch the network.
+    let discoverer: Arc<dyn EmailConfigDiscoverer> =
+        if std::env::var_os("TMAIL_FAKE_DISCOVERY").is_some() {
+            Arc::new(FakeDiscoverer)
+        } else {
+            Arc::new(PimDiscoverer)
+        };
 
     // Mouse capture is opt-in (`[tmail].mouse`, plan §10): with capture off,
     // terminal text selection keeps its native behavior and no mouse
@@ -163,22 +302,78 @@ async fn run() -> anyhow::Result<()> {
     }
     state.themes = themes;
     state.theme_index = theme_index;
+    // `--theme <name>` overrides the configured selection (feedback:
+    // `tmail --configure --theme light`). Validated against the built
+    // list, so `[tmail.themes.<name>]` tables are selectable too; an
+    // unknown name is a startup error naming the alternatives.
+    if let Some(name) = &requested_theme {
+        state.theme_index = state
+            .themes
+            .iter()
+            .position(|(candidate, _)| candidate == name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown theme {name:?}; available: {}",
+                    state
+                        .themes
+                        .iter()
+                        .map(|(candidate, _)| candidate.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+    }
 
     // Backend results re-enter the reducer as actions; the manager spawns
     // one cancellable task per effect.
     let (result_tx, mut result_rx) = mpsc::unbounded_channel();
-    let manager = OperationManager::new(Arc::clone(&backend), opener, result_tx);
+    let manager = OperationManager::new(
+        Arc::clone(&backend),
+        opener,
+        discoverer,
+        String::from("himalaya"),
+        result_tx,
+    );
     // The capture mode the terminal is currently in; the reducer owns the
     // intent as `state.mouse_capture`, and the runtime applies any change.
     let mut capture_applied = config.mouse;
 
-    // Startup work flows through the same reducer path as everything else:
-    // with no mailboxes loaded yet, Refresh starts the mailbox listing;
-    // LoadDrafts restores any crash-safe draft from the journal (plan §14).
-    let effects = reducer::reduce(&mut state, &Action::Refresh);
-    handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
-    let effects = reducer::reduce(&mut state, &Action::LoadDrafts);
-    handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
+    if wizard_needed {
+        // The wizard replaces the first `Refresh`/`LoadDrafts` warmup
+        // (ADR 0003 §3.1): while its route is active the reducer
+        // suppresses mailbox warmup and swallows mailbox keys. The file
+        // snapshots (existing account names, default holder, permissions)
+        // happen here — I/O stays out of the reducer.
+        let save_path = tmail::config::default_save_path(cli_config.as_deref());
+        let (existing_names, default_name, shared_readable) = save_path
+            .as_deref()
+            .map(|path| {
+                (
+                    tmail::config::write::existing_account_names(path),
+                    tmail::config::write::file_default_account(path),
+                    tmail::config::write::file_shared_readable(path),
+                )
+            })
+            .unwrap_or_else(|| (Vec::new(), None, false));
+        state.wizard = Some(tmail::app::wizard::WizardState::new(
+            manual_wizard,
+            save_path,
+            existing_names,
+            default_name,
+            shared_readable,
+        ));
+        state.routes.push(tmail::app::route::Route::Wizard);
+        state.focus = tmail::app::Focus::Wizard;
+    } else {
+        // Startup work flows through the same reducer path as everything
+        // else: with no mailboxes loaded yet, Refresh starts the mailbox
+        // listing; LoadDrafts restores any crash-safe draft from the
+        // journal (plan §14).
+        let effects = reducer::reduce(&mut state, &Action::Refresh);
+        handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
+        let effects = reducer::reduce(&mut state, &Action::LoadDrafts);
+        handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
+    }
 
     loop {
         let now = Local::now().fixed_offset();
@@ -258,9 +453,28 @@ async fn run() -> anyhow::Result<()> {
             },
         }
     }
-    Ok(())
-}
 
+    // Wizard exit semantics (ADR 0003 §3.1): `--configure` completion
+    // prints the saved path and exits 0; an `Esc`-cancel exits 1 with
+    // "configuration not changed". A first-run completion restarts into
+    // the normal mailbox UI without leaving the process.
+    if let Some(wizard) = &state.wizard {
+        if wizard.completed {
+            if wizard.manual {
+                if let Some(path) = wizard.saved_path.clone().or_else(|| config.path.clone()) {
+                    println!("{}", path.display());
+                }
+                return Ok(SessionOutcome::Exit(ExitCode::SUCCESS));
+            }
+            return Ok(SessionOutcome::Restart);
+        }
+        if wizard.cancelled {
+            eprintln!("tmail: configuration not changed");
+            return Ok(SessionOutcome::Exit(ExitCode::from(1)));
+        }
+    }
+    Ok(SessionOutcome::Exit(ExitCode::SUCCESS))
+}
 /// Launch the effects a state transition produced: each one gets its
 /// cancellation token from the registry, so a later `Esc` can cancel
 /// exactly that work. The `EditExternally` effect never reaches the
@@ -360,5 +574,86 @@ fn sync_mouse_capture(state: &AppState, applied: &mut bool) {
             mouse_capture = state.mouse_capture,
             "mouse capture switched"
         );
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    fn invocation(values: &[&str]) -> Invocation {
+        parse_args(args(values)).expect("parses")
+    }
+
+    #[test]
+    fn no_arguments_is_a_plain_run() {
+        let invocation = invocation(&[]);
+        assert!(!invocation.configure);
+        assert_eq!(invocation.config, None);
+        assert_eq!(invocation.theme, None);
+    }
+
+    #[test]
+    fn positional_config_path() {
+        let invocation = invocation(&["path/to/config.toml"]);
+        assert!(!invocation.configure);
+        assert_eq!(
+            invocation.config,
+            Some(PathBuf::from("path/to/config.toml"))
+        );
+    }
+
+    #[test]
+    fn configure_without_and_with_path() {
+        let bare = invocation(&["--configure"]);
+        assert!(bare.configure);
+        assert_eq!(bare.config, None);
+
+        let with_path = invocation(&["--configure", "cfg.toml"]);
+        assert!(with_path.configure);
+        assert_eq!(with_path.config, Some(PathBuf::from("cfg.toml")));
+    }
+
+    #[test]
+    fn theme_flag_accepts_a_name_in_any_order() {
+        let after = invocation(&["--configure", "--theme", "light"]);
+        assert!(after.configure);
+        assert_eq!(after.theme.as_deref(), Some("light"));
+        assert_eq!(after.config, None, "--theme's value is not a config path");
+
+        let before = invocation(&["--theme", "light", "--configure"]);
+        assert!(before.configure);
+        assert_eq!(before.theme.as_deref(), Some("light"));
+
+        let with_path = invocation(&["--configure", "cfg.toml", "--theme", "light"]);
+        assert_eq!(with_path.config, Some(PathBuf::from("cfg.toml")));
+        assert_eq!(with_path.theme.as_deref(), Some("light"));
+
+        let plain = invocation(&["--theme", "default"]);
+        assert!(!plain.configure);
+        assert_eq!(plain.theme.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn unknown_flags_are_usage_errors() {
+        assert!(parse_args(args(&["--bogus"])).is_err());
+        assert!(parse_args(args(&["--configure", "--bogus"])).is_err());
+    }
+
+    #[test]
+    fn theme_without_a_value_is_a_usage_error() {
+        assert!(parse_args(args(&["--theme"])).is_err());
+        assert!(parse_args(args(&["--theme", "--configure"])).is_err());
+    }
+
+    #[test]
+    fn repeated_flags_and_second_positional_are_usage_errors() {
+        assert!(parse_args(args(&["--theme", "light", "--theme", "dark"])).is_err());
+        assert!(parse_args(args(&["a.toml", "b.toml"])).is_err());
+        assert!(parse_args(args(&["--configure", "a.toml", "b.toml"])).is_err());
     }
 }

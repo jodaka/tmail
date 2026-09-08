@@ -10,6 +10,7 @@ pub mod reducer;
 pub mod route;
 pub mod sanitize;
 pub mod state;
+pub mod wizard;
 
 pub use action::Action;
 pub use composer::{ComposerField, ComposerState};

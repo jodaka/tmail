@@ -5,6 +5,7 @@
 pub mod app;
 pub mod backend;
 pub mod config;
+pub mod discovery;
 pub mod domain;
 pub mod input;
 pub mod runtime;

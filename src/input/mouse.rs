@@ -116,7 +116,9 @@ fn wheel(state: &AppState, delta: i64) -> Option<Action> {
         | Focus::Composer
         | Focus::Dialog
         | Focus::ThemePicker
-        | Focus::SelectAllToggle => return None,
+        | Focus::SelectAllToggle
+        // The wizard has no scrollable region yet (keyboard-first, ADR 0003).
+        | Focus::Wizard => return None,
     };
     Some(action)
 }

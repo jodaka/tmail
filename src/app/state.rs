@@ -199,6 +199,11 @@ pub struct AppState {
     pub quit_requested: bool,
     /// Tick counter for animation state (spinner lands in Phase 3).
     pub ticks: u64,
+    /// The account configuration wizard (ADR 0003): `Some` while the
+    /// first-run/manual wizard route is active. The reducer intercepts
+    /// every action while this is set, and the renderer swaps the whole
+    /// shell for the wizard screens.
+    pub wizard: Option<crate::app::wizard::WizardState>,
 }
 
 impl AppState {
@@ -252,6 +257,7 @@ impl AppState {
             },
             quit_requested: false,
             ticks: 0,
+            wizard: None,
         }
     }
 

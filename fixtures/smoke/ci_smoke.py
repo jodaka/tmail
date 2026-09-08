@@ -31,6 +31,7 @@ import struct
 import subprocess
 import sys
 import termios
+import tempfile
 import time
 
 ROWS, COLS = 40, 152
@@ -236,6 +237,135 @@ def step_opener_environment():
     print(f"   {program} found at {found} OK", flush=True)
 
 
+def wizard_type(fd, text):
+    """Type text into the wizard one key at a time."""
+    for ch in text:
+        os.write(fd, ch.encode())
+    time.sleep(0.2)
+
+
+def drive_wizard_to_save(fd, already_on_email_screen=False):
+    """Drive the wizard from the email screen to the saved screen.
+
+    Uses TMAIL_FAKE_DISCOVERY=1 (Gmail candidate) and the fake himalaya
+    for the credential test, so every step completes instantly. The
+    needles are screen-unique strings that survive ratatui's diff-based
+    redraw (unchanged cells are never retransmitted, so shared header
+    prefixes must not be waited on).
+    """
+    if not already_on_email_screen:
+        wait_for(fd, "Account setup — email address")
+    print("   email screen rendered OK", flush=True)
+    wizard_type(fd, "smoke@gmail.com")
+    os.write(fd, b"\r")  # Enter: detect settings
+    wait_for(fd, "imaps://imap.gmail.com:993")
+    print("   discovery candidate rendered OK", flush=True)
+    os.write(fd, b"\r")  # Enter: accept → identity
+    wait_for(fd, "Name")
+    print("   identity screen rendered OK", flush=True)
+    os.write(fd, b"\r")  # Enter: continue → credentials
+    wait_for(fd, "Password")
+    print("   credentials screen rendered OK", flush=True)
+    os.write(fd, b"\t\t")  # Tab, Tab: username → storage → password field
+    os.write(fd, b"p")  # masked
+    time.sleep(0.3)
+    os.write(fd, b"\r")  # Enter: test connection
+    wait_for(fd, "[accounts.gmail]")
+    print("   credential test passed, confirm screen rendered OK", flush=True)
+    os.write(fd, b"\r")  # Enter: save
+    wait_for(fd, "Account saved to")
+
+
+def step_wizard_manual(binpath, home):
+    print(
+        "== wizard (--configure): fake discovery → test → save → exit 0 ==", flush=True
+    )
+    pid, fd = spawn(
+        [binpath, "--configure"],
+        {
+            "HOME": home,
+            "TMAIL_FAKE_DISCOVERY": "1",
+            "EDITOR": os.path.join(fake_dir(), "true-like"),
+            "PATH": os.environ["PATH"],
+        },
+    )
+    try:
+        drive_wizard_to_save(fd)
+        os.write(fd, b"\r")  # Enter: finish (manual mode exits)
+        status, out = wait_exit(pid, fd)
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (
+            f"exit status {status!r}:\n{strip_ansi(out)[-2000:]}"
+        )
+        config = os.path.join(home, ".config/himalaya/config.toml")
+        assert config in strip_ansi(out), (
+            f"the saved path was not printed to stdout:\n{strip_ansi(out)[-2000:]}"
+        )
+        text = open(config).read()
+        assert "[accounts.gmail]" in text, f"account block saved:\n{text}"
+        assert 'imap.server = "imaps://imap.gmail.com:993"' in text, text
+        assert 'imap.sasl.plain.password.raw = "p"' in text, text
+        assert 'mailbox.alias.inbox = "INBOX"' in text, text
+        mode = os.stat(config).st_mode & 0o777
+        assert mode == 0o600, f"fresh config must be 0600, got {oct(mode)}"
+        print(
+            "   exit 0 + saved path on stdout + 0600 config with account OK", flush=True
+        )
+    finally:
+        try:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+        except (ChildProcessError, ProcessLookupError):
+            pass
+        os.close(fd)
+
+
+def step_wizard_first_run(binpath, home):
+    print("== wizard (first run): auto-trigger → save → mailbox UI ==", flush=True)
+    pid, fd = spawn(
+        [binpath],
+        {
+            "HOME": home,
+            "TMAIL_FAKE_DISCOVERY": "1",
+            "EDITOR": os.path.join(fake_dir(), "true-like"),
+            "PATH": os.environ["PATH"],
+        },
+    )
+    try:
+        # No config file exists under the temp HOME: the wizard starts by
+        # itself instead of showing the fatal configuration screen.
+        wait_for(fd, "Account setup — email address")
+        print("   first-run auto trigger OK", flush=True)
+        drive_wizard_to_save(fd, already_on_email_screen=True)
+        os.write(fd, b"\r")  # Enter: finish (first-run continues into the app)
+        # The session restarts into the normal mailbox UI: the fake
+        # himalaya serves the canned inbox with the "Welcome" message.
+        wait_for(fd, "Welcome")
+        print("   mailbox UI rendered after the wizard OK", flush=True)
+        os.write(fd, b"\x1b")  # Esc: quit
+        status, out = wait_exit(pid, fd)
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (
+            f"exit status {status!r}"
+        )
+        assert "\x1b[?1049l" in out, "terminal not restored after quit"
+        config = os.path.join(home, ".config/himalaya/config.toml")
+        text = open(config).read()
+        assert "[accounts.gmail]" in text, text
+        mode = os.stat(config).st_mode & 0o777
+        assert mode == 0o600, f"fresh config must be 0600, got {oct(mode)}"
+        print("   exit 0 + 0600 config + clean quit OK", flush=True)
+    finally:
+        try:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+        except (ChildProcessError, ProcessLookupError):
+            pass
+        os.close(fd)
+
+
+def fake_dir():
+    return os.path.join(ROOT, "target", "smoke-bin")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bin", required=True, help="path to the tmail binary")
@@ -283,6 +413,14 @@ def main():
         step_editor_validation(binpath, config)
         step_external_editor(binpath, config, "fake_editor.sh", expect_import=True)
         step_external_editor(binpath, config, "failing_editor.sh", expect_import=False)
+        # Wizard flows (ADR 0003 W7): isolated temp HOMEs so the save
+        # target resolves to ~/.config/himalaya/config.toml under them.
+        wizard_home_manual = tempfile.mkdtemp(prefix="tmail-wizard-home-")
+        wizard_home_first = tempfile.mkdtemp(prefix="tmail-wizard-home-")
+        step_wizard_manual(binpath, wizard_home_manual)
+        step_wizard_first_run(binpath, wizard_home_first)
+        shutil.rmtree(wizard_home_manual, ignore_errors=True)
+        shutil.rmtree(wizard_home_first, ignore_errors=True)
     finally:
         os.environ["PATH"] = old_path
     print("SMOKE OK", flush=True)

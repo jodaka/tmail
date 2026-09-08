@@ -107,6 +107,25 @@ pub enum OperationKind {
     /// only, no shell) on a secure temporary file, and waits for exit.
     /// Boxed strings keep the variant small.
     EditExternally { program: Vec<String>, body: String },
+    /// Discover IMAP/SMTP settings for an email address with the
+    /// io-pim-discovery adapter (ADR 0003 §3.3). Runs on a worker thread,
+    /// bounded by the adapter's deadline; POP/JMAP results never appear.
+    DiscoverConfig { email: String },
+    /// Validate the wizard's draft account with a real `himalaya mailbox
+    /// list` against a temporary 0600 config file (ADR 0003 §3.4). The
+    /// real config is untouched; the temp file is deleted in all
+    /// outcomes. Boxed: the draft carries the credentials.
+    TestAccount {
+        draft: Box<crate::app::wizard::DraftAccountConfig>,
+    },
+    /// Merge the confirmed draft account into the resolved config file
+    /// (ADR 0003 §3.6): format-preserving toml_edit edit, fresh files
+    /// created 0600. Runs in the manager (file I/O) so the reducer stays
+    /// I/O-free.
+    SaveAccount {
+        path: std::path::PathBuf,
+        draft: Box<crate::app::wizard::DraftAccountConfig>,
+    },
 }
 
 /// Why a draft is being removed (Phase 7.6): it selects the failure UX.
@@ -144,6 +163,9 @@ impl OperationKind {
             OperationKind::SaveAttachment { .. } => "Saving attachment",
             OperationKind::OpenPath { .. } => "Opening attachment",
             OperationKind::EditExternally { .. } => "Editing externally",
+            OperationKind::DiscoverConfig { .. } => "Detecting settings",
+            OperationKind::TestAccount { .. } => "Testing account",
+            OperationKind::SaveAccount { .. } => "Saving account",
         }
     }
 
@@ -201,6 +223,16 @@ impl OperationKind {
                 OperationKind::ReadAttachment { path: newer },
                 OperationKind::ReadAttachment { path: older },
             ) => newer == older,
+            // Wizard work supersedes its own kind: a re-run discovery (`r`)
+            // or a retried credential test replaces the still-running
+            // previous attempt (ADR 0003 §3.2).
+            (
+                OperationKind::DiscoverConfig { email: newer },
+                OperationKind::DiscoverConfig { email: older },
+            ) => newer == older,
+            (OperationKind::TestAccount { .. }, OperationKind::TestAccount { .. }) => true,
+            // Saves never supersede: a confirmed save must report exactly
+            // what it wrote.
             // Sends never supersede anything and are never superseded:
             // every delivery attempt must run to its classified outcome.
             _ => false,
@@ -264,6 +296,22 @@ pub enum OperationOutcome {
     /// actually written — possibly a collision-renamed name, so the UI
     /// always reports this path, never the requested one.
     SavedPath(std::path::PathBuf),
+    /// Ranked discovery candidates for the wizard's email address
+    /// (ADR 0003 §3.3); empty means nothing was found in time.
+    Discovered(Vec<crate::discovery::DiscoveredService>),
+    /// The wizard's credential test passed (ADR 0003 §3.4): the mailbox
+    /// names the draft account can list.
+    TestAccountCompleted {
+        mailboxes: Vec<String>,
+    },
+    /// The wizard account was merged into the config file (ADR 0003
+    /// §3.6): the file path, whether it was freshly created, and the
+    /// permissions warning when the file was group/world-readable.
+    AccountSaved {
+        path: std::path::PathBuf,
+        created: bool,
+        permissions_warning: Option<String>,
+    },
 }
 
 /// A failure ready for the Retry/Dismiss modal (plan §12). Built by the

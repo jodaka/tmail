@@ -44,6 +44,10 @@ pub enum Route {
     /// `AppState.composer`, so leaving pops the route but preserves the
     /// draft for reopening.
     Composer,
+    /// The account configuration wizard (ADR 0003): a full-screen route
+    /// owned by `AppState.wizard`. Background refreshes must not touch a
+    /// mailbox list while it is active — there is no account yet.
+    Wizard,
 }
 
 impl Route {
@@ -55,7 +59,9 @@ impl Route {
             Route::Mailbox(r) => Some(&r.mailbox_id),
             Route::Search(r) => Some(&r.mailbox_id),
             Route::Message(r) => Some(&r.mailbox_id),
-            Route::Composer => None,
+            // Like the composer: background refreshes must not touch a
+            // list while the wizard runs (ADR 0003 §3.1).
+            Route::Composer | Route::Wizard => None,
         }
     }
 }

@@ -542,3 +542,29 @@ fn legacy_ctrl_chords_match_the_keys_the_user_presses() {
         Some(Action::SearchEdit(SearchEdit::Char(']')))
     );
 }
+
+#[test]
+fn wizard_focus_maps_space_to_the_storage_toggle_and_printables_to_edits() {
+    use crate::app::action::DialogEdit;
+    use crate::app::wizard::WizardAction;
+
+    let f = Focus::Wizard;
+    assert_eq!(
+        to_action(plain(KeyCode::Char(' ')), f),
+        Some(Action::Wizard(WizardAction::ToggleStorageMode)),
+        "space is the checkbox convention on the storage row"
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Char('p')), f),
+        Some(Action::Wizard(WizardAction::Edit(DialogEdit::Char('p'))))
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Enter), f),
+        Some(Action::Activate),
+        "structural keys stay rebindable through the keymap"
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Esc), f),
+        Some(Action::BackOrCancel)
+    );
+}

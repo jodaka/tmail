@@ -31,6 +31,10 @@ pub enum Focus {
     ThemePicker,
     /// The Retry/Dismiss error modal is open; it intercepts all input.
     ErrorModal,
+    /// The account configuration wizard (ADR 0003) owns the whole screen:
+    /// it manages its own field cycle inside `WizardState`, so Tab never
+    /// leaves it and single-letter shortcuts never fire.
+    Wizard,
 }
 
 /// Tab order: next/previous focus cycles through this list (plan §10).
@@ -45,7 +49,7 @@ impl Focus {
     pub fn next(self) -> Self {
         match self {
             // The modal foci never cycle; the modal handles Tab itself.
-            Focus::ErrorModal | Focus::Dialog | Focus::ThemePicker => self,
+            Focus::ErrorModal | Focus::Dialog | Focus::ThemePicker | Focus::Wizard => self,
             // The reader screen has a single focusable area (the scrolling
             // document); Tab is inert there in v1 (plan §10).
             Focus::Reader => self,
@@ -64,7 +68,7 @@ impl Focus {
 
     pub fn previous(self) -> Self {
         match self {
-            Focus::ErrorModal | Focus::Dialog | Focus::ThemePicker => self,
+            Focus::ErrorModal | Focus::Dialog | Focus::ThemePicker | Focus::Wizard => self,
             Focus::Reader => self,
             Focus::Composer => self,
             _ => {
@@ -88,6 +92,7 @@ impl Focus {
                 | Focus::Dialog
                 | Focus::ThemePicker
                 | Focus::Composer
+                | Focus::Wizard
         )
     }
 }
@@ -104,6 +109,7 @@ impl fmt::Display for Focus {
             Focus::Dialog => write!(f, "dialog"),
             Focus::ThemePicker => write!(f, "themes"),
             Focus::ErrorModal => write!(f, "modal"),
+            Focus::Wizard => write!(f, "wizard"),
         }
     }
 }
@@ -144,6 +150,13 @@ mod tests {
         assert!(!Focus::ThemePicker.accepts_shortcuts());
         assert!(Focus::Sidebar.accepts_shortcuts());
         assert!(Focus::MessageList.accepts_shortcuts());
+    }
+
+    #[test]
+    fn wizard_focus_is_self_cycle_and_gates_shortcuts() {
+        assert_eq!(Focus::Wizard.next(), Focus::Wizard);
+        assert_eq!(Focus::Wizard.previous(), Focus::Wizard);
+        assert!(!Focus::Wizard.accepts_shortcuts());
     }
 
     #[test]

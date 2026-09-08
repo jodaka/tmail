@@ -1,0 +1,50 @@
+[
+  {
+    "service": "imap",
+    "endpoint": { "tcp": { "host": "imap.gmail.com", "port": 993, "security": "tls" } },
+    "username": "user@gmail.com",
+    "auth": [
+      {
+        "oauthAuthorizationCodeGrant": {
+          "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+          "token_endpoint": "https://oauth2.googleapis.com/token",
+          "scope": "https://mail.google.com/"
+        }
+      },
+      "password"
+    ],
+    "source": { "provider": "google" }
+  },
+  {
+    "service": "pop3",
+    "endpoint": { "tcp": { "host": "pop.gmail.com", "port": 995, "security": "tls" } },
+    "username": "user@gmail.com",
+    "auth": [
+      {
+        "oauthAuthorizationCodeGrant": {
+          "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+          "token_endpoint": "https://oauth2.googleapis.com/token",
+          "scope": "https://mail.google.com/"
+        }
+      },
+      "password"
+    ],
+    "source": { "provider": "google" }
+  },
+  {
+    "service": "smtp",
+    "endpoint": { "tcp": { "host": "smtp.gmail.com", "port": 465, "security": "tls" } },
+    "username": "user@gmail.com",
+    "auth": [
+      {
+        "oauthAuthorizationCodeGrant": {
+          "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+          "token_endpoint": "https://oauth2.googleapis.com/token",
+          "scope": "https://mail.google.com/"
+        }
+      },
+      "password"
+    ],
+    "source": { "provider": "google" }
+  }
+]

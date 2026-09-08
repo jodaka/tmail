@@ -121,6 +121,10 @@ pub enum Action {
     ComposerEdit(ComposerEdit),
     /// Modal text-field editing (Phase 8: attachment path dialog).
     DialogEdit(DialogEdit),
+    /// Account configuration wizard input (ADR 0003): step submissions,
+    /// list moves, and step-backs. The wizard intercepts every other
+    /// action while active, so mailbox shortcuts cannot leak into it.
+    Wizard(crate::app::wizard::WizardAction),
     /// Restore drafts from the crash-safe journal (startup, Phase 6).
     LoadDrafts,
     Compose,

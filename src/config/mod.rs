@@ -17,6 +17,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+pub mod write;
+
 use crate::app::sanitize::sanitize;
 use crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS;
 
@@ -319,6 +321,31 @@ fn resolve_path(cli_path: Option<&Path>) -> Option<PathBuf> {
         return Some(PathBuf::from(path));
     }
     default_candidates().into_iter().find(|p| p.exists())
+}
+
+/// The path the configuration wizard saves to (ADR 0003 §3.1): the same
+/// resolution order as [`resolve_path`], with one addition — when nothing
+/// resolves, the first well-known candidate is returned even though it does
+/// not exist yet (the wizard creates it with mode 0600).
+pub fn default_save_path(cli_path: Option<&Path>) -> Option<PathBuf> {
+    resolve_path(cli_path).or_else(|| default_candidates().into_iter().next())
+}
+
+/// Whether the config file at `path` holds at least one account
+/// (ADR 0003 §3.1: the first-run wizard triggers when no file was found,
+/// or when the file's `[accounts]` table is missing or empty). A missing
+/// or unreadable file reports `false`.
+pub fn accounts_present(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(doc) = toml::from_str::<toml::Value>(&text) else {
+        return false;
+    };
+    doc.get("accounts")
+        .and_then(toml::Value::as_table)
+        .map(|table| !table.is_empty())
+        .unwrap_or(false)
 }
 
 /// Well-known himalaya config locations, in preference order. Only paths

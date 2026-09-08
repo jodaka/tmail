@@ -1215,3 +1215,214 @@ fn attachment_save_fails_safely_on_bad_output() {
         matches!(err, BackendError::Command { ref detail, .. } if detail.contains("no such attachment"))
     );
 }
+
+// ── Wizard credential test (ADR 0003 §3.4/W7) ────────────────────────────
+
+use tmail::app::effect::Effect;
+use tmail::app::operation::{OperationKind, OperationOutcome};
+use tmail::app::wizard::DraftAccountConfig;
+use tmail::config::write::{DraftAccount, SecretStorage};
+use tmail::runtime::tasks::OperationManager;
+
+/// The draft the wizard carries into the credential test.
+fn wizard_draft(name: &str) -> DraftAccountConfig {
+    DraftAccount {
+        name: name.to_string(),
+        email: String::from("user@gmail.com"),
+        display_name: Some(String::from("Test User")),
+        imap_server: String::from("imaps://imap.gmail.com:993"),
+        imap_starttls: false,
+        smtp_server: String::from("smtps://smtp.gmail.com:465"),
+        smtp_starttls: false,
+        username: String::from("user@gmail.com"),
+        secret: SecretStorage::Raw(String::from("app-password")),
+        aliases: Vec::new(),
+    }
+}
+
+/// Builds the manager the main loop uses, pointed at the fake himalaya,
+/// runs the TestAccount effect to completion, and returns its outcome.
+fn run_test_account(
+    fake: &FakeHimalaya,
+    draft: DraftAccountConfig,
+    cancellation: CancellationToken,
+) -> Result<OperationOutcome, Box<tmail::app::operation::OperationFailure>> {
+    block(async move {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let manager = OperationManager::new(
+            std::sync::Arc::new(backend(fake, Some("probe"))),
+            std::sync::Arc::new(tmail::backend::SystemOpener),
+            std::sync::Arc::new(tmail::discovery::FakeDiscoverer),
+            fake.program().display().to_string(),
+            tx,
+        );
+        let effect = Effect {
+            id: OperationId(77),
+            kind: OperationKind::TestAccount {
+                draft: Box::new(draft),
+            },
+        };
+        let ctx = RequestContext {
+            operation: effect.id,
+            cancellation,
+        };
+        manager.launch(effect, ctx);
+        let result = rx.recv().await.expect("result for the launched effect");
+        result.outcome.map_err(Box::new)
+    })
+}
+
+#[test]
+fn wizard_test_account_runs_the_real_plumbing_and_cleans_up() {
+    let fake = FakeHimalaya::spawn("ok", "ok");
+    let outcome = run_test_account(&fake, wizard_draft("gmail"), CancellationToken::new());
+
+    match outcome.expect("the test succeeds") {
+        OperationOutcome::TestAccountCompleted { mailboxes } => {
+            assert_eq!(
+                mailboxes,
+                vec![
+                    String::from("INBOX"),
+                    String::from("Archive"),
+                    String::from("Sent"),
+                ],
+                "the canned listing from the fake himalaya"
+            );
+        }
+        other => panic!("expected a TestAccountCompleted payload, got {other:?}"),
+    }
+
+    // The invocation used a temporary 0600 config (not the fake's stub
+    // config), the draft account name, and the plain mailbox list argv.
+    let invocations = fake.argv();
+    assert_eq!(invocations.len(), 1, "exactly one himalaya run");
+    let argv = &invocations[0];
+    assert_eq!(argv[0], "-c");
+    let temp_config = PathBuf::from(&argv[1]);
+    assert!(
+        temp_config
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+            .starts_with("tmail-wizard-"),
+        "the test runs against a tmail-wizard temp config: {temp_config:?}"
+    );
+    assert_eq!(
+        &argv[2..7],
+        &[
+            "-a".to_string(),
+            "gmail".to_string(),
+            "mailbox".to_string(),
+            "list".to_string(),
+            "--json".to_string()
+        ]
+    );
+    assert!(
+        !temp_config.exists(),
+        "the temp config is deleted after the run (no credential left behind)"
+    );
+}
+
+#[test]
+fn wizard_test_account_failure_is_a_sanitized_structural_failure() {
+    let fake = FakeHimalaya::spawn("error-json", "ok");
+    let outcome = run_test_account(&fake, wizard_draft("gmail"), CancellationToken::new());
+
+    let failure = outcome.expect_err("the failing fake fails the test");
+    assert_eq!(failure.code, Some(1));
+    assert!(
+        failure.detail.contains("account not found"),
+        "the failure detail surfaces himalaya's error: {failure:?}"
+    );
+    assert!(
+        !failure.detail.contains("app-password"),
+        "no secret ever appears in the failure detail"
+    );
+}
+
+#[test]
+fn wizard_test_account_cancellation_suppresses_the_result() {
+    let fake = FakeHimalaya::spawn("ok", "ok");
+    let token = CancellationToken::new();
+    let draft = wizard_draft("gmail");
+
+    block(async move {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let manager = OperationManager::new(
+            std::sync::Arc::new(backend(&fake, Some("probe"))),
+            std::sync::Arc::new(tmail::backend::SystemOpener),
+            std::sync::Arc::new(tmail::discovery::FakeDiscoverer),
+            fake.program().display().to_string(),
+            tx,
+        );
+        // Cancel before launch: the run selects on the token and reports
+        // Cancelled, which the manager suppresses — no result, no state
+        // mutation (plan §11).
+        token.cancel();
+        let effect = Effect {
+            id: OperationId(78),
+            kind: OperationKind::TestAccount {
+                draft: Box::new(draft),
+            },
+        };
+        let ctx = RequestContext {
+            operation: effect.id,
+            cancellation: token,
+        };
+        manager.launch(effect, ctx);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await;
+        assert!(
+            result.is_err() || result.expect("recv").is_none(),
+            "a cancelled credential test must never produce a result"
+        );
+    });
+}
+
+#[test]
+fn wizard_save_account_operation_reports_the_saved_file() {
+    let fake = FakeHimalaya::spawn("ok", "ok");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let draft = wizard_draft("gmail");
+
+    block(async move {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let manager = OperationManager::new(
+            std::sync::Arc::new(backend(&fake, Some("probe"))),
+            std::sync::Arc::new(tmail::backend::SystemOpener),
+            std::sync::Arc::new(tmail::discovery::FakeDiscoverer),
+            fake.program().display().to_string(),
+            tx,
+        );
+        let effect = Effect {
+            id: OperationId(79),
+            kind: OperationKind::SaveAccount {
+                path: path.clone(),
+                draft: Box::new(draft),
+            },
+        };
+        let ctx = RequestContext {
+            operation: effect.id,
+            cancellation: CancellationToken::new(),
+        };
+        manager.launch(effect, ctx);
+        let result = rx.recv().await.expect("result");
+        match result.outcome.expect("save succeeds") {
+            OperationOutcome::AccountSaved {
+                path: saved,
+                created,
+                permissions_warning,
+            } => {
+                assert_eq!(saved, path);
+                assert!(created);
+                assert_eq!(permissions_warning, None);
+            }
+            other => panic!("expected AccountSaved, got {other:?}"),
+        }
+    });
+
+    // The file really holds the account (the merge ran in the manager).
+    let text = std::fs::read_to_string(dir.path().join("config.toml")).expect("written");
+    assert!(text.contains("[accounts.gmail]"));
+    assert!(text.contains("imap.sasl.plain.password.raw"));
+}

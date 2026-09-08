@@ -14,6 +14,7 @@ pub(crate) mod map;
 mod process;
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -45,6 +46,79 @@ pub fn executable_available(program: &str) -> bool {
                 .any(|candidate| candidate.is_file())
         })
         .unwrap_or(false)
+}
+
+/// How long the wizard's credential test may run before it fails
+/// (ADR 0003 §3.4: a 30 s timeout bounds a hung endpoint).
+const TEST_ACCOUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The wizard credential test (ADR 0003 §3.4): writes `draft` into a
+/// fresh temporary 0600 config file, runs `himalaya -c <temp> mailbox
+/// list -a <account> --json` through the same process plumbing as every
+/// other backend call, and returns the mailbox names. The temp file is
+/// deleted in all outcomes (guarded `NamedTempFile` drop); nothing
+/// containing the credential is ever written to the real config.
+pub(crate) async fn test_account_mailbox_names(
+    program: &str,
+    draft: &crate::config::write::DraftAccount,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> BackendResult<Vec<String>> {
+    // Guarded creation: the file exists only after the mode is 0600 (on
+    // unix, tempfile already creates it 0600; re-assert defensively)
+    // and before any secret is placed inside.
+    let temp = tempfile::Builder::new()
+        .prefix("tmail-wizard-")
+        .suffix(".toml")
+        .tempfile()
+        .map_err(|err| BackendError::File(format!("could not create the test config: {err}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|err| {
+                BackendError::File(format!("could not secure the test config: {err}"))
+            })?;
+    }
+    let fragment = crate::config::write::draft_account_fragment(draft);
+    temp.as_file()
+        .write_all(fragment.as_bytes())
+        .map_err(|err| BackendError::File(format!("could not write the test config: {err}")))?;
+    temp.as_file()
+        .flush()
+        .map_err(|err| BackendError::File(format!("could not write the test config: {err}")))?;
+
+    let path = temp.path().to_path_buf();
+    let argv = vec![
+        String::from("-c"),
+        path.display().to_string(),
+        String::from("-a"),
+        draft.name.clone(),
+        String::from("mailbox"),
+        String::from("list"),
+        String::from("--json"),
+    ];
+
+    // The timeout wraps the run: on `Elapsed` the run future is dropped,
+    // which kills the child (`kill_on_drop`), and the temp file drops
+    // right after — nothing lingers in either failure mode.
+    let run = process::run(program, &argv, &cancellation);
+    let output = tokio::time::timeout(TEST_ACCOUNT_TIMEOUT, run)
+        .await
+        .map_err(|_| BackendError::Command {
+            code: None,
+            detail: String::from(
+                "the connection test timed out after 30s (check the server settings)",
+            ),
+        })??;
+
+    let dto: dto::MailboxesDto = process::decode(output)?;
+    // Drop the temp file (deleting it) before reporting.
+    drop(temp);
+    Ok(map::mailboxes(dto, &HashMap::new())
+        .into_iter()
+        .map(|mailbox| mailbox.name)
+        .collect())
 }
 
 /// Drives the `himalaya` executable with argv-only child processes.

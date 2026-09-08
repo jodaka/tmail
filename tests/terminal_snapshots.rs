@@ -2070,3 +2070,454 @@ fn message_list_shows_a_scrollbar_only_when_rows_overflow() {
         "no scrollbar expected: {col:?}"
     );
 }
+
+// ── Account configuration wizard (ADR 0003 W5) ───────────────────────────
+
+use tmail::app::wizard::{StorageMode, WizardAction, WizardState};
+use tmail::discovery::{ConfigSource, DiscoveredService, Provider, Security, ServerEndpoint};
+
+/// A fresh wizard state over the mock shell, with a resolved save path.
+fn wizard_state() -> tmail::app::AppState {
+    let mut state = mock_initial_state();
+    state.wizard = Some(WizardState::new(
+        false,
+        Some(std::path::PathBuf::from("/tmp/himalaya/config.toml")),
+        Vec::new(),
+        None,
+        false,
+    ));
+    state.focus = tmail::app::Focus::Wizard;
+    state
+}
+
+fn gmail_service() -> DiscoveredService {
+    DiscoveredService {
+        source: ConfigSource::Provider(Provider::Gmail),
+        imap: ServerEndpoint {
+            url: String::from("imaps://imap.gmail.com:993"),
+            security: Security::Tls,
+        },
+        smtp: Some(ServerEndpoint {
+            url: String::from("smtps://smtp.gmail.com:465"),
+            security: Security::Tls,
+        }),
+        provider: Some(Provider::Gmail),
+        username: None,
+    }
+}
+
+fn discovered_result(id: tmail::app::OperationId, services: Vec<DiscoveredService>) -> Action {
+    Action::BackendCompleted(OperationResult {
+        id,
+        outcome: Ok(tmail::app::OperationOutcome::Discovered(services)),
+    })
+}
+
+#[test]
+fn wizard_email_screen_renders_title_field_and_hints() {
+    let mut state = wizard_state();
+    let text = text_of(&buffer_after(&mut state, &[], 80, 24));
+
+    assert!(text.contains("Account setup — email address"), "{text}");
+    assert!(text.contains("Email"), "field label: {text}");
+    assert!(text.contains("↵ detect settings"), "hint row: {text}");
+    assert!(text.contains("Ctrl+C quit"), "quit hint: {text}");
+    assert!(text.contains("Esc cancel"), "cancel hint: {text}");
+    // The mailbox shell stays hidden behind the wizard.
+    assert!(
+        !text.contains("Loading mailboxes"),
+        "no shell chrome: {text}"
+    );
+}
+
+#[test]
+fn wizard_email_screen_shows_validation_error_in_place() {
+    let mut state = wizard_state();
+    let text = text_of(&buffer_after(
+        &mut state,
+        &[Action::Wizard(WizardAction::SubmitEmail)],
+        80,
+        24,
+    ));
+    assert!(
+        text.contains("enter an email address"),
+        "inline error: {text}"
+    );
+}
+
+#[test]
+fn wizard_discovery_screen_lists_ranked_services_with_source_labels() {
+    let mut state = wizard_state();
+    if let Some(wizard) = state.wizard.as_mut() {
+        wizard.email.value = String::from("u@gmail.com");
+    }
+    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let id = submit[0].id;
+    let text = text_of(&buffer_after(
+        &mut state,
+        &[discovered_result(id, vec![gmail_service()])],
+        100,
+        24,
+    ));
+
+    assert!(
+        text.contains("known provider: Gmail"),
+        "source label: {text}"
+    );
+    assert!(
+        text.contains("imaps://imap.gmail.com:993"),
+        "imap url: {text}"
+    );
+    assert!(
+        text.contains("smtps://smtp.gmail.com:465"),
+        "smtp url: {text}"
+    );
+    assert!(text.contains("↑↓ choose"), "hint row: {text}");
+}
+
+#[test]
+fn wizard_discovery_screen_shows_the_detecting_spinner() {
+    let mut state = wizard_state();
+    if let Some(wizard) = state.wizard.as_mut() {
+        wizard.email.value = String::from("u@gmail.com");
+    }
+    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    assert!(!submit.is_empty(), "the discovery effect starts");
+    // Still discovering: the spinner message is on screen and the
+    // status bar shows the step-back hint.
+    let text = text_of(&buffer_after(&mut state, &[], 80, 24));
+    assert!(
+        text.contains("Detecting settings for u@gmail.com"),
+        "{text}"
+    );
+    assert!(text.contains("Esc steps back"), "hint: {text}");
+}
+
+#[test]
+fn wizard_empty_discovery_opens_the_manual_override_form() {
+    let mut state = wizard_state();
+    if let Some(wizard) = state.wizard.as_mut() {
+        wizard.email.value = String::from("u@custom.example");
+    }
+    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let id = submit[0].id;
+    let text = text_of(&buffer_after(
+        &mut state,
+        &[discovered_result(id, Vec::new())],
+        80,
+        24,
+    ));
+
+    assert!(text.contains("IMAP server"), "override field: {text}");
+    assert!(
+        text.contains("imaps://imap.custom.example:993"),
+        "guessed imap: {text}"
+    );
+    assert!(
+        text.contains("smtps://smtp.custom.example:465"),
+        "guessed smtp: {text}"
+    );
+}
+
+#[test]
+fn wizard_identity_screen_recaps_the_chosen_servers() {
+    let mut state = wizard_state();
+    if let Some(wizard) = state.wizard.as_mut() {
+        wizard.email.value = String::from("u@gmail.com");
+    }
+    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let id = submit[0].id;
+    let actions = [
+        discovered_result(id, vec![gmail_service()]),
+        Action::Wizard(WizardAction::SelectService),
+    ];
+    let text = text_of(&buffer_after(&mut state, &actions, 80, 24));
+
+    assert!(text.contains("Name"), "display name field: {text}");
+    assert!(
+        text.contains("IMAP  imaps://imap.gmail.com:993"),
+        "recap: {text}"
+    );
+    assert!(
+        text.contains("SMTP  smtps://smtp.gmail.com:465"),
+        "recap: {text}"
+    );
+}
+
+#[test]
+fn wizard_credentials_screen_masks_the_password_and_shows_the_gmail_hint() {
+    let mut state = wizard_state();
+    if let Some(wizard) = state.wizard.as_mut() {
+        wizard.email.value = String::from("u@gmail.com");
+        wizard.password.value = String::from("app-password");
+        wizard.password.cursor = 11;
+        wizard.credentials_index = 2;
+    }
+    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let id = submit[0].id;
+    let actions = [
+        discovered_result(id, vec![gmail_service()]),
+        Action::Wizard(WizardAction::SelectService),
+        Action::Wizard(WizardAction::SubmitCredentials),
+    ];
+    let text = text_of(&buffer_after(&mut state, &actions, 80, 24));
+
+    assert!(text.contains("Username"), "username field: {text}");
+    assert!(
+        text.contains("store password in config"),
+        "storage toggle: {text}"
+    );
+    assert!(text.contains("fetch via command"), "storage toggle: {text}");
+    assert!(text.contains("app password"), "gmail hint: {text}");
+    // The password renders as bullets, never the raw secret.
+    assert!(text.contains("••••"), "masked password: {text}");
+    assert!(
+        !text.contains("Password  app-password"),
+        "raw password rendered: {text}"
+    );
+}
+
+#[test]
+fn wizard_credentials_command_mode_shows_the_command_field() {
+    let mut state = wizard_state();
+    if let Some(wizard) = state.wizard.as_mut() {
+        wizard.email.value = String::from("u@gmail.com");
+        wizard.storage_mode = StorageMode::Command;
+        wizard.command.value = String::from("pass show mail/gmail");
+    }
+    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let id = submit[0].id;
+    let actions = [
+        discovered_result(id, vec![gmail_service()]),
+        Action::Wizard(WizardAction::SelectService),
+        Action::Wizard(WizardAction::SubmitCredentials),
+    ];
+    let text = text_of(&buffer_after(&mut state, &actions, 80, 24));
+
+    assert!(text.contains("Command"), "command field: {text}");
+    assert!(
+        text.contains("pass show mail/gmail"),
+        "the command renders: {text}"
+    );
+    assert!(
+        !text.contains("•"),
+        "no masked password field in command mode: {text}"
+    );
+}
+
+/// Drives the wizard to the Testing step through the real reducer and
+/// completes the credential test, returning the state ready for the
+/// `TestAccountCompleted` result to be synthesized with the test op's
+/// own id (the manager allocates a fresh id per attempt).
+fn drive_to_testing(
+    state: &mut tmail::app::AppState,
+    mailboxes: Vec<String>,
+) -> tmail::app::OperationId {
+    if let Some(wizard) = state.wizard.as_mut() {
+        wizard.email.value = String::from("u@gmail.com");
+        wizard.password.value = String::from("p");
+        wizard.credentials_index = 2;
+    }
+    let submit = reducer::reduce(state, &Action::Wizard(WizardAction::SubmitEmail));
+    let discovery_id = submit[0].id;
+    reducer::reduce(
+        state,
+        &discovered_result(discovery_id, vec![gmail_service()]),
+    );
+    reducer::reduce(state, &Action::Wizard(WizardAction::SelectService));
+    reducer::reduce(state, &Action::Wizard(WizardAction::SubmitCredentials));
+    let test_effects = reducer::reduce(state, &Action::Wizard(WizardAction::SubmitCredentials));
+    let test_id = test_effects[0].id;
+    reducer::reduce(
+        state,
+        &Action::BackendCompleted(OperationResult {
+            id: test_id,
+            outcome: Ok(tmail::app::OperationOutcome::TestAccountCompleted { mailboxes }),
+        }),
+    );
+    test_id
+}
+
+#[test]
+fn wizard_confirm_screen_shows_aliases_path_and_storage() {
+    let mut state = wizard_state();
+    drive_to_testing(
+        &mut state,
+        vec![
+            String::from("INBOX"),
+            String::from("[Gmail]/Sent Mail"),
+            String::from("[Gmail]/All Mail"),
+        ],
+    );
+    let text = text_of(&buffer_after(&mut state, &[], 100, 30));
+
+    assert!(text.contains("[accounts.gmail]"), "account name: {text}");
+    assert!(
+        text.contains("stored in config (****)"),
+        "masked secret: {text}"
+    );
+    assert!(text.contains("inbox  INBOX"), "alias: {text}");
+    assert!(text.contains("sent  [Gmail]/Sent Mail"), "alias: {text}");
+    assert!(text.contains("archive  [Gmail]/All Mail"), "alias: {text}");
+    assert!(
+        text.contains("/tmp/himalaya/config.toml"),
+        "save path: {text}"
+    );
+    assert!(text.contains("↵ save account"), "hint: {text}");
+    // The raw typed password never reaches the screen.
+    assert!(
+        !text.contains("Password  p"),
+        "raw password rendered: {text}"
+    );
+}
+
+#[test]
+fn wizard_saved_screen_reports_the_path_and_permissions() {
+    let mut state = wizard_state();
+    if let Some(wizard) = state.wizard.as_mut() {
+        wizard.email.value = String::from("u@gmail.com");
+        wizard.password.value = String::from("p");
+        wizard.credentials_index = 2;
+    }
+    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let discovery_id = submit[0].id;
+    reducer::reduce(
+        &mut state,
+        &discovered_result(discovery_id, vec![gmail_service()]),
+    );
+    reducer::reduce(&mut state, &Action::Wizard(WizardAction::SelectService));
+    reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitCredentials));
+    let test_effects =
+        reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitCredentials));
+    let test_id = test_effects[0].id;
+    reducer::reduce(
+        &mut state,
+        &Action::BackendCompleted(OperationResult {
+            id: test_id,
+            outcome: Ok(tmail::app::OperationOutcome::TestAccountCompleted {
+                mailboxes: vec![String::from("INBOX")],
+            }),
+        }),
+    );
+    let save_effects = reducer::reduce(&mut state, &Action::Wizard(WizardAction::ConfirmSave));
+    let save_id = save_effects[0].id;
+    let actions = [Action::BackendCompleted(OperationResult {
+        id: save_id,
+        outcome: Ok(tmail::app::OperationOutcome::AccountSaved {
+            path: std::path::PathBuf::from("/tmp/himalaya/config.toml"),
+            created: true,
+            permissions_warning: None,
+        }),
+    })];
+    let text = text_of(&buffer_after(&mut state, &actions, 80, 24));
+
+    assert!(
+        text.contains("Account saved to /tmp/himalaya/config.toml"),
+        "{text}"
+    );
+    assert!(text.contains("0600"), "created note: {text}");
+    assert!(
+        text.contains("open your mailbox"),
+        "first-run next step: {text}"
+    );
+}
+
+#[test]
+fn wizard_confirm_screen_warns_when_the_config_is_shared_readable() {
+    let mut state = wizard_state();
+    if let Some(wizard) = state.wizard.as_mut() {
+        wizard.existing_shared_readable = true;
+    }
+    drive_to_testing(&mut state, vec![String::from("INBOX")]);
+    let text = text_of(&buffer_after(&mut state, &[], 100, 30));
+
+    assert!(
+        text.contains("readable by others"),
+        "permissions warning on the confirm screen: {text}"
+    );
+}
+
+/// Counts cells carrying the accent background (the inline caret of a
+/// focused field, the app-wide cursor convention, is exactly such a
+/// reversed cell).
+fn count_accent_bg(buffer: &ratatui::buffer::Buffer, accent: ratatui::style::Color) -> usize {
+    (0..buffer.area.width)
+        .flat_map(|x| (0..buffer.area.height).map(move |y| (x, y)))
+        .filter(|&(x, y)| buffer[(x, y)].style().bg == Some(accent))
+        .count()
+}
+
+#[test]
+fn wizard_focused_fields_show_the_inline_caret() {
+    let theme = Theme::default_dark();
+
+    // W1 email: the screen's only control is focused, so exactly one
+    // accent cell — the reversed-space caret — is on screen.
+    let mut state = wizard_state();
+    let buffer = buffer_after(&mut state, &[], 80, 24);
+    assert_eq!(
+        count_accent_bg(&buffer, theme.accent),
+        1,
+        "the focused email field must draw the caret"
+    );
+
+    // With typed text the caret rides after the last character.
+    let mut state = wizard_state();
+    if let Some(wizard) = state.wizard.as_mut() {
+        wizard.email.value = String::from("u@example.com");
+        wizard.email.cursor = 13;
+    }
+    let buffer = buffer_after(&mut state, &[], 80, 24);
+    assert_eq!(
+        count_accent_bg(&buffer, theme.accent),
+        1,
+        "the caret follows the typed text"
+    );
+
+    // W3 identity: the Name box is focused.
+    let mut state = wizard_state();
+    if let Some(wizard) = state.wizard.as_mut() {
+        wizard.email.value = String::from("u@example.com");
+    }
+    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let id = submit[0].id;
+    let actions = [
+        discovered_result(id, vec![gmail_service()]),
+        Action::Wizard(WizardAction::SelectService),
+    ];
+    let buffer = buffer_after(&mut state, &actions, 80, 24);
+    assert_eq!(
+        count_accent_bg(&buffer, theme.accent),
+        1,
+        "the focused Name field draws the caret"
+    );
+
+    // W4 credentials: the username row is focused first.
+    let mut state = wizard_state();
+    if let Some(wizard) = state.wizard.as_mut() {
+        wizard.email.value = String::from("u@example.com");
+    }
+    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let id = submit[0].id;
+    let actions = [
+        discovered_result(id, vec![gmail_service()]),
+        Action::Wizard(WizardAction::SelectService),
+        Action::Wizard(WizardAction::SubmitCredentials),
+    ];
+    let buffer = buffer_after(&mut state, &actions, 80, 24);
+    assert_eq!(
+        count_accent_bg(&buffer, theme.accent),
+        1,
+        "the focused Username field draws the caret"
+    );
+
+    // A mid-string cursor replaces the character cell (still exactly
+    // one caret cell).
+    let mut state = wizard_state();
+    if let Some(wizard) = state.wizard.as_mut() {
+        wizard.email.value = String::from("u@example.com");
+        wizard.email.cursor = 1;
+    }
+    let buffer = buffer_after(&mut state, &[], 80, 24);
+    assert_eq!(count_accent_bg(&buffer, theme.accent), 1);
+}

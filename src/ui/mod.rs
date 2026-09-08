@@ -57,6 +57,13 @@ pub fn render(
         ratatui::widgets::Block::new().style(theme.on_background()),
         area,
     );
+    // The account configuration wizard replaces the whole chrome (ADR 0003
+    // §3.7): first run has no data for the shell to show, and the wizard
+    // owns every key while active. No modals can be open underneath it.
+    if state.wizard.is_some() {
+        screens::wizard::render(frame, area, state, theme);
+        return;
+    }
     let mode = layout::mode_for(state.size.0, state.size.1);
     if mode == LayoutMode::TooSmall {
         render_too_small(frame, area, state, theme);

@@ -1,0 +1,23 @@
+[
+  {
+    "service": "imap",
+    "endpoint": { "tcp": { "host": "imap.example.com", "port": 143, "security": "starttls" } },
+    "username": "user@example.com",
+    "auth": ["password"],
+    "source": "ispMain"
+  },
+  {
+    "service": "smtp",
+    "endpoint": { "tcp": { "host": "smtp.example.com", "port": 587, "security": "starttls" } },
+    "username": "user@example.com",
+    "auth": ["password"],
+    "source": "ispMain"
+  },
+  {
+    "service": "imap",
+    "endpoint": { "tcp": { "host": "imap.example.com", "port": 993, "security": "tls" } },
+    "username": "user@example.com",
+    "auth": ["password"],
+    "source": "srv"
+  }
+]

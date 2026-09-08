@@ -20,6 +20,7 @@
 
 use crate::app::action::{Action, ComposerEdit, DialogEdit, SearchEdit};
 use crate::app::focus::Focus;
+use crate::app::wizard;
 use crate::input::keymap::KeyMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -34,7 +35,10 @@ fn to_action_with(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action
     let key = normalize_ctrl_chords(key);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
-    let text_focus = matches!(focus, Focus::SearchField | Focus::Dialog | Focus::Composer);
+    let text_focus = matches!(
+        focus,
+        Focus::SearchField | Focus::Dialog | Focus::Composer | Focus::Wizard
+    );
     // Ctrl+Enter sends from anywhere (plan §10, as before); plain Enter is
     // the keymap's `activate` binding, so it stays rebindable. The
     // composer's body newline is the reducer's routing of Activate.
@@ -120,6 +124,56 @@ fn to_action_with(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action
             }
             // Fall through: global chords (quit, refresh) still fire.
         }
+        // The account configuration wizard (ADR 0003): printable keys type
+        // into the focused field; `e`/`r` are the discovery-screen
+        // shortcuts (the reducer folds them back into typed text on the
+        // other steps). Structural keys fall through so Esc/Enter/Tab stay
+        // rebindable through the keymap.
+        Focus::Wizard => match key.code {
+            // Space toggles the focused storage-mode row (checkbox
+            // convention, ADR 0003 §3.2 W4); the reducer folds it back
+            // into a typed character on every text field.
+            KeyCode::Char(' ') if !ctrl && !alt => {
+                return Some(Action::Wizard(wizard::WizardAction::ToggleStorageMode));
+            }
+            KeyCode::Char('e') if !ctrl && !alt => {
+                return Some(Action::Wizard(wizard::WizardAction::OverrideServers));
+            }
+            KeyCode::Char('r') if !ctrl && !alt => {
+                return Some(Action::Wizard(wizard::WizardAction::RerunDiscovery));
+            }
+            KeyCode::Char(c) if !ctrl && !alt => {
+                return Some(Action::Wizard(wizard::WizardAction::Edit(
+                    DialogEdit::Char(c),
+                )));
+            }
+            KeyCode::Backspace => {
+                return Some(Action::Wizard(wizard::WizardAction::Edit(
+                    DialogEdit::Backspace,
+                )));
+            }
+            KeyCode::Delete => {
+                return Some(Action::Wizard(wizard::WizardAction::Edit(
+                    DialogEdit::Delete,
+                )));
+            }
+            KeyCode::Left => {
+                return Some(Action::Wizard(wizard::WizardAction::Edit(
+                    DialogEdit::CursorLeft,
+                )));
+            }
+            KeyCode::Right => {
+                return Some(Action::Wizard(wizard::WizardAction::Edit(
+                    DialogEdit::CursorRight,
+                )));
+            }
+            KeyCode::Up => return Some(Action::Wizard(wizard::WizardAction::MoveUp)),
+            KeyCode::Down => return Some(Action::Wizard(wizard::WizardAction::MoveDown)),
+            // Structural keys and chords fall through to the keymap.
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab => {}
+            KeyCode::Char(_) => {}
+            _ => return None,
+        },
         _ => {}
     }
     let action = keymap.lookup(&key, focus)?;

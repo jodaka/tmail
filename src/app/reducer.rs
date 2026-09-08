@@ -22,6 +22,7 @@ use crate::app::overlay::{
 use crate::app::route::{MailboxRoute, MessageRoute, Route, SearchRoute};
 use crate::app::sanitize::sanitize;
 use crate::app::state::{AppState, ListStash, Loadable};
+use crate::app::wizard::wizard_reduce;
 use crate::domain::{
     DraftSaveState, Mailbox, MailboxId, MailboxRole, Message, MessageLocator, Page, PageRequest,
     SearchRequest,
@@ -30,6 +31,13 @@ use crate::domain::{
 /// Apply `action` to `state`, returning backend work to spawn. Never
 /// performs I/O, never panics on odd input.
 pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
+    // The account configuration wizard (ADR 0003) owns the whole screen
+    // while active: it intercepts every action — mailbox navigation,
+    // warmup refreshes, modals — before anything else can react. Clock,
+    // size, quit, and backend results stay live.
+    if state.wizard.is_some() {
+        return wizard_reduce(state, action);
+    }
     // A mouse click on a modal button must reach the modal path before the
     // interception swallows everything else (plan §9: a modal intercepts
     // all input; Phase 10.2 adds its buttons as clickable).
@@ -141,6 +149,11 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             // Only meaningful with their modal open (handled above).
             Vec::new()
         }
+        Action::Wizard(_) => {
+            // Only meaningful with the wizard active (handled by the
+            // interception at the top of `reduce`).
+            Vec::new()
+        }
         Action::Click(target) => click(state, *target),
         Action::BackendCompleted(result) => backend_completed(state, result),
         Action::Refresh => refresh(state),
@@ -157,42 +170,59 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::OpenThemePicker => open_theme_picker(state),
-        Action::Tick { now } => {
-            state.ticks += 1;
-            let now = **now;
-            state.clock = Some(now);
-            clear_expired_status(state, now);
-            let mut effects = autosave_tick(state, now);
-            effects.extend(auto_refresh_tick(state, now));
-            effects
-        }
-        Action::Resize { width, height } => {
-            state.size = (*width, *height);
-            // Ticket kjfq: auto-sized pages track the terminal — the limit
-            // is however many rows fit the list right now. A change re-loads
-            // the visible page in the background (supersession collapses a
-            // resize storm; the newest request wins) so the list refills.
-            let mut effects = Vec::new();
-            if state.page_size_auto {
-                let visible =
-                    crate::ui::layout::messages_visible(state.size, state.view_mode).max(1);
-                if state.messages.limit != visible {
-                    state.messages.limit = visible;
-                    if !state.messages.items.is_empty() {
-                        effects = request_visible_page_background(state, state.messages.offset);
-                    }
-                }
-            }
-            // A smaller window may have pushed the selection off screen.
-            keep_selection_visible(state);
-            clamp_reader_scroll(state);
-            effects
-        }
+        Action::Tick { now } => tick(state, **now),
+        Action::Resize { width, height } => resize(state, *width, *height),
         Action::Quit => {
             state.quit_requested = true;
             Vec::new()
         }
     }
+}
+
+/// The system handlers (injected clock, terminal size, quit) the wizard
+/// slice reuses: during the wizard these stay live while every other
+/// action is swallowed.
+pub(crate) fn reduce_unwizarded(state: &mut AppState, action: &Action) -> Vec<Effect> {
+    match action {
+        Action::Tick { now } => tick(state, **now),
+        Action::Resize { width, height } => resize(state, *width, *height),
+        Action::Quit => {
+            state.quit_requested = true;
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn tick(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset>) -> Vec<Effect> {
+    state.ticks += 1;
+    state.clock = Some(now);
+    clear_expired_status(state, now);
+    let mut effects = autosave_tick(state, now);
+    effects.extend(auto_refresh_tick(state, now));
+    effects
+}
+
+fn resize(state: &mut AppState, width: u16, height: u16) -> Vec<Effect> {
+    state.size = (width, height);
+    // Ticket kjfq: auto-sized pages track the terminal — the limit
+    // is however many rows fit the list right now. A change re-loads
+    // the visible page in the background (supersession collapses a
+    // resize storm; the newest request wins) so the list refills.
+    let mut effects = Vec::new();
+    if state.page_size_auto {
+        let visible = crate::ui::layout::messages_visible(state.size, state.view_mode).max(1);
+        if state.messages.limit != visible {
+            state.messages.limit = visible;
+            if !state.messages.items.is_empty() {
+                effects = request_visible_page_background(state, state.messages.offset);
+            }
+        }
+    }
+    // A smaller window may have pushed the selection off screen.
+    keep_selection_visible(state);
+    clamp_reader_scroll(state);
+    effects
 }
 
 // ── Modal overlays (plan §9/§12) ─────────────────────────────────────────
@@ -1590,6 +1620,16 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             state.operations.finish(result.id);
             Vec::new()
         }
+        // Wizard operations complete through the wizard slice, which
+        // intercepts `BackendCompleted` first (ADR 0003 §3.7). Reaching
+        // this arm would be a routing bug; finish so nothing leaks.
+        OperationKind::DiscoverConfig { .. }
+        | OperationKind::TestAccount { .. }
+        | OperationKind::SaveAccount { .. } => {
+            tracing::warn!(id = %result.id, "wizard result reached the main backend path");
+            state.operations.finish(result.id);
+            Vec::new()
+        }
     }
 }
 
@@ -2108,7 +2148,13 @@ fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
             // A header button: arrows do nothing (ticket p0s3).
         }
         Focus::Reader => scroll_reader(state, delta),
-        Focus::Composer | Focus::Dialog | Focus::ThemePicker | Focus::ErrorModal => {}
+        // Wizard input never reaches the mailbox navigation (the wizard
+        // intercepts everything first, ADR 0003).
+        Focus::Composer
+        | Focus::Dialog
+        | Focus::ThemePicker
+        | Focus::ErrorModal
+        | Focus::Wizard => {}
     }
     Vec::new()
 }
@@ -2364,7 +2410,8 @@ fn activate(state: &mut AppState) -> Vec<Effect> {
         | Focus::Dialog
         | Focus::ThemePicker
         | Focus::SearchField
-        | Focus::ErrorModal => {
+        | Focus::ErrorModal
+        | Focus::Wizard => {
             if state.focus == Focus::SearchField {
                 reduce(state, &Action::SubmitSearch)
             } else {
