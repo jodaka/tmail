@@ -13,10 +13,6 @@ protocols, accounts, and credentials.
    cargo install himalaya       # any platform with Rust
    ```
 
-   Verify with `himalaya --version` and configure at least one account
-   with `himalaya configure` (or write `~/.config/himalaya/config.toml`
-   yourself — the [Configuration](#configuration) section shows the shape).
-
 2. Build Tmail from source:
 
    ```sh
