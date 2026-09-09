@@ -9,7 +9,7 @@ use crate::app::focus::Focus;
 use crate::app::operation::OperationRegistry;
 use crate::app::overlay::Overlay;
 use crate::app::route::Route;
-use crate::domain::{Mailbox, Message, MessageSummary, Page};
+use crate::domain::{Mailbox, MailboxId, MailboxRole, Message, MessageSummary, Page};
 use crate::ui::theme::Theme;
 use chrono::{DateTime, FixedOffset};
 
@@ -344,6 +344,19 @@ impl AppState {
             .and_then(|m| m.unread_count)
     }
 
+    /// Role of the mailbox currently displayed, when known (ADR 0001: the
+    /// UI never guesses folder names — the backend adapter resolves them).
+    /// The Drafts role changes what Enter on a list row does (a draft
+    /// reopens in the composer, plan §14).
+    pub fn active_mailbox_role(&self) -> Option<MailboxRole> {
+        let id = self.active_route()?.mailbox_id()?;
+        self.mailboxes
+            .as_loaded()?
+            .iter()
+            .find(|m| &m.id == id)
+            .and_then(|m| m.role)
+    }
+
     /// Name of the mailbox currently displayed, if resolvable.
     pub fn active_mailbox_name(&self) -> Option<&str> {
         let id = self.active_route()?.mailbox_id()?;
@@ -352,6 +365,28 @@ impl AppState {
             .iter()
             .find(|m| &m.id == id)
             .map(|m| m.name.as_str())
+    }
+
+    /// The mailbox the sidebar marks active. Normally the displayed
+    /// mailbox; while the composer is open, the backend's Drafts folder —
+    /// drafts are saved there (plan §14), so the folder the composer
+    /// writes to reads as the active one (the composer route itself
+    /// carries no mailbox). `None` while composing without a resolved
+    /// Drafts folder, and whenever no route is displayed.
+    pub fn sidebar_active_mailbox_id(&self) -> Option<&MailboxId> {
+        if matches!(self.active_route(), Some(Route::Composer)) {
+            return self.drafts_mailbox().map(|m| &m.id);
+        }
+        self.active_route().and_then(|r| r.mailbox_id())
+    }
+
+    /// The loaded mailbox with the `Drafts` role, if any (ADR 0001: the UI
+    /// never guesses folder names; the backend adapter resolves roles).
+    pub fn drafts_mailbox(&self) -> Option<&Mailbox> {
+        self.mailboxes
+            .as_loaded()?
+            .iter()
+            .find(|m| m.role == Some(MailboxRole::Drafts))
     }
 
     /// Selected sidebar mailbox, if the list is loaded and index valid.

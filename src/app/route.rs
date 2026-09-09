@@ -53,7 +53,9 @@ pub enum Route {
 impl Route {
     /// The mailbox this route displays, if any. Search reports the mailbox
     /// its results come from; the composer has none: background refreshes
-    /// must not touch a list while composing (plan §11).
+    /// must not touch a list while composing (plan §11). The sidebar marks
+    /// the Drafts folder active while the composer is open instead
+    /// (`AppState::sidebar_active_mailbox_id`).
     pub fn mailbox_id(&self) -> Option<&MailboxId> {
         match self {
             Route::Mailbox(r) => Some(&r.mailbox_id),

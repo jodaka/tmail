@@ -48,6 +48,11 @@ pub enum OperationKind {
     Search(SearchRequest),
     /// Fetch one full message (plan §19 Phase 4: reader).
     LoadMessage(MessageLocator),
+    /// Fetch one draft copy from the Drafts mailbox to reopen it in the
+    /// composer (plan §14): same backend call as `LoadMessage`, different
+    /// consumer — the fetched message becomes a `Draft` instead of a
+    /// reader document.
+    OpenDraft(MessageLocator),
     /// Fetch one full message purely for the list's faded body preview
     /// (ticket wxtx): background work that fills `MessageSummary.snippet`
     /// and the message cache. Independent of every other operation — no
@@ -91,6 +96,12 @@ pub enum OperationKind {
     /// path as typed (`~` unexpanded); the backend expands and checks it.
     /// No bytes travel — only the resulting metadata.
     ReadAttachment { path: std::path::PathBuf },
+    /// List one directory for the attachment file chooser (plan §15,
+    /// ticket 95x0): builds the explorer state for the target directory.
+    /// `None` opens the chooser in the user's home directory (fallback:
+    /// the working directory). Filesystem work in the manager keeps the
+    /// reducer I/O-free.
+    ListAttachmentFiles { path: Option<std::path::PathBuf> },
     /// Save one incoming attachment to disk (plan §15, Phase 8.4). The
     /// request freezes the target message, part, name, and directory;
     /// retries replay it verbatim. `open_after` chains the platform
@@ -145,6 +156,7 @@ impl OperationKind {
             OperationKind::LoadPage(_) => "Loading messages",
             OperationKind::Search(_) => "Searching",
             OperationKind::LoadMessage(_) => "Loading message",
+            OperationKind::OpenDraft(_) => "Opening draft",
             OperationKind::Preview(_) => "Fetching preview",
             OperationKind::SetRead { read: true, .. } => "Marking read",
             OperationKind::SetRead { read: false, .. } => "Marking unread",
@@ -160,6 +172,7 @@ impl OperationKind {
             },
             OperationKind::Send { .. } => "Sending message",
             OperationKind::ReadAttachment { .. } => "Checking file",
+            OperationKind::ListAttachmentFiles { .. } => "Listing files",
             OperationKind::SaveAttachment { .. } => "Saving attachment",
             OperationKind::OpenPath { .. } => "Opening attachment",
             OperationKind::EditExternally { .. } => "Editing externally",
@@ -196,6 +209,10 @@ impl OperationKind {
             (OperationKind::LoadMessage(newer), OperationKind::LoadMessage(older)) => {
                 newer.mailbox == older.mailbox
             }
+            // Draft fetches likewise: only the newest Enter can win.
+            (OperationKind::OpenDraft(newer), OperationKind::OpenDraft(older)) => {
+                newer.mailbox == older.mailbox
+            }
             (
                 OperationKind::SetRead { locator: newer, .. },
                 OperationKind::SetRead { locator: older, .. },
@@ -222,6 +239,12 @@ impl OperationKind {
             (
                 OperationKind::ReadAttachment { path: newer },
                 OperationKind::ReadAttachment { path: older },
+            ) => newer == older,
+            // A newer directory listing supersedes the one in flight:
+            // navigation keeps moving, only the newest target can land.
+            (
+                OperationKind::ListAttachmentFiles { path: newer },
+                OperationKind::ListAttachmentFiles { path: older },
             ) => newer == older,
             // Wizard work supersedes its own kind: a re-run discovery (`r`)
             // or a retried credential test replaces the still-running
@@ -292,6 +315,10 @@ pub enum OperationOutcome {
     /// One validated attachment source (plan §15, Phase 8): metadata only,
     /// never bytes.
     Attachment(crate::domain::DraftAttachment),
+    /// The attachment chooser's explorer state for one directory listing
+    /// (plan §15, ticket 95x0): built by the manager (filesystem access)
+    /// and applied by the reducer.
+    Explorer(Box<ratatui_explorer::FileExplorer>),
     /// One attachment saved to disk (plan §15, Phase 8.4): the final path
     /// actually written — possibly a collision-renamed name, so the UI
     /// always reports this path, never the requested one.

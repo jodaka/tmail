@@ -18,7 +18,7 @@
 //! are mapped back to the keys that produce them (`normalize_ctrl_chords`)
 //! so specs like `"Ctrl+]"` match what the user actually pressed.
 
-use crate::app::action::{Action, ComposerEdit, DialogEdit, SearchEdit};
+use crate::app::action::{Action, AttachmentBrowse, ComposerEdit, DialogEdit, SearchEdit};
 use crate::app::focus::Focus;
 use crate::app::wizard;
 use crate::input::keymap::KeyMap;
@@ -35,6 +35,7 @@ fn to_action_with(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action
     let key = normalize_ctrl_chords(key);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let text_focus = matches!(
         focus,
         Focus::SearchField | Focus::Dialog | Focus::Composer | Focus::Wizard
@@ -73,19 +74,25 @@ fn to_action_with(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action
             _ => return None,
         },
         Focus::Dialog => match key.code {
-            KeyCode::Char(c) if !ctrl && !alt => {
-                return Some(Action::DialogEdit(DialogEdit::Char(c)));
+            // The attachment file chooser (ticket 95x0): the explorer
+            // navigates with the arrows (Shift is irrelevant to it), Left
+            // and Backspace go to the parent, Right opens the selected
+            // directory. Enter stays the keymap's `activate` binding so
+            // the reducer decides between descending and submitting the
+            // selected file; Esc/Tab fall through for cancel/focus.
+            KeyCode::Up => return Some(Action::AttachmentBrowse(AttachmentBrowse::Up)),
+            KeyCode::Down => return Some(Action::AttachmentBrowse(AttachmentBrowse::Down)),
+            KeyCode::Left | KeyCode::Backspace => {
+                return Some(Action::AttachmentBrowse(AttachmentBrowse::Parent));
             }
-            KeyCode::Backspace => return Some(Action::DialogEdit(DialogEdit::Backspace)),
-            KeyCode::Delete => return Some(Action::DialogEdit(DialogEdit::Delete)),
-            KeyCode::Left => return Some(Action::DialogEdit(DialogEdit::CursorLeft)),
-            KeyCode::Right => return Some(Action::DialogEdit(DialogEdit::CursorRight)),
-            // Up/Down never leave a single-line modal field (plan §15).
-            KeyCode::Up | KeyCode::Down => return None,
+            KeyCode::Right => return Some(Action::AttachmentBrowse(AttachmentBrowse::Open)),
+            KeyCode::PageUp => return Some(Action::AttachmentBrowse(AttachmentBrowse::PageUp)),
+            KeyCode::PageDown => {
+                return Some(Action::AttachmentBrowse(AttachmentBrowse::PageDown));
+            }
+            // Structural keys fall through; every other key is inert
+            // (there is no text entry anymore).
             KeyCode::Esc | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab => {}
-            // Chords fall through: quit/refresh pierce (below), the rest
-            // are unbound in a modal field.
-            KeyCode::Char(_) => {}
             _ => return None,
         },
         Focus::Composer => {
@@ -97,19 +104,41 @@ fn to_action_with(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action
                     return Some(Action::ComposerEdit(ComposerEdit::Backspace));
                 }
                 KeyCode::Delete => return Some(Action::ComposerEdit(ComposerEdit::Delete)),
-                // Caret moves without Alt; Alt+arrows fall through to the
+                // Arrows (ticket kfmt): plain moves the caret, Ctrl moves
+                // by words, Shift extends a selection, Ctrl+Shift selects
+                // whole words. Alt+arrows still fall through to the
                 // global bindings (move/page), as before.
                 KeyCode::Left if !alt => {
-                    return Some(Action::ComposerEdit(ComposerEdit::CursorLeft));
+                    return Some(Action::ComposerEdit(match (ctrl, shift) {
+                        (false, false) => ComposerEdit::CursorLeft,
+                        (true, false) => ComposerEdit::WordLeft,
+                        (false, true) => ComposerEdit::SelectLeft,
+                        (true, true) => ComposerEdit::SelectWordLeft,
+                    }));
                 }
                 KeyCode::Right if !alt => {
-                    return Some(Action::ComposerEdit(ComposerEdit::CursorRight));
+                    return Some(Action::ComposerEdit(match (ctrl, shift) {
+                        (false, false) => ComposerEdit::CursorRight,
+                        (true, false) => ComposerEdit::WordRight,
+                        (false, true) => ComposerEdit::SelectRight,
+                        (true, true) => ComposerEdit::SelectWordRight,
+                    }));
                 }
+                // Vertical movement has no word-wise mode; Ctrl keeps the
+                // plain-line semantics it had before.
                 KeyCode::Up if !alt => {
-                    return Some(Action::ComposerEdit(ComposerEdit::CursorUp));
+                    return Some(Action::ComposerEdit(if shift {
+                        ComposerEdit::SelectUp
+                    } else {
+                        ComposerEdit::CursorUp
+                    }));
                 }
                 KeyCode::Down if !alt => {
-                    return Some(Action::ComposerEdit(ComposerEdit::CursorDown));
+                    return Some(Action::ComposerEdit(if shift {
+                        ComposerEdit::SelectDown
+                    } else {
+                        ComposerEdit::CursorDown
+                    }));
                 }
                 // Enter activates the focused control (the reducer routes
                 // it — body focus inserts the newline there); Ctrl+Enter
@@ -119,6 +148,15 @@ fn to_action_with(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action
                 // Phase 11): composer-only, regardless of which field holds
                 // focus.
                 KeyCode::Char('e') if ctrl => return Some(Action::EditExternal),
+                // Undo/redo the body editor (ticket kfmt): coalesced
+                // steps, so a typing run reverts at once. Body-only — the
+                // single-line fields have no history.
+                KeyCode::Char('z') if ctrl && !alt => {
+                    return Some(Action::ComposerEdit(ComposerEdit::Undo));
+                }
+                KeyCode::Char('y') if ctrl && !alt => {
+                    return Some(Action::ComposerEdit(ComposerEdit::Redo));
+                }
                 KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => {}
                 _ => {}
             }

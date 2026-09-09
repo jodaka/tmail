@@ -7,7 +7,7 @@
 //! registered, so stale, cancelled, or superseded results never win
 //! (plan §11). Reducers never perform I/O themselves.
 
-use crate::app::action::{Action, BulkOp, ClickTarget, DialogEdit, SearchEdit};
+use crate::app::action::{Action, AttachmentBrowse, BulkOp, ClickTarget, ComposerEdit, SearchEdit};
 use crate::app::composer::{ComposerField, ComposerState};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
@@ -16,7 +16,7 @@ use crate::app::operation::{
     OperationOutcome, OperationResult,
 };
 use crate::app::overlay::{
-    AttachmentPathDialog, ConfirmButton, DiscardDialog, ErrorDialog, ModalButton, Overlay,
+    AttachmentFileDialog, ConfirmButton, DiscardDialog, ErrorDialog, ModalButton, Overlay,
     ThemePickerDialog,
 };
 use crate::app::route::{MailboxRoute, MessageRoute, Route, SearchRoute};
@@ -25,7 +25,7 @@ use crate::app::state::{AppState, ListStash, Loadable};
 use crate::app::wizard::wizard_reduce;
 use crate::domain::{
     DraftSaveState, Mailbox, MailboxId, MailboxRole, Message, MessageLocator, Page, PageRequest,
-    SearchRequest,
+    SearchRequest, bare_message_id,
 };
 
 /// Apply `action` to `state`, returning backend work to spawn. Never
@@ -53,45 +53,29 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
     }
     // A modal overlay intercepts all input while it is open (plan §9).
     if let Some(effects) = modal_reduce(state, action) {
+        // The theme picker previews palettes from inside the modal path;
+        // the body caret must track it like every other action.
+        sync_body_caret(state);
         return effects;
     }
-    match action {
+    let effects = match action {
         Action::MoveUp => move_selection(state, -1),
         Action::MoveDown => move_selection(state, 1),
         Action::PagePrevious => page_step(state, -1),
         Action::PageNext => page_step(state, 1),
         Action::Activate => activate(state),
         Action::BackOrCancel => back_or_cancel(state),
-        Action::FocusNext => {
-            match state.focus {
-                Focus::Composer => {
-                    if let Some(composer) = state.composer.as_mut() {
-                        composer.focus_next();
-                    }
-                }
-                // In the reader Tab walks the attachment chips (plan §15):
-                // the selection the save/open keys act on.
-                Focus::Reader => cycle_reader_attachment(state, 1),
-                _ => state.focus = state.focus.next(),
-            }
-            Vec::new()
-        }
-        Action::FocusPrevious => {
-            match state.focus {
-                Focus::Composer => {
-                    if let Some(composer) = state.composer.as_mut() {
-                        composer.focus_previous();
-                    }
-                }
-                Focus::Reader => cycle_reader_attachment(state, -1),
-                _ => state.focus = state.focus.previous(),
-            }
-            Vec::new()
-        }
+        Action::FocusNext => focus_step(state, 1),
+        Action::FocusPrevious => focus_step(state, -1),
         Action::OpenSearch => {
             // Search lives on the mailbox screen; while composing, the '/'
             // is composed text (plan §10: shortcuts never fire in fields).
-            if state.focus != Focus::Composer {
+            // The sidebar focus inside compose mode is gated the same way:
+            // submitting cannot run over the composer, so the field must
+            // not strand focus there.
+            if state.focus != Focus::Composer
+                && !matches!(state.active_route(), Some(Route::Composer))
+            {
                 state.focus = Focus::SearchField;
             }
             Vec::new()
@@ -116,7 +100,9 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             // Editing targets the focused composer control; without a
             // composer open (or without its focus) the edit is inert.
             // Content edits sync the draft and re-arm autosave (plan §14);
-            // caret moves leave the revision untouched. While a send of
+            // caret moves leave the revision untouched. Undo/redo (ticket
+            // kfmt) rewrite the body content only when the history
+            // applies a step, so they sync conditionally. While a send of
             // this draft is in flight (Phase 7.6) all editing is frozen:
             // the bytes on the wire must stay what the user saw.
             if state.focus == Focus::Composer
@@ -125,8 +111,15 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
                 if composer.sending {
                     tracing::debug!("composer edits frozen while sending");
                 } else {
-                    composer.apply(edit);
-                    if edit.is_content_edit() {
+                    let content_changed = match edit {
+                        ComposerEdit::Undo => composer.undo_body(),
+                        ComposerEdit::Redo => composer.redo_body(),
+                        _ => {
+                            composer.apply(edit);
+                            edit.is_content_edit()
+                        }
+                    };
+                    if content_changed {
                         composer.sync_draft(state.clock);
                     }
                 }
@@ -145,7 +138,10 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::DiscardDraft => open_discard_confirm(state),
         Action::EditExternal => edit_externally(state),
         Action::EditorFinished { id, result } => editor_finished(state, *id, result.clone()),
-        Action::RetryError | Action::DismissError | Action::DialogEdit(_) => {
+        Action::RetryError
+        | Action::DismissError
+        | Action::DialogEdit(_)
+        | Action::AttachmentBrowse(_) => {
             // Only meaningful with their modal open (handled above).
             Vec::new()
         }
@@ -176,6 +172,20 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             state.quit_requested = true;
             Vec::new()
         }
+    };
+    sync_body_caret(state);
+    effects
+}
+
+/// Keep the body editor's caret and selection styles in step (tickets
+/// tz12, kfmt): the accent caret block while the body is focused — the
+/// same one the single-line fields draw — and no caret otherwise. Runs
+/// after every action so focus cycling, selection changes, and live
+/// theme switches (theme picker preview) can never show a stale style.
+fn sync_body_caret(state: &mut AppState) {
+    let theme = state.active_theme();
+    if let Some(composer) = state.composer.as_mut() {
+        composer.sync_body_styles(&theme);
     }
 }
 
@@ -254,7 +264,7 @@ fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
     match state.overlay {
         Some(Overlay::Error(_)) => Some(error_modal_reduce(state, action)),
         Some(Overlay::ConfirmDiscard(_)) => Some(discard_modal_reduce(state, action)),
-        Some(Overlay::AttachmentPath(_)) => match action {
+        Some(Overlay::AttachmentExplorer(_)) => match action {
             Action::BackendCompleted(_) => None,
             _ => Some(attachment_dialog_reduce(state, action)),
         },
@@ -415,18 +425,79 @@ fn confirm_discard(state: &mut AppState, draft: crate::domain::DraftSnapshot) ->
     })]
 }
 
-/// Attachment path-entry dialog handling (plan §15, Phase 8). The entry is
-/// plain data: edits move the caret, Enter submits the raw path for
-/// backend validation, Esc cancels. Rejections keep the dialog open with
-/// the detail inline — the retry surface for missing/unreadable files.
+/// Attachment file chooser handling (plan §15, ticket 95x0). The
+/// explorer is plain state: pure selection moves apply at once, while
+/// directory changes are backend listings — navigation that changes
+/// directories freezes until the listing lands. Enter submits the
+/// selected file for backend validation; Esc cancels. Rejections keep
+/// the dialog open with the detail inline.
 fn attachment_dialog_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
-    let Some(Overlay::AttachmentPath(dialog)) = state.overlay.as_mut() else {
+    let Some(Overlay::AttachmentExplorer(dialog)) = state.overlay.as_mut() else {
         return Vec::new();
     };
+    // Directory changes and submissions are backend work: the dialog is
+    // frozen/marked here and the operation starts on the registry — a
+    // borrow of the `operations` field only, disjoint from the overlay
+    // the dialog was borrowed from.
     match action {
-        Action::DialogEdit(edit) => {
-            apply_dialog_edit(dialog, edit);
-            Vec::new()
+        Action::AttachmentBrowse(browse) => {
+            // Pure selection movement: no filesystem access, applied at
+            // once (also while a listing is in flight — the landing
+            // listing replaces the selection anyway).
+            let pure = match browse {
+                AttachmentBrowse::Up => Some(ratatui_explorer::Input::Up),
+                AttachmentBrowse::Down => Some(ratatui_explorer::Input::Down),
+                AttachmentBrowse::PageUp => Some(ratatui_explorer::Input::PageUp),
+                AttachmentBrowse::PageDown => Some(ratatui_explorer::Input::PageDown),
+                AttachmentBrowse::Parent | AttachmentBrowse::Open => None,
+            };
+            if let Some(input) = pure {
+                dialog.browse(input);
+                Vec::new()
+            } else if let Some(path) = dialog.step_target(*browse == AttachmentBrowse::Parent) {
+                if dialog.listing {
+                    Vec::new()
+                } else {
+                    dialog.listing = true;
+                    dialog.error = None;
+                    vec![
+                        state
+                            .operations
+                            .start(OperationKind::ListAttachmentFiles { path: Some(path) }),
+                    ]
+                }
+            } else {
+                Vec::new()
+            }
+        }
+        Action::Activate => {
+            // A directory descends; a file submits for validation.
+            match dialog.step_target(false) {
+                Some(dir) => {
+                    if dialog.listing {
+                        Vec::new()
+                    } else {
+                        dialog.listing = true;
+                        dialog.error = None;
+                        vec![
+                            state
+                                .operations
+                                .start(OperationKind::ListAttachmentFiles { path: Some(dir) }),
+                        ]
+                    }
+                }
+                None => match dialog.selected_file() {
+                    Some(file) => {
+                        dialog.error = None;
+                        vec![
+                            state
+                                .operations
+                                .start(OperationKind::ReadAttachment { path: file }),
+                        ]
+                    }
+                    None => Vec::new(),
+                },
+            }
         }
         // Esc closes without attaching (plan §10: Esc cancels overlays).
         Action::BackOrCancel => {
@@ -435,85 +506,9 @@ fn attachment_dialog_reduce(state: &mut AppState, action: &Action) -> Vec<Effect
             state.focus = focus;
             Vec::new()
         }
-        Action::Activate => {
-            let Some(raw) = nonempty_entry(dialog) else {
-                return Vec::new();
-            };
-            // Validation is backend work (fs access): the entry stays open
-            // and untouched until the result arrives.
-            dialog.error = None;
-            vec![
-                state
-                    .operations
-                    .start(OperationKind::ReadAttachment { path: raw }),
-            ]
-        }
         // Everything else is swallowed while the dialog is open.
         _ => Vec::new(),
     }
-}
-
-/// The trimmed, non-empty dialog entry, or `None` after setting the
-/// inline error (an empty submission is an input problem, not an
-/// operation).
-fn nonempty_entry(dialog: &mut AttachmentPathDialog) -> Option<std::path::PathBuf> {
-    let trimmed = dialog.input.trim();
-    if trimmed.is_empty() {
-        dialog.error = Some(String::from("Enter a file path"));
-        return None;
-    }
-    Some(std::path::PathBuf::from(trimmed))
-}
-
-/// One character-level edit of the dialog entry (caret editing like the
-/// composer's single-line fields).
-fn apply_dialog_edit(dialog: &mut AttachmentPathDialog, edit: &DialogEdit) {
-    match edit {
-        DialogEdit::Char(c) => {
-            let cursor = dialog.cursor;
-            let offset = dialog
-                .input
-                .char_indices()
-                .nth(cursor)
-                .map(|(offset, _)| offset)
-                .unwrap_or(dialog.input.len());
-            dialog.input.insert(offset, *c);
-            dialog.cursor = cursor + 1;
-        }
-        DialogEdit::Backspace => {
-            if dialog.cursor > 0 {
-                let offset = dialog
-                    .input
-                    .char_indices()
-                    .nth(dialog.cursor - 1)
-                    .map(|(offset, _)| offset)
-                    .unwrap_or(dialog.input.len());
-                dialog.input.remove(offset);
-                dialog.cursor -= 1;
-            }
-        }
-        DialogEdit::Delete => {
-            let cursor = dialog.cursor;
-            if cursor < dialog.input.chars().count() {
-                let offset = dialog
-                    .input
-                    .char_indices()
-                    .nth(cursor)
-                    .map(|(offset, _)| offset)
-                    .unwrap_or(dialog.input.len());
-                dialog.input.remove(offset);
-            }
-        }
-        DialogEdit::CursorLeft => dialog.cursor = dialog.cursor.saturating_sub(1),
-        DialogEdit::CursorRight => {
-            dialog.cursor = dialog
-                .cursor
-                .saturating_add(1)
-                .min(dialog.input.chars().count());
-        }
-    }
-    // A fresh edit supersedes the stale complaint about the old entry.
-    dialog.error = None;
 }
 
 /// Open the theme picker (ticket k5ba). The cursor starts on the active
@@ -716,7 +711,7 @@ fn click_message_row(state: &mut AppState, index: usize) -> Vec<Effect> {
     state.focus = Focus::MessageList;
     if index == state.selection {
         return match state.selected_message().cloned() {
-            Some(summary) => open_message(state, summary),
+            Some(summary) => open_selected(state, summary),
             None => Vec::new(),
         };
     }
@@ -781,7 +776,7 @@ fn open_reply(state: &mut AppState) -> Vec<Effect> {
         tracing::debug!("reply ignored: no loaded message in the reader");
         return Vec::new();
     };
-    if state.composer.is_some() {
+    if a_draft_is_open(state) {
         state.set_status("A draft is already open — send or discard it first");
         return Vec::new();
     }
@@ -796,7 +791,7 @@ fn open_reply_all(state: &mut AppState) -> Vec<Effect> {
         tracing::debug!("reply-all ignored: no loaded message in the reader");
         return Vec::new();
     };
-    if state.composer.is_some() {
+    if a_draft_is_open(state) {
         state.set_status("A draft is already open — send or discard it first");
         return Vec::new();
     }
@@ -815,7 +810,7 @@ fn open_forward(state: &mut AppState) -> Vec<Effect> {
         tracing::debug!("forward ignored: no loaded message in the reader");
         return Vec::new();
     };
-    if state.composer.is_some() {
+    if a_draft_is_open(state) {
         state.set_status("A draft is already open — send or discard it first");
         return Vec::new();
     }
@@ -842,13 +837,20 @@ fn open_seeded_composer(
         references: seed.references,
         ..crate::domain::Draft::default()
     };
+    install_composer_draft(state, draft, status);
+    Vec::new()
+}
+
+/// Put a ready draft into the composer and open the composer screen over
+/// the current route. The one-composer rule lives with the callers: this
+/// installs unconditionally.
+fn install_composer_draft(state: &mut AppState, draft: crate::domain::Draft, status: &str) {
     state.composer = Some(ComposerState::from_draft(draft));
     if !matches!(state.active_route(), Some(Route::Composer)) {
         state.routes.push(Route::Composer);
     }
     state.focus = Focus::Composer;
     state.set_status(status);
-    Vec::new()
 }
 
 // ── Message actions (plan §19 Phase 4) ───────────────────────────────────
@@ -1428,6 +1430,35 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                 }
             }
         }
+        OperationKind::OpenDraft(locator) => {
+            // Currency check: the drafts mailbox must still be displayed
+            // (a switch, a reader, or a composer opened meanwhile drops the
+            // result — Enter again refetches).
+            let current = match state.active_route() {
+                Some(Route::Mailbox(route)) => route.mailbox_id == locator.mailbox,
+                Some(Route::Search(route)) => route.mailbox_id == locator.mailbox,
+                _ => false,
+            };
+            state.operations.finish(result.id);
+            if !current {
+                tracing::debug!(
+                    id = %result.id,
+                    mailbox = %locator.mailbox.0,
+                    "dropping draft result for a closed context"
+                );
+                return Vec::new();
+            }
+            match &result.outcome {
+                Ok(OperationOutcome::Message(message)) => {
+                    draft_message_loaded(state, (**message).clone())
+                }
+                Ok(_) => {
+                    tracing::warn!(id = %result.id, "unexpected payload for a draft operation");
+                    Vec::new()
+                }
+                Err(failure) => open_error_modal(state, failure),
+            }
+        }
         OperationKind::Preview(_) => {
             state.operations.finish(result.id);
             match &result.outcome {
@@ -1568,6 +1599,10 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
         OperationKind::ReadAttachment { path } => {
             state.operations.finish(result.id);
             attachment_validated(state, path, result)
+        }
+        OperationKind::ListAttachmentFiles { .. } => {
+            state.operations.finish(result.id);
+            attachment_listing_ready(state, result)
         }
         OperationKind::SaveAttachment {
             request: _,
@@ -1738,23 +1773,27 @@ fn save_draft_completed(
     }
 }
 
-/// Apply a finished attachment validation (plan §15, Phase 8). Currency:
-/// the dialog must still be open, still showing the entry that was
-/// submitted — an Esc or an edit in the meantime drops the result. A
-/// validated file becomes a chip and a content edit (autosave carries the
-/// attachment list into the journal); a rejection keeps the dialog open
-/// with the detail inline, retryable in place.
+/// Apply a finished attachment validation (plan §15, ticket 95x0).
+/// Currency: the dialog must still be open, and the chooser's selection
+/// must still be the validated file — navigation in the meantime drops
+/// the result. A validated file becomes a chip and a content edit
+/// (autosave carries the attachment list into the journal); a rejection
+/// keeps the chooser open with the detail inline, retryable by pressing
+/// Enter on the file again.
 fn attachment_validated(
     state: &mut AppState,
     path: &std::path::Path,
     result: &OperationResult,
 ) -> Vec<Effect> {
-    let Some(Overlay::AttachmentPath(dialog)) = state.overlay.as_ref() else {
+    let Some(Overlay::AttachmentExplorer(dialog)) = state.overlay.as_ref() else {
         tracing::debug!(id = %result.id, "dropping attachment validation for a closed dialog");
         return Vec::new();
     };
-    if dialog.input.trim() != path.to_string_lossy() {
-        tracing::debug!(id = %result.id, "dropping attachment validation for an edited entry");
+    let selection_matches = dialog
+        .selected_file()
+        .is_some_and(|selected| selected == path);
+    if !selection_matches {
+        tracing::debug!(id = %result.id, "dropping attachment validation for a moved selection");
         return Vec::new();
     }
     match &result.outcome {
@@ -1785,16 +1824,57 @@ fn attachment_validated(
             Vec::new()
         }
         Err(failure) => {
-            // Detailed and retryable in place: the entry stays editable
-            // (plan §15, Phase 8 acceptance).
+            // Detailed and retryable in place: the chooser stays open with
+            // the same selection (plan §15 acceptance, ticket 95x0).
             let detail = failure.detail.clone();
-            if let Some(Overlay::AttachmentPath(dialog)) = state.overlay.as_mut() {
+            if let Some(Overlay::AttachmentExplorer(dialog)) = state.overlay.as_mut() {
                 dialog.error = Some(detail);
             }
             Vec::new()
         }
         Ok(_) => {
             tracing::warn!(id = %result.id, "unexpected payload for an attachment validation");
+            Vec::new()
+        }
+    }
+}
+
+/// Apply a finished directory listing (ticket 95x0). Currency: the
+/// dialog must still be open — an Esc in the meantime drops the result.
+/// A landed listing replaces the chooser's explorer state; a failed one
+/// keeps the dialog open with the detail inline (navigation stays free,
+/// so the user can head elsewhere or Esc).
+fn attachment_listing_ready(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
+    if !matches!(state.overlay, Some(Overlay::AttachmentExplorer(_))) {
+        tracing::debug!(id = %result.id, "dropping directory listing for a closed dialog");
+        return Vec::new();
+    }
+    match &result.outcome {
+        Ok(OperationOutcome::Explorer(explorer)) => {
+            let mut explorer = explorer.as_ref().clone();
+            // The chooser renders with the active palette; theme changes
+            // cannot happen while a modal is up, so this sticks.
+            let theme = state.active_theme();
+            explorer.set_theme(crate::ui::components::attachment_dialog::explorer_theme(
+                &theme,
+            ));
+            if let Some(Overlay::AttachmentExplorer(dialog)) = state.overlay.as_mut() {
+                dialog.explorer = Some(explorer);
+                dialog.listing = false;
+                dialog.error = None;
+            }
+            Vec::new()
+        }
+        Err(failure) => {
+            let detail = failure.detail.clone();
+            if let Some(Overlay::AttachmentExplorer(dialog)) = state.overlay.as_mut() {
+                dialog.listing = false;
+                dialog.error = Some(detail);
+            }
+            Vec::new()
+        }
+        Ok(_) => {
+            tracing::warn!(id = %result.id, "unexpected payload for a directory listing");
             Vec::new()
         }
     }
@@ -2121,6 +2201,64 @@ fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
 
 // ── Navigation and input ─────────────────────────────────────────────────
 
+/// Tab/Shift+Tab focus cycling (plan §10). While composing, the folder
+/// list joins the composer's cycle — Tab past the last control (Shift+Tab
+/// before the first) steps out to the sidebar, and the next step returns
+/// into the composer's first (last) control — so a draft can be parked on
+/// any mailbox without leaving the composer: switching preserves the draft
+/// (plan §14). The mailbox screen's other focusable controls (search
+/// field, select-all toggle, message list) are off screen while the
+/// composer replaces the list, so the cycle skips them.
+fn focus_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
+    match state.focus {
+        Focus::Composer => {
+            let Some(composer) = state.composer.as_mut() else {
+                return Vec::new();
+            };
+            // The sidebar sits just past the cycle's ends: Tab leaves from
+            // the last control, Shift+Tab from the first.
+            let step_out = (delta > 0 && composer.field == ComposerField::Discard)
+                || (delta < 0 && composer.field == ComposerField::To);
+            if step_out {
+                state.focus = Focus::Sidebar;
+            } else if delta > 0 {
+                composer.focus_next();
+            } else {
+                composer.focus_previous();
+            }
+            Vec::new()
+        }
+        // Back into the composer: Tab re-enters at the first control,
+        // Shift+Tab at the last — one linear cycle.
+        Focus::Sidebar if matches!(state.active_route(), Some(Route::Composer)) => {
+            state.focus = Focus::Composer;
+            let field = if delta > 0 {
+                ComposerField::To
+            } else {
+                ComposerField::Discard
+            };
+            if let Some(composer) = state.composer.as_mut() {
+                composer.focus_field(field);
+            }
+            Vec::new()
+        }
+        // In the reader Tab walks the attachment chips (plan §15): the
+        // selection the save/open keys act on.
+        Focus::Reader => {
+            cycle_reader_attachment(state, delta);
+            Vec::new()
+        }
+        _ => {
+            state.focus = if delta > 0 {
+                state.focus.next()
+            } else {
+                state.focus.previous()
+            };
+            Vec::new()
+        }
+    }
+}
+
 fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
     match state.focus {
         Focus::MessageList => {
@@ -2398,7 +2536,7 @@ fn activate(state: &mut AppState) -> Vec<Effect> {
             None => Vec::new(),
         },
         Focus::MessageList => match state.selected_message().cloned() {
-            Some(summary) => open_message(state, summary),
+            Some(summary) => open_selected(state, summary),
             None => Vec::new(),
         },
         // Enter on the focused `[ ]`/`[X]` header button: the one place
@@ -2461,20 +2599,29 @@ fn activate_composer(state: &mut AppState) -> Vec<Effect> {
     }
 }
 
-/// Open the attachment path-entry overlay (plan §15: path entry, no file
-/// browser in v1). No-op without a composer.
+/// Open the attachment file chooser (plan §15, ticket 95x0): a
+/// `ratatui_explorer` listing over the user's home directory. The
+/// listing itself is backend work — the dialog opens immediately in its
+/// pending state and the explorer arrives with the result. No-op without
+/// a composer.
 fn open_attachment_dialog(state: &mut AppState) -> Vec<Effect> {
     if state.composer.is_none() {
         return Vec::new();
     }
-    state.overlay = Some(Overlay::AttachmentPath(AttachmentPathDialog {
-        input: String::new(),
-        cursor: 0,
-        error: None,
-        previous_focus: state.focus,
-    }));
+    state.overlay = Some(Overlay::AttachmentExplorer(Box::new(
+        AttachmentFileDialog {
+            explorer: None,
+            listing: true,
+            error: None,
+            previous_focus: state.focus,
+        },
+    )));
     state.focus = Focus::Dialog;
-    Vec::new()
+    vec![
+        state
+            .operations
+            .start(OperationKind::ListAttachmentFiles { path: None }),
+    ]
 }
 
 /// Remove the focused attachment chip (plan §15: "allow removal before
@@ -2494,6 +2641,83 @@ fn remove_attachment(state: &mut AppState, index: usize) -> Vec<Effect> {
         composer.draft.note_edit(state.clock);
         state.set_status(format!("Removed {name}"));
     }
+    Vec::new()
+}
+
+/// Enter (or a second click) on a selected list row. A draft in the
+/// mailbox with the `Drafts` role reopens in the composer instead of the
+/// reader — the one context where Enter composes (plan §14: reopening
+/// continues the draft); every other message opens the reader.
+fn open_selected(state: &mut AppState, summary: crate::domain::MessageSummary) -> Vec<Effect> {
+    if state.active_mailbox_role() == Some(MailboxRole::Drafts) {
+        return open_draft_message(state, summary);
+    }
+    open_message(state, summary)
+}
+
+/// Whether the in-memory draft and the listed message are the same draft:
+/// matched on the stable RFC `Message-ID` (envelope listings carry bare
+/// ids, snapshots the bracketed form) or on the backend id of the last
+/// confirmed remote copy.
+fn is_same_draft(draft: &crate::domain::Draft, summary: &crate::domain::MessageSummary) -> bool {
+    let ids_match = match (&draft.message_id, &summary.message_id) {
+        (Some(draft_id), Some(summary_id)) => {
+            bare_message_id(draft_id) == bare_message_id(summary_id)
+        }
+        _ => false,
+    };
+    ids_match || draft.remote_id.as_ref() == Some(&summary.id)
+}
+
+/// Whether the one-composer rule blocks opening another draft (plan §14,
+/// ticket pmbz): only a draft that holds real work — content, ids, or
+/// unsaved edits — counts as open. A pristine blank (the `c` artifact,
+/// ticket v5x8) never blocks; the next draft replaces it.
+fn a_draft_is_open(state: &AppState) -> bool {
+    state.composer.as_ref().is_some_and(|c| !c.draft.is_blank())
+}
+
+/// Enter on a message in the Drafts mailbox (plan §14). The in-memory
+/// draft (left open earlier, or restored at startup) is the newest known
+/// state of itself — reopening continues it without a backend round-trip.
+/// With a *different* real draft already open the one-composer rule
+/// refuses; otherwise the copy is fetched and turned into a composer
+/// draft, replacing a pristine blank in the process (ticket pmbz: `c`
+/// leaves a blank in state, which must not seal the drafts list).
+fn open_draft_message(state: &mut AppState, summary: crate::domain::MessageSummary) -> Vec<Effect> {
+    let same = state
+        .composer
+        .as_ref()
+        .is_some_and(|c| is_same_draft(&c.draft, &summary));
+    if same {
+        open_composer_screen(state);
+        return Vec::new();
+    }
+    if a_draft_is_open(state) {
+        state.set_status("A draft is already open — send or discard it first");
+        return Vec::new();
+    }
+    let locator = MessageLocator {
+        mailbox: summary.mailbox_id.clone(),
+        id: summary.id.clone(),
+        message_id: summary.message_id.clone(),
+    };
+    state.set_status("Opening draft…");
+    vec![state.operations.start(OperationKind::OpenDraft(locator))]
+}
+
+/// Apply a fetched draft copy (the `OpenDraft` result): turn it into a
+/// composer draft and open the composer. Currency checks upstream: the
+/// drafts mailbox must still be displayed, and real work in the composer
+/// (content, ids, or unsaved edits) is never clobbered — a pristine
+/// blank is (ticket pmbz).
+fn draft_message_loaded(state: &mut AppState, message: crate::domain::Message) -> Vec<Effect> {
+    if a_draft_is_open(state) {
+        tracing::debug!("draft fetch dropped: a composer draft exists already");
+        return Vec::new();
+    }
+    let draft = crate::domain::draft_from_message(&message);
+    install_composer_draft(state, draft, "Draft opened");
     Vec::new()
 }
 
@@ -2620,19 +2844,30 @@ fn editor_finished(
     }
 }
 
-/// Open (or reopen) the built-in composer (plan §19 Phase 6). A left-open
-/// draft is preserved in `AppState.composer`, so composing again returns to
-/// it; only one composer exists at a time.
+/// Open the composer with a blank new email (the `c` key and the sidebar
+/// Compose button, plan §19 Phase 6, ticket v5x8). A draft left open
+/// earlier stays preserved in `AppState.composer` — its forced save on
+/// leave keeps the Drafts-mailbox copy current — but composing again
+/// always starts clean: the saved draft is reopened explicitly from the
+/// Drafts list. Already composing is a no-op; only one composer exists
+/// at a time.
 fn open_composer(state: &mut AppState) -> Vec<Effect> {
     if matches!(state.active_route(), Some(Route::Composer)) {
         return Vec::new();
     }
-    if state.composer.is_none() {
-        state.composer = Some(ComposerState::new());
-    }
-    state.routes.push(Route::Composer);
-    state.focus = Focus::Composer;
+    state.composer = Some(ComposerState::new());
+    open_composer_screen(state);
     Vec::new()
+}
+
+/// Push the composer route and hand it focus, showing whatever draft
+/// `AppState.composer` holds (a fresh blank one, a seeded reply, or a
+/// draft reopened from the Drafts list).
+fn open_composer_screen(state: &mut AppState) {
+    if !matches!(state.active_route(), Some(Route::Composer)) {
+        state.routes.push(Route::Composer);
+    }
+    state.focus = Focus::Composer;
 }
 
 /// Start the journal restore (plan §19 Phase 6 crash/restart acceptance).
@@ -2662,8 +2897,9 @@ fn open_discard_confirm(state: &mut AppState) -> Vec<Effect> {
 
 /// Leave the composer (plan §14): pop the route, return to the prior
 /// route, and FORCE a save of any unsaved revision — no debounce, never a
-/// silent discard. The draft data stays in `AppState.composer` so compose
-/// reopens it, and the save completes in the background. A save of the
+/// silent discard. The draft data stays in `AppState.composer` so the
+/// save can complete and the Drafts list can reopen it without a fetch;
+/// `c` itself starts a fresh blank draft (ticket v5x8). A save of the
 /// current revision already in flight is not duplicated; an in-flight save
 /// of an older revision is superseded by the forced one.
 fn leave_composer(state: &mut AppState) -> Vec<Effect> {

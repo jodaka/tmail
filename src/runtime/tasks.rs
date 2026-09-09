@@ -120,6 +120,13 @@ async fn run_effect(
             Ok(message) => Some(Ok(OperationOutcome::Message(Box::new(message)))),
             Err(err) => operation_failure(&effect, err).map(Err),
         },
+        // Same backend call as the reader's load, different consumer: the
+        // reducer turns the fetched copy into a composer draft (the Drafts
+        // list's Enter).
+        OperationKind::OpenDraft(locator) => match backend.get_message(ctx, locator).await {
+            Ok(message) => Some(Ok(OperationOutcome::Message(Box::new(message)))),
+            Err(err) => operation_failure(&effect, err).map(Err),
+        },
         // Same backend call as the reader's load (ticket wxtx), different
         // consumer: the list's faded preview. Failures land in the reducer
         // as ordinary failures, which it logs and drops for this kind.
@@ -172,6 +179,17 @@ async fn run_effect(
             Ok(attachment) => Some(Ok(OperationOutcome::Attachment(attachment))),
             Err(err) => operation_failure(&effect, err).map(Err),
         },
+        OperationKind::ListAttachmentFiles { path } => {
+            match build_attachment_explorer(path.as_deref()) {
+                Ok(explorer) => Some(Ok(OperationOutcome::Explorer(Box::new(explorer)))),
+                Err(detail) => Some(Err(OperationFailure {
+                    code: None,
+                    detail: sanitize(&detail),
+                    retry: Some(effect.retry_spec()),
+                    ambiguous: false,
+                })),
+            }
+        }
         OperationKind::SaveAttachment { request, .. } => {
             match backend.save_attachment(ctx, request).await {
                 Ok(path) => Some(Ok(OperationOutcome::SavedPath(path))),
@@ -254,6 +272,25 @@ fn effect_draft(effect: &Effect) -> crate::domain::DraftSnapshot {
         OperationKind::DeleteDraft { draft, .. } => (**draft).clone(),
         other => unreachable!("effect_draft on non-delete kind: {other:?}"),
     }
+}
+
+/// Build the attachment chooser's explorer state for `path` (ticket
+/// 95x0). `None` means the user's home directory — where attachments
+/// usually live — with the working directory as the fallback; an
+/// unreachable home falls back to the working directory too.
+fn build_attachment_explorer(
+    path: Option<&std::path::Path>,
+) -> Result<ratatui_explorer::FileExplorer, String> {
+    let target = path
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+        .filter(|dir| dir.is_dir())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    tracing::debug!(path = %target.display(), "listing attachment chooser directory");
+    let listed = target.display().to_string();
+    ratatui_explorer::FileExplorerBuilder::build_with_working_dir(target)
+        .map_err(|err| format!("could not list `{listed}`: {err}"))
 }
 
 /// Map a backend error into a modal-ready failure (plan §12): exit status,

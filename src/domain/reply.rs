@@ -228,6 +228,7 @@ mod tests {
                     name: None,
                     email: String::from("carol@example.org"),
                 }],
+                bcc: Vec::new(),
                 date: Some(
                     DateTime::parse_from_rfc3339("2026-09-02T10:03:40+03:00").expect("valid date"),
                 ),

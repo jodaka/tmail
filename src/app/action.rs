@@ -34,10 +34,29 @@ pub enum ComposerEdit {
     CursorRight,
     CursorUp,
     CursorDown,
+    /// Word-wise caret moves in the body (Ctrl+Left/Right, ticket kfmt).
+    WordLeft,
+    WordRight,
+    /// Selection extension in the body (Shift+arrows, ticket kfmt):
+    /// characters, visual lines, and — with Ctrl — whole words. The
+    /// single-line fields have no selection model.
+    SelectLeft,
+    SelectRight,
+    SelectUp,
+    SelectDown,
+    SelectWordLeft,
+    SelectWordRight,
+    /// Undo/redo the body editor's history (Ctrl+Z / Ctrl+Y, ticket
+    /// kfmt); coalesced so a typing run reverts at once. The reducer
+    /// syncs the draft only when something actually changed.
+    Undo,
+    Redo,
 }
 impl ComposerEdit {
-    /// Whether this edit changes draft content (caret moves do not): only
-    /// content edits bump the draft revision and re-arm autosave.
+    /// Whether this edit changes draft content (caret and selection moves
+    /// do not): only content edits bump the draft revision and re-arm
+    /// autosave. Undo/redo are handled separately — they are content
+    /// edits only when the history actually applied a step.
     pub fn is_content_edit(&self) -> bool {
         matches!(
             self,
@@ -49,8 +68,8 @@ impl ComposerEdit {
     }
 }
 
-/// Character-level edit of a modal text field (Phase 8: the attachment
-/// path-entry dialog, plan §15). Single-line, so no vertical movement.
+/// Character-level edit of a modal text field (the account wizard's
+/// fields, ADR 0003). Single-line, so no vertical movement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogEdit {
     Char(char),
@@ -58,6 +77,25 @@ pub enum DialogEdit {
     Delete,
     CursorLeft,
     CursorRight,
+}
+
+/// Navigate the attachment file chooser (ticket 95x0). Selection moves
+/// apply at once; directory changes are backend listings, and the
+/// reducer freezes navigation while one is in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentBrowse {
+    /// Move the selection up one entry.
+    Up,
+    /// Move the selection down one entry.
+    Down,
+    /// Jump several entries up.
+    PageUp,
+    /// Jump several entries down.
+    PageDown,
+    /// List the parent directory (Left/Backspace).
+    Parent,
+    /// Descend into the selected directory (Right).
+    Open,
 }
 
 /// What a mouse click landed on (plan §10, Phase 10.1). Recorded during
@@ -119,8 +157,10 @@ pub enum Action {
     SubmitSearch,
     /// Composer text editing / caret movement (Phase 6).
     ComposerEdit(ComposerEdit),
-    /// Modal text-field editing (Phase 8: attachment path dialog).
+    /// Modal text-field editing (Phase 8: the wizard's fields).
     DialogEdit(DialogEdit),
+    /// Attachment file chooser navigation (ticket 95x0).
+    AttachmentBrowse(AttachmentBrowse),
     /// Account configuration wizard input (ADR 0003): step submissions,
     /// list moves, and step-backs. The wizard intercepts every other
     /// action while active, so mailbox shortcuts cannot leak into it.

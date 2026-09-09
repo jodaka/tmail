@@ -3,9 +3,10 @@
 //! Header ("New message"), one row per address/subject field with the
 //! mockup's 8-column right-aligned labels and hairline rules, the body
 //! editor (`ratatui-textarea`), and the Send/Discard action row. The
-//! focused control gets the hover fill; single-line fields draw an
-//! inline caret span (the terminal cursor stays hidden, matching the
-//! rest of the app).
+//! focused control gets the hover fill; focused text inputs draw an
+//! inline caret span — the body editor the same caret through its
+//! `cursor_style` (ticket tz12), and the terminal cursor stays hidden,
+//! matching the rest of the app.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -25,6 +26,11 @@ use crate::ui::theme::Theme;
 
 /// Label column width (mockup `grid-template-columns: 8ch`).
 const LABEL_WIDTH: usize = 8;
+
+/// Left/right inset of the body text inside its well (mockup `.field`
+/// grid): the text column aligns with the subject value — the 8ch label
+/// plus the 2-space gap — mirrored on the right edge.
+const BODY_PAD: usize = LABEL_WIDTH + 2;
 
 /// Render the composer into `area` (the body region right of the sidebar).
 pub fn render(
@@ -134,22 +140,61 @@ pub fn render(
             ClickTarget::ComposerField(field),
         );
         y += 1;
-        hairline(frame, x, y, inner_w, theme);
+        // The subject is the last field: no rule between it and the body
+        // (ticket tz12; mockup `.field.body-row` carries `border-bottom: 0`),
+        // but one empty line visually separates it from the body (ticket
+        // gdqm) where the other fields' rules sit.
+        if field != ComposerField::Subject {
+            hairline(frame, x, y, inner_w, theme);
+        }
         y += 1;
     }
 
-    // Body fills the remaining space above the attach and action rows
-    // (mockup `.msg-body` textarea).
+    // Body well (mockup `.msg-body` on its `.field` row): the surface
+    // fill spans the full row, and the text is inset to align with the
+    // subject value column — `BODY_PAD` columns from each edge — with one
+    // text line of padding above and below (ticket tz12). The textarea
+    // paints over the fill with transparent styles, so the well shows
+    // through around and under the text.
+    let divider_y = bottom.saturating_sub(3);
     let attach_y = bottom.saturating_sub(2);
-    if attach_y > y {
-        let body = Rect {
-            x,
-            y,
-            width: inner_w as u16,
-            height: attach_y - y,
+    let body_h = divider_y.saturating_sub(y);
+    let body_well = Rect {
+        x,
+        y,
+        width: inner_w as u16,
+        height: body_h,
+    };
+    if body_h > 0 {
+        frame.render_widget(
+            Block::default().style(Style::new().bg(theme.surface)),
+            body_well,
+        );
+        let body_text = Rect {
+            x: x + BODY_PAD as u16,
+            y: y + 1,
+            width: inner_w.saturating_sub(BODY_PAD * 2) as u16,
+            height: body_h.saturating_sub(2),
         };
-        frame.render_widget(&composer.body, body);
-        hits.push(body, ClickTarget::ComposerField(ComposerField::Body));
+        frame.render_widget(&composer.body, body_text);
+    }
+    // Clicking the well — padding included — focuses the body.
+    hits.push(body_well, ClickTarget::ComposerField(ComposerField::Body));
+
+    // The rule separating the body from the attach/send/discard rows
+    // (mockup `.compose-actions` border-top).
+    if bottom >= y + 3 {
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(theme.hairline()),
+            Rect {
+                x,
+                y: divider_y,
+                width: inner_w as u16,
+                height: 1,
+            },
+        );
     }
 
     // Attach row (mockup `.attach-row`): one chip per attached file with
@@ -334,10 +379,9 @@ fn value_spans<'a>(
     value_w: usize,
     theme: &'a Theme,
 ) -> Vec<Span<'a>> {
-    let caret_style = Style::new()
-        .fg(theme.background)
-        .bg(theme.accent)
-        .add_modifier(Modifier::BOLD);
+    // The same accent caret block the body editor draws while focused
+    // (ticket tz12); `Theme::caret` keeps the two in step.
+    let caret_style = theme.caret();
     let normal = Style::new().fg(theme.text);
     let invalid = Style::new().fg(theme.warning);
     let entries = if address_field {

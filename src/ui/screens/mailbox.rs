@@ -404,8 +404,12 @@ fn message_spans<'a>(
     // Subject plus (full mode only) the faded body preview, composed so
     // the combined cell fills exactly the column width: the subject stays
     // whole when it fits, the preview takes what is left and ends in `…`
-    // when the body text is longer (ticket wxtx). Column anatomy keeps the
-    // mockup grid: marker, icon, from, subject(+preview), date.
+    // when the body text is longer (ticket wxtx). A message with
+    // attachments ends its preview in the paperclip emoji instead, with
+    // the body one symbol shorter to keep the column width (ticket r84f).
+    // Column anatomy keeps the mockup grid: marker, icon, from,
+    // subject(+preview), date.
+    const CLIP: &str = "📎";
     let mut spans = vec![marker, icon];
     spans.push(Span::styled(
         text::fit_left(message.from_display(), from_w),
@@ -422,15 +426,22 @@ fn message_spans<'a>(
             message
                 .snippet
                 .as_ref()
-                .map(|snippet| {
+                .and_then(|snippet| {
                     let budget = subject_w
                         .saturating_sub(message.subject.width())
                         .saturating_sub(sep.width());
-                    if budget > 0 {
-                        format!("{sep}{}", text::truncate(snippet, budget))
-                    } else {
-                        String::new()
-                    }
+                    (budget > 0).then(|| {
+                        if message.has_attachments {
+                            // The clip rides where the ellipsis sits
+                            // (ticket r84f): the body is one symbol
+                            // shorter, so text + clip fill exactly the
+                            // same budget a truncated preview would.
+                            let body = text::clip(snippet, budget.saturating_sub(2));
+                            format!("{sep}{body}{CLIP}")
+                        } else {
+                            format!("{sep}{}", text::truncate(snippet, budget))
+                        }
+                    })
                 })
                 .unwrap_or_default()
         };

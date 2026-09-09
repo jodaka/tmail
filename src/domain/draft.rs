@@ -25,6 +25,8 @@ use chrono::{DateTime, Duration, FixedOffset};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::MessageId;
+use crate::domain::address::to_field_list;
+use crate::domain::message::{Message, bracketed_message_id};
 
 /// Default autosave debounce (plan §14: "debounce 2 seconds"). The
 /// `[tmail.composer].autosave_delay_ms` setting overrides it within the
@@ -147,6 +149,26 @@ impl Draft {
         self.revision > self.saved_revision
     }
 
+    /// Whether the draft has nothing in it: no recipients, subject, body,
+    /// attachments, reply threading, identity, or unsaved edits. A blank
+    /// draft is the `c` artifact (ticket v5x8) — it is not real work, so
+    /// it never counts as "a draft is open" (ticket pmbz): the next draft
+    /// replaces it without ceremony.
+    pub fn is_blank(&self) -> bool {
+        !self.is_dirty()
+            && self.to.is_empty()
+            && self.cc.is_empty()
+            && self.bcc.is_empty()
+            && self.subject.is_empty()
+            && self.body.is_empty()
+            && self.attachments.is_empty()
+            && self.in_reply_to.is_none()
+            && self.references.is_none()
+            && self.local_id.is_none()
+            && self.message_id.is_none()
+            && self.remote_id.is_none()
+    }
+
     /// Record a content edit: bump the revision and (re)arm the debounce.
     /// An edit during an in-flight save re-dirties the draft, so the state
     /// machine always follows with another save (plan §14 acceptance).
@@ -167,7 +189,10 @@ impl Draft {
     }
 
     /// Begin a save of the current revision: mint the stable identities on
-    /// first use and freeze a snapshot for the backend.
+    /// first use and freeze a snapshot for the backend. A draft reopened
+    /// from the Drafts mailbox already carries the copy's `Message-ID` —
+    /// it is kept, so the save replaces that copy instead of adding a
+    /// second one (ADR 0002 §D.3).
     pub fn start_save(&mut self, now: DateTime<FixedOffset>) -> DraftSnapshot {
         self.save = DraftSaveState::Saving;
         if self.local_id.is_none() {
@@ -175,7 +200,9 @@ impl Draft {
                 .timestamp_nanos_opt()
                 .unwrap_or(now.timestamp_millis() * 1_000_000);
             self.local_id = Some(DraftId(format!("local-{stamp}")));
-            self.message_id = Some(format!("<{stamp}.draft@tmail.local>"));
+            if self.message_id.is_none() {
+                self.message_id = Some(format!("<{stamp}.draft@tmail.local>"));
+            }
         }
         self.snapshot()
     }
@@ -235,14 +262,130 @@ impl Draft {
     }
 }
 
+/// Rebuild a composer draft from a fetched Drafts-mailbox message (the
+/// Drafts list's Enter action): headers become the composer fields, the
+/// decoded `text/plain` body becomes the body, and the copy's stable
+/// identities carry over — the `Message-ID` (bracketed snapshot form) and
+/// the backend id as `remote_id` — so the next save *replaces* this copy
+/// instead of adding a second one (ADR 0002 §D.3 add-then-delete matches
+/// on both). The revision counter restarts at the fetched (last-pushed)
+/// state; attachment chips are path references recorded only in the
+/// journal, so a remote copy carries none.
+pub fn draft_from_message(message: &Message) -> Draft {
+    Draft {
+        to: to_field_list(&message.headers.to),
+        cc: to_field_list(&message.headers.cc),
+        bcc: to_field_list(&message.headers.bcc),
+        subject: message.headers.subject.clone(),
+        body: message.plain_body.clone().unwrap_or_default(),
+        in_reply_to: message.headers.in_reply_to.clone(),
+        references: message.headers.references.clone(),
+        message_id: message
+            .headers
+            .message_id
+            .as_deref()
+            .map(bracketed_message_id),
+        remote_id: Some(message.id.clone()),
+        ..Draft::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{Address, MailboxId, MessageHeaders};
 
     fn at(secs: i64) -> DateTime<FixedOffset> {
         DateTime::from_timestamp(1_788_335_220 + secs, 0)
             .expect("valid epoch")
             .with_timezone(&FixedOffset::east_opt(0).expect("utc"))
+    }
+
+    /// A draft copy as `message read` maps it: tmail-addressed fields,
+    /// bare `Message-ID` (the parser strips brackets), hidden recipients.
+    fn draft_copy() -> Message {
+        Message {
+            id: MessageId(String::from("copy-7")),
+            mailbox_id: MailboxId(String::from("drafts")),
+            headers: MessageHeaders {
+                subject: String::from("Quarterly notes"),
+                from: vec![Address {
+                    name: None,
+                    email: String::from("me@tmail.local"),
+                }],
+                to: vec![Address {
+                    name: Some(String::from("Dest")),
+                    email: String::from("dest@example.com"),
+                }],
+                cc: vec![Address {
+                    name: None,
+                    email: String::from("cc@example.com"),
+                }],
+                bcc: vec![Address {
+                    name: None,
+                    email: String::from("bcc@example.com"),
+                }],
+                date: None,
+                message_id: Some(String::from("1778.draft@tmail.local")),
+                in_reply_to: Some(String::from("orig@tmail.local")),
+                references: Some(String::from("root@tmail.local orig@tmail.local")),
+            },
+            plain_body: Some(String::from("draft body")),
+            html_body: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn draft_from_message_maps_fields_and_identities() {
+        let draft = draft_from_message(&draft_copy());
+        assert_eq!(draft.to, "Dest <dest@example.com>");
+        assert_eq!(draft.cc, "cc@example.com");
+        assert_eq!(draft.bcc, "bcc@example.com");
+        assert_eq!(draft.subject, "Quarterly notes");
+        assert_eq!(draft.body, "draft body");
+        // The copy's identities carry over: the next save replaces it
+        // (bracketed snapshot form, ADR 0002 §D.3).
+        assert_eq!(
+            draft.message_id.as_deref(),
+            Some("<1778.draft@tmail.local>")
+        );
+        assert_eq!(draft.remote_id, Some(MessageId(String::from("copy-7"))));
+        // Threading headers survive the round trip (reply drafts).
+        assert_eq!(draft.in_reply_to.as_deref(), Some("orig@tmail.local"));
+        assert_eq!(
+            draft.references.as_deref(),
+            Some("root@tmail.local orig@tmail.local")
+        );
+        // The fetched copy is the last pushed state: clean, ids minted on
+        // the first edit-save.
+        assert!(!draft.is_dirty());
+        assert!(draft.local_id.is_none());
+    }
+
+    #[test]
+    fn draft_from_message_tolerates_missing_data() {
+        let mut copy = draft_copy();
+        copy.headers.message_id = None;
+        copy.plain_body = None;
+        copy.headers.to.clear();
+        let draft = draft_from_message(&copy);
+        assert_eq!(draft.message_id, None, "minted at the first save instead");
+        assert_eq!(draft.body, "");
+        assert_eq!(draft.to, "");
+        assert_eq!(draft.remote_id, Some(copy.id));
+    }
+
+    #[test]
+    fn start_save_keeps_a_recovered_message_id() {
+        let mut draft = draft_from_message(&draft_copy());
+        let snapshot = draft.start_save(at(2));
+        assert!(snapshot.local_id.0.starts_with("local-"), "minted fresh");
+        assert_eq!(
+            snapshot.message_id.as_deref(),
+            Some("<1778.draft@tmail.local>"),
+            "the copy's Message-ID is kept, not re-minted"
+        );
     }
 
     #[test]

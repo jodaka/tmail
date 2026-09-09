@@ -1,24 +1,25 @@
-//! The attachment path-entry dialog (plan §15, Phase 8): a centered modal
-//! with a single-line path entry, an inline caret, and the detail of the
-//! last rejected submission. Enter submits, Esc cancels — validation runs
-//! in the backend (`~` expansion, existence, readability, size), so
-//! rejections keep the entry editable and retryable.
+//! The attachment file chooser (plan §15, ticket 95x0): a centered modal
+//! hosting a `ratatui_explorer` listing of the working directory. The
+//! explorer widget draws its own list — themed here from the app's
+//! palette — while the dialog adds the chrome, the current-directory
+//! line, and the status row: a listing in flight, the detail of a failed
+//! listing or validation, or the submit hint.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use unicode_width::UnicodeWidthStr;
+use ratatui::widgets::{Block, Borders, Clear, FrameExt, Paragraph};
 
 use crate::app::overlay::Overlay;
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
-/// Dialog geometry for one terminal size; centered like the other modals.
+/// Dialog geometry for one terminal size: generous — a proper chooser —
+/// but always inside the terminal with a margin.
 fn layout(size: (u16, u16)) -> Rect {
-    let width = 56u16.min(size.0.max(1));
-    let height = 8u16.min(size.1.max(1));
+    let width = (size.0 * 3 / 4).clamp(46, 96).min(size.0.max(1));
+    let height = (size.1 * 3 / 4).clamp(12, 30).min(size.1.max(1));
     Rect {
         x: size.0.saturating_sub(width) / 2,
         y: size.1.saturating_sub(height) / 2,
@@ -27,13 +28,24 @@ fn layout(size: (u16, u16)) -> Rect {
     }
 }
 
+/// The explorer widget's theme, built from the app's palette tokens.
+/// No block: the dialog draws its own chrome around the list.
+pub(crate) fn explorer_theme(theme: &Theme) -> ratatui_explorer::Theme {
+    ratatui_explorer::Theme::new()
+        .with_style(Style::new().fg(theme.text))
+        .with_item_style(Style::new().fg(theme.text))
+        .with_dir_style(Style::new().fg(theme.text_soft))
+        .with_highlight_item_style(Style::new().fg(theme.text).bg(theme.accent_bg))
+        .with_highlight_dir_style(Style::new().fg(theme.text).bg(theme.accent_bg))
+}
+
 /// Render the dialog, when open, above everything already drawn.
 pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme: &Theme) {
-    let Some(Overlay::AttachmentPath(dialog)) = &state.overlay else {
+    let Some(Overlay::AttachmentExplorer(dialog)) = &state.overlay else {
         return;
     };
     let area = layout(state.size);
-    if area.width < 6 || area.height < 4 {
+    if area.width < 8 || area.height < 5 {
         return;
     }
     frame.render_widget(Clear, area);
@@ -58,102 +70,130 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
     };
     let inner_w = inner.width as usize;
 
-    // Entry line with an inline caret (the terminal cursor stays hidden
-    // app-wide). The path is never cleaned here: what the user typed is
-    // what the backend receives.
-    let caret_style = Style::new()
-        .fg(theme.background)
-        .bg(theme.accent)
-        .add_modifier(Modifier::BOLD);
-    let normal = Style::new().fg(theme.text);
-    let mut entry = Vec::new();
-    let mut used = 0usize;
-    for (index, ch) in dialog.input.char_indices() {
-        let width = ch.to_string().width();
-        if used + width > inner_w {
-            break;
-        }
-        let style = if index == dialog.cursor {
-            caret_style
-        } else {
-            normal
-        };
-        entry.push(Span::styled(ch.to_string(), style));
-        used += width;
+    // The directory being listed, clipped to one line.
+    let cwd = dialog
+        .explorer
+        .as_ref()
+        .map(|explorer| explorer.cwd().display().to_string())
+        .unwrap_or_else(|| String::from("…"));
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            text::clip(&cwd, inner_w),
+            Style::new().fg(theme.dim),
+        ))),
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        },
+    );
+
+    // The listing itself, between the directory line and the bottom rows:
+    // one line each for cwd, status, and key hints.
+    let list = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: inner.height.saturating_sub(3),
+    };
+    if let Some(explorer) = dialog.explorer.as_ref() {
+        frame.render_widget_ref(explorer.widget(), list);
+    } else {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                text::clip("Listing…", list.width as usize),
+                Style::new().fg(theme.dim),
+            ))),
+            list,
+        );
     }
-    if dialog.cursor >= dialog.input.chars().count() && used < inner_w {
-        entry.push(Span::styled(" ", caret_style));
-    }
-    // The rejection rides directly under the entry; while validating (no
-    // error yet) the hint line doubles as the feedback row.
-    let feedback = match &dialog.error {
-        Some(detail) => Line::from(Span::styled(
+
+    // Status row: the last failure, the in-flight listing, or the hint
+    // that Enter attaches the selected file.
+    let (status, style) = match (&dialog.error, dialog.listing) {
+        (Some(detail), _) => (
             text::wrap(detail, inner_w)
                 .into_iter()
                 .next()
                 .unwrap_or_default(),
             Style::new().fg(theme.warning),
-        )),
-        None => Line::from(Span::styled(
-            text::clip("(path is checked when you press ↵)", inner_w),
+        ),
+        (None, true) => (String::from("Listing…"), Style::new().fg(theme.dim)),
+        (None, false) => (
+            String::from("(↵ attaches the selected file)"),
             Style::new().fg(theme.dim),
-        )),
+        ),
     };
-    let rows = [
-        Line::from(entry),
-        feedback,
-        Line::from(Span::raw("")),
-        Line::from(Span::styled(
-            text::clip("Type or paste a path · ↵ attach · Esc cancel", inner_w),
+    render_status_line(
+        frame,
+        inner,
+        inner_w,
+        inner.height.saturating_sub(2) as usize,
+        status,
+        style,
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            text::clip("↑↓ select · ← up · → open · ↵ attach · Esc cancel", inner_w),
             Style::new().fg(theme.dim),
-        )),
-    ];
-    for (index, line) in rows.into_iter().take(inner.height as usize).enumerate() {
-        frame.render_widget(
-            Paragraph::new(line),
-            Rect {
-                x: inner.x,
-                y: inner.y + index as u16,
-                width: inner.width,
-                height: 1,
-            },
-        );
-    }
+        ))),
+        Rect {
+            x: inner.x,
+            y: inner.y + inner.height - 1,
+            width: inner.width,
+            height: 1,
+        },
+    );
+}
+
+fn render_status_line(
+    frame: &mut Frame<'_>,
+    inner: Rect,
+    inner_w: usize,
+    row: usize,
+    content: String,
+    style: Style,
+) {
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            text::clip(&content, inner_w),
+            style,
+        ))),
+        Rect {
+            x: inner.x,
+            y: inner.y + row as u16,
+            width: inner.width,
+            height: 1,
+        },
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::focus::Focus;
-    use crate::app::overlay::AttachmentPathDialog;
-
-    fn dialog() -> AttachmentPathDialog {
-        AttachmentPathDialog {
-            input: String::from("~/docs/report final.pdf"),
-            cursor: 3,
-            error: None,
-            previous_focus: Focus::Composer,
-        }
-    }
 
     #[test]
-    fn layout_stays_centered_and_fits_small_terms() {
+    fn layout_is_generous_and_centered() {
         let area = layout((152, 40));
-        assert_eq!(area.width, 56);
-        assert_eq!(area.x, (152 - 56) / 2);
-        let area = layout((30, 6));
-        assert_eq!(area.width, 30);
-        assert_eq!(area.height, 6);
+        assert_eq!(area.width, 96);
+        assert_eq!(area.height, 30);
+        assert_eq!(area.x, (152 - 96) / 2);
+        assert_eq!(area.y, (40 - 30) / 2);
+        // Small terminals shrink the dialog instead of overlapping.
+        let area = layout((40, 10));
+        assert_eq!(area.width, 40);
+        assert_eq!(area.height, 10);
     }
 
     #[test]
-    fn caret_marker_and_error_shape() {
-        let d = dialog();
-        // The caret index lands inside the typed text; the entry renders
-        // with a reversed cell there (visual check happens in snapshots).
-        assert!(d.cursor < d.input.chars().count());
-        let mut d = dialog();
-        d.error = Some(String::from("`~/x` does not exist"));
-        assert!(d.error.is_some());
+    fn explorer_theme_uses_the_palette_tokens() {
+        let theme = Theme::default_dark();
+        let explorer = explorer_theme(&theme);
+        assert_eq!(explorer.item_style().fg, Some(theme.text));
+        assert_eq!(explorer.highlight_item_style().bg, Some(theme.accent_bg));
+        assert_eq!(explorer.dir_style().fg, Some(theme.text_soft));
+        assert!(explorer.block().is_none(), "the dialog owns the chrome");
     }
 }

@@ -128,6 +128,9 @@ pub(crate) fn message(dto: dto::MessageReadDto, locator: MessageLocator) -> Mess
             from: address_header(&headers, "from"),
             to: address_header(&headers, "to"),
             cc: address_header(&headers, "cc"),
+            // Draft copies stored in the Drafts mailbox keep their Bcc
+            // header so reopening recovers the hidden recipients.
+            bcc: address_header(&headers, "bcc"),
             date: date_header(&headers, "date"),
             message_id: text_header(&headers, "message-id"),
             in_reply_to: text_header(&headers, "in-reply-to").map(bare_ids),
@@ -638,6 +641,27 @@ mod tests {
         assert_eq!(message.plain_body, None);
         assert_eq!(message.html_body, None);
         assert!(message.attachments.is_empty());
+    }
+
+    #[test]
+    fn draft_bcc_header_maps_to_the_hidden_recipients() {
+        // Draft copies stored in the Drafts mailbox keep their Bcc header
+        // (`message add` writes it); reopening the draft needs it back.
+        let dto: dto::MessageReadDto = serde_json::from_str(
+            r#"{
+                "text_body": [0],
+                "parts": [{"headers": [
+                    {"name":"subject","value":{"Text":"Draft"}},
+                    {"name":"bcc","value":{"Address":{"List":[
+                        {"name":null,"address":"hidden@example.com"}
+                    ]}}}
+                ],"body":{"Text":"body"}}]
+            }"#,
+        )
+        .expect("parses");
+        let message = message(dto, locator());
+        assert_eq!(message.headers.bcc.len(), 1);
+        assert_eq!(message.headers.bcc[0].display(), "hidden@example.com");
     }
 
     #[test]

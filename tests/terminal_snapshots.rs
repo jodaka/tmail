@@ -853,6 +853,64 @@ fn composer_renders_fields_actions_and_toggles() {
     assert_absent(&text, "COMPOSE", (152, 40));
 }
 
+/// While composing, the sidebar marks the Drafts folder active (the
+/// composer saves drafts there, plan §14) — not the mailbox underneath —
+/// and the folder list stays focusable: Tab from the composer's last
+/// control lands on it with the cursor bar on the cursor folder, and the
+/// composer fields lose their caret while it holds focus.
+#[test]
+fn composer_sidebar_marks_drafts_and_stays_focusable() {
+    use tmail::app::composer::ComposerField;
+    let theme = Theme::default_dark();
+    let mut state = mock_initial_state();
+    let buffer = buffer_after(&mut state, &[Action::Compose], 152, 40);
+    let text = text_of(&buffer);
+    let (drafts_y, _) = position_of(&text, "Drafts");
+    assert_eq!(
+        buffer[(2, drafts_y as u16)].bg,
+        theme.accent_bg,
+        "Drafts row is the active one while composing:\n{text}"
+    );
+    let (inbox_y, _) = position_of(&text, "Inbox");
+    assert_eq!(
+        buffer[(2, inbox_y as u16)].bg,
+        theme.background,
+        "the underlying mailbox is not marked:\n{text}"
+    );
+    // The To field holds the caret while the composer has focus.
+    let (to_y, _) = position_of(&text, "      To");
+    assert_eq!(
+        buffer[(36, to_y as u16)].bg,
+        theme.accent,
+        "composer caret on the To value:\n{text}"
+    );
+
+    // Tab out of the composer (from its last control): the sidebar holds
+    // focus — cursor bar on the cursor folder, Drafts still marked active,
+    // and the composer caret gone.
+    state.composer.as_mut().unwrap().field = ComposerField::Discard;
+    let buffer = buffer_after(&mut state, &[Action::FocusNext], 152, 40);
+    let text = text_of(&buffer);
+    let (inbox_y, _) = position_of(&text, "Inbox");
+    assert_eq!(
+        buffer[(0, inbox_y as u16)].symbol(),
+        "▎",
+        "sidebar cursor bar after tabbing out:\n{text}"
+    );
+    let (drafts_y, _) = position_of(&text, "Drafts");
+    assert_eq!(
+        buffer[(2, drafts_y as u16)].bg,
+        theme.accent_bg,
+        "Drafts stays marked while the sidebar holds focus:\n{text}"
+    );
+    let (to_y, _) = position_of(&text, "      To");
+    assert_eq!(
+        buffer[(36, to_y as u16)].bg,
+        theme.background,
+        "no composer caret while the sidebar holds focus:\n{text}"
+    );
+}
+
 #[test]
 fn composer_renders_typed_text_and_revealed_fields() {
     let mut state = mock_initial_state();
@@ -1570,8 +1628,380 @@ fn composer_matches_mockup_hierarchy_and_density() {
     assert!(send_x < discard_x, "Send precedes Discard");
 }
 
-// ── Bulk selection rendering (ticket p0s3) ───────────────────────────────
+/// The body sits in a surface well inset to align its text with the
+/// subject value column, with one text line of padding above and below
+/// the text and no rule between the subject and the body (tjdj, tz12),
+/// while a rule separates the well from the attach, send, and discard
+/// rows (tjdj).
+#[test]
+fn composer_body_well_is_inset_and_rule_separates_the_action_rows() {
+    use tmail::app::action::ComposerEdit;
+    let theme = Theme::default_dark();
+    let mut state = mock_initial_state();
+    let actions: Vec<Action> = [
+        Action::Compose,
+        // Walk to the body (CcToggle, BccToggle, Subject, Body) and type
+        // "Hi".
+        Action::FocusNext,
+        Action::FocusNext,
+        Action::FocusNext,
+        Action::FocusNext,
+        Action::ComposerEdit(ComposerEdit::Char('H')),
+        Action::ComposerEdit(ComposerEdit::Char('i')),
+    ]
+    .into_iter()
+    .collect();
+    let buffer = buffer_after(&mut state, &actions, 152, 40);
+    let text = text_of(&buffer);
+    let (body_y, _) = position_of(&text, "Hi");
+    // The typed text starts at the subject value column: 26 + 8ch label
+    // + 2-space gap.
+    assert_eq!(
+        find_text_col(&buffer, body_y as u16, "Hi"),
+        36,
+        "body content aligns with the subject value:\n{text}"
+    );
+    // The surface fill spans the full row — padding columns included —
+    // while the field rows above stay on the page background.
+    assert_eq!(buffer[(26, body_y as u16)].bg, theme.surface);
+    assert_eq!(buffer[(148, body_y as u16)].bg, theme.surface);
+    // One text line of padding above the body text (ticket tz12): the
+    // row directly above is well surface, the one above that is the
+    // EMPTY separator line under the subject (ticket gdqm), and the
+    // subject row sits above it — no hairline rule between them.
+    assert_eq!(buffer[(26, body_y as u16 - 1)].bg, theme.surface);
+    assert_eq!(buffer[(26, body_y as u16 - 2)].bg, theme.background);
+    assert_eq!(buffer[(26, body_y as u16 - 2)].symbol(), " ", "empty line");
+    assert!(
+        text.lines()
+            .nth(body_y - 3)
+            .is_some_and(|l| l.contains(" Subject")),
+        "the subject row is right above the separator"
+    );
 
+    // One rule between the well and the attach/send/discard rows: the
+    // body well ends at y=33 (its bottom padding line), the rule sits at
+    // y=34, the attach row at 35 and the actions at 36 (bottom = 37).
+    let rule_y = 34u16;
+    assert_eq!(
+        buffer[(26, rule_y)].symbol(),
+        "─",
+        "the rule above the attach row:\n{text}"
+    );
+    assert_eq!(buffer[(26, rule_y + 1)].bg, theme.background);
+}
+
+/// The body editor's caret matches the single-line fields' caret while
+/// the body is focused — the same accent block (ticket tz12) — and the
+/// unfocused body shows no caret at all, like an HTML textarea (ticket
+/// tz12: only the focused field carries a caret).
+#[test]
+fn composer_body_caret_matches_the_field_caret_and_hides_when_unfocused() {
+    use tmail::app::action::ComposerEdit;
+    let theme = Theme::default_dark();
+
+    // Unfocused body (the To field holds the caret): no caret cell in
+    // the body well. The library's default cursor renders as a REVERSED
+    // cell, so any caret there would be visible in the scan.
+    let mut state = mock_initial_state();
+    let buffer = buffer_after(&mut state, &[Action::Compose], 152, 40);
+    let reversed = buffer
+        .content
+        .iter()
+        .any(|cell| cell.modifier.contains(ratatui::style::Modifier::REVERSED));
+    assert!(!reversed, "the unfocused body must not draw a caret");
+
+    // Focused body: the caret cell next to the typed text uses the same
+    // accent-on-background style the To field's caret draws.
+    let mut state = mock_initial_state();
+    let actions: Vec<Action> = [
+        Action::Compose,
+        Action::FocusNext,
+        Action::FocusNext,
+        Action::FocusNext,
+        Action::FocusNext, // body
+        Action::ComposerEdit(ComposerEdit::Char('H')),
+    ]
+    .into_iter()
+    .collect();
+    let buffer = buffer_after(&mut state, &actions, 152, 40);
+    let text = text_of(&buffer);
+    let (body_y, _) = position_of(&text, "H");
+    let caret_x = find_text_col(&buffer, body_y as u16, "H") + 1;
+    let caret = &buffer[(caret_x as u16, body_y as u16)];
+    assert_eq!(caret.bg, theme.accent, "body caret uses the accent fill");
+    assert_eq!(
+        caret.fg, theme.background,
+        "body caret matches the field caret"
+    );
+}
+
+/// Ctrl+Z reverts a body typing run at once (ticket kfmt): coalesced
+/// undo, with the draft left dirty so autosave re-pushes the reverted
+/// revision.
+#[test]
+fn composer_ctrl_z_reverts_a_body_typing_run() {
+    use tmail::app::action::ComposerEdit;
+    let actions: Vec<Action> = [
+        Action::Compose,
+        Action::FocusNext,
+        Action::FocusNext,
+        Action::FocusNext,
+        Action::FocusNext, // body
+        Action::ComposerEdit(ComposerEdit::Char('Z')),
+        Action::ComposerEdit(ComposerEdit::Char('Z')),
+        Action::ComposerEdit(ComposerEdit::Char('Q')),
+        Action::ComposerEdit(ComposerEdit::Char('Q')),
+        // Ctrl+Z: one undo step reverts the whole run.
+        Action::ComposerEdit(ComposerEdit::Undo),
+    ]
+    .into_iter()
+    .collect();
+    let mut state = mock_initial_state();
+    let text = draw_after(&mut state, &actions, 152, 40);
+    assert!(
+        !text.contains("ZZQQ"),
+        "the typing run must be reverted:\n{text}"
+    );
+    // The revert is itself an edit: autosave re-arms.
+    assert!(
+        text.contains("Unsaved changes"),
+        "the reverted draft stays dirty:\n{text}"
+    );
+}
+
+/// Long body lines soft-wrap onto the next visual row (ticket kfmt):
+/// no horizontal scrolling, the text folds within the well.
+#[test]
+fn composer_body_soft_wraps_long_lines() {
+    use tmail::app::action::ComposerEdit;
+    let mut state = mock_initial_state();
+    let mut actions = vec![
+        Action::Compose,
+        Action::FocusNext,
+        Action::FocusNext,
+        Action::FocusNext,
+        Action::FocusNext, // body
+    ];
+    // One oversized word: wider than the well, so it must split.
+    for _ in 0..150 {
+        actions.push(Action::ComposerEdit(ComposerEdit::Char('x')));
+    }
+    let buffer = buffer_after(&mut state, &actions, 152, 40);
+    let text = text_of(&buffer);
+    let (body_y, _) = position_of(&text, "xxxxx");
+    // Count only the body's columns — the sidebar folder names contain
+    // `x` characters of their own.
+    let row = |y: u16| -> usize {
+        (30..buffer.area.width)
+            .filter(|&x| buffer[(x, y)].symbol() == "x")
+            .count()
+    };
+    let first = row(body_y as u16);
+    let second = row(body_y as u16 + 1);
+    assert!(first > 0 && first < 150, "the run starts on the first row");
+    assert!(
+        second > 0 && first + second == 150,
+        "the oversized word wraps onto the next row (first={first}, second={second}):\n{text}"
+    );
+}
+
+/// Shift+Left extends a selection in the body, rendered with the
+/// mockup's `.msg-body::selection` fill (ticket kfmt).
+#[test]
+fn composer_body_selection_renders_with_the_selection_fill() {
+    use tmail::app::action::ComposerEdit;
+    let theme = Theme::default_dark();
+    let actions: Vec<Action> = [
+        Action::Compose,
+        Action::FocusNext,
+        Action::FocusNext,
+        Action::FocusNext,
+        Action::FocusNext, // body
+        Action::ComposerEdit(ComposerEdit::Char('h')),
+        Action::ComposerEdit(ComposerEdit::Char('e')),
+        Action::ComposerEdit(ComposerEdit::Char('l')),
+        Action::ComposerEdit(ComposerEdit::Char('l')),
+        Action::ComposerEdit(ComposerEdit::Char('o')),
+        Action::ComposerEdit(ComposerEdit::SelectLeft),
+        Action::ComposerEdit(ComposerEdit::SelectLeft),
+        Action::ComposerEdit(ComposerEdit::SelectLeft),
+    ]
+    .into_iter()
+    .collect();
+    let mut state = mock_initial_state();
+    let buffer = buffer_after(&mut state, &actions, 152, 40);
+    let text = text_of(&buffer);
+    let (body_y, _) = position_of(&text, "hello");
+    // "llo" is selected: the cells over cols 3..5 of the word carry the
+    // selection fill. The first selected cell (col 2) doubles as the
+    // caret cell — the caret style draws there instead.
+    for col in [39u16, 40] {
+        assert_eq!(
+            buffer[(col, body_y as u16)].bg,
+            theme.accent_bg,
+            "selected cell at {col} uses the selection fill:\n{text}"
+        );
+    }
+    assert_eq!(
+        buffer[(38, body_y as u16)].bg,
+        theme.accent,
+        "the selection head is the caret cell:\n{text}"
+    );
+    // Outside the selection the fill is absent.
+    assert_eq!(
+        buffer[(36, body_y as u16)].bg,
+        theme.surface,
+        "the unselected 'h' keeps the well fill:\n{text}"
+    );
+}
+
+// ── Attachment file chooser (ticket 95x0) ────────────────────────────────
+
+/// The chooser is a centered modal hosting the explorer listing: chrome
+/// and directory line on top, the file rows in the middle, the status
+/// and key-hint rows at the bottom.
+#[test]
+fn attachment_chooser_renders_the_explorer_and_chrome() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("report.pdf"), b"x").expect("write");
+    std::fs::create_dir(dir.path().join("docs")).expect("mkdir");
+
+    let mut state = mock_initial_state();
+    reducer::reduce(&mut state, &Action::Compose);
+    // Walk to the `+ attach` control and open the chooser.
+    while state.composer.as_ref().unwrap().field != tmail::app::composer::ComposerField::Attach {
+        reducer::reduce(&mut state, &Action::FocusNext);
+    }
+    let mut effects = reducer::reduce(&mut state, &Action::Activate);
+    let id = effects.pop().expect("a listing effect").id;
+    // While listing: the pending state is explicit.
+    let text = draw_after(&mut state, &[], 152, 40);
+    assert!(text.contains(" Attach file "), "title missing:\n{text}");
+    assert!(text.contains("Listing…"), "in-flight listing:\n{text}");
+
+    // Land the listing; the explorer rows and the cwd line appear.
+    let explorer =
+        ratatui_explorer::FileExplorerBuilder::build_with_working_dir(dir.path()).unwrap();
+    reducer::reduce(
+        &mut state,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Explorer(Box::new(explorer))),
+        }),
+    );
+    let text = draw_after(&mut state, &[], 152, 40);
+    assert!(
+        text.contains(&dir.path().display().to_string()),
+        "the cwd line shows the directory:\n{text}"
+    );
+    assert!(text.contains("docs"), "directory entry:\n{text}");
+    assert!(text.contains("report.pdf"), "file entry:\n{text}");
+    assert!(
+        text.contains("↑↓ select · ← up · → open · ↵ attach · Esc cancel"),
+        "key hints:\n{text}"
+    );
+    assert!(
+        text.contains("(↵ attaches the selected file)"),
+        "status hint:\n{text}"
+    );
+
+    // A failed listing keeps the chrome with the detail inline.
+    let mut state2 = mock_initial_state();
+    let mut effects = {
+        reducer::reduce(&mut state2, &Action::Compose);
+        while state2.composer.as_ref().unwrap().field != tmail::app::composer::ComposerField::Attach
+        {
+            reducer::reduce(&mut state2, &Action::FocusNext);
+        }
+        reducer::reduce(&mut state2, &Action::Activate)
+    };
+    let id = effects.pop().expect("a listing effect").id;
+    reducer::reduce(
+        &mut state2,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Err(OperationFailure {
+                code: None,
+                detail: String::from("permission denied"),
+                retry: None,
+                ambiguous: false,
+            }),
+        }),
+    );
+    let text = draw_after(&mut state2, &[], 152, 40);
+    assert!(
+        text.contains("permission denied"),
+        "the failure stays visible:\n{text}"
+    );
+}
+
+/// Attachment rows end their preview in the paperclip emoji, exactly
+/// where a truncated body's `…` sits, with the body one symbol shorter —
+/// rows without attachments are unchanged (ticket r84f).
+#[test]
+fn attachment_rows_end_in_the_paperclip_emoji() {
+    use unicode_width::UnicodeWidthStr;
+    let mut state = mock_initial_state();
+    // Two rows with identical subject and a long snippet — the first has
+    // attachments, the second does not.
+    let long = "x".repeat(100);
+    state.messages.items[1].subject = String::from("Same subject");
+    state.messages.items[1].snippet = Some(long.clone());
+    state.messages.items[1].has_attachments = true;
+    state.messages.items[2].subject = String::from("Same subject");
+    state.messages.items[2].snippet = Some(long);
+    state.messages.items[2].has_attachments = false;
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    let text = text_of(&buffer);
+    let rows: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("Same subject"))
+        .collect();
+    assert_eq!(rows.len(), 2, "both rows render:\n{text}");
+    let (attached, plain) = (rows[0], rows[1]);
+    assert!(
+        attached.contains("📎"),
+        "the attachment row shows the clip:\n{text}"
+    );
+    assert!(
+        !plain.contains("📎"),
+        "rows without attachments are unchanged:\n{text}"
+    );
+
+    // The clip sits at the very end of the preview, right where the plain
+    // row's ellipsis is — the body between the separator and the marker
+    // is one symbol shorter.
+    fn tail(line: &str) -> (&str, usize, usize) {
+        let sep = line.find(" — ").expect("preview separator");
+        let body = &line[sep + " — ".len()..];
+        let marker = body
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| *ch == '📎' || *ch == '…')
+            .map(|(i, _)| i)
+            .expect("row ends in a marker");
+        (
+            &body[..marker],
+            body[..marker].chars().count(),
+            body[..marker].width(),
+        )
+    }
+    let (_, attached_chars, attached_cols) = tail(attached);
+    let (_, plain_chars, plain_cols) = tail(plain);
+    assert_eq!(
+        attached_chars,
+        plain_chars - 1,
+        "the body is one symbol shorter:\n{attached}\n{plain}"
+    );
+    assert_eq!(
+        attached_cols + 2,
+        plain_cols + 1,
+        "the two-column clip takes the ellipsis slot exactly"
+    );
+}
+
+// ── Bulk selection rendering (ticket p0s3) ───────────────────────────────
 #[test]
 fn select_all_marks_rows_and_the_header_toggle() {
     let mut state = mock_initial_state();

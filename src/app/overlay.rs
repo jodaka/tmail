@@ -1,8 +1,8 @@
 //! Overlays (plan §9): modals rendered above every screen.
 //!
 //! Phase 3 added the error overlay; the composer adds the confirm-discard
-//! dialog (plan §14) and, in Phase 8, the attachment path-entry dialog
-//! (plan §15: no file browser in v1).
+//! dialog (plan §14) and, in Phase 8, the attachment chooser (plan §15,
+//! ticket 95x0: a `ratatui_explorer` listing replaces the v1 path entry).
 
 use crate::app::focus::Focus;
 use crate::app::operation::RetrySpec;
@@ -79,31 +79,69 @@ pub enum Overlay {
     /// Composer discard confirmation (plan §14): deleting local and remote
     /// draft state happens only after explicit confirmation.
     ConfirmDiscard(DiscardDialog),
-    /// Attachment path entry (plan §15, Phase 8): type a file path, Tmail
-    /// validates it without a shell, and a confirmed path becomes a chip.
-    AttachmentPath(AttachmentPathDialog),
+    /// Attachment file chooser (plan §15, ticket 95x0): a
+    /// `ratatui_explorer` listing of a directory; the selected file is
+    /// validated exactly like a typed path was. The explorer state is
+    /// plain data like the composer's body textarea. Boxed: the explorer
+    /// payload must not bloat the other overlay variants.
+    AttachmentExplorer(Box<AttachmentFileDialog>),
     /// Theme picker (ticket k5ba): a small list of every available palette.
     /// Moving the cursor previews the highlighted theme at once; Enter
     /// keeps it and Esc restores the palette the picker opened with.
     ThemePicker(ThemePickerDialog),
 }
 
-/// The attachment path-entry dialog (plan §15). Raw text entry with an
-/// inline caret; validation runs in the backend (`~` expansion, existence,
-/// readability, size) and a rejection keeps the dialog open with the
-/// detail, so the entry stays editable and retryable.
+/// The attachment file chooser (plan §15, ticket 95x0). A
+/// `ratatui_explorer::FileExplorer` carries the directory listing and
+/// selection — plain data, mutated only by the reducer, exactly like the
+/// composer's body textarea. Directory changes are backend listings (the
+/// reducer stays I/O-free); a selected file validates like a typed path
+/// did, and a rejection keeps the chooser open with the detail.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttachmentPathDialog {
-    /// The path as typed (never expanded or cleaned here; the backend does
-    /// that so `~` handling is testable and shell-free).
-    pub input: String,
-    /// Caret offset in chars inside `input`.
-    pub cursor: usize,
-    /// Detail of the last rejected submission; `None` until one fails.
-    /// Cleared when the user edits the entry again.
+pub struct AttachmentFileDialog {
+    /// The explorer state; `None` while the directory listing is in
+    /// flight (or after a failed one — see `error`).
+    pub explorer: Option<ratatui_explorer::FileExplorer>,
+    /// Whether a directory listing is in flight; navigation that would
+    /// change directories is frozen until it lands.
+    pub listing: bool,
+    /// Detail of the last failed listing or attachment validation;
+    /// cleared when the next step starts.
     pub error: Option<String>,
     /// Focus to restore when the dialog closes (always the composer).
     pub previous_focus: Focus,
+}
+
+impl AttachmentFileDialog {
+    /// Apply a pure selection move (no filesystem access). Inputs the
+    /// explorer cannot act on are ignored.
+    pub fn browse(&mut self, input: ratatui_explorer::Input) {
+        if let Some(explorer) = self.explorer.as_mut() {
+            // Selection movement never touches the filesystem, so the
+            // Result is always Ok here.
+            let _ = explorer.handle(input);
+        }
+    }
+
+    /// The directory a `Parent`/`Open` step would list: the cwd's parent,
+    /// or the selected entry's path when it is a directory.
+    pub fn step_target(&self, parent: bool) -> Option<std::path::PathBuf> {
+        let explorer = self.explorer.as_ref()?;
+        if parent {
+            explorer.cwd().parent().map(std::path::Path::to_path_buf)
+        } else {
+            let current = explorer.current();
+            current.is_dir.then(|| current.path.clone())
+        }
+    }
+
+    /// The selected file's path, when the selection is a file (Enter's
+    /// submit target).
+    pub fn selected_file(&self) -> Option<std::path::PathBuf> {
+        let explorer = self.explorer.as_ref()?;
+        let current = explorer.current();
+        (!current.is_dir).then(|| current.path.clone())
+    }
 }
 
 /// The composer's confirm-discard dialog.

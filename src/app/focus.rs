@@ -23,8 +23,8 @@ pub enum Focus {
     /// lives in `AppState.composer`; single-letter shortcuts never fire
     /// while a text field is focused (plan §10).
     Composer,
-    /// The attachment path-entry dialog is open (plan §15): a modal text
-    /// field that intercepts all input like the error modal.
+    /// The attachment file chooser is open (plan §15, ticket 95x0): a
+    /// modal that intercepts all input like the error modal.
     Dialog,
     /// The theme picker dialog is open (ticket k5ba): arrows preview the
     /// highlighted palette, Enter keeps it, Esc restores the original.
@@ -38,6 +38,10 @@ pub enum Focus {
 }
 
 /// Tab order: next/previous focus cycles through this list (plan §10).
+/// While the composer screen is open, the cycle is different: the
+/// composer's own controls first, then the sidebar — the reducer's
+/// `focus_step` bridges the two, and the off-screen mailbox-screen
+/// controls (search field, select-all toggle, message list) are skipped.
 pub const FOCUS_ORDER: [Focus; 4] = [
     Focus::SearchField,
     Focus::SelectAllToggle,
@@ -54,7 +58,8 @@ impl Focus {
             // document); Tab is inert there in v1 (plan §10).
             Focus::Reader => self,
             // The composer cycles its own controls (plan §10); the reducer
-            // drives that cycle through `ComposerState`.
+            // drives that cycle through `ComposerState` and steps out to
+            // the sidebar at the cycle's ends (compose-mode folder list).
             Focus::Composer => self,
             _ => {
                 let i = FOCUS_ORDER

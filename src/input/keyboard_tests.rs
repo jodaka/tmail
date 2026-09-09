@@ -149,11 +149,13 @@ fn q_mirrors_esc_outside_text_entry() {
 
 #[test]
 fn q_is_text_while_typing() {
-    for f in [Focus::SearchField, Focus::Composer, Focus::Dialog] {
+    // The attachment chooser (Focus::Dialog) has no text entry: q is
+    // inert there, not a shortcut either.
+    for f in [Focus::SearchField, Focus::Composer] {
         let expected = match f {
             Focus::SearchField => Some(Action::SearchEdit(SearchEdit::Char('q'))),
             Focus::Composer => Some(Action::ComposerEdit(ComposerEdit::Char('q'))),
-            _ => Some(Action::DialogEdit(DialogEdit::Char('q'))),
+            _ => unreachable!(),
         };
         assert_eq!(
             to_action(plain(KeyCode::Char('q')), f),
@@ -161,6 +163,11 @@ fn q_is_text_while_typing() {
             "q must type at focus {f}"
         );
     }
+    assert_eq!(
+        to_action(plain(KeyCode::Char('q')), Focus::Dialog),
+        None,
+        "the chooser has no text entry"
+    );
 }
 
 #[test]
@@ -314,46 +321,116 @@ fn global_shortcuts_still_work_from_the_composer() {
     );
 }
 
-// ── Attachment path dialog (plan §15, Phase 8.1) ─────────────────────────
-
 #[test]
-fn dialog_letters_are_text_never_shortcuts() {
-    let f = Focus::Dialog;
-    for c in "cafesu/?~".chars() {
-        assert_eq!(
-            to_action(plain(KeyCode::Char(c)), f),
-            Some(Action::DialogEdit(DialogEdit::Char(c))),
-            "{c} must be dialog text"
-        );
-    }
-    // Ctrl/Alt chords stay unbound (global Ctrl+C/Ctrl+R matched earlier).
+fn composer_shift_arrows_select_and_ctrl_arrows_move_words() {
+    let f = Focus::Composer;
     assert_eq!(
-        to_action(key(KeyCode::Char('c'), KeyModifiers::ALT), f),
-        None
+        to_action(key(KeyCode::Left, KeyModifiers::SHIFT), f),
+        Some(Action::ComposerEdit(ComposerEdit::SelectLeft))
+    );
+    assert_eq!(
+        to_action(key(KeyCode::Right, KeyModifiers::SHIFT), f),
+        Some(Action::ComposerEdit(ComposerEdit::SelectRight))
+    );
+    assert_eq!(
+        to_action(key(KeyCode::Up, KeyModifiers::SHIFT), f),
+        Some(Action::ComposerEdit(ComposerEdit::SelectUp))
+    );
+    assert_eq!(
+        to_action(key(KeyCode::Down, KeyModifiers::SHIFT), f),
+        Some(Action::ComposerEdit(ComposerEdit::SelectDown))
+    );
+    assert_eq!(
+        to_action(key(KeyCode::Left, KeyModifiers::CONTROL), f),
+        Some(Action::ComposerEdit(ComposerEdit::WordLeft))
+    );
+    assert_eq!(
+        to_action(key(KeyCode::Right, KeyModifiers::CONTROL), f),
+        Some(Action::ComposerEdit(ComposerEdit::WordRight))
+    );
+    // Ctrl+Shift selects whole words.
+    assert_eq!(
+        to_action(
+            key(KeyCode::Left, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            f
+        ),
+        Some(Action::ComposerEdit(ComposerEdit::SelectWordLeft))
+    );
+    assert_eq!(
+        to_action(
+            key(KeyCode::Right, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            f
+        ),
+        Some(Action::ComposerEdit(ComposerEdit::SelectWordRight))
     );
 }
 
 #[test]
-fn dialog_edits_and_caret_but_no_vertical_movement() {
-    let f = Focus::Dialog;
+fn composer_ctrl_z_undos_and_ctrl_y_redos() {
+    let f = Focus::Composer;
     assert_eq!(
-        to_action(plain(KeyCode::Backspace), f),
-        Some(Action::DialogEdit(DialogEdit::Backspace))
+        to_action(key(KeyCode::Char('z'), KeyModifiers::CONTROL), f),
+        Some(Action::ComposerEdit(ComposerEdit::Undo))
     );
     assert_eq!(
-        to_action(plain(KeyCode::Delete), f),
-        Some(Action::DialogEdit(DialogEdit::Delete))
+        to_action(key(KeyCode::Char('y'), KeyModifiers::CONTROL), f),
+        Some(Action::ComposerEdit(ComposerEdit::Redo))
+    );
+    // A plain z/y stays composed text.
+    assert_eq!(
+        to_action(plain(KeyCode::Char('z')), f),
+        Some(Action::ComposerEdit(ComposerEdit::Char('z')))
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Char('y')), f),
+        Some(Action::ComposerEdit(ComposerEdit::Char('y')))
+    );
+}
+
+// ── Attachment file chooser (plan §15, ticket 95x0) ──────────────────────
+
+/// The chooser's list navigation: arrows move, Left/Backspace go to the
+/// parent, Right opens the selected directory, PageUp/PageDown jump.
+/// Letters are inert — there is no text entry anymore.
+#[test]
+fn dialog_navigates_the_file_chooser() {
+    let f = Focus::Dialog;
+    assert_eq!(
+        to_action(plain(KeyCode::Up), f),
+        Some(Action::AttachmentBrowse(AttachmentBrowse::Up))
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Down), f),
+        Some(Action::AttachmentBrowse(AttachmentBrowse::Down))
     );
     assert_eq!(
         to_action(plain(KeyCode::Left), f),
-        Some(Action::DialogEdit(DialogEdit::CursorLeft))
+        Some(Action::AttachmentBrowse(AttachmentBrowse::Parent))
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Backspace), f),
+        Some(Action::AttachmentBrowse(AttachmentBrowse::Parent))
     );
     assert_eq!(
         to_action(plain(KeyCode::Right), f),
-        Some(Action::DialogEdit(DialogEdit::CursorRight))
+        Some(Action::AttachmentBrowse(AttachmentBrowse::Open))
     );
-    assert_eq!(to_action(plain(KeyCode::Up), f), None);
-    assert_eq!(to_action(plain(KeyCode::Down), f), None);
+    assert_eq!(
+        to_action(plain(KeyCode::PageUp), f),
+        Some(Action::AttachmentBrowse(AttachmentBrowse::PageUp))
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::PageDown), f),
+        Some(Action::AttachmentBrowse(AttachmentBrowse::PageDown))
+    );
+    // No text entry: letters, Delete, and chords are inert (global
+    // Ctrl+C/Ctrl+R matched earlier).
+    assert_eq!(to_action(plain(KeyCode::Char('q')), f), None);
+    assert_eq!(to_action(plain(KeyCode::Delete), f), None);
+    assert_eq!(
+        to_action(key(KeyCode::Char('c'), KeyModifiers::ALT), f),
+        None
+    );
 }
 
 #[test]

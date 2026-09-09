@@ -30,6 +30,13 @@ pub struct MessageHeaders {
     pub from: Vec<Address>,
     pub to: Vec<Address>,
     pub cc: Vec<Address>,
+    /// Blind-carbon recipients. Outgoing mail strips `Bcc`, but draft
+    /// copies stored in the Drafts mailbox keep the header (the composer
+    /// needs it back when a draft is reopened), so full messages may
+    /// carry it. `default` keeps cached messages from earlier versions
+    /// loadable (ticket haeb).
+    #[serde(default)]
+    pub bcc: Vec<Address>,
     /// Parsed `Date` header in its source offset; `None` when missing or
     /// unparseable (the UI falls back to a stable placeholder).
     pub date: Option<DateTime<FixedOffset>>,
@@ -120,5 +127,27 @@ impl MessageSummary {
             .first()
             .map(Address::display)
             .unwrap_or("(unknown sender)")
+    }
+}
+
+/// The bare form of an RFC `Message-ID`: no surrounding angle brackets.
+/// Envelope listings carry bare ids while draft snapshots keep the
+/// bracketed form, so identity comparisons normalize both sides.
+pub fn bare_message_id(id: &str) -> &str {
+    id.trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim()
+}
+
+/// The bracketed RFC form of a `Message-ID` (`<id>`), the convention draft
+/// snapshots carry. A bare id (envelope listings, fetched headers) gets
+/// wrapped; an already-bracketed id passes through.
+pub fn bracketed_message_id(id: &str) -> String {
+    let bare = id.trim();
+    if bare.starts_with('<') {
+        bare.to_string()
+    } else {
+        format!("<{bare}>")
     }
 }

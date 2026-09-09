@@ -64,7 +64,10 @@ pub fn render(
     // is counted separately from `i`.
     match &state.mailboxes {
         crate::app::state::Loadable::Loaded(mailboxes) if !mailboxes.is_empty() => {
-            let active_id = state.active_route().and_then(|r| r.mailbox_id().cloned());
+            // While composing, the Drafts folder is the active one (the
+            // composer writes drafts there); otherwise the displayed
+            // mailbox.
+            let active_id = state.sidebar_active_mailbox_id();
             let bottom = area.y + area.height;
             let first_label = mailboxes.iter().position(|m| m.is_label());
             let mut y = rows.folders.y;
@@ -81,7 +84,7 @@ pub fn render(
                 if y >= bottom {
                     break;
                 }
-                let is_active = Some(&mailbox.id) == active_id.as_ref();
+                let is_active = Some(&mailbox.id) == active_id;
                 let cursor = state.focus == Focus::Sidebar && i == state.mailbox_selection;
                 let row_area = Rect {
                     x: area.x,

@@ -1,17 +1,18 @@
 //! Composer state: fields, focus cycling, and text editing (plan §10/§14).
 //!
 //! Plain data mutated only by the reducer. The body is a
-//! `ratatui_textarea::TextArea` (plan §5: "ratatui-textarea for the
-//! built-in body editor") so multi-line editing and wrapping come from the
-//! library; single-line fields are plain strings with an explicit
-//! char-index cursor so editing stays deterministic and unit-testable.
+//! `tui_textarea::TextArea` (ticket kfmt: soft wrap, undo coalescing, and
+//! selection; plan §5: a `textarea`-style widget for the built-in body
+//! editor) so multi-line editing and wrapping come from the library;
+//! single-line fields are plain strings with an explicit char-index
+//! cursor so editing stays deterministic and unit-testable.
 //!
 //! Field navigation follows plan §10: Tab/Shift+Tab and Up/Down move
 //! between To/Cc/Bcc/Subject/body and the action row; Left/Right and
 //! Up/Down move the caret inside the focused field, crossing into the
 //! neighbouring field at the body's top/bottom edge.
 
-use ratatui_textarea::{CursorMove, TextArea};
+use tui_textarea::{Input, Key, TextArea, WrapMode};
 
 use crate::app::action::ComposerEdit;
 use crate::domain::Draft;
@@ -33,8 +34,8 @@ pub enum ComposerField {
     /// One attached-file chip, by position in the draft (mockup `.att`).
     /// Enter removes it (plan §15: "allow removal before send").
     Attachment(usize),
-    /// The `+ attach` control (mockup `.att.add`); Enter opens the
-    /// path-entry overlay (plan §15: no file browser in v1).
+    /// The `+ attach` control (mockup `.att.add`); Enter opens the file
+    /// chooser (plan §15, ticket 95x0).
     Attach,
     /// The Send button (plan §10: `Ctrl+Enter` sends; Enter activates).
     Send,
@@ -59,8 +60,9 @@ impl ComposerField {
 
 /// Everything visible in the composer. Lives in [`crate::app::state::AppState`]
 /// for as long as a draft exists; leaving the composer keeps it so the
-/// draft can be reopened (plan §14: "Leaving returns to the prior route
-/// and preserves the draft").
+/// forced save can complete and the draft can be reopened from the Drafts
+/// list, while `c` starts a fresh blank draft (ticket v5x8, plan §14:
+/// "Leaving returns to the prior route and preserves the draft").
 #[derive(Debug, Clone)]
 pub struct ComposerState {
     /// The focused control.
@@ -92,6 +94,17 @@ impl Default for ComposerState {
     }
 }
 
+/// A body editor with the app's standing configuration (ticket kfmt):
+/// word soft-wrap so long lines never require horizontal scrolling, and
+/// coalesced undo so Ctrl+Z reverts a typing run (a word-sized run of
+/// characters) instead of a single keystroke.
+fn body_textarea(lines: Vec<String>) -> TextArea<'static> {
+    let mut body = TextArea::from(lines);
+    body.set_wrap_mode(WrapMode::Word);
+    body.set_undo_coalescing(true);
+    body
+}
+
 impl ComposerState {
     pub fn new() -> Self {
         Self {
@@ -99,7 +112,7 @@ impl ComposerState {
             cursor: 0,
             show_cc: false,
             show_bcc: false,
-            body: TextArea::from([""]),
+            body: body_textarea(vec![String::new()]),
             draft: Draft::default(),
             sending: false,
             external_editing: false,
@@ -174,7 +187,7 @@ impl ComposerState {
     /// Rebuild composer UI state around a draft (startup restore from the
     /// journal, or reopening a preserved draft).
     pub fn from_draft(draft: Draft) -> Self {
-        let body = TextArea::from(if draft.body.is_empty() {
+        let body = body_textarea(if draft.body.is_empty() {
             vec![String::new()]
         } else {
             draft
@@ -205,6 +218,39 @@ impl ComposerState {
     pub fn enter_bcc(&mut self) {
         self.show_bcc = true;
         self.enter_field(ComposerField::Bcc);
+    }
+
+    /// Restyle the body editor's caret and selection (tickets tz12, kfmt).
+    /// The textarea draws its own caret cell — the terminal cursor stays
+    /// hidden app-wide — so it must match the single-line fields: the
+    /// accent caret block while the body is focused, no caret at all
+    /// otherwise (the mockup shows a caret only in the focused field).
+    /// The selection fill follows the mockup's `.msg-body::selection`.
+    /// Called by the reducer after every action, so focus moves, selection
+    /// changes, and live theme switches never leave a stale style behind.
+    pub fn sync_body_styles(&mut self, theme: &crate::ui::theme::Theme) {
+        let style = if self.field == ComposerField::Body {
+            theme.caret()
+        } else {
+            ratatui::style::Style::new()
+        };
+        self.body.set_cursor_style(style);
+        self.body
+            .set_selection_style(ratatui::style::Style::new().bg(theme.accent_bg));
+    }
+
+    /// Undo the body editor's last step (Ctrl+Z, ticket kfmt) — coalesced
+    /// so a typing run reverts at once. Single-line fields have no
+    /// history. Returns whether the content changed, so the reducer
+    /// re-syncs the draft (and autosave) only then.
+    pub fn undo_body(&mut self) -> bool {
+        self.field == ComposerField::Body && self.body.undo()
+    }
+
+    /// Redo one body edit (Ctrl+Y, ticket kfmt). Same contract as
+    /// [`ComposerState::undo_body`].
+    pub fn redo_body(&mut self) -> bool {
+        self.field == ComposerField::Body && self.body.redo()
     }
 
     /// Attach a validated file (plan §15). Same-path entries are ignored —
@@ -283,11 +329,11 @@ impl ComposerState {
             return false;
         }
         let lines: Vec<String> = content.lines().map(str::to_owned).collect();
-        self.body = if lines.is_empty() {
-            TextArea::from([""])
+        self.body = body_textarea(if lines.is_empty() {
+            vec![String::new()]
         } else {
-            TextArea::from(lines)
-        };
+            lines
+        });
         self.draft.body = String::from(content);
         self.draft.note_edit(now);
         true
@@ -297,8 +343,23 @@ impl ComposerState {
     /// composer keys). Arrow navigation crosses field boundaries at the
     /// body's top/bottom edge and between single-line fields. Content
     /// edits are inert on chips and buttons (plan §10).
+    ///
+    /// The body's movement keys go through the textarea's own `Input`
+    /// path (ticket kfmt): it cancels an active selection on plain moves,
+    /// extends it for Shift+arrows, moves by words on Ctrl+Left/Right,
+    /// and follows visual rows while soft wrap is enabled — so crossing
+    /// into a neighbouring field is detected by the cursor not moving.
     pub fn apply(&mut self, edit: &ComposerEdit) {
         if edit.is_content_edit() && !self.field.accepts_text() {
+            return;
+        }
+        // Word movement and selection (ticket kfmt): body-only — the
+        // single-line fields have no word or selection model, and the
+        // body caret must not move behind their backs.
+        if let Some((key, ctrl, shift)) = Self::body_movement(edit)
+            && self.field == ComposerField::Body
+        {
+            self.move_body(key, ctrl, shift);
             return;
         }
         match edit {
@@ -335,23 +396,21 @@ impl ComposerState {
                     self.body.delete_next_char();
                 }
             }
-            ComposerEdit::Newline => {
-                // Enter is a newline only in the body (plan §10); elsewhere
-                // it activates, which the reducer routes separately.
-                if self.field == ComposerField::Body {
-                    self.body.insert_newline();
-                }
+            // Enter is a newline only in the body (plan §10); elsewhere it
+            // activates, which the reducer routes separately.
+            ComposerEdit::Newline if self.field == ComposerField::Body => {
+                self.body.insert_newline();
             }
             ComposerEdit::CursorLeft => {
                 if self.field == ComposerField::Body {
-                    self.body.move_cursor(CursorMove::Back);
+                    self.move_body(Key::Left, false, false);
                 } else {
                     self.cursor = self.cursor.saturating_sub(1);
                 }
             }
             ComposerEdit::CursorRight => {
                 if self.field == ComposerField::Body {
-                    self.body.move_cursor(CursorMove::Forward);
+                    self.move_body(Key::Right, false, false);
                 } else {
                     self.cursor = self
                         .cursor
@@ -360,23 +419,69 @@ impl ComposerState {
                 }
             }
             ComposerEdit::CursorUp => {
-                if self.field == ComposerField::Body && self.body.cursor().0 > 0 {
-                    self.body.move_cursor(CursorMove::Up);
+                if self.field == ComposerField::Body {
+                    self.move_body_vertically(Key::Up);
                 } else {
                     self.focus_previous();
                 }
             }
             ComposerEdit::CursorDown => {
                 if self.field == ComposerField::Body {
-                    let last = self.body.lines().len().saturating_sub(1);
-                    if self.body.cursor().0 < last {
-                        self.body.move_cursor(CursorMove::Down);
-                    } else {
-                        self.focus_next();
-                    }
+                    self.move_body_vertically(Key::Down);
                 } else {
                     self.focus_next();
                 }
+            }
+            // Undo/redo route through `undo_body`/`redo_body` in the
+            // reducer: they are content edits only when something changed.
+            // The word/selection moves above already returned.
+            ComposerEdit::Undo | ComposerEdit::Redo => {}
+            _ => {}
+        }
+    }
+
+    /// One body-editor movement key (ticket kfmt): `ctrl` moves by words
+    /// (Ctrl+Left/Right), `shift` extends the selection instead of moving
+    /// the caret alone. Vertical movement follows visual rows under soft
+    /// wrap.
+    fn move_body(&mut self, key: Key, ctrl: bool, shift: bool) {
+        self.body.input(Input {
+            key,
+            ctrl,
+            alt: false,
+            shift,
+        });
+    }
+
+    /// The body-editor key a word-wise or selection edit maps to (ticket
+    /// kfmt): `None` for every edit the movement helper doesn't own.
+    fn body_movement(edit: &ComposerEdit) -> Option<(Key, bool, bool)> {
+        match edit {
+            ComposerEdit::WordLeft => Some((Key::Left, true, false)),
+            ComposerEdit::WordRight => Some((Key::Right, true, false)),
+            ComposerEdit::SelectLeft => Some((Key::Left, false, true)),
+            ComposerEdit::SelectRight => Some((Key::Right, false, true)),
+            ComposerEdit::SelectWordLeft => Some((Key::Left, true, true)),
+            ComposerEdit::SelectWordRight => Some((Key::Right, true, true)),
+            ComposerEdit::SelectUp => Some((Key::Up, false, true)),
+            ComposerEdit::SelectDown => Some((Key::Down, false, true)),
+            _ => None,
+        }
+    }
+
+    /// Vertical body movement that crosses into the neighbouring field at
+    /// the well's top/bottom edge (plan §10). With soft wrap the edge is
+    /// a *visual* row, not a logical line, so the crossing is detected by
+    /// the move not landing: `CursorMove::Up`/`Down` are no-ops at the
+    /// visual top/bottom, which leaves the cursor untouched.
+    fn move_body_vertically(&mut self, key: Key) {
+        let before = self.body.cursor();
+        self.move_body(key, false, false);
+        if self.body.cursor() == before {
+            if key == Key::Up {
+                self.focus_previous();
+            } else {
+                self.focus_next();
             }
         }
     }
@@ -676,5 +781,99 @@ mod tests {
         assert_eq!(char_offset("héllo", 2), 3, "é is one char, two bytes");
         assert_eq!(char_offset("héllo", 5), 6);
         assert_eq!(char_offset("héllo", 99), 6, "clamps to the end");
+    }
+
+    #[test]
+    fn body_editor_wraps_and_coalesces_undo() {
+        let mut c = composer();
+        assert_eq!(
+            c.body.wrap_mode(),
+            tui_textarea::WrapMode::Word,
+            "soft wrap on (ticket kfmt)"
+        );
+        assert!(c.body.undo_coalescing(), "coalesced undo on (ticket kfmt)");
+
+        // A word-sized typing run is ONE undo step (ticket kfmt): the
+        // space joins the run it ends, so "hello world" reverts in two.
+        c.field = ComposerField::Body;
+        for ch in "hello world".chars() {
+            c.apply(&ComposerEdit::Char(ch));
+        }
+        c.sync_draft(None);
+        assert_eq!(c.draft.body, "hello world");
+        assert!(c.undo_body(), "undo applied");
+        assert_eq!(c.body.lines(), ["hello "], "the word run reverted");
+        assert!(c.undo_body());
+        assert_eq!(c.body.lines(), [""], "back to the empty draft");
+        assert!(!c.undo_body(), "nothing left to undo");
+
+        // Redo restores in the same steps.
+        assert!(c.redo_body());
+        assert_eq!(c.body.lines(), ["hello "]);
+        assert!(c.redo_body());
+        assert_eq!(c.body.lines(), ["hello world"]);
+        assert!(!c.redo_body(), "nothing left to redo");
+    }
+
+    #[test]
+    fn undo_outside_the_body_changes_nothing() {
+        let mut c = composer();
+        c.draft.to = String::from("ab");
+        c.cursor = 2;
+        c.field = ComposerField::To;
+        c.apply(&ComposerEdit::Char('c'));
+        // The single-line fields have no history: undo is inert there.
+        assert!(!c.undo_body());
+        assert!(!c.redo_body());
+        assert_eq!(c.draft.to, "abc");
+        assert_eq!(c.body.lines(), [String::new()]);
+    }
+
+    #[test]
+    fn body_selection_extends_and_moves_cancel_it() {
+        let mut c = composer();
+        c.field = ComposerField::Body;
+        for ch in "hello world".chars() {
+            c.apply(&ComposerEdit::Char(ch));
+        }
+        assert_eq!(c.body.cursor(), (0, 11));
+        // Shift+Left extends the selection backwards (ticket kfmt).
+        for _ in 0..3 {
+            c.apply(&ComposerEdit::SelectLeft);
+        }
+        assert_eq!(
+            c.body.selection_range(),
+            Some(((0, 8), (0, 11))),
+            "three characters selected"
+        );
+        // A plain move cancels the selection and moves the caret.
+        c.apply(&ComposerEdit::CursorLeft);
+        assert_eq!(c.body.selection_range(), None);
+        assert_eq!(c.body.cursor(), (0, 7));
+        // Selection moves stay put in the single-line fields.
+        c.field = ComposerField::To;
+        c.apply(&ComposerEdit::SelectLeft);
+        c.apply(&ComposerEdit::SelectDown);
+        assert_eq!(c.body.selection_range(), None, "body untouched");
+        assert_eq!(c.body.cursor(), (0, 7));
+    }
+
+    #[test]
+    fn body_word_moves_jump_by_words() {
+        let mut c = composer();
+        c.field = ComposerField::Body;
+        for ch in "hello world".chars() {
+            c.apply(&ComposerEdit::Char(ch));
+        }
+        c.apply(&ComposerEdit::WordLeft);
+        assert_eq!(c.body.cursor(), (0, 6), "onto the last word");
+        c.apply(&ComposerEdit::WordLeft);
+        assert_eq!(c.body.cursor(), (0, 0));
+        c.apply(&ComposerEdit::WordRight);
+        assert_eq!(c.body.cursor(), (0, 6), "onto the next word's head");
+        // Word moves stay put in the single-line fields.
+        c.field = ComposerField::To;
+        c.apply(&ComposerEdit::WordLeft);
+        assert_eq!(c.body.cursor(), (0, 6), "body untouched");
     }
 }

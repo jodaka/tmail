@@ -289,6 +289,17 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
+    /// The caret of a focused text input — the single-line field spans
+    /// (ticket tz12) and the body editor's cursor cell draw the same
+    /// block: accent fill with page-background text, the terminal
+    /// stand-in for the mockup's accent `caret-color`.
+    pub fn caret(&self) -> Style {
+        Style::new()
+            .fg(self.background)
+            .bg(self.accent)
+            .add_modifier(Modifier::BOLD)
+    }
+
     /// Text on top of `background`.
     pub fn on_background(&self) -> Style {
         Style::new().fg(self.text).bg(self.background)

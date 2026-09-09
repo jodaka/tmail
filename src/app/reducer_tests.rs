@@ -358,6 +358,45 @@ fn activate_on_same_mailbox_is_noop() {
     assert_eq!(s.messages.offset, 0);
 }
 
+#[test]
+fn sidebar_active_mailbox_marks_drafts_while_composing() {
+    let mut s = state();
+    let active = |s: &AppState| {
+        s.sidebar_active_mailbox_id()
+            .map(|id| id.0.as_str())
+            .map(String::from)
+    };
+    assert_eq!(
+        active(&s).as_deref(),
+        Some("inbox"),
+        "the displayed mailbox"
+    );
+    compose(&mut s);
+    assert_eq!(
+        active(&s).as_deref(),
+        Some("drafts"),
+        "Drafts while composing"
+    );
+    // Leaving the composer restores the displayed mailbox.
+    reduce(&mut s, &Action::BackOrCancel);
+    assert_eq!(active(&s).as_deref(), Some("inbox"));
+}
+
+#[test]
+fn sidebar_active_mailbox_is_none_while_composing_without_drafts() {
+    // A backend with no resolved Drafts role (ADR 0001: the UI never
+    // guesses folder names): composing marks no folder active.
+    let mut s = state();
+    s.mailboxes = Loadable::Loaded(
+        mock::mock_mailboxes()
+            .into_iter()
+            .filter(|m| m.role != Some(MailboxRole::Drafts))
+            .collect(),
+    );
+    compose(&mut s);
+    assert_eq!(s.sidebar_active_mailbox_id(), None);
+}
+
 // ── Startup: mailbox listing via the operation registry ──────────────────
 
 fn boot(s: &mut AppState) -> (OperationId, OperationKind) {
@@ -1859,13 +1898,56 @@ fn composer_focus_cycles_fields_and_actions() {
         ComposerField::Attach,
         ComposerField::Send,
         ComposerField::Discard,
-        ComposerField::To,
     ] {
         reduce(&mut s, &Action::FocusNext);
         assert_eq!(s.composer.as_ref().unwrap().field, expected);
     }
+    // Tab past the last control steps out to the sidebar (compose-mode
+    // folder list); the next Tab re-enters the composer at its first
+    // control.
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.focus, Focus::Sidebar);
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.focus, Focus::Composer);
+    assert_eq!(s.composer.as_ref().unwrap().field, ComposerField::To);
+    // Shift+Tab from the first control steps out to the sidebar as well,
+    // and re-enters at the last control.
     reduce(&mut s, &Action::FocusPrevious);
+    assert_eq!(s.focus, Focus::Sidebar);
+    reduce(&mut s, &Action::FocusPrevious);
+    assert_eq!(s.focus, Focus::Composer);
     assert_eq!(s.composer.as_ref().unwrap().field, ComposerField::Discard);
+    reduce(&mut s, &Action::FocusPrevious);
+    assert_eq!(s.composer.as_ref().unwrap().field, ComposerField::Send);
+}
+
+#[test]
+fn composing_sidebar_focus_moves_the_folder_cursor_and_switches() {
+    let mut s = state();
+    compose(&mut s);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('d')));
+    // Tab out to the sidebar (from the last control), then walk the folder
+    // cursor onto Drafts and switch to it.
+    s.composer.as_mut().unwrap().field = ComposerField::Discard;
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.focus, Focus::Sidebar);
+    reduce(&mut s, &Action::MoveDown);
+    reduce(&mut s, &Action::MoveDown);
+    assert_eq!(s.mailbox_selection, 2, "Drafts row");
+    // '/' must not strand focus in the search field while composing.
+    no_effects(&reduce(&mut s, &Action::OpenSearch));
+    assert_eq!(s.focus, Focus::Sidebar);
+    let (id, req) = expect_page(&reduce(&mut s, &Action::Activate));
+    assert_eq!(req.mailbox_id.0, "drafts");
+    complete_page_ok(&mut s, id, &req, 0);
+    // The switch closed the composer view; the draft data is kept for
+    // the Drafts list (plan §14).
+    assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
+    assert_eq!(s.composer.as_ref().unwrap().draft.to, "d");
+    // Composing again starts a blank new email anyway (ticket v5x8).
+    compose(&mut s);
+    assert_eq!(s.composer.as_ref().unwrap().draft.to, "");
+    assert_eq!(s.focus, Focus::Composer);
 }
 
 #[test]
@@ -1958,14 +2040,19 @@ fn esc_leaves_the_composer_and_preserves_the_draft() {
 }
 
 #[test]
-fn compose_again_reopens_the_preserved_draft() {
+fn compose_again_starts_a_blank_new_email() {
     let mut s = state();
     compose(&mut s);
     reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('d')));
     reduce(&mut s, &Action::BackOrCancel);
+    // The draft data survives the leave (it stays for the Drafts list).
+    let composer = s.composer.as_ref().expect("draft preserved");
+    assert_eq!(composer.draft.to, "d");
+    // `c` never reopens it: composing always starts blank (ticket v5x8).
     compose(&mut s);
     let composer = s.composer.as_ref().unwrap();
-    assert_eq!(composer.draft.to, "d", "reopening continues the draft");
+    assert_eq!(composer.draft.to, "", "a blank new email");
+    assert_eq!(composer.draft.local_id, None, "a fresh, never-saved draft");
     assert_eq!(composer.field, ComposerField::To);
 }
 
@@ -2000,28 +2087,326 @@ fn composer_edits_without_composer_open_are_inert() {
     assert!(!matches!(s.active_route(), Some(Route::Composer)));
 }
 
-// ── Attachment path dialog (plan §15, Phase 8.1) ─────────────────────────
+// ── Reopening drafts from the Drafts list (plan §14) ─────────────────────
 
-use crate::app::action::DialogEdit;
-use crate::app::overlay::AttachmentPathDialog;
+fn drafts_id() -> MailboxId {
+    MailboxId(String::from("drafts"))
+}
+
+/// One Drafts-mailbox row as the envelope listing carries it: bare
+/// `Message-ID` (no brackets).
+fn draft_row(id: &str, message_id: Option<&str>) -> MessageSummary {
+    MessageSummary {
+        id: MessageId(String::from(id)),
+        mailbox_id: drafts_id(),
+        message_id: message_id.map(String::from),
+        from: Vec::new(),
+        to: Vec::new(),
+        subject: String::from("Saved draft"),
+        snippet: None,
+        timestamp: mock::now(),
+        is_read: false,
+        is_starred: false,
+        has_attachments: false,
+    }
+}
+
+/// The fetched draft copy, as `message read` maps it.
+fn fetched_draft(id: &str, message_id: &str) -> Message {
+    Message {
+        id: MessageId(String::from(id)),
+        mailbox_id: drafts_id(),
+        headers: MessageHeaders {
+            subject: String::from("Hello"),
+            from: Vec::new(),
+            to: vec![Address {
+                name: None,
+                email: String::from("dest@example.com"),
+            }],
+            cc: vec![Address {
+                name: None,
+                email: String::from("cc@example.com"),
+            }],
+            bcc: vec![Address {
+                name: None,
+                email: String::from("bcc@example.com"),
+            }],
+            date: Some(mock::now()),
+            message_id: Some(String::from(message_id)),
+            in_reply_to: None,
+            references: None,
+        },
+        plain_body: Some(String::from("draft body")),
+        html_body: None,
+        attachments: Vec::new(),
+    }
+}
+
+#[test]
+fn enter_in_other_mailboxes_still_opens_the_reader() {
+    let mut s = state();
+    let (_, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    assert!(matches!(kind, OperationKind::LoadMessage(_)));
+}
+
+#[test]
+fn enter_on_the_open_draft_in_drafts_reuses_it_without_a_fetch() {
+    let mut s = state();
+    compose(&mut s);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('d')));
+    tick(&mut s, 0);
+    let (id, snapshot) = expect_save(&tick(&mut s, 2));
+    complete_save_ok(&mut s, id, snapshot.revision, "copy-1");
+    // Leave the composer, switch to Drafts; the list shows the saved copy
+    // with a refreshed backend id but the same stable `Message-ID`.
+    reduce(&mut s, &Action::BackOrCancel);
+    switch_to(&mut s, "drafts");
+    let bare = snapshot
+        .message_id
+        .clone()
+        .expect("minted at save")
+        .trim_matches(|c| c == '<' || c == '>')
+        .to_string();
+    s.messages.items = vec![draft_row("copy-99", Some(&bare))];
+    s.selection = 0;
+    // Enter: the composer reopens the exact in-memory draft — no backend
+    // round-trip, content and remote identity intact.
+    no_effects(&reduce(&mut s, &Action::Activate));
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    let draft = &s.composer.as_ref().unwrap().draft;
+    assert_eq!(draft.to, "d");
+    assert_eq!(draft.remote_id, Some(MessageId(String::from("copy-1"))));
+    assert!(!s.operations.has_foreground(), "no fetch was started");
+}
+
+#[test]
+fn enter_on_a_remote_draft_fetches_and_opens_the_composer() {
+    let mut s = state();
+    switch_to(&mut s, "drafts");
+    s.messages.items = vec![draft_row("copy-7", Some("1778.draft@tmail.local"))];
+    s.selection = 0;
+    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let OperationKind::OpenDraft(locator) = kind else {
+        panic!("expected OpenDraft, got {kind:?}");
+    };
+    assert_eq!(locator.id, MessageId(String::from("copy-7")));
+    assert_eq!(locator.mailbox, drafts_id());
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
+                "copy-7",
+                "1778.draft@tmail.local",
+            )))),
+        }),
+    );
+    // The composer opened over the list with the copy's fields…
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    let draft = &s.composer.as_ref().unwrap().draft;
+    assert_eq!(draft.to, "dest@example.com");
+    assert_eq!(draft.cc, "cc@example.com");
+    assert_eq!(draft.bcc, "bcc@example.com");
+    assert_eq!(draft.subject, "Hello");
+    assert_eq!(draft.body, "draft body");
+    // …and its identities, so the next save replaces the copy instead of
+    // adding a second one.
+    assert_eq!(
+        draft.message_id.as_deref(),
+        Some("<1778.draft@tmail.local>")
+    );
+    assert_eq!(draft.remote_id, Some(MessageId(String::from("copy-7"))));
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('!')));
+    tick(&mut s, 0);
+    let (save_id, snapshot) = expect_save(&tick(&mut s, 2));
+    assert_eq!(
+        snapshot.message_id.as_deref(),
+        Some("<1778.draft@tmail.local>")
+    );
+    assert_eq!(snapshot.remote_id, Some(MessageId(String::from("copy-7"))));
+    complete_save_ok(&mut s, save_id, snapshot.revision, "copy-8");
+}
+
+#[test]
+fn esc_cancels_a_draft_fetch_and_the_list_stays() {
+    let mut s = state();
+    switch_to(&mut s, "drafts");
+    s.messages.items = vec![draft_row("copy-7", None)];
+    s.selection = 0;
+    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    reduce(&mut s, &Action::BackOrCancel);
+    assert!(s.composer.is_none());
+    assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
+    // The cancelled fetch's result can never mutate state (plan §11).
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
+                "copy-7",
+                "1778.draft@tmail.local",
+            )))),
+        }),
+    );
+    assert!(s.composer.is_none(), "cancelled results are dropped");
+}
+
+#[test]
+fn enter_on_a_real_draft_refuses_while_one_is_open() {
+    let mut s = state();
+    compose(&mut s);
+    // Real work in the composer: the one-composer rule refuses.
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('k')));
+    reduce(&mut s, &Action::BackOrCancel);
+    switch_to(&mut s, "drafts");
+    s.messages.items = vec![draft_row("copy-9", Some("other@tmail.local"))];
+    s.selection = 0;
+    no_effects(&reduce(&mut s, &Action::Activate));
+    assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
+    assert_eq!(
+        s.status.message.as_deref(),
+        Some("A draft is already open — send or discard it first")
+    );
+}
+
+/// A pristine blank (the `c` artifact, left open with Esc) is not work:
+/// Enter on a Drafts row replaces it instead of refusing (ticket pmbz).
+#[test]
+fn enter_on_a_draft_row_replaces_a_blank_c_draft() {
+    let mut s = state();
+    compose(&mut s);
+    // Esc with no edits: the preserved draft is pristine blank.
+    reduce(&mut s, &Action::BackOrCancel);
+    assert!(s.composer.as_ref().unwrap().draft.is_blank());
+    switch_to(&mut s, "drafts");
+    s.messages.items = vec![draft_row("copy-9", Some("other@tmail.local"))];
+    s.selection = 0;
+    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let OperationKind::OpenDraft(locator) = kind else {
+        panic!("expected OpenDraft, got {kind:?}");
+    };
+    assert_eq!(locator.id, MessageId(String::from("copy-9")));
+    // The landed copy replaces the blank and opens the composer.
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
+                "copy-9",
+                "other@tmail.local",
+            )))),
+        }),
+    );
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    let draft = &s.composer.as_ref().unwrap().draft;
+    assert_eq!(draft.subject, "Hello", "the fetched draft is editing");
+    assert_eq!(draft.body, "draft body");
+}
+
+#[test]
+fn draft_fetch_result_is_dropped_after_a_mailbox_switch() {
+    let mut s = state();
+    switch_to(&mut s, "drafts");
+    s.messages.items = vec![draft_row("copy-7", None)];
+    s.selection = 0;
+    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    switch_to(&mut s, "sent");
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
+                "copy-7",
+                "1778.draft@tmail.local",
+            )))),
+        }),
+    );
+    assert!(s.composer.is_none(), "the stale fetch must not compose");
+    assert_eq!(
+        s.active_route().and_then(Route::mailbox_id).unwrap().0,
+        "sent"
+    );
+}
+
+#[test]
+fn draft_fetch_result_never_clobbers_a_newer_draft() {
+    let mut s = state();
+    switch_to(&mut s, "drafts");
+    s.messages.items = vec![draft_row("copy-7", None)];
+    s.selection = 0;
+    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    // While the fetch runs, the user composes a fresh draft and leaves it.
+    reduce(&mut s, &Action::Compose);
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('n')));
+    reduce(&mut s, &Action::BackOrCancel);
+    // Back on the drafts list when the fetch lands: the newer draft wins.
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
+                "copy-7",
+                "1778.draft@tmail.local",
+            )))),
+        }),
+    );
+    let draft = &s.composer.as_ref().unwrap().draft;
+    assert_eq!(draft.to, "n", "the fetch must not clobber the newer draft");
+    assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
+}
+
+// ── Attachment file chooser (plan §15, ticket 95x0) ──────────────────────
+
+use crate::app::action::AttachmentBrowse;
+use crate::app::overlay::AttachmentFileDialog;
 use crate::domain::DraftAttachment;
 use std::path::PathBuf;
 
-/// Enter on the `+ attach` control and return the open dialog.
-fn open_attach_dialog(s: &mut AppState) -> &mut AttachmentPathDialog {
+/// Enter on the `+ attach` control and return the open chooser together
+/// with the listing operation's id, still in flight.
+fn open_attach_dialog(s: &mut AppState) -> (&mut AttachmentFileDialog, OperationId) {
     compose(s);
     while s.composer.as_ref().unwrap().field != ComposerField::Attach {
         reduce(s, &Action::FocusNext);
     }
-    no_effects(&reduce(s, &Action::Activate));
+    let (id, kind) = effect_parts(&reduce(s, &Action::Activate));
+    assert_eq!(
+        kind,
+        OperationKind::ListAttachmentFiles { path: None },
+        "the chooser opens with a home-directory listing"
+    );
     assert_eq!(s.focus, Focus::Dialog);
     match s.overlay.as_mut() {
-        Some(Overlay::AttachmentPath(dialog)) => dialog,
-        other => panic!("expected the attachment dialog, got {other:?}"),
+        Some(Overlay::AttachmentExplorer(dialog)) => (dialog, id),
+        other => panic!("expected the attachment chooser, got {other:?}"),
     }
 }
 
-/// Complete the in-flight `ReadAttachment` for `raw` with `attachment`.
+/// A deterministic listing target: a temp directory with two files and
+/// one subdirectory (the explorer sorts `../`, then dirs, then files).
+fn chooser_dir() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().to_path_buf();
+    std::fs::write(dir.path().join("report.pdf"), b"pdf").unwrap();
+    std::fs::write(dir.path().join("notes.txt"), b"txt").unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    (dir, path)
+}
+
+/// Land the listing the runtime built over `dir`.
+fn land_listing(s: &mut AppState, id: OperationId, dir: &std::path::Path) {
+    let explorer = ratatui_explorer::FileExplorerBuilder::build_with_working_dir(dir).unwrap();
+    reduce(
+        s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Explorer(Box::new(explorer))),
+        }),
+    );
+}
+
+/// Complete the in-flight `ReadAttachment` for the selected file with
+/// `attachment`.
 fn complete_read_ok(s: &mut AppState, id: OperationId, attachment: DraftAttachment) {
     reduce(
         s,
@@ -2041,9 +2426,19 @@ fn attachment(name: &str) -> DraftAttachment {
 }
 
 #[test]
-fn enter_on_attach_opens_the_dialog_and_esc_closes_it() {
+fn enter_on_attach_opens_the_chooser_and_esc_closes_it() {
     let mut s = state();
     open_attach_dialog(&mut s);
+    // The chooser opens in its pending state: listing in flight.
+    {
+        let dialog = match s.overlay.as_ref().unwrap() {
+            Overlay::AttachmentExplorer(dialog) => dialog,
+            _ => panic!("chooser open"),
+        };
+        assert!(dialog.explorer.is_none());
+        assert!(dialog.listing);
+        assert_eq!(dialog.error, None);
+    }
     // BackOrCancel restores the composer focus.
     reduce(&mut s, &Action::BackOrCancel);
     assert!(s.overlay.is_none());
@@ -2052,100 +2447,163 @@ fn enter_on_attach_opens_the_dialog_and_esc_closes_it() {
 }
 
 #[test]
-fn dialog_entry_edits_with_caret_and_clears_errors() {
+fn the_landed_listing_replaces_the_pending_state() {
     let mut s = state();
-    let dialog = open_attach_dialog(&mut s);
-    dialog.error = Some(String::from("stale failure"));
-    for c in "~/a.pdf".chars() {
-        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
-    }
-    {
-        let dialog = match s.overlay.as_ref().unwrap() {
-            Overlay::AttachmentPath(dialog) => dialog,
-            _ => panic!("dialog open"),
-        };
-        assert_eq!(dialog.input, "~/a.pdf");
-        assert_eq!(dialog.cursor, 7);
-        assert_eq!(dialog.error, None, "an edit clears the stale failure");
-    }
-    reduce(&mut s, &Action::DialogEdit(DialogEdit::Backspace));
-    reduce(&mut s, &Action::DialogEdit(DialogEdit::CursorLeft));
+    let (_, id) = open_attach_dialog(&mut s);
+    let (_guard, dir) = chooser_dir();
+    land_listing(&mut s, id, &dir);
     let dialog = match s.overlay.as_ref().unwrap() {
-        Overlay::AttachmentPath(dialog) => dialog,
-        _ => panic!("dialog open"),
+        Overlay::AttachmentExplorer(dialog) => dialog,
+        _ => panic!("chooser open"),
     };
-    assert_eq!(dialog.input, "~/a.pd");
-    assert_eq!(dialog.cursor, 5);
+    assert!(dialog.explorer.is_some(), "the explorer arrived");
+    assert!(!dialog.listing);
+    assert_eq!(dialog.error, None);
 }
 
 #[test]
-fn empty_entry_is_rejected_inline_without_an_operation() {
+fn arrows_move_the_selection_and_enter_submits_a_file() {
     let mut s = state();
-    open_attach_dialog(&mut s);
-    reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(' ')));
-    no_effects(&reduce(&mut s, &Action::Activate));
-    let dialog = match s.overlay.as_ref().unwrap() {
-        Overlay::AttachmentPath(dialog) => dialog,
-        _ => panic!("dialog open"),
-    };
-    assert_eq!(dialog.error.as_deref(), Some("Enter a file path"));
-    assert!(s.operations.is_empty(), "nothing to validate");
-}
+    let (_, id) = open_attach_dialog(&mut s);
+    let (_guard, dir) = chooser_dir();
+    land_listing(&mut s, id, &dir);
 
-#[test]
-fn submitting_starts_validation_and_keeps_the_dialog_open() {
-    let mut s = state();
-    open_attach_dialog(&mut s);
-    for c in "~/report final.pdf".chars() {
-        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
-    }
-    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    // The listing starts on the parent row ("../"); files come after the
+    // directories, sorted by name. Two Downs: ../ → docs/ → notes.txt.
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
+    let expected = dir.join("notes.txt");
+    assert_eq!(
+        match s.overlay.as_ref().unwrap() {
+            Overlay::AttachmentExplorer(dialog) => dialog.selected_file(),
+            _ => panic!("chooser open"),
+        },
+        Some(expected.clone()),
+        "the selection is a file now"
+    );
+
+    // Enter submits the selected file for backend validation, raw.
+    let (_, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
     assert_eq!(
         kind,
-        OperationKind::ReadAttachment {
-            path: PathBuf::from("~/report final.pdf"),
-        },
-        "the raw entry goes to the backend unexpanded"
+        OperationKind::ReadAttachment { path: expected },
+        "the selected file's path goes to the backend"
     );
     assert!(
-        matches!(s.overlay.as_ref(), Some(Overlay::AttachmentPath(_))),
-        "the dialog stays open while validating"
+        matches!(s.overlay.as_ref(), Some(Overlay::AttachmentExplorer(_))),
+        "the chooser stays open while validating"
     );
     assert_eq!(kind.summary(), "Checking file");
-    let _ = id;
+}
+
+#[test]
+fn enter_on_a_directory_lists_it_and_navigation_freezes() {
+    let mut s = state();
+    let (_, id) = open_attach_dialog(&mut s);
+    let (_guard, dir) = chooser_dir();
+    land_listing(&mut s, id, &dir);
+
+    // The first directory after the parent row is `docs/`; Enter lists it.
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
+    let (id2, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    assert_eq!(
+        kind,
+        OperationKind::ListAttachmentFiles {
+            path: Some(dir.join("docs")),
+        }
+    );
+    {
+        let dialog = match s.overlay.as_ref().unwrap() {
+            Overlay::AttachmentExplorer(dialog) => dialog,
+            _ => panic!("chooser open"),
+        };
+        assert!(dialog.listing, "navigation is frozen while listing");
+    }
+    // A second directory change while the listing runs is a no-op.
+    no_effects(&reduce(
+        &mut s,
+        &Action::AttachmentBrowse(AttachmentBrowse::Parent),
+    ));
+
+    // The landing replaces the working directory.
+    land_listing(&mut s, id2, &dir.join("docs"));
+    let dialog = match s.overlay.as_ref().unwrap() {
+        Overlay::AttachmentExplorer(dialog) => dialog,
+        _ => panic!("chooser open"),
+    };
+    assert_eq!(
+        dialog.explorer.as_ref().unwrap().cwd(),
+        &dir.join("docs"),
+        "the chooser is inside the directory now"
+    );
+    assert!(!dialog.listing);
+}
+
+#[test]
+fn left_goes_to_the_parent_and_right_into_the_selected_dir() {
+    let mut s = state();
+    let (_, id) = open_attach_dialog(&mut s);
+    let (_guard, dir) = chooser_dir();
+    land_listing(&mut s, id, &dir);
+
+    // Right on a directory lists it; Left lists the parent.
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
+    let (id2, kind) = effect_parts(&reduce(
+        &mut s,
+        &Action::AttachmentBrowse(AttachmentBrowse::Open),
+    ));
+    assert_eq!(
+        kind,
+        OperationKind::ListAttachmentFiles {
+            path: Some(dir.join("docs")),
+        }
+    );
+    land_listing(&mut s, id2, &dir.join("docs"));
+    let (_, kind) = effect_parts(&reduce(
+        &mut s,
+        &Action::AttachmentBrowse(AttachmentBrowse::Parent),
+    ));
+    assert_eq!(
+        kind,
+        OperationKind::ListAttachmentFiles { path: Some(dir) },
+        "back to the chooser's opening directory"
+    );
 }
 
 #[test]
 fn validated_file_becomes_a_chip_and_dirties_the_draft() {
     let mut s = state();
-    open_attach_dialog(&mut s);
-    for c in "~/report.pdf".chars() {
-        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
-    }
+    let (_, id) = open_attach_dialog(&mut s);
+    let (_guard, dir) = chooser_dir();
+    land_listing(&mut s, id, &dir);
+    // Down twice: ../ → docs/ → notes.txt; then use notes.txt.
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
     let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
-    complete_read_ok(&mut s, id, attachment("report.pdf"));
+    complete_read_ok(&mut s, id, attachment("notes.txt"));
     // The dialog closed and the chip is focused.
     assert!(s.overlay.is_none());
     assert_eq!(s.focus, Focus::Composer);
     let composer = s.composer.as_ref().unwrap();
     assert_eq!(composer.field, ComposerField::Attachment(0));
     let att = &composer.draft.attachments[0];
-    assert_eq!(att.name, "report.pdf");
-    assert_eq!(att.path, PathBuf::from("/tmp/report.pdf"));
+    assert_eq!(att.name, "notes.txt");
+    assert_eq!(att.path, PathBuf::from("/tmp/notes.txt"));
     assert!(composer.draft.is_dirty(), "attaching is a content edit");
     assert_eq!(
         s.status.message.as_deref(),
-        Some("Attached report.pdf (1 KB)")
+        Some("Attached notes.txt (1 KB)")
     );
 }
 
 #[test]
-fn validation_failure_stays_in_the_dialog_retryable() {
+fn validation_failure_stays_in_the_chooser_retryable() {
     let mut s = state();
-    open_attach_dialog(&mut s);
-    for c in "~/gone.pdf".chars() {
-        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
-    }
+    let (_, id) = open_attach_dialog(&mut s);
+    let (_guard, dir) = chooser_dir();
+    land_listing(&mut s, id, &dir);
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
     let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
     reduce(
         &mut s,
@@ -2153,74 +2611,102 @@ fn validation_failure_stays_in_the_dialog_retryable() {
             id,
             outcome: Err(OperationFailure {
                 code: None,
-                detail: String::from("`/home/u/gone.pdf` does not exist"),
+                detail: String::from("`notes.txt` does not exist"),
                 retry: Some(kind.retry_spec()),
                 ambiguous: false,
             }),
         }),
     );
-    // The dialog stays open with the detail; the entry is unchanged.
+    // The chooser stays open with the detail; the selection is unchanged.
     let dialog = match s.overlay.as_ref().unwrap() {
-        Overlay::AttachmentPath(dialog) => dialog,
-        _ => panic!("dialog open"),
+        Overlay::AttachmentExplorer(dialog) => dialog,
+        _ => panic!("chooser open"),
     };
-    assert_eq!(
-        dialog.error.as_deref(),
-        Some("`/home/u/gone.pdf` does not exist")
-    );
-    assert_eq!(dialog.input, "~/gone.pdf");
+    assert_eq!(dialog.error.as_deref(), Some("`notes.txt` does not exist"));
+    assert!(dialog.selected_file().is_some());
     assert_eq!(s.focus, Focus::Dialog);
     assert!(s.composer.as_ref().unwrap().draft.attachments.is_empty());
 }
 
 #[test]
-fn stale_validation_results_are_dropped() {
+fn failed_listing_keeps_the_chooser_open_with_the_detail() {
+    let mut s = state();
+    let (_, id) = open_attach_dialog(&mut s);
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Err(OperationFailure {
+                code: None,
+                detail: String::from("permission denied"),
+                retry: None,
+                ambiguous: false,
+            }),
+        }),
+    );
+    let dialog = match s.overlay.as_ref().unwrap() {
+        Overlay::AttachmentExplorer(dialog) => dialog,
+        _ => panic!("chooser open"),
+    };
+    assert_eq!(dialog.error.as_deref(), Some("permission denied"));
+    assert!(!dialog.listing, "navigation is free again");
+    assert!(dialog.explorer.is_none(), "nothing to show");
+    // Esc still closes it.
+    reduce(&mut s, &Action::BackOrCancel);
+    assert!(s.overlay.is_none());
+    assert_eq!(s.focus, Focus::Composer);
+}
+
+#[test]
+fn stale_results_are_dropped() {
     let mut s = state();
     // Esc while validating: the result must not attach anything.
-    open_attach_dialog(&mut s);
-    for c in "~/a.pdf".chars() {
-        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
-    }
+    let (_, id) = open_attach_dialog(&mut s);
+    let (_guard, dir) = chooser_dir();
+    land_listing(&mut s, id, &dir);
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
     let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
     reduce(&mut s, &Action::BackOrCancel);
-    complete_read_ok(&mut s, id, attachment("a.pdf"));
+    complete_read_ok(&mut s, id, attachment("notes.txt"));
     assert!(s.composer.as_ref().unwrap().draft.attachments.is_empty());
 
-    // Editing the entry while validating: the older result is stale.
-    open_attach_dialog(&mut s);
-    for c in "~/b.pdf".chars() {
-        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
-    }
+    // Moving the selection while validating: the older result is stale.
+    let (_, id) = open_attach_dialog(&mut s);
+    land_listing(&mut s, id, &dir);
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
     let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
-    reduce(&mut s, &Action::DialogEdit(DialogEdit::Backspace));
-    complete_read_ok(&mut s, id, attachment("b.pdf"));
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Up));
+    complete_read_ok(&mut s, id, attachment("notes.txt"));
     assert!(s.composer.as_ref().unwrap().draft.attachments.is_empty());
 }
 
 #[test]
 fn same_file_attaches_once() {
     let mut s = state();
-    open_attach_dialog(&mut s);
-    for c in "~/a.pdf".chars() {
-        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
-    }
+    let (_, id) = open_attach_dialog(&mut s);
+    let (_guard, dir) = chooser_dir();
+    land_listing(&mut s, id, &dir);
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
     let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
-    complete_read_ok(&mut s, id, attachment("a.pdf"));
+    complete_read_ok(&mut s, id, attachment("notes.txt"));
     assert_eq!(s.composer.as_ref().unwrap().draft.attachments.len(), 1);
 
     // Re-adding the same path: no duplicate chip, no dirt.
     let revision = s.composer.as_ref().unwrap().draft.revision;
-    open_attach_dialog(&mut s);
-    for c in "~/a.pdf".chars() {
-        reduce(&mut s, &Action::DialogEdit(DialogEdit::Char(c)));
-    }
+    let (_, id) = open_attach_dialog(&mut s);
+    land_listing(&mut s, id, &dir);
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
     let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
     complete_read_ok(
         &mut s,
         id,
         DraftAttachment {
-            path: PathBuf::from("/tmp/a.pdf"),
-            name: String::from("a.pdf"),
+            path: PathBuf::from("/tmp/notes.txt"),
+            name: String::from("notes.txt"),
             size: 1234,
         },
     );
@@ -2232,8 +2718,18 @@ fn same_file_attaches_once() {
     );
     assert_eq!(
         s.status.message.as_deref(),
-        Some("a.pdf is already attached")
+        Some("notes.txt is already attached")
     );
+}
+
+#[test]
+fn listing_results_for_a_closed_chooser_are_dropped() {
+    let mut s = state();
+    let (_, id) = open_attach_dialog(&mut s);
+    let (_guard, dir) = chooser_dir();
+    reduce(&mut s, &Action::BackOrCancel);
+    land_listing(&mut s, id, &dir);
+    assert!(s.overlay.is_none(), "nothing resurrected");
 }
 
 #[test]
@@ -2528,11 +3024,14 @@ fn startup_restores_the_last_safe_draft_from_the_journal() {
     );
     // The body editor carries the restored text (trailing newline intact).
     assert_eq!(composer.body.lines(), ["typed before the crash", ""]);
-    // Composing reopens exactly this draft.
+    // Composing still starts a blank new email (ticket v5x8): the
+    // restored draft continues from the Drafts list, while the in-memory
+    // copy autosaves its unconfirmed revision (next test).
     compose(&mut s);
     assert_eq!(
-        s.composer.as_ref().unwrap().draft.local_id,
-        Some(crate::domain::DraftId(String::from("local-crash-1")))
+        s.composer.as_ref().unwrap().draft.to,
+        "",
+        "a blank new email, not the restored draft"
     );
 }
 
@@ -2843,6 +3342,7 @@ fn reply_source() -> Message {
                 name: None,
                 email: String::from("carol@example.org"),
             }],
+            bcc: Vec::new(),
             date: Some(mock::now()),
             message_id: Some(String::from("318@tmail.local")),
             in_reply_to: None,
@@ -2987,14 +3487,12 @@ fn leaving_a_seeded_reply_returns_to_the_reader() {
     reduce(&mut s, &Action::BackOrCancel); // Esc: save/leave
     assert!(matches!(s.active_route(), Some(Route::Message(_))));
     assert_eq!(s.focus, Focus::MessageList);
-    // The draft stays in state and reopens with its seeded headers.
+    // The seeded draft stays in state (for the Drafts list).
     assert!(s.composer.is_some());
+    // `c` starts a blank new email instead of reopening it (ticket v5x8).
     reduce(&mut s, &Action::Compose);
-    let composer = seeded_composer(&s);
-    assert_eq!(
-        composer.draft.in_reply_to.as_deref(),
-        Some("318@tmail.local")
-    );
+    let composer = s.composer.as_ref().unwrap();
+    assert_eq!(composer.draft.in_reply_to, None, "a blank new email");
 }
 
 #[test]
@@ -5271,6 +5769,7 @@ fn enter_confirms_the_previewed_theme() {
 
 #[test]
 fn the_picker_intercepts_every_other_input() {
+    use crate::app::action::DialogEdit;
     let mut s = picker_state();
     no_effects(&reduce(&mut s, &Action::OpenThemePicker));
     // A modal swallows all input (plan §9): shortcuts, edits, and backend
@@ -5279,6 +5778,10 @@ fn the_picker_intercepts_every_other_input() {
     assert!(s.composer.is_none(), "no composer opens behind the picker");
     no_effects(&reduce(&mut s, &Action::ToggleStar));
     no_effects(&reduce(&mut s, &Action::DialogEdit(DialogEdit::Char('x'))));
+    no_effects(&reduce(
+        &mut s,
+        &Action::AttachmentBrowse(AttachmentBrowse::Down),
+    ));
     assert_eq!(s.theme_index, 0, "nothing moved the preview");
 }
 
