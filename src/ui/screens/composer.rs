@@ -1,12 +1,12 @@
 //! Composer screen (mockup `new-mail.html`, plan §14).
 //!
-//! Header ("New message"), one row per address/subject field with the
-//! mockup's 8-column right-aligned labels and hairline rules, the body
-//! editor (`ratatui-textarea`), and the Send/Discard action row. The
-//! focused control gets the hover fill; focused text inputs draw an
-//! inline caret span — the body editor the same caret through its
-//! `cursor_style` (ticket tz12), and the terminal cursor stays hidden,
-//! matching the rest of the app.
+//! Header row (autosave status only, right-aligned — ticket a9y3), one row
+//! per address/subject field with the mockup's 8-column right-aligned
+//! labels and hairline rules, the body editor (`ratatui-textarea`), and
+//! the Send/Discard action row. The focused control gets the hover fill;
+//! focused text inputs draw an inline caret span — the body editor the
+//! same caret through its `cursor_style` (ticket tz12), and the terminal
+//! cursor stays hidden, matching the rest of the app.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -55,7 +55,8 @@ pub fn render(
     let bottom = area.y + area.height;
     let mut y = area.y;
 
-    // Header: title left, autosave status right (status text lands in 6.7).
+    // Header: no title (ticket a9y3) — the row carries only the autosave
+    // status, right-aligned (status text lands in 6.7).
     if y < bottom {
         let header = Rect {
             x,
@@ -63,14 +64,11 @@ pub fn render(
             width: inner_w as u16,
             height: 1,
         };
-        let mut spans = vec![Span::styled(
-            "New message",
-            Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
-        )];
+        let mut spans: Vec<Span<'_>> = Vec::new();
         if let Some((status, failed)) = draft_status(composer) {
             let w = status.width();
-            if w + 14 < inner_w {
-                spans.push(Span::raw(" ".repeat(inner_w - 12 - w)));
+            if w + 2 < inner_w {
+                spans.push(Span::raw(" ".repeat(inner_w - w)));
                 let style = if failed {
                     Style::new().fg(theme.warning)
                 } else {

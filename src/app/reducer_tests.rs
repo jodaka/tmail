@@ -500,6 +500,144 @@ fn mailboxes_failure_opens_modal_and_retry_reloads() {
     assert!(s.operations.get(retry_id).is_some());
 }
 
+// ── Background data never resets the user's state (ticket sazy) ──────────
+
+/// Complete the boot listing with the mock mailboxes.
+fn complete_mailboxes(s: &mut AppState, id: OperationId, mailboxes: Vec<Mailbox>) {
+    reduce(
+        s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Mailboxes(mailboxes)),
+        }),
+    );
+}
+
+/// Register a mailbox-listing load on a session whose listing already
+/// applied (the fresh load the cached startup always runs behind it).
+fn start_listing(s: &mut AppState) -> OperationId {
+    s.operations.start(mailboxes_kind()).id
+}
+
+#[test]
+fn fresh_mailbox_listing_keeps_the_composer_open() {
+    // The reported bug (ticket sazy): a cached listing roots the UI at
+    // startup, the user presses `c` and types, then the fresh listing
+    // lands — the composer route used to be rebuilt away with the list.
+    let mut s = state();
+    let id = start_listing(&mut s);
+    compose(&mut s);
+    let body_before = s.composer.as_ref().unwrap().body.lines().join("\n");
+    complete_mailboxes(&mut s, id, mock::mock_mailboxes());
+    // Still composing, draft intact; the sidebar data refreshed in place.
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    assert_eq!(
+        s.composer.as_ref().unwrap().body.lines().join("\n"),
+        body_before
+    );
+    assert!(s.mailboxes.as_loaded().is_some());
+}
+
+#[test]
+fn fresh_mailbox_listing_keeps_list_page_and_selection() {
+    let mut s = state();
+    let id = start_listing(&mut s);
+    reduce(&mut s, &Action::MoveDown);
+    reduce(&mut s, &Action::MoveDown);
+    let selected = s.selected_message().unwrap().id.clone();
+    complete_mailboxes(&mut s, id, mock::mock_mailboxes());
+    // Cursor, page, and scroll are exactly where the user left them.
+    assert_eq!(s.selection, 2);
+    assert_eq!(s.selected_message().unwrap().id, selected);
+    assert_eq!(s.messages.items.len(), mock::PAGE_SIZE);
+    assert_eq!(s.messages.offset, 0);
+    assert_eq!(s.routes.len(), 1);
+}
+
+#[test]
+fn fresh_mailbox_listing_keeps_sidebar_cursor_by_identity() {
+    let mut s = state();
+    let id = start_listing(&mut s);
+    // The cursor sits on Sent; a fresh enumeration lists folders in a
+    // different order. The cursor follows the mailbox, not the index.
+    s.mailbox_selection = 1;
+    let mut reordered = mock::mock_mailboxes();
+    reordered.rotate_left(2);
+    complete_mailboxes(&mut s, id, reordered);
+    let expected = s
+        .mailboxes
+        .as_loaded()
+        .unwrap()
+        .iter()
+        .position(|m| m.id.0 == "sent")
+        .unwrap();
+    assert_eq!(s.mailbox_selection, expected);
+}
+
+#[test]
+fn page_result_applies_behind_the_composer() {
+    // A page load finishing while the user composes updates the list
+    // behind the overlay — the composer route and selection survive.
+    let mut s = state();
+    let (id, req) = expect_page(&reduce(&mut s, &Action::Refresh));
+    // The user moves and starts composing while the load runs; the
+    // displayed page is also made stale so the result really applies.
+    reduce(&mut s, &Action::MoveDown);
+    reduce(&mut s, &Action::MoveDown);
+    let selected = s.selected_message().unwrap().id.clone();
+    s.messages.items.truncate(15);
+    compose(&mut s);
+    complete_page_ok(&mut s, id, &req, 0);
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    assert_eq!(s.messages.items.len(), mock::PAGE_SIZE);
+    assert_eq!(s.selected_message().unwrap().id, selected);
+}
+
+#[test]
+fn mailbox_page_result_never_lands_over_search_results() {
+    // A search owns the visible list: a slower mailbox page load that was
+    // started before the search must not replace its results.
+    let mut s = state();
+    let (id, _req) = expect_page(&reduce(&mut s, &Action::Refresh));
+    reduce(&mut s, &Action::OpenSearch);
+    reduce(&mut s, &Action::SearchEdit(SearchEdit::Char('x')));
+    let effects = reduce(&mut s, &Action::SubmitSearch);
+    assert!(matches!(
+        effects.first().map(|e| &e.kind),
+        Some(OperationKind::Search(_))
+    ));
+    assert!(s.messages.items.is_empty());
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Page(mock::mock_page(
+                &inbox_id(),
+                0,
+                mock::PAGE_SIZE,
+            ))),
+        }),
+    );
+    assert!(
+        s.messages.items.is_empty(),
+        "mailbox page must not land over search results"
+    );
+}
+
+#[test]
+fn identical_page_result_changes_nothing() {
+    // Ticket sazy: a refresh that returns the very page already on screen
+    // is a no-op — the selection and scroll stay untouched.
+    let mut s = state();
+    reduce(&mut s, &Action::MoveDown);
+    reduce(&mut s, &Action::MoveDown);
+    reduce(&mut s, &Action::MoveDown);
+    let (id, req) = expect_page(&reduce(&mut s, &Action::Refresh));
+    no_effects(&complete_page_ok(&mut s, id, &req, 0));
+    assert_eq!(s.selection, 3);
+    assert_eq!(s.messages.items.len(), mock::PAGE_SIZE);
+}
+
 #[test]
 fn input_and_ticks_keep_working_while_an_operation_is_in_flight() {
     let mut s = state();
@@ -1154,6 +1292,58 @@ fn save_is_reader_only_and_attachment_gated() {
     assert!(s.operations.is_empty());
 }
 
+/// Enter in the reader presses the selected chip — `o`'s save-then-open
+/// path (plan §15, ticket 61qx).
+#[test]
+fn enter_on_the_reader_opens_the_selected_attachment() {
+    let mut s = reader_with_attachments();
+    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let OperationKind::SaveAttachment {
+        request,
+        open_after,
+    } = kind
+    else {
+        panic!("expected SaveAttachment");
+    };
+    assert!(open_after, "Enter arms the opener chain");
+    assert_eq!(request.part_id, 3, "first chip by default");
+    // The chain completes exactly like `o`'s would.
+    let effects = reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::SavedPath(PathBuf::from(
+                "/home/u/Downloads/report.pdf",
+            ))),
+        }),
+    );
+    let (_, open_kind) = effect_parts(&effects);
+    assert!(matches!(open_kind, OperationKind::OpenPath { .. }));
+}
+
+#[test]
+fn enter_reuses_a_session_saved_attachment_path() {
+    let mut s = reader_with_attachments();
+    let saved = PathBuf::from("/home/u/Downloads/report.pdf");
+    let message_id = s.open_message.as_loaded().unwrap().id.clone();
+    s.saved_attachments.insert((message_id, 3), saved.clone());
+    let effects = reduce(&mut s, &Action::Activate);
+    let (_, kind) = effect_parts(&effects);
+    assert_eq!(
+        kind,
+        OperationKind::OpenPath { path: saved },
+        "Enter opens a saved file without a second download"
+    );
+}
+
+#[test]
+fn enter_on_the_reader_without_attachments_is_inert() {
+    let mut s = state();
+    open_reader_with(&mut s, reply_source()); // no attachments
+    no_effects(&reduce(&mut s, &Action::Activate));
+    assert!(s.operations.is_empty());
+}
+
 #[test]
 fn save_failure_opens_a_retryable_modal() {
     let mut s = reader_with_attachments();
@@ -1537,8 +1727,6 @@ fn focus_cycles_tab_shift_tab() {
     assert_eq!(s.focus, Focus::MessageList);
     reduce(&mut s, &Action::FocusNext);
     assert_eq!(s.focus, Focus::SearchField);
-    reduce(&mut s, &Action::FocusNext);
-    assert_eq!(s.focus, Focus::SelectAllToggle);
     reduce(&mut s, &Action::FocusNext);
     assert_eq!(s.focus, Focus::Sidebar);
     reduce(&mut s, &Action::FocusNext);
@@ -2252,21 +2440,159 @@ fn esc_cancels_a_draft_fetch_and_the_list_stays() {
 }
 
 #[test]
-fn enter_on_a_real_draft_refuses_while_one_is_open() {
+fn enter_on_a_draft_row_secures_the_parked_draft_and_swaps() {
+    // A parked draft with real work never blocks the Drafts list (ticket
+    // sazy): its Esc-forced save is already in flight, so Enter fetches
+    // the selected copy and the fetched draft takes the composer slot.
     let mut s = state();
     compose(&mut s);
-    // Real work in the composer: the one-composer rule refuses.
+    tick(&mut s, 0); // sets the clock so the leave-save can start
     reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('k')));
-    reduce(&mut s, &Action::BackOrCancel);
+    let (parked_save, parked_snapshot) = expect_save(&reduce(&mut s, &Action::BackOrCancel));
     switch_to(&mut s, "drafts");
     s.messages.items = vec![draft_row("copy-9", Some("other@tmail.local"))];
     s.selection = 0;
-    no_effects(&reduce(&mut s, &Action::Activate));
-    assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
-    assert_eq!(
-        s.status.message.as_deref(),
-        Some("A draft is already open — send or discard it first")
+    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let OperationKind::OpenDraft(locator) = kind else {
+        panic!("expected OpenDraft, got {kind:?}");
+    };
+    assert_eq!(locator.id, MessageId(String::from("copy-9")));
+    // The parked save confirms while its draft is still in the slot.
+    complete_save_ok(&mut s, parked_save, parked_snapshot.revision, "copy-8");
+    // The landed copy replaces the parked draft and opens the composer.
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
+                "copy-9",
+                "other@tmail.local",
+            )))),
+        }),
     );
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    let draft = &s.composer.as_ref().unwrap().draft;
+    assert_eq!(draft.subject, "Hello", "the fetched draft is editing");
+    assert_eq!(s.status.message.as_deref(), Some("Draft opened"));
+}
+
+#[test]
+fn enter_on_a_draft_row_force_saves_an_unsaved_parked_draft() {
+    // A parked draft with unsaved edits and no save in flight (the journal
+    // restore's shape before the next autosave): Enter first secures it
+    // with a forced save, then fetches the selected copy.
+    let mut s = state();
+    tick(&mut s, 0); // sets the clock
+    switch_to(&mut s, "drafts");
+    let mut parked = crate::domain::Draft {
+        to: String::from("old@example.com"),
+        ..crate::domain::Draft::default()
+    };
+    parked.note_edit(Some(mock::now()));
+    s.composer = Some(crate::app::composer::ComposerState::from_draft(parked));
+    s.messages.items = vec![draft_row("copy-9", Some("other@tmail.local"))];
+    s.selection = 0;
+    let effects = reduce(&mut s, &Action::Activate);
+    assert_eq!(
+        effects.len(),
+        2,
+        "the forced save of the parked draft plus the fetch"
+    );
+    let OperationKind::SaveDraft { draft: snapshot } = &effects[0].kind else {
+        panic!("expected SaveDraft, got {:?}", effects[0].kind);
+    };
+    assert_eq!(snapshot.to, "old@example.com");
+    assert_eq!(snapshot.revision, 1);
+    let OperationKind::OpenDraft(_) = &effects[1].kind else {
+        panic!("expected OpenDraft, got {:?}", effects[1].kind);
+    };
+    // The parked save confirms while its draft is still in the slot…
+    complete_save_ok(&mut s, effects[0].id, snapshot.revision, "copy-old");
+    // …then the fetch lands and the fetched copy replaces it.
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id: effects[1].id,
+            outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
+                "copy-9",
+                "other@tmail.local",
+            )))),
+        }),
+    );
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    assert_eq!(s.composer.as_ref().unwrap().draft.subject, "Hello");
+}
+
+#[test]
+fn rapid_draft_opens_supersede_and_the_last_row_wins() {
+    let mut s = state();
+    tick(&mut s, 0);
+    switch_to(&mut s, "drafts");
+    s.messages.items = vec![
+        draft_row("copy-7", Some("a@tmail.local")),
+        draft_row("copy-8", Some("b@tmail.local")),
+    ];
+    s.selection = 0;
+    let (first_id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    s.selection = 1;
+    let (second_id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    assert_ne!(first_id, second_id);
+    // The older fetch was superseded by the newer Enter: its result can
+    // never open a draft (plan §11).
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id: first_id,
+            outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
+                "copy-7",
+                "a@tmail.local",
+            )))),
+        }),
+    );
+    assert!(s.composer.is_none(), "superseded result dropped");
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id: second_id,
+            outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
+                "copy-8",
+                "b@tmail.local",
+            )))),
+        }),
+    );
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    assert_eq!(
+        s.composer.as_ref().unwrap().draft.message_id.as_deref(),
+        Some("<b@tmail.local>")
+    );
+}
+
+#[test]
+fn draft_fetch_is_dropped_when_the_selection_moved() {
+    // The draft that opens is the one the cursor is on: a fetch for a row
+    // the user has already moved past is dropped (Enter again refetches).
+    let mut s = state();
+    tick(&mut s, 0);
+    switch_to(&mut s, "drafts");
+    s.messages.items = vec![
+        draft_row("copy-7", Some("a@tmail.local")),
+        draft_row("copy-8", Some("b@tmail.local")),
+    ];
+    s.selection = 0;
+    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    reduce(&mut s, &Action::MoveDown);
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
+                "copy-7",
+                "a@tmail.local",
+            )))),
+        }),
+    );
+    assert!(s.composer.is_none(), "stale fetch dropped");
+    assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
 }
 
 /// A pristine blank (the `c` artifact, left open with Esc) is not work:
@@ -3477,6 +3803,40 @@ fn reply_never_clobbers_an_existing_draft() {
         s.status.message.as_deref(),
         Some("A draft is already open — send or discard it first")
     );
+}
+
+/// A draft left behind (Esc saved it) lingers in state for the Drafts
+/// list — it must not block a reply from the reader (ticket 61qx): the
+/// seed replaces it.
+#[test]
+fn reply_replaces_a_draft_left_behind() {
+    let mut s = state();
+    open_reader_with(&mut s, reply_source());
+    no_effects(&reduce(&mut s, &Action::Compose));
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('k')));
+    reduce(&mut s, &Action::BackOrCancel); // Esc: save & leave
+    assert!(matches!(s.active_route(), Some(Route::Message(_))));
+    assert!(s.composer.is_some(), "the left draft stays in state");
+    no_effects(&reduce(&mut s, &Action::Reply));
+    let composer = seeded_composer(&s);
+    assert_eq!(
+        composer.draft.to, "Bob <bob@example.org>",
+        "the reply seed replaces the left-behind draft"
+    );
+    assert_eq!(s.status.message.as_deref(), Some("Reply draft ready"));
+}
+
+#[test]
+fn forward_replaces_a_draft_left_behind() {
+    let mut s = state();
+    open_reader_with(&mut s, reply_source());
+    no_effects(&reduce(&mut s, &Action::Compose));
+    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('k')));
+    reduce(&mut s, &Action::BackOrCancel); // Esc: save & leave
+    no_effects(&reduce(&mut s, &Action::Forward));
+    let composer = seeded_composer(&s);
+    assert_eq!(composer.draft.subject, "Fwd: Plan review");
+    assert_eq!(s.status.message.as_deref(), Some("Forward draft ready"));
 }
 
 #[test]
@@ -4943,33 +5303,9 @@ fn esc_clears_the_selection_when_nothing_is_pending() {
 }
 
 #[test]
-fn enter_on_the_select_all_toggle_flips_the_set() {
-    let mut s = state();
-    s.focus = Focus::SelectAllToggle;
-    no_effects(&reduce(&mut s, &Action::Activate));
-    assert!(s.all_visible_selected(), "Enter selects all");
-    no_effects(&reduce(&mut s, &Action::Activate));
-    assert!(s.selected.is_empty(), "Enter again clears");
-}
-
-#[test]
-fn clicking_the_select_all_toggle_marks_every_visible_row() {
-    let mut s = state();
-    no_effects(&reduce(
-        &mut s,
-        &Action::Click(ClickTarget::SelectAllToggle),
-    ));
-    assert!(s.all_visible_selected());
-    assert_eq!(s.focus, Focus::SelectAllToggle, "focus follows the click");
-}
-
-#[test]
 fn bulk_button_click_dispatches_the_advertised_action() {
     let mut s = state();
-    no_effects(&reduce(
-        &mut s,
-        &Action::Click(ClickTarget::SelectAllToggle),
-    ));
+    no_effects(&reduce(&mut s, &Action::SelectAll));
     let expected = s.messages.items.len();
     let effects = reduce(
         &mut s,
@@ -5424,6 +5760,138 @@ fn preview_result_fills_the_list_snippet_and_caches_the_message() {
             .load_message(&locator.mailbox, &locator.id.0)
             .is_some(),
         "preview fetch caches the message"
+    );
+}
+
+/// The envelope flag lies on IMAP accounts (no body structure in the
+/// listing): the fetched full message reconciles the row, so the list
+/// renders the paperclip for messages with attachments (ticket r84f).
+#[test]
+fn preview_fetch_reconciles_the_row_attachment_flag() {
+    let mut s = state();
+    let effects = load_sent_without_snippets(&mut s);
+    let (id, locator) = expect_previews(&effects)[0].clone();
+    let row = s
+        .messages
+        .items
+        .iter()
+        .find(|m| m.id == locator.id)
+        .expect("row listed");
+    assert!(!row.has_attachments, "the envelope carried no flag");
+
+    let summary = row.clone();
+    let mut message = mock::mock_message(&summary);
+    message.attachments = vec![crate::domain::Attachment {
+        name: Some(String::from("a.pdf")),
+        mime_type: None,
+        size: None,
+        part_id: 2,
+    }];
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(message))),
+        }),
+    );
+    let row = s
+        .messages
+        .items
+        .iter()
+        .find(|m| m.id == locator.id)
+        .unwrap();
+    assert!(
+        row.has_attachments,
+        "the fetched message reconciles the flag"
+    );
+    assert!(row.snippet.is_some(), "the preview still fills");
+
+    // A background page refresh re-applies envelope rows — whose flag is
+    // absent (IMAP) — and must not wipe the reconciled flag: the
+    // paperclip survives (ticket r84f).
+    let req = crate::domain::PageRequest {
+        mailbox_id: MailboxId(String::from("sent")),
+        offset: 0,
+        limit: 20,
+    };
+    let id = s.operations.start(OperationKind::LoadPage(req.clone())).id;
+    complete_page_ok(&mut s, id, &req, 0);
+    let row = s
+        .messages
+        .items
+        .iter()
+        .find(|m| m.id == locator.id)
+        .unwrap();
+    assert!(row.has_attachments, "the refresh keeps the reconciled flag");
+}
+
+/// The disk-cache preview branch reconciles the flag too: a message
+/// fetched in an earlier session flips the row without any new fetch.
+#[test]
+fn cached_copies_reconcile_the_row_attachment_flag_without_a_fetch() {
+    let mut s = state();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    s.page_cache = Some(crate::app::page_cache::PageCache::open(
+        dir.path().to_path_buf(),
+        crate::app::page_cache::CacheLimits::default(),
+    ));
+    let sent_page = mock::mock_page(&MailboxId(String::from("sent")), 0, 20);
+    let first = sent_page.items[0].clone();
+    let mut message = mock::mock_message(&first);
+    message.attachments = vec![crate::domain::Attachment {
+        name: Some(String::from("a.pdf")),
+        mime_type: None,
+        size: None,
+        part_id: 2,
+    }];
+    s.page_cache
+        .as_ref()
+        .unwrap()
+        .store_message(&first.mailbox_id, &first.id.0, &message);
+
+    reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1))); // select
+    let effects = reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1))); // activate
+    let (load, req) = expect_page(&effects);
+    let effects = complete_page_ok(&mut s, load, &req, 0);
+    // The other rows still fetch previews; the cached row does not.
+    assert!(
+        expect_previews(&effects)
+            .iter()
+            .all(|(_, l)| l.id != first.id),
+        "the cached row needs no fetch"
+    );
+    let row = s.messages.items.iter().find(|m| m.id == first.id).unwrap();
+    assert!(
+        row.has_attachments,
+        "the cached copy reconciles the flag with no fetch"
+    );
+    assert!(row.snippet.is_some());
+}
+
+/// Opening a message (the reader path) reconciles the row the same way.
+#[test]
+fn opening_a_message_reconciles_the_row_attachment_flag() {
+    let mut s = state();
+    let summary = s.messages.items[0].clone();
+    assert!(!summary.has_attachments, "the envelope carried no flag");
+    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let mut message = mock::mock_message(&summary);
+    message.attachments = vec![crate::domain::Attachment {
+        name: Some(String::from("a.pdf")),
+        mime_type: None,
+        size: None,
+        part_id: 2,
+    }];
+    reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(message))),
+        }),
+    );
+    assert!(
+        s.messages.items[0].has_attachments,
+        "the opened message reconciles the flag"
     );
 }
 

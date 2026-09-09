@@ -11,9 +11,6 @@ pub enum Focus {
     /// The `/` search field in the topbar. Text editing focus: single-letter
     /// shortcuts must not fire here (plan §10).
     SearchField,
-    /// The list header's `[ ]`/`[X]` select-all toggle (ticket p0s3): Enter
-    /// (or a click) selects/deselects all visible messages.
-    SelectAllToggle,
     Sidebar,
     MessageList,
     /// The message reader screen is open (plan §19 Phase 4): Up/Down scroll
@@ -41,13 +38,8 @@ pub enum Focus {
 /// While the composer screen is open, the cycle is different: the
 /// composer's own controls first, then the sidebar — the reducer's
 /// `focus_step` bridges the two, and the off-screen mailbox-screen
-/// controls (search field, select-all toggle, message list) are skipped.
-pub const FOCUS_ORDER: [Focus; 4] = [
-    Focus::SearchField,
-    Focus::SelectAllToggle,
-    Focus::Sidebar,
-    Focus::MessageList,
-];
+/// controls (search field, message list) are skipped.
+pub const FOCUS_ORDER: [Focus; 3] = [Focus::SearchField, Focus::Sidebar, Focus::MessageList];
 
 impl Focus {
     pub fn next(self) -> Self {
@@ -106,7 +98,6 @@ impl fmt::Display for Focus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Focus::SearchField => write!(f, "search"),
-            Focus::SelectAllToggle => write!(f, "select-all"),
             Focus::Sidebar => write!(f, "sidebar"),
             Focus::MessageList => write!(f, "list"),
             Focus::Reader => write!(f, "reader"),
@@ -132,8 +123,7 @@ mod tests {
                 f
             })
             .collect::<Vec<_>>();
-        assert_eq!(seen.len(), 4);
-        assert!(seen.contains(&Focus::SelectAllToggle));
+        assert_eq!(seen.len(), 3);
         assert!(seen.contains(&Focus::Sidebar));
         assert!(seen.contains(&Focus::MessageList));
         assert_eq!(f, Focus::SearchField);

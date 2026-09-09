@@ -71,7 +71,7 @@ pub fn render(
     } else {
         rows.width
     };
-    render_head(frame, head, state, theme, hits, scrolling);
+    render_head(frame, head, state, theme, scrolling);
     let bottom = area.y + area.height;
     let mut drew_any_row = false;
     let mut y = rows.y;
@@ -207,7 +207,6 @@ fn render_head(
     area: Rect,
     state: &AppState,
     theme: &Theme,
-    hits: &mut HitMap,
     scrolling: bool,
 ) {
     if area.height == 0 {
@@ -241,30 +240,19 @@ fn render_head(
     // Right-aligned range (mockup `.pane-range`).
     let range_w = range.width();
     let left_budget = width.saturating_sub(range_w + 2).max(10);
-    // The select-all toggle (ticket p0s3): `[X]` while every visible row
-    // carries the bulk mark, `[ ]` otherwise. Clicking it (or Ctrl+A, or
-    // Enter while it holds focus) flips the whole visible set.
-    let checkbox = if state.all_visible_selected() {
-        "[X]"
-    } else {
-        "[ ]"
-    };
-    let toggle_style = if state.focus == Focus::SelectAllToggle {
-        Style::new()
-            .fg(theme.accent)
-            .bg(theme.background)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::new()
-            .fg(theme.text)
-            .bg(theme.background)
-            .add_modifier(Modifier::BOLD)
-    };
-    let title = text::clip(&format!("  {title}"), left_budget.saturating_sub(3));
-    let title_width = title.width();
-    let mut spans = vec![Span::styled(checkbox, toggle_style)];
+    // The mailbox label is a plain header (ticket fypg): no checkbox, no
+    // click target, not focusable — select-all stays Ctrl+A's job. Three
+    // columns of padding set the label off the pane edge.
+    let title = text::clip(&format!("   {title}"), left_budget);
+    let mut spans = Vec::new();
     if !title.is_empty() {
-        spans.push(Span::styled(title, toggle_style));
+        spans.push(Span::styled(
+            title,
+            Style::new()
+                .fg(theme.text)
+                .bg(theme.background)
+                .add_modifier(Modifier::BOLD),
+        ));
     }
     if !unread.is_empty() {
         spans.push(Span::styled(
@@ -290,20 +278,6 @@ fn render_head(
         );
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
-
-    // The checkbox (plus its label) is the select-all click target.
-    let toggle_w = (checkbox.width() + title_width) as u16;
-    if toggle_w > 0 {
-        hits.push(
-            Rect {
-                x: area.x,
-                y: row.y,
-                width: toggle_w.min(area.width),
-                height: 1,
-            },
-            ClickTarget::SelectAllToggle,
-        );
-    }
 
     // Hairline under the header.
     let hairline = Rect {
@@ -346,6 +320,17 @@ fn message_spans<'a>(
     let date = dates::format_relative(now, message.timestamp);
     let from_w = if compact { 14 } else { 18 };
     let subject_w = width.saturating_sub(3 + from_w + 2 + 2 + 8).max(10);
+    // The paperclip rides one space left of the date (ticket r84f, user
+    // amend): on attachment rows the title/body cell gives up one column
+    // and the clip (2 cells, one char) plus the separator space replace
+    // the two-cell gap, so the icon sits at a fixed slot whatever the
+    // title and body lengths, and the date cell never moves. Rows without
+    // attachments keep the plain gap (nothing changes, ticket r84f).
+    let cell_w = if message.has_attachments {
+        subject_w.saturating_sub(1)
+    } else {
+        subject_w
+    };
 
     let bg = if selected {
         theme.accent_bg
@@ -402,14 +387,9 @@ fn message_spans<'a>(
     let snippet_style = Style::new().fg(theme.snippet).bg(bg);
 
     // Subject plus (full mode only) the faded body preview, composed so
-    // the combined cell fills exactly the column width: the subject stays
-    // whole when it fits, the preview takes what is left and ends in `…`
-    // when the body text is longer (ticket wxtx). A message with
-    // attachments ends its preview in the paperclip emoji instead, with
-    // the body one symbol shorter to keep the column width (ticket r84f).
-    // Column anatomy keeps the mockup grid: marker, icon, from,
-    // subject(+preview), date.
-    const CLIP: &str = "📎";
+    // the combined cell fills exactly `cell_w`: the subject stays whole
+    // when it fits, the preview takes what is left and ends in `…` when
+    // the body text is longer (ticket wxtx).
     let mut spans = vec![marker, icon];
     spans.push(Span::styled(
         text::fit_left(message.from_display(), from_w),
@@ -418,8 +398,8 @@ fn message_spans<'a>(
     spans.push(Span::styled("  ", base));
     if full {
         let sep = " — ";
-        let subject_cell = text::truncate(&message.subject, subject_w);
-        let subject_alone = message.subject.width() > subject_w;
+        let subject_cell = text::truncate(&message.subject, cell_w);
+        let subject_alone = message.subject.width() > cell_w;
         let preview_cell = if subject_alone {
             String::new()
         } else {
@@ -427,21 +407,10 @@ fn message_spans<'a>(
                 .snippet
                 .as_ref()
                 .and_then(|snippet| {
-                    let budget = subject_w
+                    let budget = cell_w
                         .saturating_sub(message.subject.width())
                         .saturating_sub(sep.width());
-                    (budget > 0).then(|| {
-                        if message.has_attachments {
-                            // The clip rides where the ellipsis sits
-                            // (ticket r84f): the body is one symbol
-                            // shorter, so text + clip fill exactly the
-                            // same budget a truncated preview would.
-                            let body = text::clip(snippet, budget.saturating_sub(2));
-                            format!("{sep}{body}{CLIP}")
-                        } else {
-                            format!("{sep}{}", text::truncate(snippet, budget))
-                        }
-                    })
+                    (budget > 0).then(|| format!("{sep}{}", text::truncate(snippet, budget)))
                 })
                 .unwrap_or_default()
         };
@@ -450,24 +419,34 @@ fn message_spans<'a>(
         if !preview_cell.is_empty() {
             spans.push(Span::styled(preview_cell, snippet_style));
         }
-        // Pad the cell to its exact column width so the date stays on the
-        // right edge (mockup grid).
-        spans.push(Span::styled(
-            " ".repeat(subject_w.saturating_sub(used)),
-            base,
-        ));
+        // Pad the cell to its exact column width so the clip slot and the
+        // date stay put (mockup grid).
+        spans.push(Span::styled(" ".repeat(cell_w.saturating_sub(used)), base));
     } else {
         spans.push(Span::styled(
-            text::fit_left(&message.subject, subject_w),
+            text::fit_left(&message.subject, cell_w),
             subject_style,
         ));
+    }
+    if message.has_attachments {
+        // Clip (2 cells, one char) + one space, exactly where the 2-cell
+        // gap used to end: the emoji's right edge lands one column left
+        // of the date.
+        spans.push(Span::styled(CLIP, base));
+        spans.push(Span::styled(" ", base));
+    } else {
+        spans.push(Span::styled("  ", base));
     }
     let date_style = if message.is_read && !selected {
         Style::new().fg(theme.dim).bg(bg)
     } else {
         from_style.bg(bg)
     };
-    spans.push(Span::styled("  ", base));
     spans.push(Span::styled(text::fit_left(&date, 8), date_style));
     spans
 }
+
+/// The attachment indicator of the message list (ticket r84f): rendered
+/// one space left of the date on rows whose message carries attachments.
+/// One char of two terminal columns.
+const CLIP: &str = "📎";

@@ -124,7 +124,7 @@ pub fn render(
         push_hints(theme, &mut spans, &hints);
     } else if reader {
         let context = Some(Context::Reader);
-        let hints: Vec<(Option<String>, &str)> = vec![
+        let mut hints: Vec<(Option<String>, &str)> = vec![
             (state.keymap.move_hint(context), "scroll"),
             (
                 state.keymap.hint(context, "cancel").map(String::from),
@@ -148,6 +148,29 @@ pub fn render(
                 "delete",
             ),
         ];
+        // Attachment actions advertise only when the open message carries
+        // attachments (plan §15, ticket 61qx): the chips are the target of
+        // S/o and Enter, and an inert-looking button must say so.
+        if state
+            .open_message
+            .as_loaded()
+            .is_some_and(|message| !message.attachments.is_empty())
+        {
+            hints.push((
+                state
+                    .keymap
+                    .hint(context, "save_attachment")
+                    .map(String::from),
+                "save",
+            ));
+            hints.push((
+                state
+                    .keymap
+                    .hint(context, "open_attachment")
+                    .map(String::from),
+                "open",
+            ));
+        }
         push_hints(theme, &mut spans, &hints);
     } else {
         let context = Some(Context::List);

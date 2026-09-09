@@ -722,6 +722,34 @@ fn reader_renders_exactly_one_message_document() {
     assert!(text.contains("Compose"), "sidebar hidden:\n{text}");
 }
 
+/// Attachment chips must advertise their actions (ticket 61qx): the
+/// status bar lists `S save` / `o open` only when the open message
+/// carries attachments.
+#[test]
+fn reader_status_bar_advertises_attachment_actions_only_with_attachments() {
+    let mut with = reader_state(0);
+    with.size = (152, 40);
+    let message = match &mut with.open_message {
+        Loadable::Loaded(message) => message,
+        other => panic!("reader_state leaves the message loaded: {other:?}"),
+    };
+    message.attachments = vec![tmail::domain::Attachment {
+        name: Some(String::from("report.pdf")),
+        mime_type: Some(String::from("application/pdf")),
+        size: Some(14),
+        part_id: 3,
+    }];
+    let text = draw_after(&mut with, &[], 152, 40);
+    assert!(text.contains("S save"), "save hint missing:\n{text}");
+    assert!(text.contains("o open"), "open hint missing:\n{text}");
+
+    // Without attachments the actions have no target: no hints, no lie.
+    let mut without = reader_state(0);
+    let text = draw_after(&mut without, &[], 152, 40);
+    assert_absent(&text, "S save", (152, 40));
+    assert_absent(&text, "o open", (152, 40));
+}
+
 #[test]
 fn reader_loading_state_renders_placeholder() {
     let mut state = reader_state(0);
@@ -839,7 +867,9 @@ fn reader_handles_missing_fields() {
 fn composer_renders_fields_actions_and_toggles() {
     let mut state = mock_initial_state();
     let text = draw_after(&mut state, &[Action::Compose], 152, 40);
-    assert!(text.contains("New message"), "header missing:\n{text}");
+    // No header title (ticket a9y3): the row above To is blank unless a
+    // draft status is shown.
+    assert_absent(&text, "New message", (152, 40));
     assert!(text.contains("      To"), "To label missing:\n{text}");
     assert!(
         text.contains("   Subject"),
@@ -1534,16 +1564,17 @@ fn position_of(text: &str, needle: &str) -> (usize, usize) {
     panic!("{needle:?} not found in:\n{text}");
 }
 
-/// Mockup `list.html`: the pane head keeps select-all + uppercase title +
-/// unread sub + right-aligned range on one row, and every message is one
-/// row of marker | star | from | subject(+snippet) | date.
+/// Mockup `list.html`: the pane head keeps the uppercase title + unread
+/// sub + right-aligned range on one row (no checkbox — ticket fypg), and
+/// every message is one row of marker | star | from | subject(+snippet) |
+/// date.
 #[test]
 fn list_matches_mockup_density_and_hierarchy() {
     let (buffer, _) = draw_with_hits(152, 40);
     let text = text_of(&buffer);
     // Head row: title, unread count, and the range share one line, with
     // the range near the right edge (mockup `.pane-range` margin-left:auto).
-    let (head_y, title_x) = position_of(&text, "[ ]  INBOX");
+    let (head_y, title_x) = position_of(&text, "   INBOX");
     let (_, unread_x) = position_of(&text, "24 unread");
     let (_, range_x) = position_of(&text, "1–20 of 25");
     assert_eq!(head_y, 4, "head sits under the topbar");
@@ -1593,20 +1624,20 @@ fn reader_matches_mockup_hierarchy() {
 }
 
 /// Mockup `new-mail.html`: right-aligned 8ch labels, Cc/Bcc toggles on the
-/// To row, the attach row above Send/Discard, and the header on top.
+/// To row, the attach row above Send/Discard. The header title is gone
+/// (ticket a9y3): the To row is the topmost composer content.
 #[test]
 fn composer_matches_mockup_hierarchy_and_density() {
     let mut state = mock_initial_state();
     reducer::reduce(&mut state, &Action::Compose);
     let text = draw_after(&mut state, &[], 152, 40);
-    let (header_y, _) = position_of(&text, "New message");
     let (to_y, _) = position_of(&text, "[Cc]");
     let (subject_y, subject_x) = position_of(&text, " Subject");
     let (attach_y, _) = position_of(&text, "[ + attach ]");
     let (send_y, send_x) = position_of(&text, "[ Send");
     let (_, discard_x) = position_of(&text, " Discard ");
-    // Vertical order: header, To row, Subject row, attach row, actions.
-    assert!(header_y < to_y && to_y < subject_y);
+    // Vertical order: To row, Subject row, attach row, actions.
+    assert!(to_y < subject_y);
     assert!(subject_y < attach_y && attach_y < send_y);
     // The label column is right-aligned within 8ch starting at x=26
     // (mockup `grid-template-columns: 8ch` + the 2ch body padding): on the
@@ -1936,90 +1967,114 @@ fn attachment_chooser_renders_the_explorer_and_chrome() {
     );
 }
 
-/// Attachment rows end their preview in the paperclip emoji, exactly
-/// where a truncated body's `…` sits, with the body one symbol shorter —
-/// rows without attachments are unchanged (ticket r84f).
+/// The paperclip rides one space left of the date (user amend of ticket
+/// r84f): a fixed slot whatever the title and body lengths — a long
+/// subject/body truncates three columns earlier, a short one pads — and
+/// the date column never moves. Rows without attachments are unchanged.
 #[test]
 fn attachment_rows_end_in_the_paperclip_emoji() {
-    use unicode_width::UnicodeWidthStr;
     let mut state = mock_initial_state();
-    // Two rows with identical subject and a long snippet — the first has
-    // attachments, the second does not.
-    let long = "x".repeat(100);
-    state.messages.items[1].subject = String::from("Same subject");
-    state.messages.items[1].snippet = Some(long.clone());
+    // Two sibling rows identical except for the attachment flag.
+    let row = state.messages.items[1].clone();
+    for index in [1, 2] {
+        let item = &mut state.messages.items[index];
+        item.subject = row.subject.clone();
+        item.from = row.from.clone();
+        item.snippet = Some(String::from("preview text"));
+        item.timestamp = row.timestamp;
+        item.is_read = row.is_read;
+        item.is_starred = false;
+    }
     state.messages.items[1].has_attachments = true;
-    state.messages.items[2].subject = String::from("Same subject");
-    state.messages.items[2].snippet = Some(long);
     state.messages.items[2].has_attachments = false;
     let buffer = buffer_after(&mut state, &[], 152, 40);
     let text = text_of(&buffer);
-    let rows: Vec<&str> = text
-        .lines()
-        .filter(|l| l.contains("Same subject"))
-        .collect();
+    let rows: Vec<&str> = text.lines().filter(|l| l.contains(&row.subject)).collect();
     assert_eq!(rows.len(), 2, "both rows render:\n{text}");
     let (attached, plain) = (rows[0], rows[1]);
     assert!(
-        attached.contains("📎"),
+        attached.contains('\u{1F4CE}'),
         "the attachment row shows the clip:\n{text}"
     );
     assert!(
-        !plain.contains("📎"),
-        "rows without attachments are unchanged:\n{text}"
+        !plain.contains('\u{1F4CE}'),
+        "rows without attachments show none:\n{text}"
     );
 
-    // The clip sits at the very end of the preview, right where the plain
-    // row's ellipsis is — the body between the separator and the marker
-    // is one symbol shorter.
-    fn tail(line: &str) -> (&str, usize, usize) {
-        let sep = line.find(" — ").expect("preview separator");
-        let body = &line[sep + " — ".len()..];
-        let marker = body
-            .char_indices()
-            .rev()
-            .find(|(_, ch)| *ch == '📎' || *ch == '…')
-            .map(|(i, _)| i)
-            .expect("row ends in a marker");
-        (
-            &body[..marker],
-            body[..marker].chars().count(),
-            body[..marker].width(),
-        )
-    }
-    let (_, attached_chars, attached_cols) = tail(attached);
-    let (_, plain_chars, plain_cols) = tail(plain);
+    // The date text is the same on both rows and sits at the same column:
+    // the slot never shifts the date.
+    let date_text = tmail::ui::dates::format_relative(mock::now(), row.timestamp);
+    let date_col = |line: &str| {
+        line.rfind(&date_text)
+            .map(|byte| line[..byte].chars().count())
+            .expect("date on the row")
+    };
+    let (attached_date_x, plain_date_x) = (date_col(attached), date_col(plain));
     assert_eq!(
-        attached_chars,
-        plain_chars - 1,
-        "the body is one symbol shorter:\n{attached}\n{plain}"
+        attached_date_x, plain_date_x,
+        "the date column is fixed:\n{attached}\n{plain}"
     );
+    // Visually the emoji ends one column left of the date: it is one char
+    // of two columns, followed in the flat text by the wide-symbol skip
+    // cell and the separator space (two chars) before the date char.
+    let clip_x = attached
+        .rfind('\u{1F4CE}')
+        .map(|byte| attached[..byte].chars().count())
+        .expect("clip on the row");
     assert_eq!(
-        attached_cols + 2,
-        plain_cols + 1,
-        "the two-column clip takes the ellipsis slot exactly"
+        clip_x + 3,
+        attached_date_x,
+        "the clip sits one space left of the date:\n{attached}"
+    );
+
+    // The slot is fixed for a long body too: the cell truncates earlier
+    // instead of pushing the clip around.
+    let mut long_state = mock_initial_state();
+    long_state.messages.items[1].subject = row.subject.clone();
+    long_state.messages.items[1].snippet = Some("x".repeat(400));
+    long_state.messages.items[1].has_attachments = true;
+    long_state.messages.items[1].timestamp = row.timestamp;
+    let text = text_of(&buffer_after(&mut long_state, &[], 152, 40));
+    let long_row = text
+        .lines()
+        .find(|l| l.contains(&row.subject))
+        .expect("long row renders");
+    let long_date_x = date_col(long_row);
+    let long_clip_x = long_row
+        .rfind('\u{1F4CE}')
+        .map(|byte| long_row[..byte].chars().count())
+        .expect("clip on the long row");
+    assert_eq!(long_date_x, attached_date_x, "the date column is fixed");
+    assert_eq!(
+        long_clip_x + 3,
+        long_date_x,
+        "the clip holds the slot with a long body:\n{long_row}"
     );
 }
 
 // ── Bulk selection rendering (ticket p0s3) ───────────────────────────────
 #[test]
-fn select_all_marks_rows_and_the_header_toggle() {
+fn select_all_marks_rows_and_the_header_stays_a_plain_label() {
     let mut state = mock_initial_state();
     state.focus = tmail::app::Focus::MessageList;
     let before = text_of(&buffer_after(&mut state, &[], 152, 40));
+    // The header is a plain label now (ticket fypg): three columns of
+    // padding, no checkbox, never focus-marked.
     assert!(
-        before.contains("[ ]"),
-        "header starts unchecked:\n{}",
+        before.contains("   INBOX"),
+        "header label missing:\n{}",
         before.lines().take(6).collect::<Vec<_>>().join("\n")
     );
+    assert_absent(&before, "[ ]", (152, 40));
 
-    // One draw after SelectAll: the header flips and every marked row but
-    // the cursor row carries the bulk highlight.
+    // One draw after SelectAll: rows flip and the header does NOT change —
+    // no checkbox exists to mark.
     let mut state = mock_initial_state();
     state.focus = tmail::app::Focus::MessageList;
     let buffer = buffer_after(&mut state, &[Action::SelectAll], 152, 40);
     let text = text_of(&buffer);
-    assert!(text.contains("[X]"), "header flips to checked");
+    assert_absent(&text, "[X]", (152, 40));
+    assert!(text.contains("   INBOX"), "header label unchanged:\n{text}");
 
     // Rows are located by their rendered subject text.
     let theme = Theme::default_dark();

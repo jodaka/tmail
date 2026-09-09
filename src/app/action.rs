@@ -121,9 +121,6 @@ pub enum ClickTarget {
     ErrorButton(ModalButton),
     /// Discard/Keep buttons of the confirm-discard dialog.
     ConfirmButton(ConfirmButton),
-    /// The list header's `[ ]`/`[X]` select-all toggle (ticket p0s3):
-    /// equivalent of Ctrl+A.
-    SelectAllToggle,
     /// A bulk-operation button in the selection-mode status bar (ticket
     /// p0s3): equivalent of the advertised key acting on the selection.
     BulkAction(BulkOp),
@@ -181,8 +178,8 @@ pub enum Action {
     /// Space on a focused message row: toggle its bulk-selection mark
     /// (ticket p0s3).
     ToggleSelected,
-    /// Ctrl+A or the `[ ]`/`[X]` header toggle: select every visible
-    /// message, or clear the selection when all are selected.
+    /// Ctrl+A: select every visible message, or clear the selection when
+    /// all are selected.
     SelectAll,
     Refresh,
     /// Turn terminal mouse capture on/off at runtime (plan §10 feedback).

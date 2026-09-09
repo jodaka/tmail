@@ -636,10 +636,6 @@ fn click(state: &mut AppState, target: ClickTarget) -> Vec<Effect> {
         // only recorded while the modal renders); the arm keeps the match
         // total.
         ClickTarget::ErrorButton(_) | ClickTarget::ConfirmButton(_) => Vec::new(),
-        ClickTarget::SelectAllToggle => {
-            state.focus = Focus::SelectAllToggle;
-            toggle_select_all(state)
-        }
         ClickTarget::BulkAction(op) => {
             // The buttons act on the selection (ticket p0s3): focus the
             // list first so the bulk path (not the reader path) applies,
@@ -776,7 +772,7 @@ fn open_reply(state: &mut AppState) -> Vec<Effect> {
         tracing::debug!("reply ignored: no loaded message in the reader");
         return Vec::new();
     };
-    if a_draft_is_open(state) {
+    if composer_open(state) {
         state.set_status("A draft is already open — send or discard it first");
         return Vec::new();
     }
@@ -791,7 +787,7 @@ fn open_reply_all(state: &mut AppState) -> Vec<Effect> {
         tracing::debug!("reply-all ignored: no loaded message in the reader");
         return Vec::new();
     };
-    if a_draft_is_open(state) {
+    if composer_open(state) {
         state.set_status("A draft is already open — send or discard it first");
         return Vec::new();
     }
@@ -810,7 +806,7 @@ fn open_forward(state: &mut AppState) -> Vec<Effect> {
         tracing::debug!("forward ignored: no loaded message in the reader");
         return Vec::new();
     };
-    if a_draft_is_open(state) {
+    if composer_open(state) {
         state.set_status("A draft is already open — send or discard it first");
         return Vec::new();
     }
@@ -1005,9 +1001,9 @@ fn toggle_selected(state: &mut AppState) -> Vec<Effect> {
     Vec::new()
 }
 
-/// Ctrl+A or the `[ ]`/`[X]` header toggle: select every visible message,
-/// or clear the selection when all visible rows are already marked. The
-/// toggle needs a visible list — it never fires over the reader.
+/// Ctrl+A: select every visible message, or clear the selection when all
+/// visible rows are already marked. Needs a visible list — it never fires
+/// over the reader.
 fn toggle_select_all(state: &mut AppState) -> Vec<Effect> {
     if !matches!(
         state.active_route(),
@@ -1312,14 +1308,16 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             }
         }
         OperationKind::LoadPage(request) => {
-            // Currency check: the request must still target the active
-            // mailbox. A newer request for the same mailbox superseded this
-            // operation, so its id would already be unknown above; this
-            // guard drops results that raced a mailbox switch.
-            let current = state
-                .active_route()
-                .and_then(Route::mailbox_id)
-                .is_some_and(|id| *id == request.mailbox_id);
+            // Currency check: the request must still target the mailbox
+            // whose page the visible list shows. A newer request for the
+            // same mailbox superseded this operation, so its id would
+            // already be unknown above; this guard drops results that
+            // raced a mailbox switch or a search taking over the list.
+            // Reader and composer routes are overlays: a load finishing
+            // while the user reads or composes still updates the list
+            // behind them — routes, focus, and selection untouched
+            // (ticket sazy).
+            let current = visible_mailbox_page(state).is_some_and(|id| *id == request.mailbox_id);
             state.operations.finish(result.id);
             if !current {
                 tracing::debug!(
@@ -1719,10 +1717,12 @@ fn drafts_restored(state: &mut AppState, drafts: &[crate::domain::RestoredDraft]
 }
 
 /// Apply a confirmed draft save (plan §14). Currency check: the draft must
-/// still be the one in the composer (a discarded draft is gone and its
-/// result is dropped). Success for the newest revision marks the draft
-/// saved; a stale success (edits happened meanwhile) immediately chains
-/// another save so revision N+1 is never left unpushed.
+/// still be the one in the composer (a discarded draft is gone; a draft
+/// swapped out by opening another one is no longer in the slot — the
+/// backend already has the pushed copy, so the local confirm is dropped).
+/// Success for the newest revision marks the draft saved; a stale success
+/// (edits happened meanwhile) immediately chains another save so revision
+/// N+1 is never left unpushed.
 fn save_draft_completed(
     state: &mut AppState,
     snapshot: &crate::domain::DraftSnapshot,
@@ -1735,7 +1735,7 @@ fn save_draft_completed(
     if !current {
         tracing::debug!(
             local_id = %snapshot.local_id.0,
-            "dropping draft result for a discarded draft"
+            "dropping draft result for a discarded or replaced draft"
         );
         return Vec::new();
     }
@@ -1948,6 +1948,7 @@ fn selected_attachment(state: &AppState) -> Option<(usize, &crate::domain::Attac
 fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
     let snippet = crate::ui::rich::preview_text(&message);
     let message_id = message.id.clone();
+    let has_attachments = !message.attachments.is_empty();
     // Ticket haeb: cache the viewed message (bounded by [tmail.cache]).
     if let Some(cache) = &state.page_cache
         && let Some(Route::Message(route)) = state.active_route()
@@ -1955,6 +1956,10 @@ fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
         cache.store_message(&route.mailbox_id, &message_id.0, &message);
     }
     state.open_message = Loadable::Loaded(message);
+    // The parsed message knows attachments better than the envelope did
+    // (ticket r84f: IMAP envelopes carry no body structure, so the flag
+    // was false and the paperclip never rendered).
+    sync_row_attachments(state, &message_id, has_attachments);
     if let Some(snippet) = snippet {
         // The session keeps the preview: page loads and refreshes restore
         // it instead of re-fetching the message (ticket wxtx).
@@ -2033,11 +2038,74 @@ fn message_moved(state: &mut AppState, locator: &MessageLocator) -> Vec<Effect> 
     request_visible_page(state, state.messages.offset)
 }
 
-/// Apply the mailbox listing: select the Inbox, or the first mailbox when
-/// no Inbox exists, and load its first page.
+/// Reconcile one list row's attachment flag with a full message (ticket
+/// r84f): envelope listings may not carry the flag (IMAP accounts — the
+/// envelope carries no body structure), but every parsed message —
+/// fetched for a preview or a read — knows the truth.
+fn sync_row_attachments(
+    state: &mut AppState,
+    id: &crate::domain::MessageId,
+    has_attachments: bool,
+) {
+    if let Some(summary) = state.messages.items.iter_mut().find(|s| &s.id == id) {
+        summary.has_attachments = has_attachments;
+    }
+}
+
+/// Apply the fetched mailbox listing (plan §19 Phase 2). Cold start — no
+/// mailbox displayed yet — picks the Inbox (or first usable), roots the
+/// route stack there, and loads its first page. Warm start — a mailbox is
+/// already displayed (the cached listing at startup, ticket haeb, or a
+/// previous load) — updates the sidebar data in place only: routes, the
+/// visible page, the list selection, and the scroll are never touched, so
+/// a background listing can never kick the user out of the composer or
+/// reset their cursor (ticket sazy).
 fn mailboxes_loaded(state: &mut AppState, mailboxes: Vec<Mailbox>) -> Vec<Effect> {
-    state.mailboxes = Loadable::Loaded(mailboxes.clone());
-    apply_mailbox_listing(state, mailboxes)
+    // Cold start: no mailbox context established yet (empty stack). Warm
+    // start: the stack is rooted at a mailbox — possibly under a reader,
+    // search, or composer the user opened while the fetch ran; those all
+    // stay.
+    if !matches!(state.routes.first(), Some(Route::Mailbox(_))) {
+        state.mailboxes = Loadable::Loaded(mailboxes.clone());
+        return apply_mailbox_listing(state, mailboxes);
+    }
+    refresh_sidebar_listing(state, mailboxes);
+    Vec::new()
+}
+
+/// Warm-start sidebar refresh (ticket sazy): swap the listing while keeping
+/// the sidebar cursor on the same mailbox identity — a fresh enumeration
+/// may order folders differently than the cached or previous one. The
+/// mailbox the cursor points at wins; the displayed mailbox is the
+/// fallback; with neither present in the fresh list, the index is simply
+/// kept inside it.
+fn refresh_sidebar_listing(state: &mut AppState, mailboxes: Vec<Mailbox>) {
+    let cursor_id = state
+        .mailboxes
+        .as_loaded()
+        .and_then(|list| list.get(state.mailbox_selection))
+        .map(|m| m.id.clone());
+    // The mailbox the UI is rooted at (the warm path guarantees one).
+    let active_id = match state.routes.first() {
+        Some(Route::Mailbox(route)) => Some(route.mailbox_id.clone()),
+        _ => None,
+    };
+    let pointed = cursor_id
+        .filter(|id| mailboxes.iter().any(|m| &m.id == id))
+        .or_else(|| active_id.filter(|id| mailboxes.iter().any(|m| &m.id == id)));
+    let len = mailboxes.len();
+    state.mailboxes = Loadable::Loaded(mailboxes);
+    state.mailbox_selection = match pointed {
+        // The same mailbox, possibly at a new position.
+        Some(id) => state
+            .mailboxes
+            .as_loaded()
+            .and_then(|list| list.iter().position(|m| m.id == id))
+            .unwrap_or(0),
+        // Neither the cursor's nor the displayed mailbox exists anymore:
+        // keep the index inside the fresh list.
+        None => state.mailbox_selection.min(len.saturating_sub(1)),
+    };
 }
 
 /// Shared body of the mailbox application (plan §19 Phase 2): pick the
@@ -2070,15 +2138,57 @@ fn apply_mailbox_listing(state: &mut AppState, mailboxes: Vec<Mailbox>) -> Vec<E
     }
 }
 
+/// The mailbox whose page the visible list currently shows, when it shows
+/// one: the nearest mailbox route on the stack. Reader and composer routes
+/// are overlays over the list beneath them (the walk continues past them),
+/// so a page load finishing behind them still applies (ticket sazy). A
+/// search route owns the visible list with query results — a mailbox page
+/// must never land there, so the walk stops.
+fn visible_mailbox_page(state: &AppState) -> Option<&MailboxId> {
+    for route in state.routes.iter().rev() {
+        match route {
+            Route::Mailbox(route) => return Some(&route.mailbox_id),
+            Route::Search(_) => return None,
+            Route::Message(_) | Route::Composer | Route::Wizard => {}
+        }
+    }
+    None
+}
+
 /// Apply a page result for the active mailbox. The selection is
 /// re-resolved by `Message-ID` first, then backend id (ADR 0001 finding 4:
 /// only the Message-ID is stable across moves). Rows without a body
 /// preview start their background preview fetches (ticket wxtx).
 fn apply_page(state: &mut AppState, page: Page<crate::domain::MessageSummary>) -> Vec<Effect> {
+    // Ticket sazy: an identical page changes nothing observable — keep the
+    // user's selection, scroll, and preview bookkeeping exactly as they
+    // are instead of re-resolving over the same rows. Fresh envelope
+    // listings carry no snippets, so a page the session already decorated
+    // never compares equal here; equality means genuinely unchanged data.
+    if page == state.messages {
+        return Vec::new();
+    }
     let previous = state.selected_message();
     let previous_message_id = previous.and_then(|m| m.message_id.clone());
     let previous_id = previous.map(|m| m.id.clone());
+    // The envelope's attachment flag is absent on IMAP listings (ticket
+    // r84f): a fresh page must not wipe the flag the fetched messages
+    // established this session (previews, opens), or the paperclip would
+    // vanish on every background refresh.
+    let reconciled_flags: std::collections::HashMap<crate::domain::MessageId, bool> = state
+        .messages
+        .items
+        .iter()
+        .map(|s| (s.id.clone(), s.has_attachments))
+        .collect();
     state.messages = page;
+    for item in &mut state.messages.items {
+        if !item.has_attachments
+            && let Some(previous) = reconciled_flags.get(&item.id)
+        {
+            item.has_attachments = *previous;
+        }
+    }
     let len = state.messages.items.len();
     state.selection = state
         .messages
@@ -2149,12 +2259,23 @@ fn start_missing_previews(state: &mut AppState) -> Vec<Effect> {
                 state.previews.insert(summary.id.clone(), text.clone());
                 if let Some(item) = state.messages.items.iter_mut().find(|s| s.id == summary.id) {
                     item.snippet = Some(text);
+                    item.has_attachments = cached
+                        .as_ref()
+                        .is_some_and(|message| !message.attachments.is_empty());
                 }
             }
             None if cached.is_some() => {
                 // Fetched before, but the body carries no preview text
-                // (an empty body): satisfied, nothing to request.
+                // (an empty body): satisfied, nothing to request. The
+                // attachment flag still reconciles from the cached copy.
                 state.preview_requested.insert(summary.id.clone());
+                sync_row_attachments(
+                    state,
+                    &summary.id,
+                    cached
+                        .as_ref()
+                        .is_some_and(|message| !message.attachments.is_empty()),
+                );
             }
             None if budget > 0 => {
                 // Genuinely unknown: fetch in the background, once.
@@ -2187,13 +2308,16 @@ fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
     let message_id = message.id.clone();
     if let Some(text) = crate::ui::rich::preview_text(&message) {
         state.previews.insert(message_id.clone(), text.clone());
-        if let Some(summary) = state
-            .messages
-            .items
-            .iter_mut()
-            .find(|s| s.id == message_id && s.snippet.is_none())
-        {
-            summary.snippet = Some(text);
+    }
+    // The parsed message knows attachments better than the envelope did
+    // (ticket r84f: IMAP envelopes carry no body structure, so the flag
+    // was false and the paperclip never rendered). The row's snippet,
+    // when still missing, fills from the preview computed above.
+    let has_attachments = !message.attachments.is_empty();
+    if let Some(summary) = state.messages.items.iter_mut().find(|s| s.id == message_id) {
+        summary.has_attachments = has_attachments;
+        if summary.snippet.is_none() {
+            summary.snippet = state.previews.get(&message_id).cloned();
         }
     }
     start_missing_previews(state)
@@ -2207,7 +2331,7 @@ fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
 /// into the composer's first (last) control — so a draft can be parked on
 /// any mailbox without leaving the composer: switching preserves the draft
 /// (plan §14). The mailbox screen's other focusable controls (search
-/// field, select-all toggle, message list) are off screen while the
+/// field, message list) are off screen while the
 /// composer replaces the list, so the cycle skips them.
 fn focus_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
     match state.focus {
@@ -2281,9 +2405,6 @@ fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
         Focus::SearchField => {
             // Cursor movement inside the field is a render concern for now;
             // the query is edited append/backspace only (Phase 1).
-        }
-        Focus::SelectAllToggle => {
-            // A header button: arrows do nothing (ticket p0s3).
         }
         Focus::Reader => scroll_reader(state, delta),
         // Wizard input never reaches the mailbox navigation (the wizard
@@ -2539,13 +2660,14 @@ fn activate(state: &mut AppState) -> Vec<Effect> {
             Some(summary) => open_selected(state, summary),
             None => Vec::new(),
         },
-        // Enter on the focused `[ ]`/`[X]` header button: the one place
-        // Enter participates in selection (ticket p0s3).
-        Focus::SelectAllToggle => toggle_select_all(state),
         Focus::Composer => activate_composer(state),
         // The dialogs intercept Enter themselves; unreachable in practice.
-        Focus::Reader
-        | Focus::Dialog
+        // Enter on the reader presses the selected attachment chip (plan
+        // §15, ticket 61qx): `o`'s open path — a session save is reused,
+        // otherwise the chip is saved first and the opener chains on the
+        // confirmed path. Inert without a loaded message or attachments.
+        Focus::Reader => open_selected_attachment(state),
+        Focus::Dialog
         | Focus::ThemePicker
         | Focus::SearchField
         | Focus::ErrorModal
@@ -2669,21 +2791,61 @@ fn is_same_draft(draft: &crate::domain::Draft, summary: &crate::domain::MessageS
     ids_match || draft.remote_id.as_ref() == Some(&summary.id)
 }
 
-/// Whether the one-composer rule blocks opening another draft (plan §14,
-/// ticket pmbz): only a draft that holds real work — content, ids, or
-/// unsaved edits — counts as open. A pristine blank (the `c` artifact,
-/// ticket v5x8) never blocks; the next draft replaces it.
-fn a_draft_is_open(state: &AppState) -> bool {
-    state.composer.as_ref().is_some_and(|c| !c.draft.is_blank())
+/// Whether a composer screen is open right now (the one-composer rule,
+/// plan §14): a draft the user is editing — or parked with Tab while
+/// picking a mailbox — is never clobbered. A draft left behind (`Esc`
+/// saved it) stays in `AppState.composer` for the Drafts list, but it no
+/// longer blocks a reply/forward (ticket 61qx): the seed replaces it, and
+/// its possibly in-flight save result is dropped by the local_id currency
+/// check in `save_draft_completed`.
+fn composer_open(state: &AppState) -> bool {
+    matches!(state.active_route(), Some(Route::Composer))
+}
+
+/// Secure the draft parked in the composer slot before it is replaced
+/// (ticket sazy): a forced save of its newest revision, unless a save of
+/// exactly that revision is already in flight (it carries the same
+/// content). Drafts are durable in the Drafts mailbox, so a secured parked
+/// draft never blocks another one from opening.
+enum Secured {
+    /// Nothing to do: no parked draft, it is clean, or its newest
+    /// revision is already being pushed.
+    Nothing,
+    /// The save effect to launch before replacing the slot.
+    Save(Effect),
+    /// The parked draft is dirty but cannot be secured yet (no clock —
+    /// before the first tick): the caller must not replace it.
+    Cannot,
+}
+
+fn secure_parked_draft(state: &mut AppState) -> Secured {
+    let Some(composer) = state.composer.as_ref() else {
+        return Secured::Nothing;
+    };
+    if !composer.draft.is_dirty() {
+        return Secured::Nothing;
+    }
+    let in_flight = composer.draft.local_id.as_ref().is_some_and(|local_id| {
+        state
+            .operations
+            .is_saving_draft(local_id, composer.draft.revision)
+    });
+    if in_flight {
+        return Secured::Nothing;
+    }
+    match draft_save_effect(state) {
+        Some(effect) => Secured::Save(effect),
+        None => Secured::Cannot,
+    }
 }
 
 /// Enter on a message in the Drafts mailbox (plan §14). The in-memory
 /// draft (left open earlier, or restored at startup) is the newest known
 /// state of itself — reopening continues it without a backend round-trip.
-/// With a *different* real draft already open the one-composer rule
-/// refuses; otherwise the copy is fetched and turned into a composer
-/// draft, replacing a pristine blank in the process (ticket pmbz: `c`
-/// leaves a blank in state, which must not seal the drafts list).
+/// A *different* parked draft never blocks (ticket sazy): it is secured
+/// with a forced save and the fetched draft takes the composer slot when
+/// it lands. The only remaining refusal is a dirty draft with no clock
+/// yet — before the first tick — where the save cannot be stamped.
 fn open_draft_message(state: &mut AppState, summary: crate::domain::MessageSummary) -> Vec<Effect> {
     let same = state
         .composer
@@ -2693,9 +2855,14 @@ fn open_draft_message(state: &mut AppState, summary: crate::domain::MessageSumma
         open_composer_screen(state);
         return Vec::new();
     }
-    if a_draft_is_open(state) {
-        state.set_status("A draft is already open — send or discard it first");
-        return Vec::new();
+    let mut effects = Vec::new();
+    match secure_parked_draft(state) {
+        Secured::Save(effect) => effects.push(effect),
+        Secured::Cannot => {
+            state.set_status("Still starting up — try again in a moment");
+            return Vec::new();
+        }
+        Secured::Nothing => {}
     }
     let locator = MessageLocator {
         mailbox: summary.mailbox_id.clone(),
@@ -2703,22 +2870,46 @@ fn open_draft_message(state: &mut AppState, summary: crate::domain::MessageSumma
         message_id: summary.message_id.clone(),
     };
     state.set_status("Opening draft…");
-    vec![state.operations.start(OperationKind::OpenDraft(locator))]
+    effects.push(state.operations.start(OperationKind::OpenDraft(locator)));
+    effects
 }
 
 /// Apply a fetched draft copy (the `OpenDraft` result): turn it into a
-/// composer draft and open the composer. Currency checks upstream: the
-/// drafts mailbox must still be displayed, and real work in the composer
-/// (content, ids, or unsaved edits) is never clobbered — a pristine
-/// blank is (ticket pmbz).
+/// composer draft and open the composer, replacing the draft parked in
+/// the slot. The parked copy is secured the same way the intent secured
+/// it (`secure_parked_draft`) — a draft composed or restored while the
+/// fetch ran is saved to the Drafts mailbox, never clobbered — and its
+/// late save result drops on the local_id mismatch (the fetched copy
+/// carries a fresh identity). Currency checks upstream: the drafts
+/// mailbox must still be displayed. The selected row must still be this
+/// draft, so the draft that opens is the one the cursor is on (a moved
+/// selection drops the stale fetch).
 fn draft_message_loaded(state: &mut AppState, message: crate::domain::Message) -> Vec<Effect> {
-    if a_draft_is_open(state) {
-        tracing::debug!("draft fetch dropped: a composer draft exists already");
+    let selected = state
+        .selected_message()
+        .is_some_and(|row| row.id == message.id);
+    if !selected {
+        tracing::debug!(
+            id = %message.id.0,
+            "draft fetch dropped: the selection moved on"
+        );
         return Vec::new();
+    }
+    let mut effects = Vec::new();
+    match secure_parked_draft(state) {
+        Secured::Save(effect) => effects.push(effect),
+        Secured::Cannot => {
+            tracing::debug!(
+                id = %message.id.0,
+                "draft fetch dropped: the parked draft cannot be secured yet"
+            );
+            return Vec::new();
+        }
+        Secured::Nothing => {}
     }
     let draft = crate::domain::draft_from_message(&message);
     install_composer_draft(state, draft, "Draft opened");
-    Vec::new()
+    effects
 }
 
 /// Open the selected message: push the reader route, snapshot the summary,

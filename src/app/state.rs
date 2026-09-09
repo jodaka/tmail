@@ -285,8 +285,8 @@ impl AppState {
             .count()
     }
 
-    /// Whether every visible row is bulk-selected (the `[X]` header state).
-    /// An empty list is never "all selected".
+    /// Whether every visible row is bulk-selected. An empty list is never
+    /// "all selected".
     pub fn all_visible_selected(&self) -> bool {
         !self.messages.items.is_empty()
             && self

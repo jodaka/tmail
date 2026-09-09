@@ -158,6 +158,9 @@ survives moves; the Gmail-specific drafts API is provider-specific and forbidden
 - Reply/forward act only on a loaded reader message (inert from the list); replies
   quote `text/plain` (HTML-only messages seed a placeholder); forwards quote the
   text body only — original attachments are not forwarded (v1 scope, plan §15).
+- A draft left behind (`Esc` saved it) does not block a reply/forward: the seed
+  replaces it and the stale save result is dropped by the local_id currency check
+  (ticket 61qx). Only a composer actually on screen (edited or Tab-parked) blocks.
 - `OutboundMessage.message_id` accepts either bracket form; the backend strips
   brackets for mail-builder (draft-derived sends reuse the draft's stable identity).
 
@@ -171,7 +174,9 @@ survives moves; the Gmail-specific drafts API is provider-specific and forbidden
 - Reader chips are metadata (filename · MIME · human size, deterministic wire
   order); Tab cycles the cursor; `d` saves via a frozen retryable request, `o`
   opens (save-then-open chain on the confirmed, possibly collision-renamed path;
-  same-session saves are reused without a duplicate download).
+  same-session saves are reused without a duplicate download). `Enter` presses the
+  selected chip (the same open path), and the status bar advertises `S save` /
+  `o open` whenever the open message carries attachments (ticket 61qx).
 - Downloads dir resolution: explicit request dir → `[tmail.attachments].downloads_dir`
   → `$HOME/Downloads`; missing dirs are created. Destination names reduce to a
   single component (traversal-proof); existing downloads are never silently
@@ -185,6 +190,12 @@ survives moves; the Gmail-specific drafts API is provider-specific and forbidden
 - Opening an unread message fills missing list snippets and starts a separate
   retryable `SetRead(true)` (one typed intent per operation, not `message read
   --seen`).
+- The list row's attachment flag reconciles from every fetched full message
+  (preview fetch, disk-cache serve, open): IMAP envelope listings carry no
+  body structure, so the envelope flag alone hid the paperclip (ticket r84f).
+  A background page refresh keeps the reconciled flag. The clip renders one
+  space left of the date at a fixed slot: on attachment rows the title/body
+  cell gives up one column, so neither long nor short content moves it.
 - Sidebar unread counts are not recomputed after flag changes; they refresh on the
   next mailbox listing (manual refresh / auto-refresh timer).
 - html2text inserts single spaces between CJK ideographs (its word-break model) —
