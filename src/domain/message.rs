@@ -128,6 +128,16 @@ impl MessageSummary {
             .map(Address::display)
             .unwrap_or("(unknown sender)")
     }
+
+    /// Recipient shown in list rows of outgoing folders (the Drafts list,
+    /// where every row's sender is the user's own address): first `to`
+    /// address, or a placeholder. Matches the reader's `To` meta wording.
+    pub fn to_display(&self) -> &str {
+        self.to
+            .first()
+            .map(Address::display)
+            .unwrap_or("(no recipients)")
+    }
 }
 
 /// The bare form of an RFC `Message-ID`: no surrounding angle brackets.

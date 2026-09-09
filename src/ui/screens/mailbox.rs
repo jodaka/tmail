@@ -72,6 +72,11 @@ pub fn render(
         rows.width
     };
     render_head(frame, head, state, theme, scrolling);
+    // Rows of the Drafts mailbox show the recipient in the sender column:
+    // a draft's sender is always the user's own address, which reads as
+    // noise. Matched on the row's mailbox id, so search results over the
+    // Drafts mailbox follow the same rule.
+    let drafts_mailbox = state.drafts_mailbox().map(|m| m.id.clone());
     let bottom = area.y + area.height;
     let mut drew_any_row = false;
     let mut y = rows.y;
@@ -97,6 +102,9 @@ pub fn render(
             width: row_width,
             height: 1,
         };
+        let shows_recipient = drafts_mailbox
+            .as_ref()
+            .is_some_and(|id| *id == message.mailbox_id);
         let spans = message_spans(
             message,
             row_width as usize,
@@ -106,6 +114,7 @@ pub fn render(
             selected,
             bulk_selected,
             state.focus == Focus::MessageList,
+            shows_recipient,
         );
         frame.render_widget(Paragraph::new(Line::from(spans)), content);
         // Comfortable density: a hairline under the row (fainter than any
@@ -309,17 +318,20 @@ fn message_spans<'a>(
     // marker (the same bar the sidebar's focused folder carries). Selection
     // alone keeps the fill but never the marker, so focus stays readable.
     focused: bool,
+    // Drafts row: the sender column shows the recipient instead (the
+    // sender is always the user's own address there).
+    shows_recipient: bool,
 ) -> Vec<Span<'a>> {
     let full = mode == LayoutMode::Full;
     let compact = mode == LayoutMode::Compact;
 
     // Column anatomy: marker 1 + icon 2 (star/checkbox + trailing space,
-    // ticket cvc4) + from + gap 2 + subject(+snippet) + gap 2 + date 8,
+    // ticket cvc4) + who + gap 2 + subject(+snippet) + gap 2 + date 8,
     // summing to the full row width so the date lands on the right edge
-    // (mockup grid).
+    // (mockup grid). `who` is the sender, or the recipient on Drafts rows.
     let date = dates::format_relative(now, message.timestamp);
-    let from_w = if compact { 14 } else { 18 };
-    let subject_w = width.saturating_sub(3 + from_w + 2 + 2 + 8).max(10);
+    let who_w = if compact { 14 } else { 18 };
+    let subject_w = width.saturating_sub(3 + who_w + 2 + 2 + 8).max(10);
     // The paperclip rides one space left of the date (ticket r84f, user
     // amend): on attachment rows the title/body cell gives up one column
     // and the clip (2 cells, one char) plus the separator space replace
@@ -369,7 +381,7 @@ fn message_spans<'a>(
     // The fill marks selection and the `unread` modifier marks state, so a
     // focused unread row keeps its bold under the accent fill — selection
     // alone must not flatten read and unread rows into one look.
-    let from_style = if selected || bulk_selected {
+    let who_style = if selected || bulk_selected {
         if message.is_read {
             base.fg(theme.text)
         } else {
@@ -380,7 +392,7 @@ fn message_spans<'a>(
     } else {
         theme.unread_text().bg(theme.background)
     };
-    let subject_style = from_style;
+    let subject_style = who_style;
     // The faded preview (ticket wxtx): dimmer than any subject state, so
     // the Gmail-style body preview reads as context. It keeps the row's
     // fill (accent fill included).
@@ -392,8 +404,15 @@ fn message_spans<'a>(
     // the body text is longer (ticket wxtx).
     let mut spans = vec![marker, icon];
     spans.push(Span::styled(
-        text::fit_left(message.from_display(), from_w),
-        from_style,
+        text::fit_left(
+            if shows_recipient {
+                message.to_display()
+            } else {
+                message.from_display()
+            },
+            who_w,
+        ),
+        who_style,
     ));
     spans.push(Span::styled("  ", base));
     if full {
@@ -440,7 +459,7 @@ fn message_spans<'a>(
     let date_style = if message.is_read && !selected {
         Style::new().fg(theme.dim).bg(bg)
     } else {
-        from_style.bg(bg)
+        who_style.bg(bg)
     };
     spans.push(Span::styled(text::fit_left(&date, 8), date_style));
     spans

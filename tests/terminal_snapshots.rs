@@ -140,6 +140,42 @@ fn selected_row_uses_accent_fill() {
     assert!(has_accent_bg, "selected row lacks accent fill:\n{text}");
 }
 
+/// In the Drafts mailbox the sender column would carry the user's own
+/// address on every row, so rows show the "To" recipient instead. Search
+/// results over Drafts follow the same rule (per-row mailbox match).
+#[test]
+fn drafts_rows_show_recipients_instead_of_senders() {
+    let mut state = mock_initial_state();
+    let drafts = mock::mock_mailboxes()
+        .into_iter()
+        .find(|m| m.role == Some(tmail::domain::MailboxRole::Drafts))
+        .expect("mock has a drafts mailbox");
+    state.routes = vec![tmail::app::route::Route::Mailbox(
+        tmail::app::route::MailboxRoute {
+            mailbox_id: drafts.id.clone(),
+        },
+    )];
+    state.mailbox_selection = mock::mock_mailboxes()
+        .iter()
+        .position(|m| m.id == drafts.id)
+        .unwrap();
+    state.messages = mock::mock_page(&drafts.id, 0, mock::PAGE_SIZE);
+    state.selection = 0;
+    state.size = (152, 40);
+    let (buffer, _) = draw_state_hits(&state, 152, 40);
+    let text = text_of(&buffer);
+    assert!(
+        text.contains("DRAFTS"),
+        "drafts pane title missing:\n{text}"
+    );
+    assert!(
+        text.contains("Bob Smith"),
+        "drafts rows must show the recipient:\n{text}"
+    );
+    assert_absent(&text, "Tmail Probe", (152, 40));
+    assert_absent(&text, "(no recipients)", (152, 40));
+}
+
 /// The compose well uses rounded corners like the search field and no
 /// longer carries an inline `c` hint (the status bar advertises it).
 #[test]

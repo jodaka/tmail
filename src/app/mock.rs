@@ -297,7 +297,18 @@ pub fn mock_messages(mailbox_id: &MailboxId) -> Vec<MessageSummary> {
             items
         }
         "sent" => small_mailbox("sent", 4),
-        "drafts" => small_mailbox("drafts", 3),
+        // The drafts list shows the recipient in the sender column
+        // (`mailbox::message_spans`), so the mock rows carry one.
+        "drafts" => {
+            let to = vec![addr("Bob Smith", "bob@example.org")];
+            small_mailbox("drafts", 3)
+                .into_iter()
+                .map(|mut row| {
+                    row.to = to.clone();
+                    row
+                })
+                .collect()
+        }
         "archive" => small_mailbox("archive", 6),
         "spam" => small_mailbox("spam", 5),
         "trash" => small_mailbox("trash", 2),
