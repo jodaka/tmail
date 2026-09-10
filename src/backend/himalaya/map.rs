@@ -199,7 +199,7 @@ fn text_header(headers: &[dto::HeaderDto], name: &str) -> Option<String> {
 /// reply seeding preserves (plan §14, Phase 7.4).
 fn bare_ids(raw: String) -> String {
     raw.split_whitespace()
-        .map(|id| id.trim_start_matches('<').trim_end_matches('>').to_string())
+        .map(crate::domain::message::bare_message_id)
         .collect::<Vec<_>>()
         .join(" ")
 }

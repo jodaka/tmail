@@ -138,6 +138,17 @@ impl MessageSummary {
             .map(Address::display)
             .unwrap_or("(no recipients)")
     }
+
+    /// The [`MessageLocator`] addressing this row: the shared construction
+    /// behind list selection and reader/list action targets. Broad cloning
+    /// is the point — a locator must outlive the row it came from.
+    pub fn into_locator(&self) -> MessageLocator {
+        MessageLocator {
+            mailbox: self.mailbox_id.clone(),
+            id: self.id.clone(),
+            message_id: self.message_id.clone(),
+        }
+    }
 }
 
 /// The bare form of an RFC `Message-ID`: no surrounding angle brackets.

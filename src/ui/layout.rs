@@ -73,6 +73,26 @@ pub fn split_list(area: Rect) -> (Rect, Rect) {
     (head, rows)
 }
 
+/// The list pane's rectangle for a terminal `size`: the shared prologue of
+/// the three visible-viewport helpers — origin rect, mode selection, and
+/// the TooSmall bail (`None` means the pane is not drawn at all); then the
+/// vertical chrome split and the sidebar split.
+fn list_rect(size: (u16, u16)) -> Option<(Rect, LayoutMode)> {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: size.0,
+        height: size.1,
+    };
+    let mode = mode_for(area.width, area.height);
+    if mode == LayoutMode::TooSmall {
+        return None;
+    }
+    let (_, body, _) = split_vertical(area);
+    let (_, list) = split_body(mode, body);
+    Some((list, mode))
+}
+
 /// Number of messages the list area shows for a terminal `size` under a
 /// view mode, computed with the exact same layout functions the renderer
 /// uses. The reducer consumes this to keep the selection on screen across
@@ -81,18 +101,9 @@ pub fn split_list(area: Rect) -> (Rect, Rect) {
 /// Comfortable view mode interleaves a faint separator under every row, so
 /// each message costs [`ViewMode::row_height`] lines and fewer fit.
 pub fn messages_visible(size: (u16, u16), view_mode: ViewMode) -> usize {
-    let area = Rect {
-        x: 0,
-        y: 0,
-        width: size.0,
-        height: size.1,
-    };
-    let mode = mode_for(area.width, area.height);
-    if mode == LayoutMode::TooSmall {
+    let Some((list, _)) = list_rect(size) else {
         return 0;
-    }
-    let (_, body, _) = split_vertical(area);
-    let (_, list) = split_body(mode, body);
+    };
     let (_, rows) = split_list(list);
     rows.height as usize / view_mode.row_height()
 }
@@ -101,37 +112,13 @@ pub fn messages_visible(size: (u16, u16), view_mode: ViewMode) -> usize {
 /// replaces list head and rows, mockup `viewer.html` `.reader`). The
 /// reducer's scroll clamp uses this with the reader's content line count.
 pub fn reader_rows_visible(size: (u16, u16)) -> usize {
-    let area = Rect {
-        x: 0,
-        y: 0,
-        width: size.0,
-        height: size.1,
-    };
-    let mode = mode_for(area.width, area.height);
-    if mode == LayoutMode::TooSmall {
-        return 0;
-    }
-    let (_, body, _) = split_vertical(area);
-    let (_, list) = split_body(mode, body);
-    list.height as usize
+    list_rect(size).map_or(0, |(list, _)| list.height as usize)
 }
 
 /// Width of the reader viewport (body area minus the sidebar in full mode).
 /// The reader's content function and renderer must agree on this.
 pub fn reader_width(size: (u16, u16)) -> usize {
-    let area = Rect {
-        x: 0,
-        y: 0,
-        width: size.0,
-        height: size.1,
-    };
-    let mode = mode_for(area.width, area.height);
-    if mode == LayoutMode::TooSmall {
-        return 0;
-    }
-    let (_, body, _) = split_vertical(area);
-    let (_, list) = split_body(mode, body);
-    list.width as usize
+    list_rect(size).map_or(0, |(list, _)| list.width as usize)
 }
 
 #[cfg(test)]

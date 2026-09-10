@@ -26,8 +26,8 @@ use crate::backend::journal::DraftJournal;
 use crate::backend::traits::{BackendError, BackendResult, MailBackend, RequestContext};
 use crate::config::Config;
 use crate::domain::{
-    AttachmentRequest, DraftAttachment, DraftSnapshot, Mailbox, MailboxRole, Message, MessageId,
-    MessageLocator, MessageSummary, OutboundMessage, Page, PageRequest, RestoredDraft,
+    AttachmentRequest, DraftAttachment, DraftSnapshot, Mailbox, MailboxId, MailboxRole, Message,
+    MessageId, MessageLocator, MessageSummary, OutboundMessage, Page, PageRequest, RestoredDraft,
     SearchRequest, SendOutcome,
 };
 
@@ -89,15 +89,7 @@ pub(crate) async fn test_account_mailbox_names(
         .map_err(|err| BackendError::File(format!("could not write the test config: {err}")))?;
 
     let path = temp.path().to_path_buf();
-    let argv = vec![
-        String::from("-c"),
-        path.display().to_string(),
-        String::from("-a"),
-        draft.name.clone(),
-        String::from("mailbox"),
-        String::from("list"),
-        String::from("--json"),
-    ];
+    let argv = command::mailbox_list_argv(Some(&path), Some(&draft.name), false);
 
     // The timeout wraps the run: on `Elapsed` the run future is dropped,
     // which kills the child (`kill_on_drop`), and the temp file drops
@@ -210,13 +202,76 @@ impl HimalayaCliBackend {
         self.downloads_dir = dir;
         self
     }
+
+    /// The 1-based page number and the page-aligned offset for a requested
+    /// offset/limit (ADR 0001 finding 8). Himalaya pages are 1-based and
+    /// Tmail requests page-aligned offsets; aligning here keeps an
+    /// off-grid offset from silently reading a different page than
+    /// requested.
+    fn page_alignment(offset: usize, limit: usize) -> Result<(usize, usize), BackendError> {
+        if limit == 0 {
+            return Err(BackendError::InvalidRequest(String::from(
+                "page limit must be non-zero",
+            )));
+        }
+        let aligned = offset - offset % limit;
+        let page_number = aligned / limit + 1;
+        Ok((aligned, page_number))
+    }
+
+    /// The shared envelope page fetch: `envelope list` when `query` is
+    /// `None`, `envelope search` when it carries the DSL (the output shape
+    /// matches on himalaya 2.1.0, so the same envelope mapping applies; the
+    /// search backend provides no total, so the page degrades to
+    /// next-availability — plan §16).
+    async fn fetch_page(
+        &self,
+        ctx: &RequestContext,
+        mailbox_id: MailboxId,
+        query: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> BackendResult<Page<MessageSummary>> {
+        let (aligned, page_number) = Self::page_alignment(offset, limit)?;
+        let argv = match query {
+            Some(query) => command::envelope_search_argv(
+                self.config_path.as_deref(),
+                self.account.as_deref(),
+                &mailbox_id.0,
+                query,
+                page_number,
+                limit,
+            ),
+            None => command::envelope_list_argv(
+                self.config_path.as_deref(),
+                self.account.as_deref(),
+                &mailbox_id.0,
+                page_number,
+                limit,
+            ),
+        };
+        let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
+        let dto: dto::EnvelopesDto = process::decode(output)?;
+        Ok(map::envelopes(dto, mailbox_id, aligned, limit))
+    }
+
+    /// The shared CLI identity (program, config, account) for callers that
+    /// take a [`Cli`]: flags, truncation, and detached cleanup helpers.
+    fn cli(&self) -> Cli {
+        Cli {
+            program: self.program.clone(),
+            config: self.config_path.clone(),
+            account: self.account.clone(),
+        }
+    }
 }
 
 #[async_trait]
 impl MailBackend for HimalayaCliBackend {
     async fn list_mailboxes(&self, ctx: RequestContext) -> BackendResult<Vec<Mailbox>> {
         tracing::debug!(operation = %ctx.operation, "list_mailboxes");
-        let argv = command::mailbox_list_argv(self.config_path.as_deref(), self.account.as_deref());
+        let argv =
+            command::mailbox_list_argv(self.config_path.as_deref(), self.account.as_deref(), true);
         let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
         let dto: dto::MailboxesDto = process::decode(output)?;
         let mailboxes = map::mailboxes(dto, &self.aliases);
@@ -234,31 +289,8 @@ impl MailBackend for HimalayaCliBackend {
         page: PageRequest,
     ) -> BackendResult<Page<MessageSummary>> {
         tracing::debug!(operation = %ctx.operation, "list_messages");
-        if page.limit == 0 {
-            return Err(BackendError::InvalidRequest(String::from(
-                "page limit must be non-zero",
-            )));
-        }
-        // Himalaya pages are 1-based and Tmail requests page-aligned offsets;
-        // aligning here keeps an off-grid offset from silently reading a
-        // different page than requested (ADR 0001 finding 8).
-        let aligned = page.offset - page.offset % page.limit;
-        let page_number = aligned / page.limit + 1;
-        let argv = command::envelope_list_argv(
-            self.config_path.as_deref(),
-            self.account.as_deref(),
-            &page.mailbox_id.0,
-            page_number,
-            page.limit,
-        );
-        let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
-        let dto: dto::EnvelopesDto = process::decode(output)?;
-        Ok(map::envelopes(
-            dto,
-            page.mailbox_id.clone(),
-            aligned,
-            page.limit,
-        ))
+        self.fetch_page(&ctx, page.mailbox_id, None, page.offset, page.limit)
+            .await
     }
 
     async fn get_message(
@@ -292,29 +324,14 @@ impl MailBackend for HimalayaCliBackend {
             mailbox = %request.mailbox_id.0,
             "search_messages"
         );
-        if request.limit == 0 {
-            return Err(BackendError::InvalidRequest(String::from(
-                "page limit must be non-zero",
-            )));
-        }
-        let aligned = request.offset - request.offset % request.limit;
-        let page_number = aligned / request.limit + 1;
-        let argv = command::envelope_search_argv(
-            self.config_path.as_deref(),
-            self.account.as_deref(),
-            &request.mailbox_id.0,
-            &request.query,
-            page_number,
-            request.limit,
-        );
-        let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
-        let dto: dto::EnvelopesDto = process::decode(output)?;
-        Ok(map::envelopes(
-            dto,
-            request.mailbox_id,
-            aligned,
-            request.limit,
-        ))
+        let SearchRequest {
+            mailbox_id,
+            query,
+            offset,
+            limit,
+        } = request;
+        self.fetch_page(&ctx, mailbox_id, Some(&query), offset, limit)
+            .await
     }
 
     async fn set_read(
@@ -690,11 +707,7 @@ impl HimalayaCliBackend {
     ) {
         let trash = self.mailbox_for_role(MailboxRole::Trash);
         spawn_draft_cleanup(
-            Cli {
-                program: self.program.clone(),
-                config: self.config_path.clone(),
-                account: self.account.clone(),
-            },
+            self.cli(),
             CleanupTarget {
                 mailbox: mailbox.to_string(),
                 id: id.to_string(),
@@ -720,11 +733,7 @@ impl HimalayaCliBackend {
         let Some(message_id) = message_id else {
             return;
         };
-        let cli = Cli {
-            program: self.program.clone(),
-            config: self.config_path.clone(),
-            account: self.account.clone(),
-        };
+        let cli = self.cli();
         let trash = self.mailbox_for_role(MailboxRole::Trash);
         let drafts_mailbox = drafts_mailbox.to_string();
         let keep = keep.map(|id| id.0.clone());
@@ -744,7 +753,7 @@ impl HimalayaCliBackend {
             let Ok(listed) = process::decode::<dto::EnvelopesDto>(output) else {
                 return;
             };
-            let bare = message_id.trim_start_matches('<').trim_end_matches('>');
+            let bare = crate::domain::message::bare_message_id(&message_id);
             for envelope in listed.envelopes {
                 if envelope.message_id.as_deref() != Some(bare)
                     || keep.as_deref() == Some(envelope.id.as_str())
@@ -926,12 +935,10 @@ fn header_addresses(field: &str) -> Option<MailAddress<'static>> {
     (!list.is_empty()).then_some(MailAddress::List(list))
 }
 
-/// Bare id form for mail-builder, which adds the angle brackets itself.
+/// Bare id form for mail-builder, which adds the angle brackets itself
+/// (shared normalizer: `domain::message::bare_message_id`).
 fn bare_message_id(message_id: &str) -> String {
-    message_id
-        .trim_start_matches('<')
-        .trim_end_matches('>')
-        .to_string()
+    crate::domain::message::bare_message_id(message_id).to_string()
 }
 
 /// Resolve the destination directory for a save (plan §15): the request's
@@ -1249,7 +1256,7 @@ async fn run_two_phase_delete(
     let Ok(listed) = process::decode::<dto::EnvelopesDto>(output) else {
         return;
     };
-    let bare = message_id.trim_start_matches('<').trim_end_matches('>');
+    let bare = crate::domain::message::bare_message_id(message_id);
     for envelope in listed.envelopes {
         if envelope.message_id.as_deref() != Some(bare) {
             continue;

@@ -16,6 +16,7 @@ use crate::app::action::ClickTarget;
 use crate::app::focus::Focus;
 use crate::app::state::AppState;
 use crate::input::mouse::HitMap;
+use crate::ui::chrome;
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
@@ -100,7 +101,7 @@ pub fn render(
             }
         }
         crate::app::state::Loadable::Loaded(_) => {
-            render_note(frame, rows.folders, theme, "(no mailboxes)")
+            chrome::render_note(frame, rows.folders, theme, "(no mailboxes)")
         }
         // Loading: one centered spinner, like every other pane (ticket
         // m3by). `Idle` cannot occur for the sidebar slot, but the
@@ -109,28 +110,9 @@ pub fn render(
             super::spinner::render_centered(frame, rows.folders, theme, state.ticks);
         }
         crate::app::state::Loadable::Failed(_) => {
-            render_note(frame, rows.folders, theme, "mailboxes unavailable")
+            chrome::render_note(frame, rows.folders, theme, "mailboxes unavailable")
         }
     }
-}
-
-/// A dim one-line placeholder for the mailbox list area.
-fn render_note(frame: &mut Frame<'_>, area: Rect, theme: &Theme, note: &str) {
-    if area.height == 0 {
-        return;
-    }
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            text::clip(note, area.width as usize),
-            Style::new().fg(theme.dim),
-        )),
-        Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: 1,
-        },
-    );
 }
 
 fn render_folder_row(

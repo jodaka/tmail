@@ -12,7 +12,9 @@
 //! reports shifted letters as the uppercase `char`, so `"S"` means
 //! exactly today's save-attachment key.
 //!
-//! Matching semantics live in [`KeySpec::matches`]: character bindings
+//! Matching semantics are plain structural equality: the keymap stores
+//! specs in a `HashMap` keyed by `(KeyCode, ctrl, alt)`, so lookup is key
+//! equality against that triple. Character bindings
 //! without `ctrl`/`alt` reject those modifiers (so `Ctrl+C` never fires a
 //! plain `c` binding) but ignore `SHIFT` (terminals vary); `ctrl`/`alt`
 //! chords require exactly those modifiers. `shift` is not representable on
@@ -47,13 +49,17 @@ impl KeySpec {
         }
     }
 
-    /// Whether a pressed key matches this spec (see module docs for the
-    /// exact modifier rules).
-    pub fn matches(&self, code: KeyCode, ctrl: bool, alt: bool) -> bool {
-        if code != self.code {
-            return false;
+    /// The spec of a pressed key event: the event's code plus its
+    /// ctrl/alt chord state (`SHIFT` does not enter a spec — see module
+    /// docs). The shared normalization behind keymap lookup and the
+    /// translation layer's own ctrl/alt checks.
+    pub fn from_event(event: &crossterm::event::KeyEvent) -> Self {
+        use crossterm::event::KeyModifiers;
+        KeySpec {
+            code: event.code,
+            ctrl: event.modifiers.contains(KeyModifiers::CONTROL),
+            alt: event.modifiers.contains(KeyModifiers::ALT),
         }
-        self.ctrl == ctrl && self.alt == alt
     }
 
     /// Canonical display form (hints, docs): `"Ctrl+R"`, `"Esc"`, `"→"`,
@@ -136,81 +142,77 @@ pub fn parse_spec(spec: &str) -> Result<KeySpec, String> {
     Ok(KeySpec { code, ctrl, alt })
 }
 
-/// Named keys and glyph aliases, matched case-insensitively.
+/// One named key: every accepted name (aliases included, matched
+/// case-insensitively), the KeyCode it maps to, and the canonical display
+/// form used in hints and docs. The single source of truth for both
+/// directions of the mapping — parsing and display share one table, so a
+/// code added to parsing is displayable with no second edit.
+const NAMED_KEYS: &[(&str, KeyCode, &str)] = &[
+    ("esc", KeyCode::Esc, "Esc"),
+    ("escape", KeyCode::Esc, "Esc"),
+    ("⎋", KeyCode::Esc, "Esc"),
+    ("enter", KeyCode::Enter, "↵"),
+    ("return", KeyCode::Enter, "↵"),
+    ("⏎", KeyCode::Enter, "↵"),
+    ("↵", KeyCode::Enter, "↵"),
+    ("tab", KeyCode::Tab, "Tab"),
+    ("⇥", KeyCode::Tab, "Tab"),
+    ("backtab", KeyCode::BackTab, "Shift+Tab"),
+    ("backspace", KeyCode::Backspace, "⌫"),
+    ("⌫", KeyCode::Backspace, "⌫"),
+    ("delete", KeyCode::Delete, "Del"),
+    ("del", KeyCode::Delete, "Del"),
+    ("insert", KeyCode::Insert, "Ins"),
+    ("home", KeyCode::Home, "Home"),
+    ("end", KeyCode::End, "End"),
+    ("pageup", KeyCode::PageUp, "PageUp"),
+    ("pgup", KeyCode::PageUp, "PageUp"),
+    ("pagedown", KeyCode::PageDown, "PageDown"),
+    ("pgdn", KeyCode::PageDown, "PageDown"),
+    ("up", KeyCode::Up, "↑"),
+    ("↑", KeyCode::Up, "↑"),
+    ("down", KeyCode::Down, "↓"),
+    ("↓", KeyCode::Down, "↓"),
+    ("left", KeyCode::Left, "←"),
+    ("←", KeyCode::Left, "←"),
+    ("right", KeyCode::Right, "→"),
+    ("→", KeyCode::Right, "→"),
+    ("space", KeyCode::Char(' '), "Space"),
+];
+
+/// Named keys and glyph aliases, matched case-insensitively. The token
+/// arrives lowercased; a single-char glyph stays as-is.
 fn named_key(lower: &str) -> Option<KeyCode> {
-    let code = match lower {
-        "esc" | "escape" | "⎋" => KeyCode::Esc,
-        "enter" | "return" | "↵" | "⏎" => KeyCode::Enter,
-        "tab" | "⇥" => KeyCode::Tab,
-        "backtab" => KeyCode::BackTab,
-        "backspace" | "⌫" => KeyCode::Backspace,
-        "delete" | "del" => KeyCode::Delete,
-        "insert" => KeyCode::Insert,
-        "home" => KeyCode::Home,
-        "end" => KeyCode::End,
-        "pageup" | "pgup" => KeyCode::PageUp,
-        "pagedown" | "pgdn" => KeyCode::PageDown,
-        "up" | "↑" => KeyCode::Up,
-        "down" | "↓" => KeyCode::Down,
-        "left" | "←" => KeyCode::Left,
-        "right" | "→" => KeyCode::Right,
-        "space" => KeyCode::Char(' '),
-        // Function keys: "f1"–"f12" (the token arrives lowercased).
-        f if matches!(f.len(), 2..=3) && f.starts_with('f') => {
-            let n: u8 = f[1..].parse().ok()?;
-            let n = if (1..=12).contains(&n) {
-                n
-            } else {
-                return None;
-            };
-            function_key(n)
+    // Function keys: "f1"–"f12" (the token arrives lowercased, and
+    // "f"? would otherwise read as a character key).
+    if matches!(lower.len(), 2..=3) && lower.starts_with('f') {
+        let n: u8 = lower[1..].parse().ok()?;
+        if !(1..=12).contains(&n) {
+            return None;
         }
-        _ => return None,
-    };
-    Some(code)
-}
-
-fn function_key(n: u8) -> KeyCode {
-    match n {
-        1 => KeyCode::F(1),
-        2 => KeyCode::F(2),
-        3 => KeyCode::F(3),
-        4 => KeyCode::F(4),
-        5 => KeyCode::F(5),
-        6 => KeyCode::F(6),
-        7 => KeyCode::F(7),
-        8 => KeyCode::F(8),
-        9 => KeyCode::F(9),
-        10 => KeyCode::F(10),
-        11 => KeyCode::F(11),
-        _ => KeyCode::F(12),
+        return Some(KeyCode::F(n));
     }
+    NAMED_KEYS
+        .iter()
+        .find(|(name, _, _)| *name == lower)
+        .map(|&(_, code, _)| code)
 }
 
-/// Canonical display for a code (inverse of the named/glyph set): arrows
-/// and Enter render as the compact glyphs the docs and hints use.
+/// Canonical display for a code (inverse of [`NAMED_KEYS`]): arrows and
+/// Enter render as the compact glyphs the docs and hints use; an
+/// unlemmatized char is itself.
 fn display_code(code: KeyCode) -> String {
-    match code {
-        KeyCode::Esc => String::from("Esc"),
-        KeyCode::Enter => String::from("↵"),
-        KeyCode::Tab => String::from("Tab"),
-        KeyCode::BackTab => String::from("Shift+Tab"),
-        KeyCode::Backspace => String::from("⌫"),
-        KeyCode::Delete => String::from("Del"),
-        KeyCode::Insert => String::from("Ins"),
-        KeyCode::Home => String::from("Home"),
-        KeyCode::End => String::from("End"),
-        KeyCode::PageUp => String::from("PageUp"),
-        KeyCode::PageDown => String::from("PageDown"),
-        KeyCode::Up => String::from("↑"),
-        KeyCode::Down => String::from("↓"),
-        KeyCode::Left => String::from("←"),
-        KeyCode::Right => String::from("→"),
-        KeyCode::F(n) => format!("F{n}"),
-        KeyCode::Char(' ') => String::from("Space"),
-        KeyCode::Char(c) => c.to_string(),
-        other => format!("{other:?}"),
+    if let KeyCode::F(n) = code {
+        return format!("F{n}");
     }
+    NAMED_KEYS
+        .iter()
+        .find(|&(_, entry_code, _)| *entry_code == code)
+        .map(|&(_, _, display)| String::from(display))
+        .unwrap_or_else(|| match code {
+            KeyCode::Char(c) => c.to_string(),
+            other => format!("{other:?}"),
+        })
 }
 
 #[cfg(test)]
@@ -303,24 +305,5 @@ mod tests {
         assert_eq!(spec("Ctrl+R").display(), "Ctrl+r");
         assert_eq!(spec("enter").display(), "↵");
         assert_eq!(spec("backtab").display(), "Shift+Tab");
-    }
-
-    #[test]
-    fn matching_honors_the_modifier_rules() {
-        let plain_c = spec("c");
-        // Plain char bindings ignore SHIFT but reject ctrl/alt.
-        assert!(plain_c.matches(KeyCode::Char('c'), false, false));
-        assert!(!plain_c.matches(KeyCode::Char('c'), true, false));
-        assert!(!plain_c.matches(KeyCode::Char('c'), false, true));
-        // A different character never matches.
-        assert!(!plain_c.matches(KeyCode::Char('d'), false, false));
-        let ctrl_r = spec("ctrl+r");
-        assert!(ctrl_r.matches(KeyCode::Char('r'), true, false));
-        // Chords match exactly: alt never rides along.
-        assert!(!ctrl_r.matches(KeyCode::Char('r'), true, true));
-        assert!(!ctrl_r.matches(KeyCode::Char('r'), false, false));
-        let esc = spec("esc");
-        assert!(esc.matches(KeyCode::Esc, false, false));
-        assert!(!esc.matches(KeyCode::Esc, true, false));
     }
 }

@@ -72,8 +72,8 @@ impl OperationManager {
                 &opener,
                 &discoverer,
                 &himalaya_program,
-                effect,
-                ctx,
+                &effect,
+                &ctx,
             )
             .await
             {
@@ -95,106 +95,157 @@ impl OperationManager {
 
 /// Execute one effect and translate the backend result. `None` means the
 /// operation was cancelled — there is nothing to report.
+///
+/// The plain `OperationKind` arms dispatch through [`run_call`]: a backend
+/// call, a success payload, and the shared `operation_failure` error
+/// mapping. Only the arms with a different control shape (attachment
+/// explorer, platform opener, editor, discovery, credential test, account
+/// save) are spelled out.
 async fn run_effect(
     backend: &Arc<dyn MailBackend>,
     opener: &Arc<dyn PathOpener>,
     discoverer: &Arc<dyn EmailConfigDiscoverer>,
     himalaya_program: &str,
-    effect: Effect,
-    ctx: RequestContext,
+    effect: &Effect,
+    ctx: &RequestContext,
 ) -> Option<Result<OperationOutcome, OperationFailure>> {
     match effect.kind.clone() {
-        OperationKind::LoadMailboxes => match backend.list_mailboxes(ctx).await {
-            Ok(mailboxes) => Some(Ok(OperationOutcome::Mailboxes(mailboxes))),
-            Err(err) => operation_failure(&effect, err).map(Err),
-        },
-        OperationKind::LoadPage(request) => match backend.list_messages(ctx, request).await {
-            Ok(page) => Some(Ok(OperationOutcome::Page(page))),
-            Err(err) => operation_failure(&effect, err).map(Err),
-        },
-        OperationKind::Search(request) => match backend.search_messages(ctx, request).await {
-            Ok(page) => Some(Ok(OperationOutcome::Page(page))),
-            Err(err) => operation_failure(&effect, err).map(Err),
-        },
-        OperationKind::LoadMessage(locator) => match backend.get_message(ctx, locator).await {
-            Ok(message) => Some(Ok(OperationOutcome::Message(Box::new(message)))),
-            Err(err) => operation_failure(&effect, err).map(Err),
-        },
-        // Same backend call as the reader's load, different consumer: the
-        // reducer turns the fetched copy into a composer draft (the Drafts
-        // list's Enter).
-        OperationKind::OpenDraft(locator) => match backend.get_message(ctx, locator).await {
-            Ok(message) => Some(Ok(OperationOutcome::Message(Box::new(message)))),
-            Err(err) => operation_failure(&effect, err).map(Err),
-        },
-        // Same backend call as the reader's load (ticket wxtx), different
-        // consumer: the list's faded preview. Failures land in the reducer
-        // as ordinary failures, which it logs and drops for this kind.
-        OperationKind::Preview(locator) => match backend.get_message(ctx, locator).await {
-            Ok(message) => Some(Ok(OperationOutcome::Message(Box::new(message)))),
-            Err(err) => operation_failure(&effect, err).map(Err),
-        },
+        OperationKind::LoadMailboxes => {
+            run_call(
+                effect,
+                ctx,
+                |c| backend.list_mailboxes(c),
+                OperationOutcome::Mailboxes,
+            )
+            .await
+        }
+        OperationKind::LoadPage(request) => {
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.list_messages(c, request),
+                OperationOutcome::Page,
+            )
+            .await
+        }
+        OperationKind::Search(request) => {
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.search_messages(c, request),
+                OperationOutcome::Page,
+            )
+            .await
+        }
+        // Reader load, draft reopen (the reducer turns the fetched copy
+        // into a composer draft), and list preview (ticket wxtx) share one
+        // backend call and one payload shape.
+        OperationKind::LoadMessage(locator)
+        | OperationKind::OpenDraft(locator)
+        | OperationKind::Preview(locator) => {
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.get_message(c, locator),
+                |message| OperationOutcome::Message(Box::new(message)),
+            )
+            .await
+        }
         OperationKind::SetRead { locator, read } => {
-            match backend.set_read(ctx, locator, read).await {
-                Ok(()) => Some(Ok(OperationOutcome::Done)),
-                Err(err) => operation_failure(&effect, err).map(Err),
-            }
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.set_read(c, locator, read),
+                |_| OperationOutcome::Done,
+            )
+            .await
         }
         OperationKind::SetStarred { locator, starred } => {
-            match backend.set_starred(ctx, locator, starred).await {
-                Ok(()) => Some(Ok(OperationOutcome::Done)),
-                Err(err) => operation_failure(&effect, err).map(Err),
-            }
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.set_starred(c, locator, starred),
+                |_| OperationOutcome::Done,
+            )
+            .await
         }
-        OperationKind::Archive(locator) => match backend.archive(ctx, locator).await {
-            Ok(()) => Some(Ok(OperationOutcome::Done)),
-            Err(err) => operation_failure(&effect, err).map(Err),
-        },
-        OperationKind::Trash(locator) => match backend.trash(ctx, locator).await {
-            Ok(()) => Some(Ok(OperationOutcome::Done)),
-            Err(err) => operation_failure(&effect, err).map(Err),
-        },
-        OperationKind::SaveDraft { draft } => match backend.save_draft(ctx, *draft).await {
-            Ok(remote_id) => Some(Ok(OperationOutcome::DraftSaved { remote_id })),
-            Err(err) => operation_failure(&effect, err).map(Err),
-        },
-        OperationKind::LoadDrafts => match backend.load_drafts(ctx).await {
-            Ok(drafts) => Some(Ok(OperationOutcome::Drafts(drafts))),
-            Err(err) => operation_failure(&effect, err).map(Err),
-        },
-        OperationKind::DeleteDraft { .. } => {
-            match backend.delete_draft(ctx, effect_draft(&effect)).await {
-                Ok(()) => Some(Ok(OperationOutcome::Done)),
-                Err(err) => operation_failure(&effect, err).map(Err),
-            }
+        OperationKind::Archive(locator) => {
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.archive(c, locator),
+                |_| OperationOutcome::Done,
+            )
+            .await
         }
-        OperationKind::Send { message } => match backend.send_message(ctx, *message).await {
-            // Classified delivery outcomes (plan §12) — including failures
-            // — travel as success payloads; only structural refusals
-            // (spawn I/O, refused request) come back as errors.
-            Ok(outcome) => Some(Ok(OperationOutcome::SendOutcome(outcome))),
-            Err(err) => operation_failure(&effect, err).map(Err),
-        },
-        OperationKind::ReadAttachment { path } => match backend.read_attachment(ctx, path).await {
-            Ok(attachment) => Some(Ok(OperationOutcome::Attachment(attachment))),
-            Err(err) => operation_failure(&effect, err).map(Err),
-        },
+        OperationKind::Trash(locator) => {
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.trash(c, locator),
+                |_| OperationOutcome::Done,
+            )
+            .await
+        }
+        OperationKind::SaveDraft { draft } => {
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.save_draft(c, *draft),
+                |remote_id| OperationOutcome::DraftSaved { remote_id },
+            )
+            .await
+        }
+        OperationKind::LoadDrafts => {
+            run_call(
+                effect,
+                ctx,
+                |c| backend.load_drafts(c),
+                OperationOutcome::Drafts,
+            )
+            .await
+        }
+        OperationKind::DeleteDraft { draft, .. } => {
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.delete_draft(c, *draft),
+                |_| OperationOutcome::Done,
+            )
+            .await
+        }
+        OperationKind::Send { message } => {
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.send_message(c, *message),
+                OperationOutcome::SendOutcome,
+            )
+            .await
+        }
+        OperationKind::ReadAttachment { path } => {
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.read_attachment(c, path),
+                OperationOutcome::Attachment,
+            )
+            .await
+        }
         OperationKind::ListAttachmentFiles { path } => {
             match build_attachment_explorer(path.as_deref()) {
                 Ok(explorer) => Some(Ok(OperationOutcome::Explorer(Box::new(explorer)))),
-                Err(detail) => Some(Err(OperationFailure {
-                    code: None,
-                    detail: sanitize(&detail),
-                    retry: Some(effect.retry_spec()),
-                    ambiguous: false,
-                })),
+                Err(detail) => Some(Err(plain_failure(effect, &detail))),
             }
         }
         OperationKind::SaveAttachment { request, .. } => {
-            match backend.save_attachment(ctx, request).await {
-                Ok(path) => Some(Ok(OperationOutcome::SavedPath(path))),
-                Err(err) => operation_failure(&effect, err).map(Err),
-            }
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.save_attachment(c, request),
+                OperationOutcome::SavedPath,
+            )
+            .await
         }
         OperationKind::OpenPath { path } => {
             tracing::debug!(path = %path.display(), "opening with platform handler");
@@ -202,18 +253,10 @@ async fn run_effect(
             // token dance here — the handler app owns its own lifetime.
             match opener.open(&path) {
                 Ok(()) => Some(Ok(OperationOutcome::Done)),
-                Err(err) => {
-                    let failure = OperationFailure {
-                        code: None,
-                        detail: sanitize(&format!(
-                            "`{}` could not be opened: {err}",
-                            path.display()
-                        )),
-                        retry: Some(effect.retry_spec()),
-                        ambiguous: false,
-                    };
-                    Some(Err(failure))
-                }
+                Err(err) => Some(Err(plain_failure(
+                    effect,
+                    &format!("`{}` could not be opened: {err}", path.display()),
+                ))),
             }
         }
         // The external editor never reaches the manager: the main loop
@@ -243,7 +286,7 @@ async fn run_effect(
             .await
             {
                 Ok(mailboxes) => Some(Ok(OperationOutcome::TestAccountCompleted { mailboxes })),
-                Err(err) => operation_failure(&effect, err).map(Err),
+                Err(err) => operation_failure(effect, err).map(Err),
             }
         }
         // Wizard save (ADR 0003 §3.6): the format-preserving merge runs
@@ -255,22 +298,45 @@ async fn run_effect(
                     created: report.created,
                     permissions_warning: report.permissions_warning,
                 })),
-                Err(detail) => Some(Err(OperationFailure {
-                    code: None,
-                    detail: sanitize(&detail),
-                    retry: Some(effect.retry_spec()),
-                    ambiguous: false,
-                })),
+                Err(detail) => Some(Err(plain_failure(effect, &detail))),
             }
         }
     }
 }
 
-/// The snapshot carried by a delete-draft effect.
-fn effect_draft(effect: &Effect) -> crate::domain::DraftSnapshot {
-    match &effect.kind {
-        OperationKind::DeleteDraft { draft, .. } => (**draft).clone(),
-        other => unreachable!("effect_draft on non-delete kind: {other:?}"),
+/// Run one backend call through the shared outcome/error translation:
+/// success builds the typed outcome via `build`, failure maps through
+/// [`operation_failure`] with `None` on cancellation. Collapses the
+/// per-kind copies of the same success/error match.
+async fn run_call<F, Fut, T>(
+    effect: &Effect,
+    ctx: &RequestContext,
+    call: F,
+    build: impl Fn(T) -> OperationOutcome,
+) -> Option<Result<OperationOutcome, OperationFailure>>
+where
+    F: FnOnce(RequestContext) -> Fut,
+    Fut: std::future::Future<Output = crate::backend::BackendResult<T>>,
+{
+    match call(ctx.clone()).await {
+        Ok(value) => Some(Ok(build(value))),
+        Err(err) => operation_failure(effect, err).map(Err),
+    }
+}
+
+/// A structural failure that is not a [`BackendError`] (file I/O in the
+/// manager: the attachment explorer, the platform opener, the account
+/// save, the credential-test timeout): same shape and sanitize path as
+/// [`operation_failure`], minus the exit code.
+fn plain_failure(effect: &Effect, detail: &str) -> OperationFailure {
+    tracing::debug!(id = %effect.id, "operation failed");
+    OperationFailure {
+        code: None,
+        // Sanitized before entering state/UI or logs (plan §12).
+        detail: sanitize(detail),
+        retry: Some(effect.retry_spec()),
+        // Structural failures are never ambiguous (plan §12).
+        ambiguous: false,
     }
 }
 

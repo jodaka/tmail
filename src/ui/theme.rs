@@ -260,13 +260,6 @@ impl Theme {
         Style::new().fg(self.text_soft)
     }
 
-    /// Faded body preview in the list rows (ticket wxtx): dimmer than the
-    /// subject, so Gmail-style previews read as context. Callers set `bg`
-    /// to the row fill (accent fill included).
-    pub fn snippet_text(&self) -> Style {
-        Style::new().fg(self.snippet)
-    }
-
     pub fn star(&self) -> Style {
         Style::new().fg(self.warning)
     }
@@ -279,6 +272,21 @@ impl Theme {
 
     pub fn hairline(&self) -> Style {
         Style::new().fg(self.border)
+    }
+
+    /// Focused/unfocused control fill: focused gets a full-color fill with
+    /// background text and bold; unfocused stays quiet (`muted`). `fill`
+    /// is the focused fill color — accent for normal buttons, error for
+    /// destructive ones, warning for the composer's discard.
+    pub fn button_style(&self, focused: bool, fill: Color) -> Style {
+        if focused {
+            Style::new()
+                .fg(self.background)
+                .bg(fill)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(self.muted)
+        }
     }
 
     /// Mode badge in the status bar (mockup `.mode`): accent fill, dark text.
@@ -303,14 +311,6 @@ impl Theme {
     /// Text on top of `background`.
     pub fn on_background(&self) -> Style {
         Style::new().fg(self.text).bg(self.background)
-    }
-
-    /// HTML headings (plan §13: heading → bold; stronger color than body).
-    pub fn heading(&self) -> Style {
-        Style::new()
-            .fg(self.text)
-            .bg(self.background)
-            .add_modifier(Modifier::BOLD)
     }
 
     /// HTML links (plan §13: accent + underline; target rides the span).
@@ -455,14 +455,14 @@ mod default_theme_doc_tests {
         let text = include_str!("../../docs/default-theme.toml");
         let (config, issues) = parse_with_issues(text, None);
         assert!(issues.is_empty(), "{issues:?}");
-        assert_eq!(config.theme_name, "default");
+        assert_eq!(config.theme.name, "default");
         assert_eq!(
-            config.theme_overrides.len(),
+            config.theme.overrides.len(),
             THEME_TOKENS.len(),
             "every token documented: {issues:?}"
         );
-        let mut theme = Theme::from_name(&config.theme_name);
-        for (token, hex) in &config.theme_overrides {
+        let mut theme = Theme::from_name(&config.theme.name);
+        for (token, hex) in &config.theme.overrides {
             let color =
                 Theme::color_from_hex(hex).unwrap_or_else(|| panic!("{token}: bad hex {hex:?}"));
             assert!(theme.set_token(token, color), "unknown token {token}");

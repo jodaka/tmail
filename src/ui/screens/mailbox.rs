@@ -12,9 +12,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-};
+use ratatui::widgets::{Paragraph, ScrollbarState};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::action::ClickTarget;
@@ -23,6 +21,7 @@ use crate::app::route::Route;
 use crate::app::state::AppState;
 use crate::domain::MessageSummary;
 use crate::input::mouse::HitMap;
+use crate::ui::chrome::{self, HairlineSide};
 use crate::ui::dates;
 use crate::ui::layout::LayoutMode;
 use crate::ui::text;
@@ -128,12 +127,7 @@ pub fn render(
                 width: row_width,
                 height: 1,
             };
-            frame.render_widget(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_style(theme.hairline()),
-                separator,
-            );
+            chrome::hairline(frame, separator, HairlineSide::Bottom, theme);
         }
         // Clicking a row selects it; clicking the selected row opens it
         // (arrows + Enter, plan §10). The hit block covers the separator
@@ -152,16 +146,7 @@ pub fn render(
     if scrolling {
         let mut scrollbar_state =
             ScrollbarState::new(state.messages.items.len()).position(state.list_scroll);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_symbol(Some("│"))
-                .track_style(Style::new().fg(theme.border).bg(theme.background))
-                .thumb_style(Style::new().fg(theme.dim).bg(theme.background)),
-            rows,
-            &mut scrollbar_state,
-        );
+        frame.render_stateful_widget(chrome::scrollbar(theme), rows, &mut scrollbar_state);
     }
     // An empty search result set is a valid state, not an error — say so
     // once the request is no longer in flight (Phase 9.3). While the list
@@ -173,7 +158,7 @@ pub fn render(
         && matches!(state.active_route(), Some(Route::Search(_)))
         && state.operations.foreground().is_none()
     {
-        render_note(frame, rows, theme, "(no results)");
+        chrome::render_note(frame, rows, theme, "(no results)");
     }
 }
 
@@ -190,25 +175,6 @@ fn list_load_in_flight(state: &AppState) -> bool {
             .is_some_and(|id| state.operations.page_in_flight(id).is_some()),
         None => false,
     }
-}
-
-/// A dim one-line note in the list area (Phase 9: empty search results).
-fn render_note(frame: &mut Frame<'_>, rows: Rect, theme: &Theme, note: &str) {
-    if rows.height == 0 {
-        return;
-    }
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            text::clip(note, rows.width as usize),
-            Style::new().fg(theme.dim),
-        )),
-        Rect {
-            x: rows.x,
-            y: rows.y,
-            width: rows.width,
-            height: 1,
-        },
-    );
 }
 
 fn render_head(
@@ -295,12 +261,7 @@ fn render_head(
         width: area.width,
         height: 1,
     };
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::BOTTOM)
-            .border_style(theme.hairline()),
-        hairline,
-    );
+    chrome::hairline(frame, hairline, HairlineSide::Bottom, theme);
 }
 
 #[allow(clippy::too_many_arguments)]

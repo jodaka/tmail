@@ -1,5 +1,6 @@
 //! Rendering entry point: theme + responsive layout + chrome components.
 
+pub mod chrome;
 pub mod components;
 pub mod dates;
 pub mod layout;
@@ -24,21 +25,16 @@ use crate::ui::layout::LayoutMode;
 
 /// Values injected at render time so neither the reducer nor snapshots
 /// depend on the wall clock (plan §20).
-pub struct RenderContext<'a> {
+pub struct RenderContext {
     /// Current time for the clock and relative dates.
     pub now: DateTime<FixedOffset>,
     /// Preformatted clock label (`Wed Sep 2 · 10:47`).
     pub clock: String,
-    _marker: std::marker::PhantomData<&'a ()>,
 }
 
-impl<'a> RenderContext<'a> {
+impl RenderContext {
     pub fn new(now: DateTime<FixedOffset>, clock: String) -> Self {
-        Self {
-            now,
-            clock,
-            _marker: std::marker::PhantomData,
-        }
+        Self { now, clock }
     }
 }
 
@@ -49,7 +45,7 @@ pub fn render(
     frame: &mut Frame<'_>,
     state: &AppState,
     theme: &Theme,
-    ctx: &RenderContext<'_>,
+    ctx: &RenderContext,
     hits: &mut HitMap,
 ) {
     let area = frame.area();

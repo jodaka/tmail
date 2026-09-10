@@ -7,11 +7,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, FrameExt, Paragraph};
+use ratatui::widgets::{FrameExt, Paragraph};
 
 use crate::app::overlay::Overlay;
+use crate::ui::chrome::{self, centered};
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
@@ -20,12 +21,7 @@ use crate::ui::theme::Theme;
 fn layout(size: (u16, u16)) -> Rect {
     let width = (size.0 * 3 / 4).clamp(46, 96).min(size.0.max(1));
     let height = (size.1 * 3 / 4).clamp(12, 30).min(size.1.max(1));
-    Rect {
-        x: size.0.saturating_sub(width) / 2,
-        y: size.1.saturating_sub(height) / 2,
-        width,
-        height,
-    }
+    centered(size, width, height)
 }
 
 /// The explorer widget's theme, built from the app's palette tokens.
@@ -48,25 +44,14 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
     if area.width < 8 || area.height < 5 {
         return;
     }
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            " Attach file ",
-            Style::new()
-                .fg(theme.background)
-                .bg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .border_style(Style::new().fg(theme.accent))
-        .style(theme.on_background());
-    frame.render_widget(block, area);
-
-    let inner = Rect {
-        x: area.x + 2,
-        y: area.y + 1,
-        width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(2),
+    let Some(inner) = chrome::modal_frame(
+        frame,
+        area,
+        &Span::raw(" Attach file "),
+        theme.accent,
+        theme,
+    ) else {
+        return;
     };
     let inner_w = inner.width as usize;
 

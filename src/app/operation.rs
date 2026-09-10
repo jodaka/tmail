@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::{
@@ -25,7 +24,7 @@ use crate::domain::{
 /// Opaque identifier carried by every backend request and result (plan §5:
 /// "Every request and result carries an `OperationId`"). Constructed only
 /// by the registry; test code may synthesize unknown ids.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OperationId(pub u64);
 
 impl fmt::Display for OperationId {
@@ -36,7 +35,7 @@ impl fmt::Display for OperationId {
 
 /// The typed intent of one backend operation (plan §5: "Effects launch
 /// typed backend requests").
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationKind {
     /// Fetch the mailbox listing.
     LoadMailboxes,
@@ -140,7 +139,7 @@ pub enum OperationKind {
 }
 
 /// Why a draft is being removed (Phase 7.6): it selects the failure UX.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftRemovalReason {
     /// Confirmed discard (plan §14): failures open Retry/Dismiss.
     Discard,
@@ -285,7 +284,7 @@ impl OperationKind {
 /// Serializable typed intent for retrying a failed operation (plan §12).
 /// Retrying creates a *new* [`OperationId`]; the intent itself is replayed
 /// unchanged.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrySpec {
     pub kind: OperationKind,
 }

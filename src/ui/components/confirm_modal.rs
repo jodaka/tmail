@@ -5,27 +5,21 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::action::ClickTarget;
 use crate::app::overlay::{ConfirmButton, Overlay};
 use crate::input::mouse::HitMap;
+use crate::ui::chrome;
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
 /// Dialog geometry for one terminal size; centered like the error modal.
 fn layout(size: (u16, u16)) -> Rect {
-    let width = 52u16.min(size.0.max(1));
-    let height = 8u16.min(size.1.max(1));
-    Rect {
-        x: size.0.saturating_sub(width) / 2,
-        y: size.1.saturating_sub(height) / 2,
-        width,
-        height,
-    }
+    chrome::centered(size, 52, 8)
 }
 
 /// Render the dialog, when open, above everything already drawn.
@@ -42,25 +36,14 @@ pub fn render(
     if area.width < 6 || area.height < 4 {
         return;
     }
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            " Discard draft? ",
-            Style::new()
-                .fg(theme.background)
-                .bg(theme.error)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .border_style(Style::new().fg(theme.error))
-        .style(theme.on_background());
-    frame.render_widget(block, area);
-
-    let inner = Rect {
-        x: area.x + 2,
-        y: area.y + 1,
-        width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(2),
+    let Some(inner) = chrome::modal_frame(
+        frame,
+        area,
+        &Span::raw(" Discard draft? "),
+        theme.error,
+        theme,
+    ) else {
+        return;
     };
     let subject = match dialog.draft.subject.trim() {
         "" => String::from("(no subject)"),
@@ -132,26 +115,17 @@ pub fn render(
 /// when focused); the unfocused buttons stay quiet.
 fn button_spans<'a>(button: ConfirmButton, theme: &'a Theme) -> Vec<Span<'a>> {
     let discard = if button == ConfirmButton::Discard {
-        Span::styled(
-            " [ Discard ] ",
-            Style::new()
-                .fg(theme.background)
-                .bg(theme.error)
-                .add_modifier(Modifier::BOLD),
-        )
+        Span::styled(" [ Discard ] ", theme.button_style(true, theme.error))
     } else {
-        Span::styled(" [ Discard ] ", Style::new().fg(theme.muted))
+        Span::styled(" [ Discard ] ", theme.button_style(false, theme.error))
     };
     let keep = if button == ConfirmButton::Keep {
+        Span::styled(" [ Keep editing ] ", theme.button_style(true, theme.accent))
+    } else {
         Span::styled(
             " [ Keep editing ] ",
-            Style::new()
-                .fg(theme.background)
-                .bg(theme.accent)
-                .add_modifier(Modifier::BOLD),
+            theme.button_style(false, theme.accent),
         )
-    } else {
-        Span::styled(" [ Keep editing ] ", Style::new().fg(theme.muted))
     };
     vec![discard, Span::raw(" "), keep]
 }

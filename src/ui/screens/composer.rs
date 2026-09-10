@@ -12,7 +12,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::action::ClickTarget;
@@ -22,6 +22,7 @@ use crate::app::route::Route;
 use crate::app::state::AppState;
 use crate::domain::DraftSaveState;
 use crate::input::mouse::HitMap;
+use crate::ui::chrome::{self, HairlineSide};
 use crate::ui::theme::Theme;
 
 /// Label column width (mockup `grid-template-columns: 8ch`).
@@ -143,7 +144,17 @@ pub fn render(
         // but one empty line visually separates it from the body (ticket
         // gdqm) where the other fields' rules sit.
         if field != ComposerField::Subject {
-            hairline(frame, x, y, inner_w, theme);
+            chrome::hairline(
+                frame,
+                Rect {
+                    x,
+                    y,
+                    width: inner_w as u16,
+                    height: 1,
+                },
+                HairlineSide::Bottom,
+                theme,
+            );
         }
         y += 1;
     }
@@ -182,16 +193,16 @@ pub fn render(
     // The rule separating the body from the attach/send/discard rows
     // (mockup `.compose-actions` border-top).
     if bottom >= y + 3 {
-        frame.render_widget(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(theme.hairline()),
+        chrome::hairline(
+            frame,
             Rect {
                 x,
                 y: divider_y,
                 width: inner_w as u16,
                 height: 1,
             },
+            HairlineSide::Top,
+            theme,
         );
     }
 
@@ -446,20 +457,6 @@ fn render_field_row(
     spans.extend(value);
     frame.render_widget(
         Paragraph::new(Line::from(spans)),
-        Rect {
-            x,
-            y,
-            width: inner_w as u16,
-            height: 1,
-        },
-    );
-}
-
-fn hairline(frame: &mut Frame<'_>, x: u16, y: u16, inner_w: usize, theme: &Theme) {
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::BOTTOM)
-            .border_style(theme.hairline()),
         Rect {
             x,
             y,

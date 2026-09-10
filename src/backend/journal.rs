@@ -64,11 +64,6 @@ impl DraftJournal {
         Some(Self::open(dir))
     }
 
-    /// Where the journal lives (for logs and tests).
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
     fn file(&self, local_id: &str) -> io::Result<PathBuf> {
         // Ids are minted internally, but never let one escape the directory.
         if local_id.is_empty()

@@ -9,12 +9,11 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{
-    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-};
+use ratatui::widgets::{Paragraph, ScrollbarState};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::overlay::Overlay;
+use crate::ui::chrome;
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
@@ -40,12 +39,7 @@ pub fn layout(size: (u16, u16), theme_count: usize) -> PickerLayout {
     let height = ((theme_count.min(MAX_VISIBLE_ROWS) as u16) + 3).min(size.1.max(1));
     let visible_rows = height.saturating_sub(3).max(1) as usize;
     PickerLayout {
-        area: Rect {
-            x: size.0.saturating_sub(width) / 2,
-            y: size.1.saturating_sub(height) / 2,
-            width,
-            height,
-        },
+        area: chrome::centered(size, width, height),
         visible_rows,
     }
 }
@@ -71,25 +65,14 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
     if layout.area.width < 6 || layout.area.height < 3 {
         return;
     }
-    frame.render_widget(Clear, layout.area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            " Theme ",
-            Style::new()
-                .fg(theme.background)
-                .bg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .border_style(Style::new().fg(theme.accent))
-        .style(theme.on_background());
-    frame.render_widget(block, layout.area);
-
-    let inner = Rect {
-        x: layout.area.x + 2,
-        y: layout.area.y + 1,
-        width: layout.area.width.saturating_sub(4),
-        height: layout.area.height.saturating_sub(2),
+    let Some(inner) = chrome::modal_frame(
+        frame,
+        layout.area,
+        &Span::raw(" Theme "),
+        theme.accent,
+        theme,
+    ) else {
+        return;
     };
     // The hint occupies the last inner row; theme rows fill the rest,
     // windowed by the reducer-maintained scroll offset. When the theme
@@ -143,12 +126,7 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
         // the cursor (position = first visible row, like the message list).
         let mut scrollbar_state = ScrollbarState::new(state.themes.len()).position(dialog.scroll);
         frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_symbol(Some("│"))
-                .track_style(Style::new().fg(theme.border).bg(theme.background))
-                .thumb_style(Style::new().fg(theme.dim).bg(theme.background)),
+            chrome::scrollbar(theme),
             Rect {
                 x: inner.x,
                 y: inner.y,

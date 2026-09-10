@@ -19,7 +19,7 @@ use crate::config::parse_with_issues;
 
 /// How the wizard stores the account secret (ADR 0003 §3.2 W4): the
 /// same pair himalaya accepts, `password.raw` or `password.cmd`.
-#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum SecretStorage {
     /// The secret itself, stored in the config file.
     Raw(String),
@@ -67,9 +67,24 @@ impl SecretStorage {
     }
 }
 
+/// The account-name collision rule (ADR 0003 §3.6): `base`, then
+/// `base-2`, `base-3`, … Shared by the wizard and the save-side tests.
+pub fn next_free_name(existing: &[String], base: &str) -> String {
+    if !existing.iter().any(|name| name == base) {
+        return base.to_string();
+    }
+    for suffix in 2.. {
+        let candidate = format!("{base}-{suffix}");
+        if !existing.iter().any(|name| name == &candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("suffix loop always returns")
+}
+
 /// The account draft the wizard saves, already carrying the final
 /// account name (collision-resolved by the wizard).
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftAccount {
     /// Final `[accounts.<name>]` id, sanitized and collision-resolved.
     pub name: String,
@@ -598,6 +613,8 @@ imap.server = \"imaps://imap.example.com:993\"
 
     #[test]
     fn collision_suffix_names_are_suggested() {
+        // The shared collision rule lives in this module (ADR 0003 §3.6).
+        use super::next_free_name;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[accounts.gmail]\nemail = \"a@gmail.com\"\n").expect("seed");
@@ -728,19 +745,5 @@ imap.server = \"imaps://imap.example.com:993\"
             std::fs::read_to_string(&path).expect("unchanged"),
             "not [valid toml"
         );
-    }
-
-    /// The wizard's collision rule: `base`, then `base-2`, `base-3`, …
-    fn next_free_name(existing: &[String], base: &str) -> String {
-        if !existing.iter().any(|name| name == base) {
-            return base.to_string();
-        }
-        for suffix in 2.. {
-            let candidate = format!("{base}-{suffix}");
-            if !existing.iter().any(|name| name == &candidate) {
-                return candidate;
-            }
-        }
-        unreachable!("suffix loop always returns")
     }
 }

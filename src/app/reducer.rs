@@ -874,73 +874,58 @@ fn bulk_targets(state: &AppState) -> Option<Vec<MessageLocator>> {
 }
 
 fn archive_message(state: &mut AppState) -> Vec<Effect> {
-    if let Some(locators) = bulk_targets(state) {
-        let count = locators.len();
-        state.set_status(format!("Archiving {count} messages…"));
-        return locators
-            .into_iter()
-            .map(|locator| state.operations.start(OperationKind::Archive(locator)))
-            .collect();
-    }
-    match message_target(state) {
-        Some(locator) => {
-            state.set_status("Archiving…");
-            vec![state.operations.start(OperationKind::Archive(locator))]
-        }
-        None => Vec::new(),
-    }
+    bulk_or_single(
+        state,
+        "Archiving {count} messages…",
+        "Archiving…",
+        false,
+        OperationKind::Archive,
+    )
 }
 
 fn trash_message(state: &mut AppState) -> Vec<Effect> {
-    if let Some(locators) = bulk_targets(state) {
-        let count = locators.len();
-        state.set_status(format!("Moving {count} messages to trash…"));
-        return locators
-            .into_iter()
-            .map(|locator| state.operations.start(OperationKind::Trash(locator)))
-            .collect();
-    }
-    match message_target(state) {
-        Some(locator) => {
-            state.set_status("Moving to trash…");
-            vec![state.operations.start(OperationKind::Trash(locator))]
-        }
-        None => Vec::new(),
-    }
+    bulk_or_single(
+        state,
+        "Moving {count} messages to trash…",
+        "Moving to trash…",
+        false,
+        OperationKind::Trash,
+    )
 }
 
 /// Mark read (ticket p0s3): the whole selection in selection mode, else the
 /// focused row (the list has no read shortcut today; the reader marks read
-/// on open, so this arm stays list-only in practice).
+/// on open, so the single path stays list-only).
 fn mark_read(state: &mut AppState) -> Vec<Effect> {
-    if let Some(locators) = bulk_targets(state) {
-        let count = locators.len();
-        state.set_status(format!("Marking {count} messages read…"));
-        return locators
-            .into_iter()
-            .map(|locator| {
-                state.operations.start(OperationKind::SetRead {
-                    locator,
-                    read: true,
-                })
-            })
-            .collect();
-    }
-    if state.focus != Focus::MessageList {
-        return Vec::new();
-    }
-    match message_target(state) {
-        Some(locator) => vec![state.operations.start(OperationKind::SetRead {
+    bulk_or_single(
+        state,
+        "Marking {count} messages read…",
+        "Marking read…",
+        true,
+        |locator| OperationKind::SetRead {
             locator,
             read: true,
-        })],
-        None => Vec::new(),
-    }
+        },
+    )
 }
 
+/// The unread counterpart (ticket p0s3).
+fn mark_unread(state: &mut AppState) -> Vec<Effect> {
+    bulk_or_single(
+        state,
+        "Marking {count} messages unread…",
+        "Marking unread…",
+        false,
+        |locator| OperationKind::SetRead {
+            locator,
+            read: false,
+        },
+    )
+}
+
+/// The target summary carries the current state to invert; the UI only
+/// flips once the backend confirms (plan §19 Phase 4 acceptance).
 fn toggle_star(state: &mut AppState) -> Vec<Effect> {
-    // The target summary carries the current state to invert; the UI only
-    // flips once the backend confirms (plan §19 Phase 4 acceptance).
     let Some(locator) = message_target(state) else {
         return Vec::new();
     };
@@ -954,25 +939,35 @@ fn toggle_star(state: &mut AppState) -> Vec<Effect> {
     })]
 }
 
-fn mark_unread(state: &mut AppState) -> Vec<Effect> {
+/// The shared "bulk in selection mode, else the focused row" skeleton of
+/// the flag operations (ticket p0s3): builds one [`OperationKind`] per
+/// target from `make`, and forms the status message — `bulk` templates one
+/// `{count}` plural in bulk mode, `single` is the fixed phrase for one
+/// message. `list_only` keeps the single path from firing over the reader
+/// (mark read/unread are list shortcuts today); the bulk path always
+/// implies list focus.
+fn bulk_or_single(
+    state: &mut AppState,
+    bulk: &str,
+    single: &str,
+    list_only: bool,
+    make: impl Fn(MessageLocator) -> OperationKind,
+) -> Vec<Effect> {
     if let Some(locators) = bulk_targets(state) {
-        let count = locators.len();
-        state.set_status(format!("Marking {count} messages unread…"));
+        state.set_status(bulk.replace("{count}", &locators.len().to_string()));
         return locators
             .into_iter()
-            .map(|locator| {
-                state.operations.start(OperationKind::SetRead {
-                    locator,
-                    read: false,
-                })
-            })
+            .map(|locator| state.operations.start(make(locator)))
             .collect();
     }
+    if list_only && state.focus != Focus::MessageList {
+        return Vec::new();
+    }
     match message_target(state) {
-        Some(locator) => vec![state.operations.start(OperationKind::SetRead {
-            locator,
-            read: false,
-        })],
+        Some(locator) => {
+            state.set_status(single);
+            vec![state.operations.start(make(locator))]
+        }
         None => Vec::new(),
     }
 }
@@ -1272,6 +1267,14 @@ fn list_failure(state: &mut AppState, failure: &OperationFailure, origin: Operat
 /// operation ids never mutate state: `finish` removes the operation, and a
 /// superseded operation was already cancelled and removed when its
 /// replacement started.
+/// A result payload that cannot belong to this operation kind: wiring
+/// bugs of the manager/reducer contract, never user-facing — log and
+/// keep the state untouched.
+fn unexpected_payload(id: OperationId, kind: &str) -> Vec<Effect> {
+    tracing::warn!(id = %id, "unexpected payload for a {kind} operation");
+    Vec::new()
+}
+
 fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
     let Some(op) = state.operations.get(result.id) else {
         tracing::debug!(id = %result.id, "dropping result for unknown or cancelled operation");
@@ -1295,10 +1298,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                     tracing::warn!(id = %result.id, "page payload for a mailbox operation");
                     Vec::new()
                 }
-                Ok(_) => {
-                    tracing::warn!(id = %result.id, "unexpected payload for a mailbox operation");
-                    Vec::new()
-                }
+                Ok(_) => unexpected_payload(result.id, "mailbox"),
                 Err(failure) => {
                     // The sidebar keeps a dim failed note; the modal carries
                     // the full sanitized detail and the retry intent.
@@ -1351,10 +1351,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                     list_failure(state, failure, origin);
                     Vec::new()
                 }
-                _ => {
-                    tracing::warn!(id = %result.id, "unexpected payload for a page operation");
-                    Vec::new()
-                }
+                _ => unexpected_payload(result.id, "page"),
             }
         }
         OperationKind::Search(request) => {
@@ -1386,10 +1383,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                     }
                     effects
                 }
-                Ok(_) => {
-                    tracing::warn!(id = %result.id, "unexpected payload for a search operation");
-                    Vec::new()
-                }
+                Ok(_) => unexpected_payload(result.id, "search"),
                 Err(failure) => {
                     list_failure(state, failure, origin);
                     Vec::new()
@@ -1416,10 +1410,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                 Ok(OperationOutcome::Message(message)) => {
                     message_loaded(state, (**message).clone())
                 }
-                Ok(_) => {
-                    tracing::warn!(id = %result.id, "unexpected payload for a message operation");
-                    Vec::new()
-                }
+                Ok(_) => unexpected_payload(result.id, "message"),
                 Err(failure) => {
                     // The reader shows a failure placeholder; the modal
                     // carries Retry/Dismiss (plan §12). Coherent state.
@@ -1450,10 +1441,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                 Ok(OperationOutcome::Message(message)) => {
                     draft_message_loaded(state, (**message).clone())
                 }
-                Ok(_) => {
-                    tracing::warn!(id = %result.id, "unexpected payload for a draft operation");
-                    Vec::new()
-                }
+                Ok(_) => unexpected_payload(result.id, "draft"),
                 Err(failure) => open_error_modal(state, failure),
             }
         }
@@ -1463,10 +1451,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                 Ok(OperationOutcome::Message(message)) => {
                     preview_loaded(state, (**message).clone())
                 }
-                Ok(_) => {
-                    tracing::warn!(id = %result.id, "unexpected payload for a preview");
-                    Vec::new()
-                }
+                Ok(_) => unexpected_payload(result.id, "preview"),
                 Err(failure) => {
                     // A preview is decorative background context (ticket
                     // wxtx): its failure never interrupts the user and is
@@ -1489,7 +1474,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                     apply_flag(state, locator, FlagChange::Read(*read));
                 }
                 Ok(_) => {
-                    tracing::warn!(id = %result.id, "unexpected payload for a flag operation");
+                    unexpected_payload(result.id, "flag");
                 }
                 Err(failure) => {
                     open_error_modal(state, failure);
@@ -1504,7 +1489,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                     apply_flag(state, locator, FlagChange::Starred(*starred));
                 }
                 Ok(_) => {
-                    tracing::warn!(id = %result.id, "unexpected payload for a flag operation");
+                    unexpected_payload(result.id, "flag");
                 }
                 Err(failure) => {
                     open_error_modal(state, failure);
@@ -1516,10 +1501,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             state.operations.finish(result.id);
             match &result.outcome {
                 Ok(OperationOutcome::Done) => message_moved(state, locator),
-                Ok(_) => {
-                    tracing::warn!(id = %result.id, "unexpected payload for a move operation");
-                    Vec::new()
-                }
+                Ok(_) => unexpected_payload(result.id, "move"),
                 Err(failure) => {
                     // Nothing was removed locally: the list/reader still
                     // show the message (plan §12 coherent failure state).
@@ -1535,10 +1517,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             state.operations.finish(result.id);
             match &result.outcome {
                 Ok(OperationOutcome::Drafts(drafts)) => drafts_restored(state, drafts),
-                Ok(_) => {
-                    tracing::warn!(id = %result.id, "unexpected payload for a draft restore");
-                    Vec::new()
-                }
+                Ok(_) => unexpected_payload(result.id, "draft restore"),
                 Err(failure) => {
                     // The journal is the crash-safety net; a failure to read
                     // it must be visible (plan §12) even though mail
@@ -1556,10 +1535,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             // is best-effort (ADR 0002) and never claims a failed send.
             match &result.outcome {
                 Ok(OperationOutcome::Done) => Vec::new(),
-                Ok(_) => {
-                    tracing::warn!(id = %result.id, "unexpected payload for a draft removal");
-                    Vec::new()
-                }
+                Ok(_) => unexpected_payload(result.id, "draft removal"),
                 Err(failure) => match reason {
                     DraftRemovalReason::Discard => open_error_modal(state, failure),
                     DraftRemovalReason::Sent => {
@@ -1578,10 +1554,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                 Ok(OperationOutcome::SendOutcome(outcome)) => {
                     send_completed(state, outcome, message)
                 }
-                Ok(_) => {
-                    tracing::warn!(id = %result.id, "unexpected payload for a send");
-                    Vec::new()
-                }
+                Ok(_) => unexpected_payload(result.id, "send"),
                 Err(failure) => {
                     // Structural refusal (missing identity, spawn I/O):
                     // nothing was transmitted, the draft stays intact and
@@ -1623,10 +1596,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                     }
                     Vec::new()
                 }
-                Ok(_) => {
-                    tracing::warn!(id = %result.id, "unexpected payload for an attachment save");
-                    Vec::new()
-                }
+                Ok(_) => unexpected_payload(result.id, "attachment save"),
                 Err(failure) => open_error_modal(state, failure),
             }
         }
@@ -1637,10 +1607,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                     state.set_status("Opened");
                     Vec::new()
                 }
-                Ok(_) => {
-                    tracing::warn!(id = %result.id, "unexpected payload for an open");
-                    Vec::new()
-                }
+                Ok(_) => unexpected_payload(result.id, "open"),
                 Err(failure) => open_error_modal(state, failure),
             }
         }
@@ -1766,10 +1733,7 @@ fn save_draft_completed(
             state.set_status("Draft save failed");
             Vec::new()
         }
-        Ok(_) => {
-            tracing::warn!(id = %result.id, "unexpected payload for a draft save");
-            Vec::new()
-        }
+        Ok(_) => unexpected_payload(result.id, "draft save"),
     }
 }
 
@@ -1832,10 +1796,7 @@ fn attachment_validated(
             }
             Vec::new()
         }
-        Ok(_) => {
-            tracing::warn!(id = %result.id, "unexpected payload for an attachment validation");
-            Vec::new()
-        }
+        Ok(_) => unexpected_payload(result.id, "attachment validation"),
     }
 }
 
@@ -1873,10 +1834,7 @@ fn attachment_listing_ready(state: &mut AppState, result: &OperationResult) -> V
             }
             Vec::new()
         }
-        Ok(_) => {
-            tracing::warn!(id = %result.id, "unexpected payload for a directory listing");
-            Vec::new()
-        }
+        Ok(_) => unexpected_payload(result.id, "directory listing"),
     }
 }
 
@@ -1987,11 +1945,7 @@ fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
     if route.summary.is_read {
         return Vec::new();
     }
-    let locator = MessageLocator {
-        mailbox: route.mailbox_id.clone(),
-        id: route.summary.id.clone(),
-        message_id: route.summary.message_id.clone(),
-    };
+    let locator = route.summary.into_locator();
     vec![state.operations.start(OperationKind::SetRead {
         locator,
         read: true,
@@ -2281,13 +2235,11 @@ fn start_missing_previews(state: &mut AppState) -> Vec<Effect> {
                 // Genuinely unknown: fetch in the background, once.
                 budget -= 1;
                 state.preview_requested.insert(summary.id.clone());
-                effects.push(state.operations.start_background(OperationKind::Preview(
-                    crate::domain::MessageLocator {
-                        mailbox: summary.mailbox_id.clone(),
-                        id: summary.id.clone(),
-                        message_id: summary.message_id.clone(),
-                    },
-                )));
+                effects.push(
+                    state
+                        .operations
+                        .start_background(OperationKind::Preview(summary.into_locator())),
+                );
             }
             // Beyond the window: leave unrequested for the rolling refill.
             None => {}
@@ -2864,11 +2816,7 @@ fn open_draft_message(state: &mut AppState, summary: crate::domain::MessageSumma
         }
         Secured::Nothing => {}
     }
-    let locator = MessageLocator {
-        mailbox: summary.mailbox_id.clone(),
-        id: summary.id.clone(),
-        message_id: summary.message_id.clone(),
-    };
+    let locator = summary.into_locator();
     state.set_status("Opening draft…");
     effects.push(state.operations.start(OperationKind::OpenDraft(locator)));
     effects
@@ -2917,11 +2865,7 @@ fn draft_message_loaded(state: &mut AppState, message: crate::domain::Message) -
 /// untouched so `Esc` restores them exactly (plan §19 Phase 4).
 fn open_message(state: &mut AppState, summary: crate::domain::MessageSummary) -> Vec<Effect> {
     let mailbox_id = summary.mailbox_id.clone();
-    let locator = MessageLocator {
-        mailbox: mailbox_id.clone(),
-        id: summary.id.clone(),
-        message_id: summary.message_id.clone(),
-    };
+    let locator = summary.into_locator();
     state.routes.push(Route::Message(MessageRoute {
         mailbox_id,
         summary,

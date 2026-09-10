@@ -25,7 +25,7 @@
 
 use std::collections::HashMap;
 
-use crossterm::event::{KeyEvent, KeyModifiers};
+use crossterm::event::KeyEvent;
 
 use crate::app::action::Action;
 use crate::app::focus::Focus;
@@ -111,39 +111,41 @@ const DEFAULT_READER: &[DefaultBinding] = &[binding!("trash", Action::Trash, ["d
 /// Actions that must keep at least one binding: the escape hatches.
 const STRUCTURAL_ACTIONS: &[&str] = &["cancel", "activate", "focus_next", "focus_previous", "quit"];
 
-/// Every bindable action name → the action it dispatches. The defaults
-/// above and the config both address actions through these names.
+/// Every bindable action name → the action it dispatches. The default
+/// tables are the single source of truth: each `binding!` carries the
+/// config name and the action on one line, and both lookups walk the
+/// tables, so a name can never drift away from the action it dispatches.
+/// The defaults above and the config both address actions through these
+/// names.
 fn action_by_name(name: &str) -> Option<Action> {
-    let action = match name {
-        "move_up" => Action::MoveUp,
-        "move_down" => Action::MoveDown,
-        "previous_page" => Action::PagePrevious,
-        "next_page" => Action::PageNext,
-        "activate" => Action::Activate,
-        "cancel" => Action::BackOrCancel,
-        "focus_next" => Action::FocusNext,
-        "focus_previous" => Action::FocusPrevious,
-        "open_search" => Action::OpenSearch,
-        "compose" => Action::Compose,
-        "refresh" => Action::Refresh,
-        "quit" => Action::Quit,
-        "select_all" => Action::SelectAll,
-        "toggle_mouse" => Action::ToggleMouseCapture,
-        "theme" => Action::OpenThemePicker,
-        "reply" => Action::Reply,
-        "reply_all" => Action::ReplyAll,
-        "forward" => Action::Forward,
-        "archive" => Action::Archive,
-        "star" => Action::ToggleStar,
-        "mark_unread" => Action::MarkUnread,
-        "mark_read" => Action::MarkRead,
-        "trash" => Action::Trash,
-        "toggle_selected" => Action::ToggleSelected,
-        "save_attachment" => Action::SaveAttachment,
-        "open_attachment" => Action::OpenAttachment,
-        _ => return None,
-    };
-    Some(action)
+    named_default_binding(name).map(|binding| binding.action.clone())
+}
+
+/// The config-facing name of an action (reverse of [`action_by_name`]),
+/// used to describe binding owners in warnings. `None` never happens for
+/// actions this module created, but keeps the helper total: data-carrying
+/// actions (`SearchEdit`, `BackendCompleted`, …) bind no names.
+fn action_name_of(action: &Action) -> Option<&'static str> {
+    named_default_binding_by_action(action).map(|binding| binding.name)
+}
+
+/// The default binding with this config name, from the built-in tables.
+fn named_default_binding(name: &str) -> Option<&'static DefaultBinding> {
+    DEFAULT_GLOBAL
+        .iter()
+        .chain(DEFAULT_LIST.iter())
+        .chain(DEFAULT_READER.iter())
+        .find(|binding| binding.name == name)
+}
+
+/// The default binding that dispatches to `action`, from the built-in
+/// tables.
+fn named_default_binding_by_action(action: &Action) -> Option<&'static DefaultBinding> {
+    DEFAULT_GLOBAL
+        .iter()
+        .chain(DEFAULT_LIST.iter())
+        .chain(DEFAULT_READER.iter())
+        .find(|binding| &binding.action == action)
 }
 
 /// One context's bindings: key → action, plus action → keys (for
@@ -356,11 +358,7 @@ impl KeyMap {
     /// The action a pressed key dispatches, consulting the focus's own
     /// context table first, then the global one.
     pub fn lookup(&self, key: &KeyEvent, focus: Focus) -> Option<Action> {
-        let spec = KeySpec {
-            code: key.code,
-            ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
-            alt: key.modifiers.contains(KeyModifiers::ALT),
-        };
+        let spec = KeySpec::from_event(key);
         for context in contexts_for_focus(focus) {
             let table = match context {
                 Some(Context::List) => &self.list,
@@ -397,49 +395,13 @@ impl KeyMap {
     }
 }
 
-/// The config-facing name of an action (reverse of [`action_by_name`]),
-/// used to describe binding owners in warnings. `None` never happens for
-/// actions this module created, but keeps the helper total.
-fn action_name_of(action: &Action) -> Option<&'static str> {
-    let name = match action {
-        Action::MoveUp => "move_up",
-        Action::MoveDown => "move_down",
-        Action::PagePrevious => "previous_page",
-        Action::PageNext => "next_page",
-        Action::Activate => "activate",
-        Action::BackOrCancel => "cancel",
-        Action::FocusNext => "focus_next",
-        Action::FocusPrevious => "focus_previous",
-        Action::OpenSearch => "open_search",
-        Action::Compose => "compose",
-        Action::Refresh => "refresh",
-        Action::Quit => "quit",
-        Action::SelectAll => "select_all",
-        Action::ToggleMouseCapture => "toggle_mouse",
-        Action::OpenThemePicker => "theme",
-        Action::Reply => "reply",
-        Action::ReplyAll => "reply_all",
-        Action::Forward => "forward",
-        Action::Archive => "archive",
-        Action::ToggleStar => "star",
-        Action::MarkUnread => "mark_unread",
-        Action::MarkRead => "mark_read",
-        Action::Trash => "trash",
-        Action::ToggleSelected => "toggle_selected",
-        Action::SaveAttachment => "save_attachment",
-        Action::OpenAttachment => "open_attachment",
-        _ => return None,
-    };
-    Some(name)
-}
-
 /// A default table must never bind one key to two actions, and every
 /// default must parse; this test walks the constants so drift fails here
 /// instead of at a user's startup.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     #[test]
     fn default_tables_are_conflict_free_and_parse() {

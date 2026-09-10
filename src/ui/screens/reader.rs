@@ -20,11 +20,12 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Paragraph, ScrollbarState};
 
 use crate::app::action::ClickTarget;
 use crate::app::state::{AppState, Loadable};
 use crate::input::mouse::HitMap;
+use crate::ui::chrome;
 use crate::ui::dates;
 use crate::ui::rich::{RichLine, RichSpan, RichStyle};
 use crate::ui::text;
@@ -353,8 +354,23 @@ pub fn render(
     let header = header_lines(state, width);
     let body = scroll_document(state, width);
 
-    // The header never scrolls: subject and meta stay on screen however
-    // long the message is (ticket 6864).
+    let body_area = render_header(frame, area, theme, &header);
+    if body_area.height == 0 {
+        return;
+    }
+    // While the message loads the body carries nothing: the centered pane
+    // spinner stands in for it (ticket m3by).
+    if matches!(state.open_message, Loadable::Loading) {
+        crate::ui::components::spinner::render_centered(frame, body_area, theme, state.ticks);
+        return;
+    }
+    render_body(frame, body_area, theme, &body, state.reader_scroll);
+    push_chip_targets(hits, &body, body_area, state);
+}
+
+/// The fixed header: subject, meta block, hairline, each field padded two
+/// symbols in from the panel edges (ticket 6864). It never scrolls.
+fn render_header(frame: &mut Frame<'_>, area: Rect, theme: &Theme, header: &[ReaderLine]) -> Rect {
     let header_h = header.len().min(area.height as usize) as u16;
     for (i, line) in header.iter().take(header_h as usize).enumerate() {
         let row = Rect {
@@ -368,26 +384,26 @@ pub fn render(
             row,
         );
     }
-
-    // The body viewport is whatever is left under the fixed header.
-    let body_area = Rect {
+    Rect {
         x: area.x,
         y: area.y + header_h,
         width: area.width,
         height: area.height - header_h,
-    };
-    if body_area.height == 0 {
-        return;
     }
+}
+
+/// The scrollable body viewport with its scrollbar (appears only when the
+/// body overflows the viewport, ticket 6864).
+fn render_body(
+    frame: &mut Frame<'_>,
+    body_area: Rect,
+    theme: &Theme,
+    body: &[ReaderLine],
+    reader_scroll: usize,
+) {
     let viewport = body_area.height as usize;
     let total = body.len();
-    // While the message loads the body carries nothing: the centered pane
-    // spinner stands in for it (ticket m3by).
-    if matches!(state.open_message, Loadable::Loading) {
-        crate::ui::components::spinner::render_centered(frame, body_area, theme, state.ticks);
-        return;
-    }
-    let start = state.reader_scroll.min(total.saturating_sub(1));
+    let start = reader_scroll.min(total.saturating_sub(1));
     let scrolling = total > viewport;
     // A visible scrollbar reserves its column: body text clips one column
     // short so text and scrollbar never overlap. When the message fits,
@@ -414,21 +430,17 @@ pub fn render(
     frame.render_widget(Paragraph::new(visible), text_area);
     if scrolling {
         let mut scrollbar_state = ScrollbarState::new(total).position(start);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_symbol(Some("│"))
-                .track_style(Style::new().fg(theme.border).bg(theme.background))
-                .thumb_style(Style::new().fg(theme.dim).bg(theme.background)),
-            body_area,
-            &mut scrollbar_state,
-        );
+        frame.render_stateful_widget(chrome::scrollbar(theme), body_area, &mut scrollbar_state);
     }
+}
 
-    // Clickable attachment chips are indexed across the whole body, so
-    // scrolling never shifts the identity of the visible chips; their
-    // rects follow the scroll offset.
+/// Clickable attachment chips indexed across the whole body, so scrolling
+/// never shifts the identity of the visible chips; their rects follow the
+/// scroll offset.
+fn push_chip_targets(hits: &mut HitMap, body: &[ReaderLine], body_area: Rect, state: &AppState) {
+    let viewport = body_area.height as usize;
+    let start = state.reader_scroll.min(body.len().saturating_sub(1));
+    let width = body_area.width;
     let mut chip_index = 0usize;
     for (offset, line) in body.iter().enumerate() {
         if matches!(line, ReaderLine::Chip { .. }) {
@@ -438,7 +450,7 @@ pub fn render(
                     Rect {
                         x: body_area.x,
                         y: body_area.y + (offset - start) as u16,
-                        width: body_area.width,
+                        width,
                         height: 1,
                     },
                     ClickTarget::ReaderAttachment(chip_index),

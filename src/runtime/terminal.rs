@@ -29,13 +29,21 @@ impl TerminalGuard {
 /// click/wheel events reach the app; otherwise the terminal keeps its
 /// native selection behavior and no mouse events arrive.
 pub fn enable(mouse: bool) -> io::Result<TerminalGuard> {
+    let guard = enter(mouse, "terminal entered (raw mode + alternate screen)")?;
+    install_panic_hook();
+    Ok(guard)
+}
+
+/// The six shared setup lines of [`enable`] and [`reenter`]: raw mode,
+/// alternate screen, mouse capture, backend, fresh ratatui `Terminal` with
+/// empty buffers (so a fresh guard repaints from scratch).
+fn enter(mouse: bool, what: &'static str) -> io::Result<TerminalGuard> {
     term::enable_raw_mode()?;
     execute!(io::stdout(), term::EnterAlternateScreen)?;
     set_mouse_capture(mouse)?;
     let backend = CrosstermBackend::new(io::stdout());
     let terminal = Terminal::new(backend)?;
-    install_panic_hook();
-    tracing::debug!(mouse, "terminal entered (raw mode + alternate screen)");
+    tracing::debug!(mouse, "{what}");
     Ok(TerminalGuard { terminal })
 }
 
@@ -79,13 +87,7 @@ pub fn suspend() {
 /// repaints the whole screen without a cursor-position query (which the
 /// paused event reader would race for).
 pub fn reenter(mouse: bool) -> io::Result<TerminalGuard> {
-    term::enable_raw_mode()?;
-    execute!(io::stdout(), term::EnterAlternateScreen)?;
-    set_mouse_capture(mouse)?;
-    let backend = CrosstermBackend::new(io::stdout());
-    let terminal = Terminal::new(backend)?;
-    tracing::debug!(mouse, "terminal re-entered after the external editor");
-    Ok(TerminalGuard { terminal })
+    enter(mouse, "terminal re-entered after the external editor")
 }
 
 fn install_panic_hook() {

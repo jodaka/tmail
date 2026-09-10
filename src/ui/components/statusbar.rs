@@ -9,7 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::action::{BulkOp, ClickTarget};
@@ -17,6 +17,7 @@ use crate::app::route::Route;
 use crate::app::state::AppState;
 use crate::input::keymap::Context;
 use crate::input::mouse::HitMap;
+use crate::ui::chrome::{self, HairlineSide};
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
@@ -38,12 +39,7 @@ pub fn render(
         width: area.width,
         height: 1,
     };
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::TOP)
-            .border_style(theme.hairline()),
-        hairline,
-    );
+    chrome::hairline(frame, hairline, HairlineSide::Top, theme);
 
     let row = Rect {
         x: area.x,

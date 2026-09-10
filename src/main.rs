@@ -218,7 +218,7 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
     tracing::info!(
         config = ?config.path,
         account = ?config.account,
-        page_size = config.page_size,
+        page_size = config.mail.page_size,
         "configuration loaded"
     );
 
@@ -251,17 +251,17 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
     // events arrive at all. The guard is optional: `None` only while the
     // external editor owns the terminal (Phase 11).
     let mut guard = Some(terminal::enable(config.mouse)?);
-    let mut state = AppState::initial(config.page_size);
+    let mut state = AppState::initial(config.mail.page_size);
     // The configured keymap replaces the defaults-only seed (the reducer
     // and hint rows read it through `state`).
     state.keymap = built_keymap.keymap;
     // Reply-all excludes the configured account address (Phase 7.5).
     state.account_email = config.account_email.clone();
     // Periodic refresh timer (Phase 9.4); `0` disables it.
-    state.refresh_interval_seconds = config.refresh_interval_seconds;
+    state.refresh_interval_seconds = config.mail.refresh_interval_seconds;
     // Draft autosave debounce (Phase 10.4 wiring of
-    // `[tmail.composer].autosave_delay_ms`).
-    state.autosave_delay_ms = config.autosave_delay_ms;
+    // `[tmail.composer].composer.autosave_delay_ms`).
+    state.autosave_delay_ms = config.composer.autosave_delay_ms;
     // `[tmail].view_mode` list density (Gmail-style): comfortable splits
     // message rows with faint horizontal separators, so each message
     // takes two terminal lines.
@@ -269,14 +269,14 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
     // Status-message fade-and-clear window (ticket h1d7); `0` disables it.
     state.status_timeout_seconds = config.status_timeout;
     // The external editor argv (Phase 11.4); `None` = builtin editor.
-    state.editor_command = config.editor_command.clone();
+    state.editor_command = config.composer.editor_command.clone();
     // Tmail-owned summary cache (ticket haeb): instant warm starts, the
     // fresh page always loads in the background afterwards.
     state.page_cache = tmail::app::page_cache::PageCache::open_default(
         config.account.as_deref(),
         tmail::app::page_cache::CacheLimits {
-            max_messages: config.cache_max_messages,
-            max_bytes: config.cache_max_bytes,
+            max_messages: config.cache.max_messages,
+            max_bytes: config.cache.max_bytes,
         },
     );
     // Mouse capture starts in the configured mode (Phase 10.4); `m`
@@ -287,10 +287,10 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
     }
     // Ticket kjfq: `page_size_auto` sizes each page to the number of
     // message rows the terminal can show, so the page fits the list
-    // without scrolling; manual pagination keeps `[tmail.mail].page_size`.
+    // without scrolling; manual pagination keeps `[tmail.mail].mail.page_size`.
     // The view mode decides how many lines a message costs.
-    state.page_size_auto = config.page_size_auto;
-    if config.page_size_auto {
+    state.page_size_auto = config.mail.page_size_auto;
+    if config.mail.page_size_auto {
         state.messages.limit =
             tmail::ui::layout::messages_visible(state.size, state.view_mode).max(1);
     }
@@ -303,9 +303,9 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
     // table. NO_COLOR wins over all of it (plan §18): every palette
     // becomes monochrome, so switching stays a harmless no-op.
     let (mut themes, theme_index) = Theme::theme_list(
-        &config.theme_name,
-        &config.theme_overrides,
-        &config.theme_tables,
+        &config.theme.name,
+        &config.theme.overrides,
+        &config.theme.tables,
     );
     if Theme::no_color_requested() {
         for (_, theme) in &mut themes {
@@ -391,7 +391,7 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
         let now = Local::now().fixed_offset();
         // The top-right clock is config-gated and off by default (ticket
         // w7f5): an empty label renders nothing.
-        let clock_label = if config.ui_clock {
+        let clock_label = if config.ui.clock {
             format_clock(now)
         } else {
             String::new()
@@ -487,33 +487,6 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
     }
     Ok(SessionOutcome::Exit(ExitCode::SUCCESS))
 }
-/// Launch the effects a state transition produced: each one gets its
-/// cancellation token from the registry, so a later `Esc` can cancel
-/// exactly that work. The `EditExternally` effect never reaches the
-/// manager: the external editor must run on the thread that owns the
-/// terminal (plan §14, Phase 11), so it is awaited inline by the caller —
-/// `handle_effects` below.
-fn launch(manager: &OperationManager, state: &AppState, effects: Vec<Effect>) {
-    for effect in effects {
-        if matches!(
-            effect.kind,
-            tmail::app::operation::OperationKind::EditExternally { .. }
-        ) {
-            tracing::warn!(id = %effect.id, "external editor effect reached the manager; dropped");
-            continue;
-        }
-        let Some(token) = state.operations.cancellation(effect.id) else {
-            tracing::warn!(id = %effect.id, "effect without a registered operation");
-            continue;
-        };
-        let ctx = RequestContext {
-            operation: effect.id,
-            cancellation: token,
-        };
-        manager.launch(effect, ctx);
-    }
-}
-
 /// Route one batch of reducer effects: async backend operations go to the
 /// manager; the external editor runs here, synchronously, on the terminal
 /// owner (plan §14 steps 2–7, Phase 11): pause the event reader so it
@@ -552,7 +525,9 @@ async fn handle_effects(
             );
             // The import's follow-up save is a plain backend effect; the
             // editor flow itself cannot re-enter here.
-            launch(manager, state, effects);
+            for effect in effects {
+                launch_one(manager, state, effect);
+            }
         } else {
             launch_one(manager, state, effect);
         }
@@ -560,8 +535,18 @@ async fn handle_effects(
     Ok(())
 }
 
-/// Launch one non-editor effect.
+/// Launch one non-editor effect. `EditExternally` must never pass here: the
+/// external editor runs on the terminal owner in [`handle_effects`] — if
+/// one reaches this point it is a wiring bug, so it is logged and dropped
+/// instead of spawned like a backend call.
 fn launch_one(manager: &OperationManager, state: &AppState, effect: Effect) {
+    if matches!(
+        effect.kind,
+        tmail::app::operation::OperationKind::EditExternally { .. }
+    ) {
+        tracing::warn!(id = %effect.id, "external editor effect reached the manager; dropped");
+        return;
+    }
     let Some(token) = state.operations.cancellation(effect.id) else {
         tracing::warn!(id = %effect.id, "effect without a registered operation");
         return;

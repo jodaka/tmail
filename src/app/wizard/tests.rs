@@ -592,6 +592,7 @@ fn server_url_parsing_maps_schemes_to_security() {
 
 #[test]
 fn collision_suffix_rule_generates_the_next_free_name() {
+    use crate::config::write::next_free_name;
     let existing = vec![
         String::from("gmail"),
         String::from("gmail-2"),

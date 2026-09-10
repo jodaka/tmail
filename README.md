@@ -387,7 +387,6 @@ no settings/help UI, and no offline sync.
 
 ```sh
 cargo build
-cargo run --bin probe -- <config.toml>   # Phase 0 backend probe harness
 cargo test --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all
@@ -404,7 +403,6 @@ python3 fixtures/smoke/ci_smoke.py --bin target/debug/tmail   # pty smoke (CI ru
 - `src/backend/` — `MailBackend` trait + Himalaya CLI adapter (DTOs private)
 - `src/config/` — shared one-file configuration (`[tmail]` + aliases)
 - `src/input/` — keyboard and mouse → action translation
-- `src/bin/probe.rs` — subprocess probe (argv-only, stdin, cancellation)
 - `tests/fake_himalaya.rs` — fake `himalaya` executable for contract tests
 - `tests/backend_contract.rs` — backend contract test suite
 - `TMAIL_IMPLEMENTATION_PLAN.md` — the product/engineering specification

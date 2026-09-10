@@ -43,6 +43,17 @@ pub const FOCUS_ORDER: [Focus; 3] = [Focus::SearchField, Focus::Sidebar, Focus::
 
 impl Focus {
     pub fn next(self) -> Self {
+        self.step(1)
+    }
+
+    pub fn previous(self) -> Self {
+        self.step(-1)
+    }
+
+    /// One step around the Tab cycle (`next` is `+1`, `previous` is `-1`).
+    /// The self-cycle foci — modals, the wizard, the reader, the composer —
+    /// stay put: the modal/composer handles Tab itself.
+    fn step(self, dir: isize) -> Self {
         match self {
             // The modal foci never cycle; the modal handles Tab itself.
             Focus::ErrorModal | Focus::Dialog | Focus::ThemePicker | Focus::Wizard => self,
@@ -58,22 +69,9 @@ impl Focus {
                     .iter()
                     .position(|f| *f == self)
                     .expect("focus in order");
-                FOCUS_ORDER[(i + 1) % FOCUS_ORDER.len()]
-            }
-        }
-    }
-
-    pub fn previous(self) -> Self {
-        match self {
-            Focus::ErrorModal | Focus::Dialog | Focus::ThemePicker | Focus::Wizard => self,
-            Focus::Reader => self,
-            Focus::Composer => self,
-            _ => {
-                let i = FOCUS_ORDER
-                    .iter()
-                    .position(|f| *f == self)
-                    .expect("focus in order");
-                FOCUS_ORDER[(i + FOCUS_ORDER.len() - 1) % FOCUS_ORDER.len()]
+                let len = FOCUS_ORDER.len() as isize;
+                let n = (i as isize + dir).rem_euclid(len) as usize;
+                FOCUS_ORDER[n]
             }
         }
     }

@@ -795,7 +795,9 @@ fn submit_credentials(wizard: &mut WizardState, state: &mut AppState) -> Vec<Eff
                     Some(String::from("enter the command that prints the password"));
                 return Vec::new();
             }
-            if let Err(message) = validate_command(&command) {
+            if let Err(message) =
+                crate::config::validate_plain_command(&command, "the password command")
+            {
                 wizard.last_error = Some(message);
                 return Vec::new();
             }
@@ -824,28 +826,6 @@ fn submit_credentials(wizard: &mut WizardState, state: &mut AppState) -> Vec<Eff
     });
     wizard.in_flight = Some(effect.id);
     vec![effect]
-}
-
-/// `password.cmd` validation, mirroring the editor command rule
-/// (ADR 0003 §3.2 W4): Tmail never spawns a shell, so shell
-/// metacharacters are rejected; the program must exist.
-fn validate_command(command: &str) -> Result<(), String> {
-    const FORBIDDEN: [char; 10] = ['|', '&', ';', '<', '>', '`', '$', '\\', '"', '\''];
-    if command.chars().any(|c| FORBIDDEN.contains(&c)) {
-        return Err(String::from(
-            "the command must be a plain command without shell metacharacters",
-        ));
-    }
-    let Some(program) = command.split_whitespace().next() else {
-        return Err(String::from("the command is empty"));
-    };
-    if crate::config::program_exists(program) {
-        Ok(())
-    } else if program.contains('/') {
-        Err(format!("program {program:?} does not exist"))
-    } else {
-        Err(format!("program {program:?} was not found on PATH"))
-    }
 }
 
 /// W6 `Enter`: save the account into the resolved config file.
@@ -1032,28 +1012,14 @@ fn prepare_confirm(wizard: &mut WizardState) {
     }
     let collides = wizard.existing_names.contains(&wizard.account_name);
     wizard.name_choice = if collides {
-        let suffix = next_free_name(&wizard.existing_names, &wizard.account_name);
+        let suffix =
+            crate::config::write::next_free_name(&wizard.existing_names, &wizard.account_name);
         wizard.name_choice_index = 0;
         Some(NameChoice::Suffix(suffix))
     } else {
         wizard.name_choice_index = 0;
         None
     };
-}
-
-/// The wizard's collision rule (ADR 0003 §3.6): `base`, then `base-2`,
-/// `base-3`, …
-pub fn next_free_name(existing: &[String], base: &str) -> String {
-    if !existing.iter().any(|name| name == base) {
-        return base.to_string();
-    }
-    for suffix in 2.. {
-        let candidate = format!("{base}-{suffix}");
-        if !existing.iter().any(|name| name == &candidate) {
-            return candidate;
-        }
-    }
-    unreachable!("suffix loop always returns")
 }
 
 #[cfg(test)]

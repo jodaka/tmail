@@ -304,11 +304,7 @@ impl AppState {
             .items
             .iter()
             .filter(|m| self.selected.contains(&m.id))
-            .map(|m| crate::domain::MessageLocator {
-                mailbox: m.mailbox_id.clone(),
-                id: m.id.clone(),
-                message_id: m.message_id.clone(),
-            })
+            .map(MessageSummary::into_locator)
             .collect()
     }
 
@@ -327,21 +323,12 @@ impl AppState {
             Focus::Reader => self.open_summary(),
             _ => self.selected_message(),
         }?;
-        Some(crate::domain::MessageLocator {
-            mailbox: summary.mailbox_id.clone(),
-            id: summary.id.clone(),
-            message_id: summary.message_id.clone(),
-        })
+        Some(summary.into_locator())
     }
 
     /// Unread count of the mailbox currently displayed, when known.
     pub fn active_mailbox_unread(&self) -> Option<u64> {
-        let id = self.active_route()?.mailbox_id()?;
-        self.mailboxes
-            .as_loaded()?
-            .iter()
-            .find(|m| &m.id == id)
-            .and_then(|m| m.unread_count)
+        self.active_mailbox().and_then(|m| m.unread_count)
     }
 
     /// Role of the mailbox currently displayed, when known (ADR 0001: the
@@ -349,22 +336,20 @@ impl AppState {
     /// The Drafts role changes what Enter on a list row does (a draft
     /// reopens in the composer, plan §14).
     pub fn active_mailbox_role(&self) -> Option<MailboxRole> {
-        let id = self.active_route()?.mailbox_id()?;
-        self.mailboxes
-            .as_loaded()?
-            .iter()
-            .find(|m| &m.id == id)
-            .and_then(|m| m.role)
+        self.active_mailbox().and_then(|m| m.role)
     }
 
     /// Name of the mailbox currently displayed, if resolvable.
     pub fn active_mailbox_name(&self) -> Option<&str> {
+        self.active_mailbox().map(|m| m.name.as_str())
+    }
+
+    /// The mailbox displayed by the active route (sidebar/search/list),
+    /// when the listing is loaded. The shared lookup behind the
+    /// unread/role/name accessors.
+    fn active_mailbox(&self) -> Option<&Mailbox> {
         let id = self.active_route()?.mailbox_id()?;
-        self.mailboxes
-            .as_loaded()?
-            .iter()
-            .find(|m| &m.id == id)
-            .map(|m| m.name.as_str())
+        self.mailboxes.as_loaded()?.iter().find(|m| &m.id == id)
     }
 
     /// The mailbox the sidebar marks active. Normally the displayed

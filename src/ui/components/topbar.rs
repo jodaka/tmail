@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::action::ClickTarget;
 use crate::app::state::AppState;
 use crate::input::mouse::HitMap;
+use crate::ui::chrome::{self, HairlineSide};
 use crate::ui::theme::Theme;
 
 /// Render the topbar into `area` (height 4: 3 content rows + hairline).
@@ -121,10 +122,5 @@ pub fn render(
         width: area.width,
         height: 1,
     };
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::BOTTOM)
-            .border_style(theme.hairline()),
-        hairline_area,
-    );
+    chrome::hairline(frame, hairline_area, HairlineSide::Bottom, theme);
 }

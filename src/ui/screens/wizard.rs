@@ -242,8 +242,6 @@ fn render_discovery(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, the
         // Spinner row + message; the spinner animates from the tick
         // counter (deterministic in tests).
         let email = wizard.email.value.trim();
-        let glyph = spinner::frame(0);
-        let _ = glyph;
         let y = centered_y(column, 1);
         frame.render_widget(
             Paragraph::new(Line::from(vec![

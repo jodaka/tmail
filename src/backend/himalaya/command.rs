@@ -7,15 +7,55 @@
 
 use std::path::Path;
 
-/// `mailbox list --json --counts` (`--counts` populates per-mailbox total
-/// and unread counters; maildir does not implement counts yet, in which
-/// case the fields stay `None` and the sidebar degrades gracefully).
-pub(crate) fn mailbox_list_argv(config: Option<&Path>, account: Option<&str>) -> Vec<String> {
+/// Pushes every element onto `argv` as one `String`. Mixed literals and
+/// computed values (`&str`, `&String`, numbers) become argv entries without
+/// the ten copies of `extend([...].into_iter().map(String::from))`.
+macro_rules! args {
+    ($argv:expr, $($arg:expr),+ $(,)?) => {
+        $($argv.push($arg.to_string());)+
+    };
+}
+
+/// `mailbox list --json` with the per-mailbox counters when `counts` is
+/// set (`--counts` populates total and unread; maildir does not implement
+/// counts yet, in which case the fields stay `None` and the sidebar
+/// degrades gracefully). The wizard credential test omits it.
+pub(crate) fn mailbox_list_argv(
+    config: Option<&Path>,
+    account: Option<&str>,
+    counts: bool,
+) -> Vec<String> {
     let mut argv = global_flags(config, account);
-    argv.extend(
-        ["mailbox", "list", "--json", "--counts"]
-            .into_iter()
-            .map(String::from),
+    args!(argv, "mailbox", "list", "--json");
+    if counts {
+        args!(argv, "--counts");
+    }
+    argv
+}
+
+/// Shared shape of `envelope {list,search} -m <mailbox> -p <page>
+/// -s <size> --json`: the two calls differ only in the subcommand word and
+/// (for search) the trailing query.
+fn envelope_page_argv(
+    config: Option<&Path>,
+    account: Option<&str>,
+    subcommand: &str,
+    mailbox_id: &str,
+    page_number: usize,
+    page_size: usize,
+) -> Vec<String> {
+    let mut argv = global_flags(config, account);
+    args!(
+        argv,
+        "envelope",
+        subcommand,
+        "-m",
+        mailbox_id,
+        "-p",
+        page_number,
+        "-s",
+        page_size,
+        "--json"
     );
     argv
 }
@@ -28,23 +68,7 @@ pub(crate) fn envelope_list_argv(
     page_number: usize,
     page_size: usize,
 ) -> Vec<String> {
-    let mut argv = global_flags(config, account);
-    argv.extend(
-        [
-            "envelope",
-            "list",
-            "-m",
-            mailbox_id,
-            "-p",
-            &page_number.to_string(),
-            "-s",
-            &page_size.to_string(),
-            "--json",
-        ]
-        .into_iter()
-        .map(String::from),
-    );
-    argv
+    envelope_page_argv(config, account, "list", mailbox_id, page_number, page_size)
 }
 
 /// The predicates and connectors of the himalaya 2.1.0 search DSL,
@@ -100,21 +124,13 @@ pub(crate) fn envelope_search_argv(
     page_number: usize,
     page_size: usize,
 ) -> Vec<String> {
-    let mut argv = global_flags(config, account);
-    argv.extend(
-        [
-            "envelope",
-            "search",
-            "-m",
-            mailbox_id,
-            "-p",
-            &page_number.to_string(),
-            "-s",
-            &page_size.to_string(),
-            "--json",
-        ]
-        .into_iter()
-        .map(String::from),
+    let mut argv = envelope_page_argv(
+        config,
+        account,
+        "search",
+        mailbox_id,
+        page_number,
+        page_size,
     );
     argv.push(normalize_search_query(query));
     argv
@@ -128,11 +144,7 @@ pub(crate) fn message_read_argv(
     id: &str,
 ) -> Vec<String> {
     let mut argv = global_flags(config, account);
-    argv.extend(
-        ["message", "read", "-m", mailbox_id, id, "--json"]
-            .into_iter()
-            .map(String::from),
-    );
+    args!(argv, "message", "read", "-m", mailbox_id, id, "--json");
     argv
 }
 
@@ -150,19 +162,16 @@ pub(crate) fn flag_argv(
     id: &str,
 ) -> Vec<String> {
     let mut argv = global_flags(config, account);
-    argv.extend(
-        [
-            "flag",
-            if add { "add" } else { "remove" },
-            "-m",
-            mailbox_id,
-            "--flag",
-            flag,
-            id,
-            "--json",
-        ]
-        .into_iter()
-        .map(String::from),
+    args!(
+        argv,
+        "flag",
+        if add { "add" } else { "remove" },
+        "-m",
+        mailbox_id,
+        "--flag",
+        flag,
+        id,
+        "--json"
     );
     argv
 }
@@ -178,12 +187,8 @@ pub(crate) fn message_move_argv(
     id: &str,
 ) -> Vec<String> {
     let mut argv = global_flags(config, account);
-    argv.extend(
-        [
-            "message", "move", "--from", source, "--to", target, id, "--json",
-        ]
-        .into_iter()
-        .map(String::from),
+    args!(
+        argv, "message", "move", "--from", source, "--to", target, id, "--json"
     );
     argv
 }
@@ -197,11 +202,7 @@ pub(crate) fn message_delete_argv(
     id: &str,
 ) -> Vec<String> {
     let mut argv = global_flags(config, account);
-    argv.extend(
-        ["message", "delete", "-m", mailbox_id, id, "--json"]
-            .into_iter()
-            .map(String::from),
-    );
+    args!(argv, "message", "delete", "-m", mailbox_id, id, "--json");
     argv
 }
 
@@ -216,10 +217,8 @@ pub(crate) fn message_add_argv(
     flag: &str,
 ) -> Vec<String> {
     let mut argv = global_flags(config, account);
-    argv.extend(
-        ["message", "add", "-m", mailbox_id, "--flag", flag, "--json"]
-            .into_iter()
-            .map(String::from),
+    args!(
+        argv, "message", "add", "-m", mailbox_id, "--flag", flag, "--json"
     );
     argv
 }
@@ -231,7 +230,7 @@ pub(crate) fn message_add_argv(
 /// already delivered, which Tmail classifies in the adapter).
 pub(crate) fn message_send_argv(config: Option<&Path>, account: Option<&str>) -> Vec<String> {
     let mut argv = global_flags(config, account);
-    argv.extend(["message", "send", "--json"].into_iter().map(String::from));
+    args!(argv, "message", "send", "--json");
     argv
 }
 
@@ -248,20 +247,17 @@ pub(crate) fn attachment_download_argv(
     dir: &Path,
 ) -> Vec<String> {
     let mut argv = global_flags(config, account);
-    argv.extend(
-        [
-            "attachment",
-            "download",
-            "-m",
-            mailbox_id,
-            "-d",
-            &dir.display().to_string(),
-            message_id,
-            &part_id.to_string(),
-            "--json",
-        ]
-        .into_iter()
-        .map(String::from),
+    args!(
+        argv,
+        "attachment",
+        "download",
+        "-m",
+        mailbox_id,
+        "-d",
+        dir.display(),
+        message_id,
+        part_id,
+        "--json"
     );
     argv
 }
@@ -286,7 +282,7 @@ mod tests {
 
     #[test]
     fn mailbox_list_with_config_and_account() {
-        let argv = mailbox_list_argv(Some(Path::new("/tmp/cfg.toml")), Some("probe"));
+        let argv = mailbox_list_argv(Some(Path::new("/tmp/cfg.toml")), Some("probe"), true);
         assert_eq!(
             argv,
             vec![
@@ -333,7 +329,7 @@ mod tests {
 
     #[test]
     fn flags_omitted_when_unset() {
-        let argv = mailbox_list_argv(None, None);
+        let argv = mailbox_list_argv(None, None, true);
         assert_eq!(argv, vec!["mailbox", "list", "--json", "--counts"]);
         let argv = envelope_list_argv(None, None, "My Folder", 1, 20);
         assert_eq!(argv[0], "envelope");
@@ -343,7 +339,7 @@ mod tests {
     #[test]
     fn config_paths_with_spaces_stay_single_argv_entries() {
         let path = PathBuf::from("/tmp/some dir/my config.toml");
-        let mailbox_list_argv = mailbox_list_argv(Some(&path), None);
+        let mailbox_list_argv = mailbox_list_argv(Some(&path), None, true);
         assert_eq!(mailbox_list_argv[1], "/tmp/some dir/my config.toml");
     }
 

@@ -8,14 +8,15 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::action::ClickTarget;
 use crate::app::overlay::{ErrorDialog, ModalButton, Overlay};
 use crate::input::mouse::HitMap;
+use crate::ui::chrome;
 use crate::ui::text::wrap;
 use crate::ui::theme::Theme;
 
@@ -36,12 +37,7 @@ pub struct ModalLayout {
 pub fn layout(size: (u16, u16), code: Option<i32>, ambiguous: bool) -> ModalLayout {
     let width = size.0.saturating_sub(10).clamp(24, 76).min(size.0.max(1));
     let height = size.1.saturating_sub(4).clamp(7, 18).min(size.1.max(1));
-    let area = Rect {
-        x: size.0.saturating_sub(width) / 2,
-        y: size.1.saturating_sub(height) / 2,
-        width,
-        height,
-    };
+    let area = chrome::centered(size, width, height);
     // Inside the borders: [code?] [warning?] [detail…] [buttons] [hint].
     let inner_height = height.saturating_sub(2) as usize;
     let fixed = 2 + usize::from(code.is_some()) + usize::from(ambiguous);
@@ -85,8 +81,6 @@ pub fn render(
     if layout.area.width < 3 || layout.area.height < 3 {
         return;
     }
-    frame.render_widget(Clear, layout.area);
-
     let title = dialog
         .retry
         .as_ref()
@@ -99,24 +93,21 @@ pub fn render(
     } else {
         format!(" {title} failed ")
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            title_text,
-            Style::new()
-                .fg(theme.background)
-                .bg(theme.error)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .border_style(Style::new().fg(theme.error))
-        .style(theme.on_background());
-    frame.render_widget(block, layout.area);
+    let Some(area) = chrome::modal_frame(
+        frame,
+        layout.area,
+        &Span::raw(title_text),
+        theme.error,
+        theme,
+    ) else {
+        return;
+    };
 
     // Rows are laid out top to bottom inside the border, matching `layout`:
     // [code?] [warning?] [detail viewport] [buttons] [hint].
-    let inner_x = layout.area.x + 2;
-    let inner_w = layout.area.width.saturating_sub(4);
-    let mut y = layout.area.y + 1;
+    let inner_x = area.x;
+    let inner_w = area.width;
+    let mut y = area.y;
     let row = |y: u16, height: u16| Rect {
         x: inner_x,
         y,
@@ -162,16 +153,7 @@ pub fn render(
     y += layout.viewport_lines as u16;
 
     // Buttons: [ Retry ]  [ Dismiss ]; the focused one gets the accent fill.
-    let button_style = |focused: bool| {
-        if focused {
-            Style::new()
-                .fg(theme.background)
-                .bg(theme.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::new().fg(theme.muted)
-        }
-    };
+    let button_style = |focused: bool| theme.button_style(focused, theme.accent);
     let buttons = Line::from(vec![
         Span::styled(
             "[ Retry ]",
