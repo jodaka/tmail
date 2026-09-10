@@ -12,8 +12,8 @@ use crate::app::composer::{ComposerField, ComposerState};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::operation::{
-    DraftRemovalReason, OperationFailure, OperationId, OperationKind, OperationOrigin,
-    OperationOutcome, OperationResult,
+    DraftRemovalReason, NotifyRequest, OperationFailure, OperationId, OperationKind,
+    OperationOrigin, OperationOutcome, OperationResult,
 };
 use crate::app::overlay::{
     AttachmentFileDialog, ConfirmButton, DiscardDialog, ErrorDialog, HelpDialog, ModalButton,
@@ -23,9 +23,10 @@ use crate::app::route::{MailboxRoute, MessageRoute, Route, SearchRoute};
 use crate::app::sanitize::sanitize;
 use crate::app::state::{AppState, ListStash, Loadable, ReaderFocus};
 use crate::app::wizard::wizard_reduce;
+use crate::config::Notifications;
 use crate::domain::{
-    DraftSaveState, Mailbox, MailboxId, MailboxRole, Message, MessageLocator, Page, PageRequest,
-    SearchRequest, bare_message_id,
+    DraftSaveState, Mailbox, MailboxId, MailboxRole, Message, MessageLocator, MessageSummary, Page,
+    PageRequest, SearchRequest, bare_message_id,
 };
 
 /// Apply `action` to `state`, returning backend work to spawn. Never
@@ -132,6 +133,10 @@ fn dispatch(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::ToggleMouseCapture => toggle_mouse_capture(state),
         Action::OpenThemePicker => open_theme_picker(state),
         Action::Tick { now } => tick(state, **now),
+        Action::SetTerminalFocus(focused) => {
+            state.session.terminal_focused = *focused;
+            Vec::new()
+        }
         Action::Resize { width, height } => resize(state, *width, *height),
         Action::Quit => {
             state.session.quit_requested = true;
@@ -1474,6 +1479,57 @@ fn list_failure(state: &mut AppState, failure: &OperationFailure, origin: Operat
     open_error_modal(state, failure);
 }
 
+/// Finish a successful *background* page update for notifications (ticket
+/// b28p): the page becomes the new clean baseline, and the leading run of
+/// ids the previous baseline did not contain is the mail that arrived
+/// since the last boundary. With notifications enabled and the terminal
+/// unfocused, that run turns into a bell or desktop-notification effect;
+/// otherwise the update stays silent. The manager delivers the
+/// notification off-thread, so nothing here (or there) blocks the UI.
+fn notify_new_messages(state: &mut AppState, page: &Page<MessageSummary>) -> Vec<Effect> {
+    let arrived: Vec<MessageSummary> = state
+        .session
+        .notifications
+        .new_messages(page)
+        .into_iter()
+        .cloned()
+        .collect();
+    // The finish boundary: whatever the update found is clean now.
+    state.session.notifications.mark_clean(page);
+    if arrived.is_empty()
+        || state.settings.notifications == Notifications::Off
+        || state.session.terminal_focused
+    {
+        return Vec::new();
+    }
+    let request = match state.settings.notifications {
+        Notifications::Off => unreachable!("filtered above"),
+        Notifications::Bell => NotifyRequest::Bell,
+        Notifications::On => desktop_request(&arrived),
+    };
+    vec![
+        state
+            .session
+            .operations
+            .start_background(OperationKind::Notify { request }),
+    ]
+}
+
+/// The desktop notification for `arrived` (ticket b28p): a single message
+/// names its sender and subject; several list the count.
+fn desktop_request(arrived: &[MessageSummary]) -> NotifyRequest {
+    match arrived {
+        [message] => NotifyRequest::Desktop {
+            summary: message.from_display().to_owned(),
+            body: message.subject.clone(),
+        },
+        _ => NotifyRequest::Desktop {
+            summary: String::from("Tmail"),
+            body: format!("{} new messages", arrived.len()),
+        },
+    }
+}
+
 /// Apply a backend result. Results for unknown, cancelled, or superseded
 /// operation ids never mutate state: `finish` removes the operation, and a
 /// superseded operation was already cancelled and removed when its
@@ -1525,6 +1581,12 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
         }
         OperationKind::OpenPath { .. } => complete_open_path(state, result),
         OperationKind::OpenUrl { .. } => complete_open_url(state, result),
+        // Notifications are best-effort side effects (ticket b28p): the
+        // manager reports the attempt, state has nothing to apply.
+        OperationKind::Notify { .. } => {
+            tracing::debug!(id = %result.id, "notification delivered");
+            Vec::new()
+        }
         // The external editor completes through `Action::EditorFinished`,
         // not the result channel (Phase 11: it runs on the terminal owner,
         // not in the manager). A result arriving here would be a routing
@@ -1597,7 +1659,13 @@ fn complete_load_page(
     match &result.outcome {
         Ok(OperationOutcome::Page(page)) => {
             state.session.last_background_error = None;
-            let effects = apply_page(state, page.clone());
+            let mut effects = Vec::new();
+            // Timer refreshes report new mail (ticket b28p); foreground
+            // loads are user-driven and stay silent.
+            if origin == OperationOrigin::Background {
+                effects.extend(notify_new_messages(state, page));
+            }
+            effects.extend(apply_page(state, page.clone()));
             // Ticket haeb: every successful load refreshes the cached page —
             // with the previews applied (ticket wxtx), so the next cold
             // start renders rows without re-fetching anything.
@@ -1645,7 +1713,13 @@ fn complete_search(
     match &result.outcome {
         Ok(OperationOutcome::Page(page)) => {
             state.session.last_background_error = None;
-            let effects = apply_page(state, page.clone());
+            let mut effects = Vec::new();
+            // A timer refresh of an open search reports matching new mail
+            // like a mailbox refresh does (ticket b28p).
+            if origin == OperationOrigin::Background {
+                effects.extend(notify_new_messages(state, page));
+            }
+            effects.extend(apply_page(state, page.clone()));
             // Ticket haeb: search results cache under their query — with
             // the previews applied (ticket wxtx).
             if let Some(cache) = &state.caches.page_cache {
@@ -2879,8 +2953,13 @@ fn request_visible_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
 }
 
 /// Background variant of [`request_visible_page`] (Phase 9.4): same
-/// request, but failures are handled as background work (Phase 9.6).
+/// request, but failures are handled as background work (Phase 9.6). The
+/// visible page is marked clean first — the start boundary of the
+/// new-mail notification bookkeeping (ticket b28p): only ids the result
+/// adds are new arrivals (a foreground refresh or navigation between
+/// timer firings is already counted clean).
 fn request_visible_page_background(state: &mut AppState, offset: usize) -> Vec<Effect> {
+    state.session.notifications.mark_clean(&state.messages);
     match state.active_route() {
         Some(Route::Search(route)) => {
             let request = SearchRequest {

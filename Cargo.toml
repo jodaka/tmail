@@ -49,6 +49,7 @@ pimalaya-stream = { version = "0.3", default-features = false }
 url = "2"
 tui-textarea-2 = "0.13.2"
 ratatui-explorer = "0.3.0"
+notify-rust = "4"
 
 [features]
 test-fixtures = ["dep:mail-parser"]

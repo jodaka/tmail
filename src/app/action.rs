@@ -239,6 +239,10 @@ pub enum Action {
     Tick {
         now: Box<DateTime<FixedOffset>>,
     },
+    /// The terminal window gained or lost focus (CSI 1004 focus events,
+    /// ticket b28p). New-mail notifications fire only while the window is
+    /// unfocused, so this is the "user is active" signal.
+    SetTerminalFocus(bool),
     Resize {
         width: u16,
         height: u16,

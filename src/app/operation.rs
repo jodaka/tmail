@@ -149,6 +149,27 @@ pub enum OperationKind {
         path: std::path::PathBuf,
         draft: Box<crate::app::wizard::DraftAccountConfig>,
     },
+    /// Deliver one new-mail notification (`[tmail].notifications`, ticket
+    /// b28p). No mail travels; the manager delivers it without blocking
+    /// the UI loop (the desktop path on the blocking pool).
+    Notify { request: NotifyRequest },
+}
+
+/// One new-mail notification (`[tmail].notifications`, ticket b28p): the
+/// terminal bell or a desktop notification. Built by the reducer from the
+/// messages the background refresh found; delivered by the manager,
+/// best-effort — a failure is logged, never modaled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotifyRequest {
+    /// Ring the terminal bell (`\x07`).
+    Bell,
+    /// Show a desktop notification through `notify-rust`.
+    Desktop {
+        /// Notification title: a single message's sender, else "Tmail".
+        summary: String,
+        /// Notification body: a single message's subject, else the count.
+        body: String,
+    },
 }
 
 /// Why a draft is being removed (Phase 7.6): it selects the failure UX.
@@ -211,6 +232,7 @@ impl OperationKind {
             OperationKind::DiscoverConfig { .. } => "Detecting settings",
             OperationKind::TestAccount { .. } => "Testing account",
             OperationKind::SaveAccount { .. } => "Saving account",
+            OperationKind::Notify { .. } => "Notifying",
         }
     }
 

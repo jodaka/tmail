@@ -22,7 +22,8 @@ use tokio::sync::mpsc;
 
 use tmail::app::{Action, AppState, Effect, OperationResult, reducer};
 use tmail::backend::{
-    MailBackend, PathOpener, RequestContext, SystemOpener, himalaya::HimalayaCliBackend,
+    MailBackend, Notifier, PathOpener, RequestContext, SystemNotifier, SystemOpener,
+    himalaya::HimalayaCliBackend,
 };
 use tmail::discovery::{EmailConfigDiscoverer, FakeDiscoverer, PimDiscoverer};
 use tmail::input::mouse;
@@ -189,6 +190,10 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
     let backend: Arc<dyn MailBackend> = Arc::new(HimalayaCliBackend::from_config(&config));
     // Platform open-with adapter for saved attachments (plan §15).
     let opener: Arc<dyn PathOpener> = Arc::new(SystemOpener);
+    // New-mail notification adapter (ticket b28p): the terminal bell or a
+    // notify-rust desktop notification. Injected like the opener, and
+    // delivered off the UI thread by the operation manager.
+    let notifier: Arc<dyn Notifier> = Arc::new(SystemNotifier);
     // The email settings discoverer (ADR 0003 §3.3): injected like the
     // backend and opener. `TMAIL_FAKE_DISCOVERY=1` selects the canned
     // fake — tests and smoke runs never touch the network.
@@ -220,6 +225,7 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
     let manager = OperationManager::new(
         Arc::clone(&backend),
         opener,
+        notifier,
         discoverer,
         String::from("himalaya"),
         result_tx,
@@ -379,6 +385,7 @@ fn seed_state(
         autosave_delay_ms: config.composer.autosave_delay_ms,
         view_mode: config.view_mode,
         status_timeout_seconds: config.status_timeout,
+        notifications: config.notifications,
         editor_command: config.composer.editor_command.clone(),
         mouse_capture: config.mouse,
         themes,

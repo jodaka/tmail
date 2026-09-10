@@ -1252,6 +1252,7 @@ fn run_test_account(
         let manager = OperationManager::new(
             std::sync::Arc::new(backend(fake, Some("probe"))),
             std::sync::Arc::new(tmail::backend::SystemOpener),
+            std::sync::Arc::new(tmail::backend::SystemNotifier),
             std::sync::Arc::new(tmail::discovery::FakeDiscoverer),
             fake.program().display().to_string(),
             tx,
@@ -1351,6 +1352,7 @@ fn wizard_test_account_cancellation_suppresses_the_result() {
         let manager = OperationManager::new(
             std::sync::Arc::new(backend(&fake, Some("probe"))),
             std::sync::Arc::new(tmail::backend::SystemOpener),
+            std::sync::Arc::new(tmail::backend::SystemNotifier),
             std::sync::Arc::new(tmail::discovery::FakeDiscoverer),
             fake.program().display().to_string(),
             tx,
@@ -1390,6 +1392,7 @@ fn wizard_save_account_operation_reports_the_saved_file() {
         let manager = OperationManager::new(
             std::sync::Arc::new(backend(&fake, Some("probe"))),
             std::sync::Arc::new(tmail::backend::SystemOpener),
+            std::sync::Arc::new(tmail::backend::SystemNotifier),
             std::sync::Arc::new(tmail::discovery::FakeDiscoverer),
             fake.program().display().to_string(),
             tx,

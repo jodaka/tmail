@@ -33,6 +33,7 @@ mod drafts;
 mod list;
 mod modals;
 mod mouse;
+mod notifications;
 mod reader;
 mod search;
 mod status;

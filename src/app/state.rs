@@ -62,6 +62,36 @@ pub struct ListStash {
     pub scroll: usize,
 }
 
+/// New-mail notification bookkeeping (ticket b28p). The background refresh
+/// marks the visible page as clean at its start and finish; the leading run
+/// of ids a finished page adds is the mail that arrived since the last
+/// boundary, which [`crate::config::Notifications`] decides what to do with.
+#[derive(Debug, Clone, Default)]
+pub struct NotificationsState {
+    /// Message ids considered clean at the last background-update boundary.
+    /// Ids outside this set are new arrivals.
+    pub clean: HashSet<MessageId>,
+}
+
+impl NotificationsState {
+    /// Mark `page` as clean (a background update's start or finish
+    /// boundary): everything on screen now is known mail.
+    pub fn mark_clean(&mut self, page: &Page<MessageSummary>) {
+        self.clean = page.items.iter().map(|m| m.id.clone()).collect();
+    }
+
+    /// The leading run of messages in `page` whose ids are not in the clean
+    /// set — the mail that arrived since the last boundary. Stops at the
+    /// first known id, so a widened page (a terminal resize) never counts
+    /// rows that already existed deeper in the list.
+    pub fn new_messages<'a>(&self, page: &'a Page<MessageSummary>) -> Vec<&'a MessageSummary> {
+        page.items
+            .iter()
+            .take_while(|m| !self.clean.contains(&m.id))
+            .collect()
+    }
+}
+
 /// Transient status area state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusState {
@@ -115,6 +145,11 @@ pub struct Settings {
     /// until the next message replaces it. Set from the config at
     /// startup; expiry runs on the injected tick clock.
     pub status_timeout_seconds: u64,
+    /// `[tmail].notifications` (ticket b28p): no notification, terminal
+    /// bell, or desktop notification for new mail found by the periodic
+    /// background refresh. Set from the config at startup; the reducer
+    /// only reads it.
+    pub notifications: crate::config::Notifications,
     /// The configured external editor as an argv (plan §14, Phase 11),
     /// resolved from the config at startup. `None` means the builtin
     /// editor: `Ctrl+E` is inert.
@@ -201,6 +236,13 @@ pub struct SessionState {
     /// (Phase 9.6): repeated identical failures are suppressed in the
     /// status line until a success or a manual refresh clears the record.
     pub last_background_error: Option<String>,
+    /// Whether the terminal window currently has focus (CSI 1004 focus
+    /// events, ticket b28p). New-mail notifications fire only while the
+    /// window is unfocused; terminals without focus reporting leave this
+    /// set, so notifications stay conservative.
+    pub terminal_focused: bool,
+    /// New-mail notification bookkeeping (ticket b28p).
+    pub notifications: NotificationsState,
     /// In-flight backend operations with their ids, retry intents, and
     /// cancellation tokens (plan §9/§11). Results only apply while their
     /// operation is still registered here.
@@ -277,6 +319,7 @@ impl AppState {
                 autosave_delay_ms: crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS,
                 view_mode: crate::config::ViewMode::Compact,
                 status_timeout_seconds: 0,
+                notifications: crate::config::Notifications::Off,
                 editor_command: None,
                 mouse_capture: false,
                 themes: vec![
@@ -308,6 +351,8 @@ impl AppState {
                 search_return: None,
                 last_refresh_at: None,
                 last_background_error: None,
+                terminal_focused: true,
+                notifications: NotificationsState::default(),
                 operations: OperationRegistry::default(),
                 composer: None,
                 wizard: None,

@@ -32,6 +32,12 @@ mouse = true
 # Seconds a status message stays up before it fades and clears;
 # 0 (default) keeps it until the next message replaces it.
 # status_timeout = 5
+# Notifications for mail the periodic background refresh finds:
+# "off" (default) stays silent, "bell" rings the terminal bell (\x07),
+# "on" shows a desktop notification through notify-rust. Only mail that
+# arrived since the previous background update notifies, and only while
+# the terminal window is unfocused.
+# notifications = "off"
 
 [tmail.mail]
 # Message list page size (explicit pagination).

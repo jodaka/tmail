@@ -103,6 +103,34 @@ impl ViewMode {
     }
 }
 
+/// New-mail notification behavior for the periodic background refresh
+/// (`[tmail].notifications`, ticket b28p). Only mail that arrived since the
+/// last update notifies, and only while the terminal window is unfocused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Notifications {
+    /// No notifications; identical to the pre-feature behavior.
+    #[default]
+    Off,
+    /// Ring the terminal bell (`\x07`).
+    Bell,
+    /// Show a desktop notification through `notify-rust`.
+    On,
+}
+
+impl Notifications {
+    /// Parse a `[tmail].notifications` value; `None` when the name is
+    /// unknown (the caller reports the problem and falls back to the
+    /// default).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "bell" => Some(Self::Bell),
+            "on" => Some(Self::On),
+            _ => None,
+        }
+    }
+}
+
 /// Parse a config-file color: `#rgb` or `#rrggbb` (case-insensitive hex).
 /// Returns the normalized `#rrggbb` form, or `None` when the value is not
 /// a color Tmail can use.
@@ -169,6 +197,10 @@ pub struct Config {
     /// stays up before it fades out and clears. `0` (the default) keeps a
     /// message until the next one replaces it.
     pub status_timeout: u64,
+    /// `[tmail].notifications` (ticket b28p): off, terminal bell, or
+    /// desktop notification for mail the periodic background refresh
+    /// finds. Off by default.
+    pub notifications: Notifications,
     /// `[tmail.keybindings.<context>]` (configurable keybindings): each
     /// context table's `(action, keys)` entries. Values stay raw here —
     /// action names, key specs, conflicts, and the structural non-empty
@@ -279,6 +311,7 @@ impl Default for Config {
             mouse: false,
             view_mode: ViewMode::Compact,
             status_timeout: 0,
+            notifications: Notifications::Off,
             keybindings: Vec::new(),
             mail: MailConfig {
                 page_size: DEFAULT_PAGE_SIZE,
@@ -513,6 +546,7 @@ pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssu
     parse_ui_clock(tmail, &mut config, &mut issues);
     parse_view_mode(tmail, &mut config, &mut issues);
     parse_status_timeout(tmail, &mut config, &mut issues);
+    parse_notifications(tmail, &mut config, &mut issues);
     parse_cache_limits(tmail, &mut config, &mut issues);
 
     // Without `[tmail].account`, drive the account himalaya itself would
@@ -804,6 +838,31 @@ fn parse_status_timeout(tmail: Option<&toml::Value>, config: &mut Config, issues
             "[tmail].status_timeout must be an integer; using 0 (disabled)",
         )),
     }
+}
+
+/// `[tmail].notifications` (ticket b28p): `"off"` (default), `"bell"`, or
+/// `"on"`. Anything else is reported and the default applies.
+fn parse_notifications(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
+    let Some(value) = tmail.and_then(|tmail| tmail.get("notifications")) else {
+        return;
+    };
+    config.notifications = match value.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => match Notifications::parse(name) {
+            Some(notifications) => notifications,
+            None => {
+                issues.push(format!(
+                    "[tmail].notifications {name:?} is unknown (known: off, bell, on); using \"off\""
+                ));
+                Notifications::Off
+            }
+        },
+        None => {
+            issues.push(String::from(
+                "[tmail].notifications must be \"off\", \"bell\", or \"on\"; using \"off\"",
+            ));
+            Notifications::Off
+        }
+    };
 }
 
 /// `[tmail.composer].composer.editor`: `"builtin"`, `"$EDITOR"`, or an explicit
@@ -1614,6 +1673,40 @@ mod status_timeout_tests {
 
         let (config, issues) = parse_with_issues("[tmail]\nstatus_timeout = \"soon\"\n", None);
         assert_eq!(config.status_timeout, 0);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+    }
+}
+
+#[cfg(test)]
+mod notifications_tests {
+    use super::*;
+
+    #[test]
+    fn notifications_default_off_and_parse_all_three() {
+        let (config, issues) = parse_with_issues("", None);
+        assert!(issues.is_empty());
+        assert_eq!(config.notifications, Notifications::Off, "off by default");
+
+        let (config, issues) = parse_with_issues("[tmail]\nnotifications = \"bell\"\n", None);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(config.notifications, Notifications::Bell);
+
+        let (config, issues) = parse_with_issues("[tmail]\nnotifications = \"on\"\n", None);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(config.notifications, Notifications::On);
+    }
+
+    #[test]
+    fn unknown_notifications_value_reports_and_falls_back() {
+        let (config, issues) = parse_with_issues("[tmail]\nnotifications = \"loud\"\n", None);
+        assert_eq!(config.notifications, Notifications::Off);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].contains("notifications"), "{issues:?}");
+        assert!(issues[0].contains("bell"), "{issues:?}");
+
+        // A non-string value is reported the same way.
+        let (config, issues) = parse_with_issues("[tmail]\nnotifications = 1\n", None);
+        assert_eq!(config.notifications, Notifications::Off);
         assert_eq!(issues.len(), 1, "{issues:?}");
     }
 }

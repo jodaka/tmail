@@ -16,9 +16,11 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app::effect::Effect;
-use crate::app::operation::{OperationFailure, OperationKind, OperationOutcome, OperationResult};
+use crate::app::operation::{
+    NotifyRequest, OperationFailure, OperationKind, OperationOutcome, OperationResult,
+};
 use crate::app::sanitize::sanitize;
-use crate::backend::{BackendError, MailBackend, PathOpener, RequestContext};
+use crate::backend::{BackendError, MailBackend, Notifier, PathOpener, RequestContext};
 use crate::discovery::EmailConfigDiscoverer;
 
 /// Spawns backend tasks for the effects the reducer emits.
@@ -27,6 +29,10 @@ pub struct OperationManager {
     /// Platform open-with adapter for `OpenPath` effects (plan §15,
     /// Phase 8.5): `open`/`xdg-open`, spawned directly.
     opener: Arc<dyn PathOpener>,
+    /// New-mail notification adapter (ticket b28p): terminal bell or
+    /// `notify-rust`. Injected like the opener so tests never ring or
+    /// pop a real notification.
+    notifier: Arc<dyn Notifier>,
     /// The email settings discoverer for the wizard's `DiscoverConfig`
     /// effects (ADR 0003 §3.7): injected like the backend and opener,
     /// so tests and smoke runs swap in a fake.
@@ -43,6 +49,7 @@ impl OperationManager {
     pub fn new(
         backend: Arc<dyn MailBackend>,
         opener: Arc<dyn PathOpener>,
+        notifier: Arc<dyn Notifier>,
         discoverer: Arc<dyn EmailConfigDiscoverer>,
         himalaya_program: String,
         results: UnboundedSender<OperationResult>,
@@ -50,6 +57,7 @@ impl OperationManager {
         Self {
             backend,
             opener,
+            notifier,
             discoverer,
             himalaya_program,
             results,
@@ -61,6 +69,7 @@ impl OperationManager {
     pub fn launch(&self, effect: Effect, ctx: RequestContext) {
         let backend = Arc::clone(&self.backend);
         let opener = Arc::clone(&self.opener);
+        let notifier = Arc::clone(&self.notifier);
         let discoverer = Arc::clone(&self.discoverer);
         let himalaya_program = self.himalaya_program.clone();
         let results = self.results.clone();
@@ -70,6 +79,7 @@ impl OperationManager {
             match run_effect(
                 &backend,
                 &opener,
+                &notifier,
                 &discoverer,
                 &himalaya_program,
                 &effect,
@@ -104,6 +114,7 @@ impl OperationManager {
 async fn run_effect(
     backend: &Arc<dyn MailBackend>,
     opener: &Arc<dyn PathOpener>,
+    notifier: &Arc<dyn Notifier>,
     discoverer: &Arc<dyn EmailConfigDiscoverer>,
     himalaya_program: &str,
     effect: &Effect,
@@ -314,6 +325,34 @@ async fn run_effect(
                 })),
                 Err(detail) => Some(Err(plain_failure(effect, &detail))),
             }
+        }
+        // New-mail notification (ticket b28p): best-effort and off the UI
+        // thread. A failure is logged, never modaled.
+        OperationKind::Notify { request } => {
+            match request {
+                // One byte to stdout: fast enough to stay on the runtime,
+                // and it can never interleave with a draw the way a
+                // blocking-pool write to the same terminal could.
+                NotifyRequest::Bell => {
+                    if let Err(err) = notifier.bell() {
+                        tracing::warn!(%err, "bell notification failed");
+                    }
+                }
+                // notify-rust blocks while the desktop service answers,
+                // and the main runtime is single-threaded: the delivery
+                // runs on the blocking pool so the frame loop never waits.
+                NotifyRequest::Desktop { summary, body } => {
+                    let notifier = Arc::clone(notifier);
+                    let delivered =
+                        tokio::task::spawn_blocking(move || notifier.notify(&summary, &body)).await;
+                    match delivered {
+                        Ok(Ok(())) => {}
+                        Ok(Err(detail)) => tracing::warn!(detail, "notification failed"),
+                        Err(err) => tracing::warn!(%err, "notification task failed"),
+                    }
+                }
+            }
+            Some(Ok(OperationOutcome::Done))
         }
     }
 }
@@ -629,11 +668,20 @@ mod tests {
         backend: Arc<dyn MailBackend>,
         opener: Arc<dyn PathOpener>,
     ) -> (OperationManager, UnboundedReceiver<OperationResult>) {
+        manager_with_notifier(backend, opener, Arc::new(RecordingNotifier::default()))
+    }
+
+    fn manager_with_notifier(
+        backend: Arc<dyn MailBackend>,
+        opener: Arc<dyn PathOpener>,
+        notifier: Arc<dyn Notifier>,
+    ) -> (OperationManager, UnboundedReceiver<OperationResult>) {
         let (tx, rx) = unbounded_channel();
         (
             OperationManager::new(
                 backend,
                 opener,
+                notifier,
                 std::sync::Arc::new(crate::discovery::FakeDiscoverer),
                 String::from("himalaya"),
                 tx,
@@ -672,6 +720,39 @@ mod tests {
 
         fn urls(&self) -> Vec<String> {
             self.urls.lock().expect("opener lock").clone()
+        }
+    }
+
+    /// A `Notifier` double: records bells and desktop notifications, so
+    /// tests never ring a terminal or pop a real notification.
+    #[derive(Default)]
+    struct RecordingNotifier {
+        bells: std::sync::atomic::AtomicUsize,
+        desktop: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl Notifier for RecordingNotifier {
+        fn bell(&self) -> std::io::Result<()> {
+            self.bells.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn notify(&self, summary: &str, body: &str) -> Result<(), String> {
+            self.desktop
+                .lock()
+                .expect("notifier lock")
+                .push((summary.to_string(), body.to_string()));
+            Ok(())
+        }
+    }
+
+    impl RecordingNotifier {
+        fn bell_count(&self) -> usize {
+            self.bells.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn desktop(&self) -> Vec<(String, String)> {
+            self.desktop.lock().expect("notifier lock").clone()
         }
     }
 
@@ -831,6 +912,78 @@ mod tests {
         assert_eq!(result.outcome, Ok(OperationOutcome::Done));
         // The whole URL traveled — query and fragment intact, no shell.
         assert_eq!(opener.urls(), vec![url]);
+    }
+
+    #[tokio::test]
+    async fn bell_notifications_ring_via_the_injected_notifier() {
+        let backend = Arc::new(FakeBackend::ok());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (manager, mut rx) = manager_with_notifier(
+            backend,
+            Arc::new(RecordingOpener::default()),
+            Arc::clone(&notifier) as _,
+        );
+        let (effect, token) = effect(OperationKind::Notify {
+            request: NotifyRequest::Bell,
+        });
+        manager.launch(effect, ctx(21, &token));
+        let result = rx.recv().await.expect("result");
+        assert_eq!(result.outcome, Ok(OperationOutcome::Done));
+        assert_eq!(notifier.bell_count(), 1, "the bell rings once");
+    }
+
+    #[tokio::test]
+    async fn desktop_notifications_carry_the_reducer_text() {
+        let backend = Arc::new(FakeBackend::ok());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let (manager, mut rx) = manager_with_notifier(
+            backend,
+            Arc::new(RecordingOpener::default()),
+            Arc::clone(&notifier) as _,
+        );
+        let (effect, token) = effect(OperationKind::Notify {
+            request: NotifyRequest::Desktop {
+                summary: String::from("Ada Example"),
+                body: String::from("Lunch?"),
+            },
+        });
+        manager.launch(effect, ctx(22, &token));
+        let result = rx.recv().await.expect("result");
+        assert_eq!(result.outcome, Ok(OperationOutcome::Done));
+        assert_eq!(
+            notifier.desktop(),
+            vec![(String::from("Ada Example"), String::from("Lunch?"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_notifier_still_completes_the_operation() {
+        struct RefusingNotifier;
+        impl Notifier for RefusingNotifier {
+            fn bell(&self) -> std::io::Result<()> {
+                Err(std::io::Error::other("no bell"))
+            }
+
+            fn notify(&self, _summary: &str, _body: &str) -> Result<(), String> {
+                Err(String::from("no notification service"))
+            }
+        }
+        let backend = Arc::new(FakeBackend::ok());
+        let (manager, mut rx) = manager_with_notifier(
+            backend,
+            Arc::new(RecordingOpener::default()),
+            Arc::new(RefusingNotifier),
+        );
+        let (effect, token) = effect(OperationKind::Notify {
+            request: NotifyRequest::Desktop {
+                summary: String::from("x"),
+                body: String::from("y"),
+            },
+        });
+        manager.launch(effect, ctx(23, &token));
+        // Best-effort: a notification failure is logged, never surfaced.
+        let result = rx.recv().await.expect("result");
+        assert_eq!(result.outcome, Ok(OperationOutcome::Done));
     }
 
     #[tokio::test]

@@ -23,6 +23,10 @@ pub enum Event {
     /// Click or wheel event (Phase 10, plan §10). Arrives only while mouse
     /// capture is enabled (`[tmail].mouse`).
     Mouse(MouseEvent),
+    /// The terminal window gained (`true`) or lost (`false`) focus (CSI
+    /// 1004 focus events, ticket b28p). Terminals without focus reporting
+    /// simply never send one.
+    Focus(bool),
     Resize {
         width: u16,
         height: u16,
@@ -119,8 +123,20 @@ async fn event_loop(tx: UnboundedSender<Event>, mut control: UnboundedReceiver<C
                             break;
                         }
                     }
+                    Some(Ok(CrosstermEvent::FocusGained)) => {
+                        // New-mail notifications fire only while the
+                        // window is unfocused (ticket b28p).
+                        if tx.send(Event::Focus(true)).is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(CrosstermEvent::FocusLost)) => {
+                        if tx.send(Event::Focus(false)).is_err() {
+                            break;
+                        }
+                    }
                     Some(Ok(_)) => {
-                        // Focus changes and gestures have no v1 behavior.
+                        // Paste and other gestures have no v1 behavior.
                     }
                     Some(Err(err)) => {
                         tracing::warn!(%err, "crossterm event stream error");
@@ -181,6 +197,7 @@ pub fn coalesce(batch: Vec<Event>, hits: &mouse::HitMap, state: &AppState) -> Ve
                 }
                 mouse::to_action(mouse_event, hits, state)
             }
+            Event::Focus(focused) => Some(Action::SetTerminalFocus(focused)),
             Event::Resize { width, height } => Some(Action::Resize { width, height }),
             Event::Tick => {
                 if actions.iter().any(|a| matches!(a, Action::Tick { .. })) {
@@ -327,6 +344,19 @@ mod tests {
         let state = mock_initial_state();
         let events = vec![Event::Tick, Event::Tick, Event::Tick];
         assert_eq!(coalesce(events, &mouse::HitMap::default(), &state).len(), 1);
+    }
+
+    #[test]
+    fn focus_changes_map_to_set_terminal_focus() {
+        let state = mock_initial_state();
+        let events = vec![Event::Focus(false), Event::Focus(true)];
+        assert_eq!(
+            coalesce(events, &mouse::HitMap::default(), &state),
+            vec![
+                Action::SetTerminalFocus(false),
+                Action::SetTerminalFocus(true)
+            ]
+        );
     }
 
     #[test]

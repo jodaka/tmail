@@ -9,9 +9,11 @@
 
 pub mod himalaya;
 pub mod journal;
+pub mod notifier;
 pub mod opener;
 pub mod traits;
 
 pub use crate::domain::AttachmentRequest;
+pub use notifier::{Notifier, SystemNotifier};
 pub use opener::{PathOpener, SystemOpener};
 pub use traits::{BackendError, BackendResult, MailBackend, RequestContext};

@@ -6,7 +6,9 @@ use std::io::{self, Stdout};
 use std::panic;
 
 use crossterm::cursor::Show;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+};
 use crossterm::style::Print;
 use crossterm::{execute, terminal as term};
 use ratatui::Terminal;
@@ -57,7 +59,10 @@ pub fn restore_title() {
 /// empty buffers (so a fresh guard repaints from scratch).
 fn enter(mouse: bool, what: &'static str) -> io::Result<TerminalGuard> {
     term::enable_raw_mode()?;
-    execute!(io::stdout(), term::EnterAlternateScreen)?;
+    // Focus reporting (CSI 1004, ticket b28p) arms the "user is active"
+    // signal new-mail notifications respect; terminals without support
+    // ignore the mode and simply never report a change.
+    execute!(io::stdout(), term::EnterAlternateScreen, EnableFocusChange)?;
     set_mouse_capture(mouse)?;
     let backend = CrosstermBackend::new(io::stdout());
     let terminal = Terminal::new(backend)?;
@@ -84,6 +89,7 @@ pub fn restore() {
         io::stdout(),
         term::LeaveAlternateScreen,
         DisableMouseCapture,
+        DisableFocusChange,
         Show
     );
     let _ = term::disable_raw_mode();
