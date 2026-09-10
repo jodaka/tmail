@@ -57,6 +57,15 @@ pub enum OperationKind {
     /// and the message cache. Independent of every other operation — no
     /// supersession — and never surfaced: failures are logged only.
     Preview(MessageLocator),
+    /// Fetch one full message from the list to seed a composer draft
+    /// (reply/reply-all/forward from NORMAL, user request): the same
+    /// read path as `LoadMessage`, and the reducer turns the fetched
+    /// copy into a seeded draft per `seed`. Supersedes its own kind for
+    /// the same locator: only the newest intent may open the composer.
+    SeedComposer {
+        locator: MessageLocator,
+        kind: SeedKind,
+    },
     /// Mark a message read (`read: true`) or unread.
     SetRead { locator: MessageLocator, read: bool },
     /// Star (`starred: true`) or unstar a message.
@@ -147,6 +156,20 @@ pub enum DraftRemovalReason {
     Sent,
 }
 
+/// Which draft a list-initiated [`OperationKind::SeedComposer`] opens
+/// (user request): the reply variants seed from the fetched message's
+/// headers/body the same way the reader's reply does; forward quotes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedKind {
+    /// Reply to the sender.
+    Reply,
+    /// Reply to sender and every recipient (the account address excluded,
+    /// plan §14 Phase 7.5).
+    ReplyAll,
+    /// Forward the message unseeded of recipients.
+    Forward,
+}
+
 impl OperationKind {
     /// Human-readable label for the status bar and error modal.
     pub fn summary(&self) -> &'static str {
@@ -157,6 +180,11 @@ impl OperationKind {
             OperationKind::LoadMessage(_) => "Loading message",
             OperationKind::OpenDraft(_) => "Opening draft",
             OperationKind::Preview(_) => "Fetching preview",
+            OperationKind::SeedComposer { kind, .. } => match kind {
+                SeedKind::Reply => "Replying",
+                SeedKind::ReplyAll => "Replying all",
+                SeedKind::Forward => "Forwarding",
+            },
             OperationKind::SetRead { read: true, .. } => "Marking read",
             OperationKind::SetRead { read: false, .. } => "Marking unread",
             OperationKind::SetStarred { starred: true, .. } => "Starring",
@@ -212,6 +240,12 @@ impl OperationKind {
             (OperationKind::OpenDraft(newer), OperationKind::OpenDraft(older)) => {
                 newer.mailbox == older.mailbox
             }
+            // List-initiated reply/forward seeds: the last pressed key wins
+            // (the composer is one-shot; an older fetch must not open it).
+            (
+                OperationKind::SeedComposer { locator: newer, .. },
+                OperationKind::SeedComposer { locator: older, .. },
+            ) => newer.id == older.id,
             (
                 OperationKind::SetRead { locator: newer, .. },
                 OperationKind::SetRead { locator: older, .. },

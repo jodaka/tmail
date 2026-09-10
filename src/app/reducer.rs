@@ -16,8 +16,8 @@ use crate::app::operation::{
     OperationOutcome, OperationResult,
 };
 use crate::app::overlay::{
-    AttachmentFileDialog, ConfirmButton, DiscardDialog, ErrorDialog, ModalButton, Overlay,
-    ThemePickerDialog,
+    AttachmentFileDialog, ConfirmButton, DiscardDialog, ErrorDialog, HelpDialog, ModalButton,
+    Overlay, ThemePickerDialog,
 };
 use crate::app::route::{MailboxRoute, MessageRoute, Route, SearchRoute};
 use crate::app::sanitize::sanitize;
@@ -95,6 +95,7 @@ pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::ToggleSelected => toggle_selected(state),
         Action::SelectAll => toggle_select_all(state),
         Action::Compose => open_composer(state),
+        Action::OpenHelp => open_help(state),
         Action::LoadDrafts => load_drafts(state),
         Action::ComposerEdit(edit) => {
             // Editing targets the focused composer control; without a
@@ -269,8 +270,56 @@ fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
             _ => Some(attachment_dialog_reduce(state, action)),
         },
         Some(Overlay::ThemePicker(_)) => Some(theme_picker_reduce(state, action)),
+        Some(Overlay::Help(_)) => match action {
+            // Results must land while help is open (a send/autosave in
+            // flight); the popup otherwise swallows everything.
+            Action::BackendCompleted(_) => None,
+            _ => Some(help_modal_reduce(state, action)),
+        },
         None => None,
     }
+}
+
+/// Help handling (user request): the popup is inert except for its own
+/// close keys — Esc, `?`, or `Ctrl+h` (whichever the user pressed) all
+/// close, restoring the focus underneath.
+fn help_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
+    let Some(Overlay::Help(dialog)) = state.overlay.take() else {
+        return Vec::new();
+    };
+    match action {
+        Action::BackOrCancel | Action::OpenHelp | Action::Activate => {
+            state.focus = dialog.previous_focus;
+        }
+        _ => {
+            // Swallowed: restore the dialog (everything else is inert).
+            state.overlay = Some(Overlay::Help(dialog));
+        }
+    }
+    Vec::new()
+}
+
+/// The shortcuts popup (user request). Only when no wizard owns the keys
+/// — wizard input is entirely its own — and not when another overlay is
+/// open (the modal path above keeps the existing one).
+fn open_help(state: &mut AppState) -> Vec<Effect> {
+    if state.wizard.is_some()
+        || !matches!(
+            state.focus,
+            Focus::MessageList
+                | Focus::Reader
+                | Focus::Sidebar
+                | Focus::SearchField
+                | Focus::Composer
+        )
+    {
+        return Vec::new();
+    }
+    state.overlay = Some(Overlay::Help(HelpDialog {
+        previous_focus: state.focus,
+    }));
+    state.focus = Focus::Help;
+    Vec::new()
 }
 
 /// Error modal handling (plan §12).
@@ -768,50 +817,112 @@ fn click_composer_field(state: &mut AppState, field: ComposerField) -> Vec<Effec
 /// requires a loaded reader; a draft already in the composer is never
 /// clobbered (plan §14: one composer at a time).
 fn open_reply(state: &mut AppState) -> Vec<Effect> {
-    let Some(message) = state.open_message.as_loaded() else {
-        tracing::debug!("reply ignored: no loaded message in the reader");
-        return Vec::new();
-    };
-    if composer_open(state) {
-        state.set_status("A draft is already open — send or discard it first");
-        return Vec::new();
+    if let Some(message) = state.open_message.as_loaded() {
+        if composer_open(state) {
+            state.set_status("A draft is already open — send or discard it first");
+            return Vec::new();
+        }
+        let seed = crate::domain::reply::seed_reply(message, crate::domain::ReplyKind::Reply, None);
+        return open_seeded_composer(state, seed, "Reply draft ready");
     }
-    let seed = crate::domain::reply::seed_reply(message, crate::domain::ReplyKind::Reply, None);
-    open_seeded_composer(state, seed, "Reply draft ready")
+    // Per user request: reply works from the list too — fetch the selected
+    // message, then seed on arrival (`SeedComposer` result arm).
+    seed_from_list(state, crate::app::operation::SeedKind::Reply)
 }
 
 /// Seed a reply-all draft (Phase 7.5): recipients merged, deduplicated,
 /// and the configured account address excluded.
 fn open_reply_all(state: &mut AppState) -> Vec<Effect> {
-    let Some(message) = state.open_message.as_loaded() else {
-        tracing::debug!("reply-all ignored: no loaded message in the reader");
-        return Vec::new();
-    };
-    if composer_open(state) {
-        state.set_status("A draft is already open — send or discard it first");
-        return Vec::new();
+    if let Some(message) = state.open_message.as_loaded() {
+        if composer_open(state) {
+            state.set_status("A draft is already open — send or discard it first");
+            return Vec::new();
+        }
+        let own = state.account_email.clone();
+        let seed = crate::domain::reply::seed_reply(
+            message,
+            crate::domain::ReplyKind::ReplyAll,
+            own.as_deref(),
+        );
+        return open_seeded_composer(state, seed, "Reply-all draft ready");
     }
-    let own = state.account_email.clone();
-    let seed = crate::domain::reply::seed_reply(
-        message,
-        crate::domain::ReplyKind::ReplyAll,
-        own.as_deref(),
-    );
-    open_seeded_composer(state, seed, "Reply-all draft ready")
+    seed_from_list(state, crate::app::operation::SeedKind::ReplyAll)
 }
 
 /// Seed a forward draft from the open message (reader).
 fn open_forward(state: &mut AppState) -> Vec<Effect> {
-    let Some(message) = state.open_message.as_loaded() else {
-        tracing::debug!("forward ignored: no loaded message in the reader");
+    if let Some(message) = state.open_message.as_loaded() {
+        if composer_open(state) {
+            state.set_status("A draft is already open — send or discard it first");
+            return Vec::new();
+        }
+        let seed = crate::domain::reply::seed_forward(message);
+        return open_seeded_composer(state, seed, "Forward draft ready");
+    }
+    seed_from_list(state, crate::app::operation::SeedKind::Forward)
+}
+
+/// List-initiated reply/forward (user request): the summaries do not carry
+/// a body, so fetch the message first (`SeedComposer`) and seed the
+/// composer when the result lands. Requires a list/reader-targeted
+/// message.
+fn seed_from_list(state: &mut AppState, kind: crate::app::operation::SeedKind) -> Vec<Effect> {
+    // Same target rule as every list/reader message action.
+    let locator = match state.focus {
+        Focus::MessageList | Focus::Reader => state.action_target(),
+        _ => None,
+    };
+    let Some(locator) = locator else {
         return Vec::new();
     };
     if composer_open(state) {
         state.set_status("A draft is already open — send or discard it first");
         return Vec::new();
     }
-    let seed = crate::domain::reply::seed_forward(message);
-    open_seeded_composer(state, seed, "Forward draft ready")
+    state.set_status(match kind {
+        crate::app::operation::SeedKind::Reply => "Loading message for reply…",
+        crate::app::operation::SeedKind::ReplyAll => "Loading message for reply-all…",
+        crate::app::operation::SeedKind::Forward => "Loading message for forward…",
+    });
+    vec![
+        state
+            .operations
+            .start(OperationKind::SeedComposer { locator, kind }),
+    ]
+}
+
+/// The fetched message arrives for a list-initiated seed: convert it into
+/// a composer draft with the same domain seeding the reader uses, one
+/// composer rule intact (an older fetch whose composer already opened by
+/// a newer seed is superseded away operation-wise, so this runs once).
+fn install_seed(
+    state: &mut AppState,
+    message: crate::domain::Message,
+    kind: crate::app::operation::SeedKind,
+) -> Vec<Effect> {
+    if composer_open(state) {
+        state.set_status("A draft is already open — send or discard it first");
+        return Vec::new();
+    }
+    let (seed, status) = match kind {
+        crate::app::operation::SeedKind::Reply => (
+            crate::domain::reply::seed_reply(&message, crate::domain::ReplyKind::Reply, None),
+            "Reply draft ready",
+        ),
+        crate::app::operation::SeedKind::ReplyAll => (
+            crate::domain::reply::seed_reply(
+                &message,
+                crate::domain::ReplyKind::ReplyAll,
+                state.account_email.as_deref(),
+            ),
+            "Reply-all draft ready",
+        ),
+        crate::app::operation::SeedKind::Forward => (
+            crate::domain::reply::seed_forward(&message),
+            "Forward draft ready",
+        ),
+    };
+    open_seeded_composer(state, seed, status)
 }
 
 /// Install a seeded draft in the composer, pushing the composer route on
@@ -1463,6 +1574,16 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
                     );
                     Vec::new()
                 }
+            }
+        }
+        OperationKind::SeedComposer { kind, .. } => {
+            state.operations.finish(result.id);
+            match &result.outcome {
+                Ok(OperationOutcome::Message(message)) => {
+                    install_seed(state, (**message).clone(), *kind)
+                }
+                Ok(_) => unexpected_payload(result.id, "composer seed"),
+                Err(failure) => open_error_modal(state, failure),
             }
         }
         OperationKind::SetRead { locator, read } => {
@@ -2364,6 +2485,7 @@ fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
         Focus::Composer
         | Focus::Dialog
         | Focus::ThemePicker
+        | Focus::Help
         | Focus::ErrorModal
         | Focus::Wizard => {}
     }
@@ -2621,6 +2743,7 @@ fn activate(state: &mut AppState) -> Vec<Effect> {
         Focus::Reader => open_selected_attachment(state),
         Focus::Dialog
         | Focus::ThemePicker
+        | Focus::Help
         | Focus::SearchField
         | Focus::ErrorModal
         | Focus::Wizard => {

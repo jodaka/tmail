@@ -95,6 +95,7 @@ const DEFAULT_GLOBAL: &[DefaultBinding] = &[
     binding!("mark_read", Action::MarkRead, ["i"]),
     binding!("save_attachment", Action::SaveAttachment, ["S"]),
     binding!("open_attachment", Action::OpenAttachment, ["o"]),
+    binding!("open_help", Action::OpenHelp, ["?", "Ctrl+h"]),
 ];
 
 /// Message-list-only keys (`d` first: the compact form is what the hint
@@ -392,6 +393,53 @@ impl KeyMap {
         let up = self.hint(context, "move_up")?;
         let down = self.hint(context, "move_down")?;
         Some(format!("{up}/{down}"))
+    }
+
+    /// The active bindings for one focus: `(action label, key display)`
+    /// pairs, the focus's own context first (list/reader), then the
+    /// global table. Order follows the default tables, and only the keys
+    /// actually bound (possibly user-rebound) are listed, so a custom
+    /// `[tmail.keybindings]` can never make the help popup lie.
+    pub fn help_entries(&self, focus: Focus) -> Vec<(String, String)> {
+        let mut entries = Vec::new();
+        let mut global_served = false;
+        for context in contexts_for_focus(focus) {
+            let table = match context {
+                Some(Context::List) => (&self.list, DEFAULT_LIST),
+                Some(Context::Reader) => (&self.reader, DEFAULT_READER),
+                Some(Context::Global) | None => {
+                    if global_served {
+                        continue;
+                    }
+                    global_served = true;
+                    (&self.global, DEFAULT_GLOBAL)
+                }
+            };
+            // The context's default table fixes the order; unbound actions
+            // drop out.
+            for binding in table.1 {
+                let Some(keys) = table.0.keys_of(binding.name) else {
+                    continue;
+                };
+                let label = action_label(binding.name);
+                for key in keys {
+                    entries.push((label.clone(), key.display()));
+                }
+            }
+        }
+        entries
+    }
+}
+
+/// A list-friendly action label for the help popup: underscores into
+/// spaces, first letter capitalized ("focus_previous" → "Focus
+/// previous").
+fn action_label(name: &str) -> String {
+    let label = name.replace('_', " ");
+    let mut chars = label.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => label,
     }
 }
 

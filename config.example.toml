@@ -103,6 +103,7 @@ name = "default"
 # mark_read = ["i"]
 # save_attachment = ["S"]
 # open_attachment = ["o"]
+# open_help = ["?", "Ctrl+h"]
 #
 # [tmail.keybindings.list]
 # trash = ["d", "Delete"]

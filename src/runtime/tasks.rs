@@ -138,11 +138,13 @@ async fn run_effect(
             .await
         }
         // Reader load, draft reopen (the reducer turns the fetched copy
-        // into a composer draft), and list preview (ticket wxtx) share one
-        // backend call and one payload shape.
+        // into a composer draft), list preview (ticket wxtx), and the
+        // list-initiated reply/forward seed share one backend call and
+        // one payload shape.
         OperationKind::LoadMessage(locator)
         | OperationKind::OpenDraft(locator)
-        | OperationKind::Preview(locator) => {
+        | OperationKind::Preview(locator)
+        | OperationKind::SeedComposer { locator, .. } => {
             run_call(
                 effect,
                 ctx,

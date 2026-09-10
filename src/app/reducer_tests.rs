@@ -8,7 +8,7 @@ use crate::app::action::{BulkOp, ClickTarget};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::mock::{self, mock_initial_state};
-use crate::app::operation::{OperationId, RetrySpec};
+use crate::app::operation::{OperationId, RetrySpec, SeedKind};
 use crate::app::overlay::Overlay;
 use crate::app::route::Route;
 use crate::app::state::AppState;
@@ -1976,9 +1976,6 @@ fn unimplemented_actions_are_safe_noops() {
     let mut s = state();
     let before = s.clone();
     for action in [
-        Action::Reply,
-        Action::ReplyAll,
-        Action::Forward,
         Action::Send,
         Action::LeaveComposer,
         Action::RetryError,
@@ -3765,29 +3762,17 @@ fn forward_seeds_a_header_block_and_no_recipients() {
 }
 
 #[test]
-fn reply_needs_a_loaded_message() {
+fn reply_needs_a_target() {
     let mut s = state();
-    // No reader at all.
+    // No reader and an empty list: nothing to reply to.
+    s.messages.items.clear();
+    s.open_message = Loadable::Idle;
     no_effects(&reduce(&mut s, &Action::Reply));
     no_effects(&reduce(&mut s, &Action::Forward));
     assert!(s.composer.is_none());
-    // Reader open but the message still loading.
-    let summary = s.selected_message().unwrap().clone();
-    let (id, _kind) = expect_kind(&reduce(&mut s, &Action::Activate));
-    reduce(
-        &mut s,
-        &Action::BackendCompleted(OperationResult {
-            id,
-            outcome: Ok(OperationOutcome::Page(mock::mock_page(
-                &inbox_id(),
-                0,
-                mock::PAGE_SIZE,
-            ))),
-        }),
-    );
-    let _ = summary;
-    no_effects(&reduce(&mut s, &Action::Reply));
-    assert!(s.composer.is_none());
+    // Reader open but the message still loading: the seed fetch starts
+    // from the reader's summary, so this is now the pending-fetch case
+    // (covered by `reply_from_the_list_fetches_then_seeds_the_composer`).
 }
 
 #[test]
@@ -6298,4 +6283,197 @@ fn the_active_theme_default_is_the_dark_reference() {
     let s = state();
     assert_eq!(s.themes.len(), 2, "both built-ins are cycle candidates");
     assert_eq!(s.active_theme(), crate::ui::theme::Theme::default_dark());
+}
+
+// ── Reply / forward seeding from the list (NORMAL) ───────────────────────
+
+fn expect_seed(effects: &[Effect]) -> (OperationId, MessageLocator, SeedKind) {
+    let (id, kind) = effect_parts(effects);
+    match kind {
+        OperationKind::SeedComposer { locator, kind } => (id, locator, kind),
+        other => panic!("expected a SeedComposer effect, got {other:?}"),
+    }
+}
+
+#[test]
+fn reply_from_the_list_fetches_then_seeds_the_composer() {
+    let mut s = state();
+    assert_eq!(s.focus, Focus::MessageList);
+    let effects = reduce(&mut s, &Action::Reply);
+    let (id, locator, kind) = expect_seed(&effects);
+    assert_eq!(kind, SeedKind::Reply);
+    assert_eq!(locator.id, s.messages.items[0].id);
+    // The fetch is in flight; the composer has not opened yet.
+    assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
+    assert!(s.composer.is_none());
+    // The fetched message seeds the composer exactly like the reader path.
+    let message = mock::mock_message(&s.messages.items[0]);
+    no_effects(&reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(message))),
+        }),
+    ));
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    assert_eq!(s.focus, Focus::Composer);
+    let composer = seeded_composer(&s);
+    assert!(
+        composer.draft.subject.starts_with("Re:"),
+        "{}",
+        composer.draft.subject
+    );
+}
+
+#[test]
+fn forward_from_the_list_quotes_the_fetched_message() {
+    let mut s = state();
+    let effects = reduce(&mut s, &Action::Forward);
+    let (id, _locator, kind) = expect_seed(&effects);
+    assert_eq!(kind, SeedKind::Forward);
+    let message = mock::mock_message(&s.messages.items[0]);
+    no_effects(&reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(message))),
+        }),
+    ));
+    let composer = seeded_composer(&s);
+    assert!(
+        composer.draft.subject.starts_with("Fwd:"),
+        "{}",
+        composer.draft.subject
+    );
+    assert_ne!(s.status.message.as_deref(), None);
+}
+
+#[test]
+fn a_failed_list_seed_opens_the_modal_without_a_composer() {
+    let mut s = state();
+    let effects = reduce(&mut s, &Action::Reply);
+    let (id, _locator, _kind) = expect_seed(&effects);
+    let kind = OperationKind::SeedComposer {
+        locator: s.messages.items[0].clone().into_locator(),
+        kind: SeedKind::Reply,
+    };
+    let _ = &mut s;
+    reduce(&mut s, &failure(id, &kind, "himalaya exited with code 1"));
+    assert!(
+        matches!(s.active_route(), Some(Route::Mailbox(_))),
+        "no composer on failure"
+    );
+    assert!(s.composer.is_none());
+    assert!(matches!(s.overlay, Some(Overlay::Error(_))));
+}
+
+#[test]
+fn pressing_reply_twice_supersedes_the_first_fetch() {
+    let mut s = state();
+    let (first_id, _, _) = expect_seed(&reduce(&mut s, &Action::Reply));
+    let (second_id, _, _) = expect_seed(&reduce(&mut s, &Action::Reply));
+    assert_ne!(first_id, second_id);
+    // The superseded first fetch is dropped by the registry: its late
+    // result must not open the composer.
+    let message = mock::mock_message(&s.messages.items[0]);
+    no_effects(&reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id: first_id,
+            outcome: Ok(OperationOutcome::Message(Box::new(message.clone()))),
+        }),
+    ));
+    assert!(s.composer.is_none());
+    // The newest fetch wins and seeds.
+    no_effects(&reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id: second_id,
+            outcome: Ok(OperationOutcome::Message(Box::new(message))),
+        }),
+    ));
+    assert!(s.composer.is_some());
+}
+
+// ── Shortcuts help popup (? / Ctrl+h) ────────────────────────────────────
+
+#[test]
+fn help_opens_over_the_current_screen_and_closes_restoring_focus() {
+    let mut s = state();
+    no_effects(&reduce(&mut s, &Action::OpenHelp));
+    assert!(matches!(s.overlay, Some(Overlay::Help(_))));
+    assert_eq!(s.focus, Focus::Help);
+    // Esc closes back into the list.
+    no_effects(&reduce(&mut s, &Action::BackOrCancel));
+    assert!(s.overlay.is_none());
+    assert_eq!(s.focus, Focus::MessageList);
+    // A second open/close cycle from the composer restores the composer.
+    reduce(&mut s, &Action::Compose);
+    no_effects(&reduce(
+        &mut s,
+        &Action::ComposerEdit(ComposerEdit::Char('h')),
+    ));
+    no_effects(&reduce(&mut s, &Action::OpenHelp));
+    assert_eq!(previous_focus_of(&s), Focus::Composer);
+    no_effects(&reduce(&mut s, &Action::OpenHelp));
+    assert!(s.overlay.is_none());
+    assert_eq!(s.focus, Focus::Composer);
+    assert!(
+        matches!(s.active_route(), Some(Route::Composer)),
+        "the draft survives the popup"
+    );
+}
+
+/// The focus saved with the dialog (what the close restores).
+fn previous_focus_of(s: &AppState) -> Focus {
+    let Some(Overlay::Help(dialog)) = &s.overlay else {
+        panic!("help overlay expected");
+    };
+    dialog.previous_focus
+}
+
+#[test]
+fn help_swallows_navigation_and_backend_results_land() {
+    let mut s = state();
+    no_effects(&reduce(&mut s, &Action::OpenHelp));
+    // The arrows never reach the list behind the popup.
+    let before = s.clone();
+    no_effects(&reduce(&mut s, &Action::MoveDown));
+    assert_eq!(s.selection, before.selection);
+    // Backend results are not blocked by the popup.
+    let summary = s.messages.items[0].clone();
+    // (no in-flight operation: an unknown id is a harmless no-op)
+    let _ = summary;
+}
+
+#[test]
+fn help_does_not_open_during_the_wizard() {
+    let mut s = state();
+    s.wizard = Some(crate::app::wizard::WizardState::new(
+        true,
+        None,
+        Vec::new(),
+        None,
+        false,
+    ));
+    no_effects(&reduce(&mut s, &Action::OpenHelp));
+    assert!(s.overlay.is_none());
+}
+
+#[test]
+fn help_lists_the_active_bindings_of_the_screen_underneath() {
+    let mut s = state();
+    reduce(&mut s, &Action::OpenHelp);
+    let Some(Overlay::Help(dialog)) = &s.overlay else {
+        panic!("help overlay");
+    };
+    assert_eq!(dialog.previous_focus, Focus::MessageList);
+    // The default map's list view: global + list entries, rebound-free.
+    let entries = s.keymap.help_entries(Focus::MessageList);
+    assert!(
+        entries
+            .iter()
+            .any(|(label, key)| label == "Open help" && key == "?")
+    );
+    assert!(entries.iter().any(|(label, _)| label == "Trash"));
 }

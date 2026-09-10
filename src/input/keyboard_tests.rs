@@ -204,12 +204,47 @@ fn slash_does_not_open_search_when_already_editing() {
 }
 
 #[test]
-fn j_k_and_help_are_not_bound() {
+fn j_and_k_are_not_bound() {
     for f in [Focus::MessageList, Focus::Sidebar] {
         assert_eq!(to_action(plain(KeyCode::Char('j')), f), None);
         assert_eq!(to_action(plain(KeyCode::Char('k')), f), None);
-        assert_eq!(to_action(plain(KeyCode::Char('?')), f), None);
     }
+}
+
+#[test]
+fn question_mark_opens_the_help_popup() {
+    for f in [Focus::MessageList, Focus::Sidebar, Focus::Reader] {
+        assert_eq!(
+            to_action(plain(KeyCode::Char('?')), f),
+            Some(Action::OpenHelp)
+        );
+        // Ctrl+h pierces text foci; even here it is the help chord.
+        assert_eq!(
+            to_action(key(KeyCode::Backspace, KeyModifiers::CONTROL), f),
+            Some(Action::OpenHelp)
+        );
+    }
+    // The composer's helper chord: Ctrl+h (user decision — '?' keeps
+    // typing) opens the help over the draft.
+    assert_eq!(
+        to_action(
+            key(KeyCode::Backspace, KeyModifiers::CONTROL),
+            Focus::Composer
+        ),
+        Some(Action::OpenHelp)
+    );
+}
+
+#[test]
+fn piped_question_mark_stays_text() {
+    assert_eq!(
+        to_action(plain(KeyCode::Char('?')), Focus::Composer),
+        Some(Action::ComposerEdit(ComposerEdit::Char('?')))
+    );
+    assert_eq!(
+        to_action(plain(KeyCode::Char('?')), Focus::SearchField),
+        Some(Action::SearchEdit(SearchEdit::Char('?')))
+    );
 }
 
 #[test]

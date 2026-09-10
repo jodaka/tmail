@@ -26,6 +26,9 @@ pub enum Focus {
     /// The theme picker dialog is open (ticket k5ba): arrows preview the
     /// highlighted palette, Enter keeps it, Esc restores the original.
     ThemePicker,
+    /// The shortcuts help popup is open (user request): it intercepts all
+    /// input; Esc (or the help keys again) returns to the saved focus.
+    Help,
     /// The Retry/Dismiss error modal is open; it intercepts all input.
     ErrorModal,
     /// The account configuration wizard (ADR 0003) owns the whole screen:
@@ -56,7 +59,11 @@ impl Focus {
     fn step(self, dir: isize) -> Self {
         match self {
             // The modal foci never cycle; the modal handles Tab itself.
-            Focus::ErrorModal | Focus::Dialog | Focus::ThemePicker | Focus::Wizard => self,
+            Focus::ErrorModal
+            | Focus::Dialog
+            | Focus::ThemePicker
+            | Focus::Help
+            | Focus::Wizard => self,
             // The reader screen has a single focusable area (the scrolling
             // document); Tab is inert there in v1 (plan §10).
             Focus::Reader => self,
@@ -86,6 +93,7 @@ impl Focus {
                 | Focus::ErrorModal
                 | Focus::Dialog
                 | Focus::ThemePicker
+                | Focus::Help
                 | Focus::Composer
                 | Focus::Wizard
         )
@@ -102,6 +110,7 @@ impl fmt::Display for Focus {
             Focus::Composer => write!(f, "composer"),
             Focus::Dialog => write!(f, "dialog"),
             Focus::ThemePicker => write!(f, "themes"),
+            Focus::Help => write!(f, "help"),
             Focus::ErrorModal => write!(f, "modal"),
             Focus::Wizard => write!(f, "wizard"),
         }

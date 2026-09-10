@@ -216,11 +216,12 @@ fn to_action_with(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action
     }
     let action = keymap.lookup(&key, focus)?;
     // Text entry is pierced only by the quit and refresh chords (plan
-    // §10): every other ctrl/alt chord stays out of the fields the user
-    // is typing into, however the keymap is configured. Structural keys
-    // (Esc/Enter/Tab) pass unrestricted.
+    // §10) — plus the help chord (user request: shortcuts lookup inside
+    // the composer's text fields): every other ctrl/alt chord stays out
+    // of the fields the user is typing into, however the keymap is
+    // configured. Structural keys (Esc/Enter/Tab) pass unrestricted.
     let chord = matches!(key.code, KeyCode::Char(_)) && (ctrl || alt);
-    if text_focus && chord && !matches!(action, Action::Quit | Action::Refresh) {
+    if text_focus && chord && !matches!(action, Action::Quit | Action::Refresh | Action::OpenHelp) {
         return None;
     }
     Some(action)
@@ -243,6 +244,13 @@ fn normalize_ctrl_chords(key: KeyEvent) -> KeyEvent {
         KeyCode::Char('5') => KeyCode::Char(']'),
         KeyCode::Char('6') => KeyCode::Char('^'),
         KeyCode::Char('7') => KeyCode::Char('_'),
+        KeyCode::Backspace => {
+            // Legacy terminals send Ctrl+H as the single byte 0x08, which
+            // crossterm reports as Backspace + CONTROL: mapped back to the
+            // glyph the config spec names ("Ctrl+h" — the shortcuts help,
+            // user request). A plain Backspace (no CONTROL) is untouched.
+            KeyCode::Char('h')
+        }
         _ => return key,
     };
     KeyEvent {

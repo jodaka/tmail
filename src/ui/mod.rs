@@ -111,6 +111,7 @@ pub fn render(
     components::confirm_modal::render(frame, state, theme, hits);
     components::attachment_dialog::render(frame, state, theme);
     components::theme_picker::render(frame, state, theme);
+    components::help::render(frame, state, theme);
 }
 
 /// Too-small mode: a clear centered message, nothing overlapping (plan §18).

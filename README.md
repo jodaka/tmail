@@ -177,7 +177,7 @@ Tmail reads, from himalaya's own blocks:
   `drafts`, `trash`, `archive`) to the account's real folder names; without
   an alias, archive/trash resolve from what the account actually exposes
 
-Keyaboard shortcuts described in `./docs/shortcuts.md`
+Keyboard shortcuts described in [docs/shortcusts.md](docs/shortcusts.md)
 
 ## Account configuration wizard
 

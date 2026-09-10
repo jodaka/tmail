@@ -204,6 +204,10 @@ pub enum Action {
     OpenAttachment,
     LeaveComposer,
     DiscardDraft,
+    /// `?` / `Ctrl+H` (user request): the shortcuts popup over the current
+    /// screen — mailbox, reader, composer, sidebar. Never fires in the
+    /// wizard (every key there is wizard-owned) or over an open overlay.
+    OpenHelp,
     /// Ctrl+E in the composer (plan §14, Phase 11): save the draft, then
     /// hand the body to the configured external editor.
     EditExternal,

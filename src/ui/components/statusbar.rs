@@ -143,6 +143,10 @@ pub fn render(
                 state.keymap.hint(context, "trash").map(String::from),
                 "delete",
             ),
+            (
+                state.keymap.hint(context, "open_help").map(String::from),
+                "shortcuts",
+            ),
         ];
         // Attachment actions advertise only when the open message carries
         // attachments (plan §15, ticket 61qx): the chips are the target of
@@ -199,6 +203,10 @@ pub fn render(
             (
                 state.keymap.hint(context, "open_search").map(String::from),
                 "search",
+            ),
+            (
+                state.keymap.hint(context, "open_help").map(String::from),
+                "shortcuts",
             ),
         ];
         push_hints(theme, &mut spans, &hints);

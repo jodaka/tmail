@@ -89,6 +89,18 @@ pub enum Overlay {
     /// Moving the cursor previews the highlighted theme at once; Enter
     /// keeps it and Esc restores the palette the picker opened with.
     ThemePicker(ThemePickerDialog),
+    /// The shortcuts help popup (user request): every active binding for
+    /// the screen underneath, rendered from the keymap.
+    Help(HelpDialog),
+}
+
+/// The shortcuts help dialog (user request). The bindings themselves live
+/// in the keymap; the help renders live (`KeyMap::help_entries`), so a
+/// custom `[tmail.keybindings]` config shows up here unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelpDialog {
+    /// Focus to restore when the popup closes.
+    pub previous_focus: Focus,
 }
 
 /// The attachment file chooser (plan §15, ticket 95x0). A
