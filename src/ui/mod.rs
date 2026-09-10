@@ -2,12 +2,11 @@
 
 pub mod chrome;
 pub mod components;
-pub mod dates;
-pub mod layout;
-pub(crate) mod rich;
+pub use crate::view::dates;
+pub use crate::view::layout;
 pub mod screens;
-pub mod text;
-pub mod theme;
+pub use crate::view::text;
+pub use crate::view::theme;
 
 pub use theme::Theme;
 
@@ -65,10 +64,7 @@ pub fn render(
         render_too_small(frame, area, state, theme);
         // The modals still open even in too-small terminals: failures and
         // confirmations must stay visible and recoverable (plan §12/§14).
-        components::error_modal::render(frame, state, theme, hits);
-        components::confirm_modal::render(frame, state, theme, hits);
-        components::attachment_dialog::render(frame, state, theme);
-        components::theme_picker::render(frame, state, theme);
+        render_modals(frame, state, theme, hits);
         return;
     }
     let (topbar, body, statusbar) = layout::split_vertical(area);
@@ -107,11 +103,18 @@ pub fn render(
         screens::mailbox::render(frame, list, state, mode, theme, ctx.now, hits);
     }
     components::statusbar::render(frame, statusbar, state, theme, hits);
+    render_modals(frame, state, theme, hits);
+    components::help::render(frame, state, theme);
+}
+
+/// The always-on modal stack drawn above every screen (plan §12/§14): the
+/// error modal, the confirm dialog, the attachment chooser, and the theme
+/// picker. Help is normal-mode only and draws on top separately.
+fn render_modals(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, hits: &mut HitMap) {
     components::error_modal::render(frame, state, theme, hits);
     components::confirm_modal::render(frame, state, theme, hits);
     components::attachment_dialog::render(frame, state, theme);
     components::theme_picker::render(frame, state, theme);
-    components::help::render(frame, state, theme);
 }
 
 /// Too-small mode: a clear centered message, nothing overlapping (plan §18).

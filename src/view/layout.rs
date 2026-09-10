@@ -73,6 +73,21 @@ pub fn split_list(area: Rect) -> (Rect, Rect) {
     (head, rows)
 }
 
+/// A horizontally centered dialog rectangle: the shared anatomy of the
+/// modal `layout()` functions (`x = (size.0 - width) / 2`, and so on).
+/// The rectangle never exceeds the terminal: oversized dimensions clamp to
+/// the terminal first, so callers may pass raw caps.
+pub fn centered(size: (u16, u16), width: u16, height: u16) -> Rect {
+    let width = width.min(size.0.max(1));
+    let height = height.min(size.1.max(1));
+    Rect {
+        x: size.0.saturating_sub(width) / 2,
+        y: size.1.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
 /// The list pane's rectangle for a terminal `size`: the shared prologue of
 /// the three visible-viewport helpers — origin rect, mode selection, and
 /// the TooSmall bail (`None` means the pane is not drawn at all); then the

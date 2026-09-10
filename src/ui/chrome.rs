@@ -25,16 +25,7 @@ pub enum HairlineSide {
 /// modal `layout()` functions (`x = (size.0 - width) / 2`, and so on).
 /// The rectangle never exceeds the terminal: oversized dimensions clamp to
 /// the terminal first, so callers may pass raw caps.
-pub fn centered(size: (u16, u16), width: u16, height: u16) -> Rect {
-    let width = width.min(size.0.max(1));
-    let height = height.min(size.1.max(1));
-    Rect {
-        x: size.0.saturating_sub(width) / 2,
-        y: size.1.saturating_sub(height) / 2,
-        width,
-        height,
-    }
-}
+pub use crate::view::layout::centered;
 
 /// A hairline rule on one edge of `area` (mockup `border-bottom: 1px solid
 /// var(--border)`): one-color border block, the only difference between

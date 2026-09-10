@@ -81,15 +81,12 @@ pub(crate) struct AddressDto {
 
 // ── `message add --json` (ADR 0002 draft spike) ──────────────────────────
 
-/// `message add` returns the created message's backend id; `sent` is false
-/// for a plain append (drafts). It is parsed for shape fidelity but not
-/// interpreted: a draft add never sends.
+/// `message add` returns the created message's backend id. It is parsed
+/// for shape fidelity but not interpreted: a draft add never sends, so
+/// the wire's `sent` flag is not modeled (serde ignores unknown keys).
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct MessageAddDto {
     pub id: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub sent: Option<bool>,
 }
 
 // ── `message read --json` (ADR 0001 finding 10) ──────────────────────────
@@ -148,8 +145,12 @@ pub(crate) enum HeaderNameDto {
         other: String,
     },
     /// Catch-all for name shapes Tmail does not interpret (they only need
-    /// to parse, not to be read).
-    #[allow(dead_code)]
+    /// to parse, not to be read). Constructed by the untagged serde
+    /// fallback; the payload is deliberately ignored.
+    #[allow(
+        dead_code,
+        reason = "serde untagged catch-all; payload unread by design"
+    )]
     Other(serde_json::Value),
 }
 
@@ -180,8 +181,12 @@ impl HeaderNameDto {
 pub(crate) enum HeaderValueDto {
     Known(KnownHeaderValue),
     /// Catch-all for value kinds Tmail does not interpret (they only need
-    /// to parse, not to be read).
-    #[allow(dead_code)]
+    /// to parse, not to be read). Constructed by the untagged serde
+    /// fallback; the payload is deliberately ignored.
+    #[allow(
+        dead_code,
+        reason = "serde untagged catch-all; payload unread by design"
+    )]
     Other(serde_json::Value),
 }
 
@@ -275,37 +280,34 @@ pub(crate) struct AttachmentsDto {
     pub attachments: Vec<AttachmentRowDto>,
 }
 
-/// One attachment row.
+/// One attachment row: the fields the saver reads. The wire rows also
+/// carry `mime`, `size`, and `inline`; Tmail never interprets them, so
+/// they are not modeled and serde ignores them.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct AttachmentRowDto {
     /// 1-based MIME part position, as a string.
     pub id: String,
     #[serde(default)]
     pub filename: Option<String>,
-    /// Wire shape fidelity only; the saver uses the request/row filename.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub mime: Option<String>,
-    /// Decoded size in bytes (schema-required; shape fidelity only).
-    #[allow(dead_code)]
-    pub size: u64,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub inline: bool,
     /// Where `attachment download` wrote the bytes.
     #[serde(default)]
     pub path: Option<String>,
 }
 
-/// Part bodies are externally tagged too: decoded text, HTML, raw binary
-/// (a JSON number array), or nested part indexes for multipart. The outer
-/// untagged wrapper tolerates unknown body shapes.
+/// Part bodies are externally tagged too: decoded text, HTML, or raw
+/// binary (a JSON number array). Nested multipart indexes and any future
+/// body shape fall through to the `Other` catch-all, so an unknown body
+/// never fails the whole message.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum BodyDto {
     Known(KnownBody),
-    /// Catch-all for body kinds Tmail does not interpret.
-    #[allow(dead_code)]
+    /// Catch-all for body kinds Tmail does not interpret. Constructed by
+    /// the untagged serde fallback; the payload is deliberately ignored.
+    #[allow(
+        dead_code,
+        reason = "serde untagged catch-all; payload unread by design"
+    )]
     Other(serde_json::Value),
 }
 
@@ -314,8 +316,4 @@ pub(crate) enum KnownBody {
     Text(String),
     Html(String),
     Binary(Vec<u8>),
-    /// Nested part indexes; parsed for shape fidelity but not traversed
-    /// (bodies are selected by `text_body`/`html_body`/`attachments`).
-    #[allow(dead_code)]
-    Multipart(Vec<usize>),
 }

@@ -190,7 +190,7 @@ fn apply_line_markers(line: &mut RichLine) {
 /// (word boundaries, Unicode-safe hard chunking of oversized tokens —
 /// plan §13: long URLs never corrupt the layout).
 pub(crate) fn plain_to_rich(plain: &str, width: usize) -> Vec<RichLine> {
-    crate::ui::text::wrap(plain, width.max(1))
+    crate::view::text::wrap(plain, width.max(1))
         .into_iter()
         .map(RichLine::from_plain)
         .collect()
@@ -227,7 +227,7 @@ pub(crate) fn preview_text(message: &crate::domain::Message) -> Option<String> {
     for text in [html, plain].into_iter().flatten() {
         let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
         if !collapsed.is_empty() {
-            return Some(crate::ui::text::truncate(&collapsed, MAX_PREVIEW_WIDTH));
+            return Some(crate::view::text::truncate(&collapsed, MAX_PREVIEW_WIDTH));
         }
     }
     None

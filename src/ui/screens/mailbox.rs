@@ -36,7 +36,6 @@ use crate::ui::theme::Theme;
 const DATE_TEXT_RIGHT_INSET: usize = 3;
 
 /// Render the message list into `area` (already split off from the sidebar).
-#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -107,13 +106,15 @@ pub fn render(
         let spans = message_spans(
             message,
             row_width as usize,
-            mode,
-            theme,
-            now,
-            selected,
-            bulk_selected,
-            state.focus == Focus::MessageList,
-            shows_recipient,
+            &RowContext {
+                mode,
+                theme,
+                now,
+                selected,
+                bulk_selected,
+                focused: state.focus == Focus::MessageList,
+                shows_recipient,
+            },
         );
         frame.render_widget(Paragraph::new(Line::from(spans)), content);
         // Comfortable density: a hairline under the row (fainter than any
@@ -264,13 +265,15 @@ fn render_head(
     chrome::hairline(frame, hairline, HairlineSide::Bottom, theme);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn message_spans<'a>(
-    message: &'a MessageSummary,
-    width: usize,
+/// Per-row presentation inputs for [`message_spans`]: the frame-wide
+/// styling plus the row's flags. Bundled because the renderer computes the
+/// frame-wide parts once and varies only the flags per row.
+#[derive(Clone, Copy)]
+struct RowContext<'a> {
     mode: LayoutMode,
     theme: &'a Theme,
     now: chrono::DateTime<chrono::FixedOffset>,
+    /// The cursor row.
     selected: bool,
     // Space-marked row (ticket p0s3): the bulk highlight fill. The cursor
     // row keeps its accent fill; both may apply to one row (cursor wins).
@@ -282,7 +285,22 @@ fn message_spans<'a>(
     // Drafts row: the sender column shows the recipient instead (the
     // sender is always the user's own address there).
     shows_recipient: bool,
+}
+
+fn message_spans<'a>(
+    message: &'a MessageSummary,
+    width: usize,
+    ctx: &RowContext<'a>,
 ) -> Vec<Span<'a>> {
+    let RowContext {
+        mode,
+        theme,
+        now,
+        selected,
+        bulk_selected,
+        focused,
+        shows_recipient,
+    } = *ctx;
     let full = mode == LayoutMode::Full;
     let compact = mode == LayoutMode::Compact;
 

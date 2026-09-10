@@ -17,52 +17,20 @@ use crate::app::action::ClickTarget;
 use crate::app::overlay::{ErrorDialog, ModalButton, Overlay};
 use crate::input::mouse::HitMap;
 use crate::ui::chrome;
-use crate::ui::text::wrap;
 use crate::ui::theme::Theme;
 
-/// Geometry of the modal for one terminal size and dialog shape. Shared by
-/// the renderer and the reducer's scroll clamping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ModalLayout {
-    /// Outer bordered rectangle.
-    pub area: Rect,
-    /// Display width available to wrapped detail lines.
-    pub detail_width: usize,
-    /// Number of detail lines visible at once.
-    pub viewport_lines: usize,
-}
-
-/// Compute the modal geometry. The modal always fits: it shrinks to the
-/// terminal and keeps at least one detail row even in tiny terminals.
-pub fn layout(size: (u16, u16), code: Option<i32>, ambiguous: bool) -> ModalLayout {
-    let width = size.0.saturating_sub(10).clamp(24, 76).min(size.0.max(1));
-    let height = size.1.saturating_sub(4).clamp(7, 18).min(size.1.max(1));
-    let area = chrome::centered(size, width, height);
-    // Inside the borders: [code?] [warning?] [detail…] [buttons] [hint].
-    let inner_height = height.saturating_sub(2) as usize;
-    let fixed = 2 + usize::from(code.is_some()) + usize::from(ambiguous);
-    let viewport_lines = inner_height.saturating_sub(fixed).max(1);
-    let detail_width = width.saturating_sub(4).max(1) as usize;
-    ModalLayout {
-        area,
-        detail_width,
-        viewport_lines,
-    }
-}
-
-/// Lines of wrapped detail (width from the layout), for tests and the
-/// reducer.
-fn detail_lines(detail: &str, size: (u16, u16), code: Option<i32>, ambiguous: bool) -> Vec<String> {
-    let layout = layout(size, code, ambiguous);
-    wrap(detail, layout.detail_width)
-}
+pub use crate::view::overlay::error_detail_lines as detail_lines;
+pub use crate::view::overlay::error_modal_layout as layout;
 
 /// Largest valid scroll offset for `dialog` at `size` (what the reducer
-/// clamps against).
+/// clamps against); the shared geometry lives in `view::overlay`.
 pub fn max_scroll(dialog: &ErrorDialog, size: (u16, u16)) -> usize {
-    let lines = detail_lines(&dialog.detail, size, dialog.code, dialog.ambiguous);
-    let layout = layout(size, dialog.code, dialog.ambiguous);
-    lines.len().saturating_sub(layout.viewport_lines)
+    crate::view::overlay::error_modal_max_scroll(
+        &dialog.detail,
+        dialog.code,
+        dialog.ambiguous,
+        size,
+    )
 }
 
 /// Render the modal, when open, above everything already drawn.

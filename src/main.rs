@@ -20,7 +20,7 @@ use anyhow::{Context, bail};
 use chrono::Local;
 use tokio::sync::mpsc;
 
-use tmail::app::{Action, AppState, Effect, reducer};
+use tmail::app::{Action, AppState, Effect, OperationResult, reducer};
 use tmail::backend::{
     MailBackend, PathOpener, RequestContext, SystemOpener, himalaya::HimalayaCliBackend,
 };
@@ -173,61 +173,14 @@ async fn run(invocation: Invocation) -> anyhow::Result<ExitCode> {
 }
 
 async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
-    let cli_config = invocation.config.clone();
-    let manual_wizard = invocation.configure;
-    let requested_theme = invocation.theme.clone();
-    let (config, issues) = tmail::config::Config::load_with_issues(cli_config.as_deref());
-    // Startup validation reports every detected problem together, before
-    // the TUI starts: a broken config is fixed in the file, not navigated
-    // in the app (plan §17/§19 Phase 10). Details are actionable and
-    // sanitized; secrets never reach these messages. `--configure` starts
-    // the wizard regardless of config state (ADR 0003 §3.1) — config
-    // issues are the wizard's job there — but the himalaya check stays:
-    // the credential test cannot run without it.
-    let mut issues: Vec<String> = if manual_wizard {
-        Vec::new()
-    } else {
-        issues.iter().cloned().collect()
-    };
-    if !tmail::backend::himalaya::executable_available("himalaya") {
-        issues.push(String::from(
-            "the himalaya executable was not found on PATH; install it or point PATH at it",
-        ));
-    }
-    // The keymap is built here (not inside the config parser): conflicts
-    // and structural checks are policy, not syntax, and their warnings
-    // describe adjustments — the app still starts (configurable
-    // keybindings; syntax problems come back fatal, like theme tokens).
-    let built_keymap = tmail::input::keymap::KeyMap::build(&config.keybindings);
-    if !manual_wizard {
-        issues.extend(built_keymap.errors);
-    }
-    if !issues.is_empty() {
-        let mut message = String::from("configuration problems (fix the file, then start again):");
-        for issue in &issues {
-            message.push_str(&format!("\n  - {issue}"));
-        }
-        bail!("{}", message);
-    }
-    // Warnings print before the alternate screen swallows stderr: a
-    // refused conflict or restored default must be visible somewhere.
-    for warning in &built_keymap.warnings {
-        eprintln!("tmail: warning: {warning}");
-        tracing::warn!(warning, "keybinding config adjusted");
-    }
-    tracing::info!(
-        config = ?config.path,
-        account = ?config.account,
-        page_size = config.mail.page_size,
-        "configuration loaded"
-    );
+    let (config, keymap) = load_validated_config(invocation)?;
 
     // First-run trigger (ADR 0003 §3.1): the resolved config yields no
     // drivable account — no file found anywhere, or a file whose
     // `[accounts]` table is missing or empty. A file that exists with
     // accounts is never hijacked, even the multi-account-without-default
     // case (startup issues explain it, as today).
-    let wizard_needed = manual_wizard
+    let wizard_needed = invocation.configure
         || match &config.path {
             None => true,
             Some(path) => !tmail::config::accounts_present(path),
@@ -246,15 +199,139 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
             Arc::new(PimDiscoverer)
         };
 
-    // Mouse capture is opt-in (`[tmail].mouse`, plan §10): with capture off,
-    // terminal text selection keeps its native behavior and no mouse
-    // events arrive at all. The guard is optional: `None` only while the
-    // external editor owns the terminal (Phase 11).
-    let mut guard = Some(terminal::enable(config.mouse)?);
+    // The events stream starts before the first draw; the terminal guard
+    // and the title cache ride in `SessionAssets` so effect handling stays
+    // a short argument list. Mouse capture is opt-in (`[tmail].mouse`,
+    // plan §10): with capture off, terminal text selection keeps its native
+    // behavior and no mouse events arrive at all. The guard is optional:
+    // `None` only while the external editor owns the terminal (Phase 11).
+    let (mut events, events_control) = events::spawn();
+    let mut assets = SessionAssets {
+        guard: Some(terminal::enable(config.mouse)?),
+        events_control,
+        applied_title: String::new(),
+    };
+    let mut state = seed_state(&config, keymap, invocation.theme.as_deref())?;
+    tracing::info!(size = ?state.size, "shell started (real backend)");
+
+    // Backend results re-enter the reducer as actions; the manager spawns
+    // one cancellable task per effect.
+    let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+    let manager = OperationManager::new(
+        Arc::clone(&backend),
+        opener,
+        discoverer,
+        String::from("himalaya"),
+        result_tx,
+    );
+
+    if wizard_needed {
+        start_wizard(&mut state, invocation);
+    } else {
+        // Startup work flows through the same reducer path as everything
+        // else: with no mailboxes loaded yet, Refresh starts the mailbox
+        // listing; LoadDrafts restores any crash-safe draft from the
+        // journal (plan §14).
+        let effects = reducer::reduce(&mut state, &Action::Refresh);
+        handle_effects(&mut state, &manager, &mut assets, effects).await?;
+        let effects = reducer::reduce(&mut state, &Action::LoadDrafts);
+        handle_effects(&mut state, &manager, &mut assets, effects).await?;
+    }
+
+    run_event_loop(
+        &mut state,
+        &manager,
+        &mut assets,
+        &mut events,
+        &mut result_rx,
+        &config,
+    )
+    .await?;
+
+    // Terminal restoration (guarded Drop) leaves the window title set;
+    // hand the session's original title back (best-effort, popped from
+    // the title stack pushed by `enable`).
+    terminal::restore_title();
+    Ok(finish_session(&state, &config))
+}
+
+/// The terminal and event-reader assets the loop owns between effects: the
+/// terminal guard (dropped while the external editor runs), the event
+/// reader's pause/resume control, and the last terminal title applied.
+struct SessionAssets {
+    guard: Option<terminal::TerminalGuard>,
+    events_control: events::EventControl,
+    applied_title: String,
+}
+
+/// Load and validate the config, returning it with the built keymap.
+/// Startup validation reports every detected problem together, before the
+/// TUI starts: a broken config is fixed in the file, not navigated in the
+/// app (plan §17/§19 Phase 10). Details are actionable and sanitized;
+/// secrets never reach these messages. `--configure` starts the wizard
+/// regardless of config state (ADR 0003 §3.1) — config issues are the
+/// wizard's job there — but the himalaya check stays: the credential test
+/// cannot run without it.
+fn load_validated_config(
+    invocation: &Invocation,
+) -> anyhow::Result<(tmail::config::Config, tmail::input::keymap::KeyMap)> {
+    let (config, issues) = tmail::config::Config::load_with_issues(invocation.config.as_deref());
+    let mut issues: Vec<String> = if invocation.configure {
+        Vec::new()
+    } else {
+        issues
+    };
+    if !tmail::backend::himalaya::executable_available("himalaya") {
+        issues.push(String::from(
+            "the himalaya executable was not found on PATH; install it or point PATH at it",
+        ));
+    }
+    // The keymap is built here (not inside the config parser): conflicts
+    // and structural checks are policy, not syntax, and their warnings
+    // describe adjustments — the app still starts (configurable
+    // keybindings; syntax problems come back fatal, like theme tokens).
+    let tmail::input::keymap::KeymapBuild {
+        keymap,
+        errors,
+        warnings,
+    } = tmail::input::keymap::KeyMap::build(&config.keybindings);
+    if !invocation.configure {
+        issues.extend(errors);
+    }
+    if !issues.is_empty() {
+        let mut message = String::from("configuration problems (fix the file, then start again):");
+        for issue in &issues {
+            message.push_str(&format!("\n  - {issue}"));
+        }
+        bail!("{}", message);
+    }
+    // Warnings print before the alternate screen swallows stderr: a
+    // refused conflict or restored default must be visible somewhere.
+    for warning in &warnings {
+        eprintln!("tmail: warning: {warning}");
+        tracing::warn!(warning, "keybinding config adjusted");
+    }
+    tracing::info!(
+        config = ?config.path,
+        account = ?config.account,
+        page_size = config.mail.page_size,
+        "configuration loaded"
+    );
+    Ok((config, keymap))
+}
+
+/// Build the runtime state from the validated config: the set-once knobs,
+/// the runtime-switchable theme list (NO_COLOR wins over all of it, plan
+/// §18), and the `--theme` override.
+fn seed_state(
+    config: &tmail::config::Config,
+    keymap: tmail::input::keymap::KeyMap,
+    requested_theme: Option<&str>,
+) -> anyhow::Result<AppState> {
     let mut state = AppState::initial(config.mail.page_size);
     // The configured keymap replaces the defaults-only seed (the reducer
     // and hint rows read it through `state`).
-    state.keymap = built_keymap.keymap;
+    state.keymap = keymap;
     // Reply-all excludes the configured account address (Phase 7.5).
     state.account_email = config.account_email.clone();
     // Periodic refresh timer (Phase 9.4); `0` disables it.
@@ -294,9 +371,6 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
         state.messages.limit =
             tmail::ui::layout::messages_visible(state.size, state.view_mode).max(1);
     }
-    tracing::info!(size = ?state.size, "shell started (real backend)");
-
-    let (mut events, events_control) = events::spawn();
     // Runtime-switchable theme list (ticket z0s4): the two built-ins —
     // the `[tmail.theme]` selection with its color overrides (ticket wrs7)
     // landing on the startup entry — plus every `[tmail.themes.<name>]`
@@ -318,7 +392,7 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
     // `tmail --configure --theme light`). Validated against the built
     // list, so `[tmail.themes.<name>]` tables are selectable too; an
     // unknown name is a startup error naming the alternatives.
-    if let Some(name) = &requested_theme {
+    if let Some(name) = requested_theme {
         state.theme_index = state
             .themes
             .iter()
@@ -335,91 +409,62 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
                 )
             })?;
     }
+    Ok(state)
+}
 
-    // Backend results re-enter the reducer as actions; the manager spawns
-    // one cancellable task per effect.
-    let (result_tx, mut result_rx) = mpsc::unbounded_channel();
-    let manager = OperationManager::new(
-        Arc::clone(&backend),
-        opener,
-        discoverer,
-        String::from("himalaya"),
-        result_tx,
-    );
+/// Start the account configuration wizard (ADR 0003 §3.1): it replaces the
+/// first `Refresh`/`LoadDrafts` warmup — while its route is active the
+/// reducer suppresses mailbox warmup and swallows mailbox keys. The file
+/// snapshots (existing account names, default holder, permissions) happen
+/// here — I/O stays out of the reducer.
+fn start_wizard(state: &mut AppState, invocation: &Invocation) {
+    let save_path = tmail::config::default_save_path(invocation.config.as_deref());
+    let (existing_names, default_name, shared_readable) = save_path
+        .as_deref()
+        .map(|path| {
+            (
+                tmail::config::write::existing_account_names(path),
+                tmail::config::write::file_default_account(path),
+                tmail::config::write::file_shared_readable(path),
+            )
+        })
+        .unwrap_or_else(|| (Vec::new(), None, false));
+    state.wizard = Some(tmail::app::wizard::WizardState::new(
+        invocation.configure,
+        save_path,
+        existing_names,
+        default_name,
+        shared_readable,
+    ));
+    state.routes.push(tmail::app::route::Route::Wizard);
+    state.focus = tmail::app::Focus::Wizard;
+}
+
+/// The main loop: draw a frame, then wait for one batch of input or one
+/// backend result, applying effects between frames. Returns when the user
+/// quits or the event stream closes.
+async fn run_event_loop(
+    state: &mut AppState,
+    manager: &OperationManager,
+    assets: &mut SessionAssets,
+    events: &mut mpsc::UnboundedReceiver<events::Event>,
+    result_rx: &mut mpsc::UnboundedReceiver<OperationResult>,
+    config: &tmail::config::Config,
+) -> anyhow::Result<()> {
     // Mouse capture starts in the configured mode; the reducer owns the
     // intent as `state.mouse_capture`, and the runtime applies any change.
     let mut capture_applied = config.mouse;
-    // The terminal window title (user request): mirrors the app mode —
-    // wizard, composer, or the displayed mailbox with its unread count.
-    // Applied only when it changes, so a burst of events costs no extra
-    // writes; the session's original title is saved by `enable` and
-    // restored after the sync loop. Empty = "unknown/never applied".
-    let mut applied_title = String::new();
-
-    if wizard_needed {
-        // The wizard replaces the first `Refresh`/`LoadDrafts` warmup
-        // (ADR 0003 §3.1): while its route is active the reducer
-        // suppresses mailbox warmup and swallows mailbox keys. The file
-        // snapshots (existing account names, default holder, permissions)
-        // happen here — I/O stays out of the reducer.
-        let save_path = tmail::config::default_save_path(cli_config.as_deref());
-        let (existing_names, default_name, shared_readable) = save_path
-            .as_deref()
-            .map(|path| {
-                (
-                    tmail::config::write::existing_account_names(path),
-                    tmail::config::write::file_default_account(path),
-                    tmail::config::write::file_shared_readable(path),
-                )
-            })
-            .unwrap_or_else(|| (Vec::new(), None, false));
-        state.wizard = Some(tmail::app::wizard::WizardState::new(
-            manual_wizard,
-            save_path,
-            existing_names,
-            default_name,
-            shared_readable,
-        ));
-        state.routes.push(tmail::app::route::Route::Wizard);
-        state.focus = tmail::app::Focus::Wizard;
-    } else {
-        // Startup work flows through the same reducer path as everything
-        // else: with no mailboxes loaded yet, Refresh starts the mailbox
-        // listing; LoadDrafts restores any crash-safe draft from the
-        // journal (plan §14).
-        let effects = reducer::reduce(&mut state, &Action::Refresh);
-        handle_effects(
-            &mut state,
-            &manager,
-            &mut guard,
-            &events_control,
-            &mut applied_title,
-            effects,
-        )
-        .await?;
-        let effects = reducer::reduce(&mut state, &Action::LoadDrafts);
-        handle_effects(
-            &mut state,
-            &manager,
-            &mut guard,
-            &events_control,
-            &mut applied_title,
-            effects,
-        )
-        .await?;
-    }
-
     loop {
         // Title sync ahead of the draw: the reducer may have changed the
         // mode (open the composer/wizard, switch mailboxes, unread tick).
         let title = state.terminal_title();
-        if title != applied_title {
+        if title != assets.applied_title {
             if let Err(err) =
                 crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(&title))
             {
                 tracing::warn!(%err, "could not set the terminal title");
             }
-            applied_title = title;
+            assets.applied_title = title;
         }
         let now = Local::now().fixed_offset();
         // The top-right clock is config-gated and off by default (ticket
@@ -436,11 +481,12 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
         // The palette the reducer last selected (ticket z0s4): `t` swaps
         // it at runtime, and the next frame picks it up from state.
         let theme = state.active_theme();
-        guard
+        assets
+            .guard
             .as_mut()
             .expect("terminal guard alive while drawing")
             .terminal_mut()
-            .draw(|frame| tmail::ui::render(frame, &state, &theme, &ctx, &mut hits))
+            .draw(|frame| tmail::ui::render(frame, state, &theme, &ctx, &mut hits))
             .context("terminal draw failed")?;
 
         if state.quit_requested {
@@ -472,11 +518,11 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
                             Err(_) => break,
                         }
                     }
-                    for action in events::coalesce(batch, &hits, &state) {
+                    for action in events::coalesce(batch, &hits, state) {
                         tracing::debug!(?action, "dispatch");
-                        let effects = reducer::reduce(&mut state, &action);
-                        handle_effects(&mut state, &manager, &mut guard, &events_control, &mut applied_title, effects).await?;
-                        sync_mouse_capture(&state, &mut capture_applied);
+                        let effects = reducer::reduce(state, &action);
+                        handle_effects(state, manager, assets, effects).await?;
+                        sync_mouse_capture(state, &mut capture_applied);
                     }
                 }
                 None => {
@@ -486,45 +532,42 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
             },
             action = result_rx.recv() => match action {
                 Some(result) => {
-                    let effects = reducer::reduce(
-                        &mut state,
-                        &Action::BackendCompleted(result),
-                    );
-                    handle_effects(&mut state, &manager, &mut guard, &events_control, &mut applied_title, effects).await?;
-                    sync_mouse_capture(&state, &mut capture_applied);
+                    let effects = reducer::reduce(state, &Action::BackendCompleted(result));
+                    handle_effects(state, manager, assets, effects).await?;
+                    sync_mouse_capture(state, &mut capture_applied);
                 }
                 // The manager holds a sender for the whole session.
                 None => bail!("backend result channel closed unexpectedly"),
             },
         }
     }
+    Ok(())
+}
 
-    // Terminal restoration (guarded Drop) leaves the window title set;
-    // hand the session's original title back (best-effort, popped from
-    // the title stack pushed by `enable`).
-    terminal::restore_title();
-
-    // Wizard exit semantics (ADR 0003 §3.1): `--configure` completion
-    // prints the saved path and exits 0; an `Esc`-cancel exits 1 with
-    // "configuration not changed". A first-run completion restarts into
-    // the normal mailbox UI without leaving the process.
+/// Map the post-loop state to the session outcome (ADR 0003 §3.1):
+/// `--configure` completion prints the saved path and exits 0; an
+/// `Esc`-cancel exits 1 with "configuration not changed". A first-run
+/// completion restarts into the normal mailbox UI without leaving the
+/// process.
+fn finish_session(state: &AppState, config: &tmail::config::Config) -> SessionOutcome {
     if let Some(wizard) = &state.wizard {
         if wizard.completed {
             if wizard.manual {
                 if let Some(path) = wizard.saved_path.clone().or_else(|| config.path.clone()) {
                     println!("{}", path.display());
                 }
-                return Ok(SessionOutcome::Exit(ExitCode::SUCCESS));
+                return SessionOutcome::Exit(ExitCode::SUCCESS);
             }
-            return Ok(SessionOutcome::Restart);
+            return SessionOutcome::Restart;
         }
         if wizard.cancelled {
             eprintln!("tmail: configuration not changed");
-            return Ok(SessionOutcome::Exit(ExitCode::from(1)));
+            return SessionOutcome::Exit(ExitCode::from(1));
         }
     }
-    Ok(SessionOutcome::Exit(ExitCode::SUCCESS))
+    SessionOutcome::Exit(ExitCode::SUCCESS)
 }
+
 /// Route one batch of reducer effects: async backend operations go to the
 /// manager; the external editor runs here, synchronously, on the terminal
 /// owner (plan §14 steps 2–7, Phase 11): pause the event reader so it
@@ -534,9 +577,7 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
 async fn handle_effects(
     state: &mut AppState,
     manager: &OperationManager,
-    guard: &mut Option<terminal::TerminalGuard>,
-    events_control: &events::EventControl,
-    applied_title: &mut String,
+    assets: &mut SessionAssets,
     effects: Vec<Effect>,
 ) -> anyhow::Result<()> {
     for effect in effects {
@@ -546,18 +587,18 @@ async fn handle_effects(
             // Suspend: drop the guard (its Drop restores the terminal) and
             // pause the event reader so it cannot steal the editor's
             // keystrokes (plan §14 steps 2 and 5).
-            events_control.pause();
-            drop(guard.take().expect("terminal guard to suspend"));
+            assets.events_control.pause();
+            drop(assets.guard.take().expect("terminal guard to suspend"));
             let mouse = state.mouse_capture;
             let result = tmail::runtime::editor::run(&program, &body).await;
             // Step 7: restore the terminal even on editor failure —
             // unconditionally, before anything else runs. The fresh guard
             // repaints from scratch on the next draw.
-            *guard = Some(terminal::reenter(mouse).context("terminal resume failed")?);
-            events_control.resume();
+            assets.guard = Some(terminal::reenter(mouse).context("terminal resume failed")?);
+            assets.events_control.resume();
             // The title that is on screen is the editor's business: forget
             // the applied one, so the next frame re-asserts Tmail's.
-            *applied_title = String::new();
+            assets.applied_title = String::new();
             let effects = reducer::reduce(
                 state,
                 &Action::EditorFinished {

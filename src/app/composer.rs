@@ -228,7 +228,7 @@ impl ComposerState {
     /// The selection fill follows the mockup's `.msg-body::selection`.
     /// Called by the reducer after every action, so focus moves, selection
     /// changes, and live theme switches never leave a stale style behind.
-    pub fn sync_body_styles(&mut self, theme: &crate::ui::theme::Theme) {
+    pub fn sync_body_styles(&mut self, theme: &crate::view::theme::Theme) {
         let style = if self.field == ComposerField::Body {
             theme.caret()
         } else {

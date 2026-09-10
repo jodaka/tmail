@@ -51,41 +51,77 @@ pub fn render(
         return;
     }
     let focused = state.focus == Focus::Composer;
-    let inner_w = area.width.saturating_sub(4) as usize; // 2 columns of padding
-    let x = area.x + 2;
-    let bottom = area.y + area.height;
-    let mut y = area.y;
+    let mut cursor = Cursor {
+        x: area.x + 2,
+        y: area.y,
+        inner_w: area.width.saturating_sub(4) as usize, // 2 columns of padding
+        bottom: area.y + area.height,
+    };
+    render_header(frame, &mut cursor, composer, theme);
+    render_fields(frame, &mut cursor, composer, focused, theme, hits);
+    render_body(frame, &cursor, composer, theme, hits);
+    render_divider(frame, &cursor, theme);
+    render_attach_row(frame, &cursor, composer, focused, theme, hits);
+    render_actions(frame, &cursor, composer, focused, theme, hits);
+}
 
-    // Header: no title (ticket a9y3) — the row carries only the autosave
-    // status, right-aligned (status text lands in 6.7).
-    if y < bottom {
-        let header = Rect {
-            x,
-            y,
-            width: inner_w as u16,
-            height: 1,
-        };
-        let mut spans: Vec<Span<'_>> = Vec::new();
-        if let Some((status, failed)) = draft_status(composer) {
-            let w = status.width();
-            if w + 2 < inner_w {
-                spans.push(Span::raw(" ".repeat(inner_w - w)));
-                let style = if failed {
-                    Style::new().fg(theme.warning)
-                } else {
-                    Style::new().fg(theme.dim)
-                };
-                spans.push(Span::styled(status, style));
-            }
-        }
-        frame.render_widget(Paragraph::new(Line::from(spans)), header);
-        y += 1;
+/// Shared cursor for the composer's stacked sections: the content column
+/// origin `x`, the next free row `y`, the inner width, and the bottom edge.
+/// The header and field renderers advance `y`; the pinned sections below
+/// (body, divider, attach, actions) anchor to `bottom` and read it as-is.
+struct Cursor {
+    x: u16,
+    y: u16,
+    inner_w: usize,
+    bottom: u16,
+}
+
+/// Header: no title (ticket a9y3) — the row carries only the autosave
+/// status, right-aligned (status text lands in 6.7).
+fn render_header(
+    frame: &mut Frame<'_>,
+    cursor: &mut Cursor,
+    composer: &ComposerState,
+    theme: &Theme,
+) {
+    if cursor.y >= cursor.bottom {
+        return;
     }
+    let header = Rect {
+        x: cursor.x,
+        y: cursor.y,
+        width: cursor.inner_w as u16,
+        height: 1,
+    };
+    let mut spans: Vec<Span<'_>> = Vec::new();
+    if let Some((status, failed)) = draft_status(composer) {
+        let w = status.width();
+        if w + 2 < cursor.inner_w {
+            spans.push(Span::raw(" ".repeat(cursor.inner_w - w)));
+            let style = if failed {
+                Style::new().fg(theme.warning)
+            } else {
+                Style::new().fg(theme.dim)
+            };
+            spans.push(Span::styled(status, style));
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), header);
+    cursor.y += 1;
+}
 
-    // Field rows (value row + hairline row each), mockup `.fields`. The
-    // Cc/Bcc toggles ride the To row's right edge (mockup `.field-extra`).
+/// Field rows (value row + hairline row each), mockup `.fields`. The
+/// Cc/Bcc toggles ride the To row's right edge (mockup `.field-extra`).
+fn render_fields(
+    frame: &mut Frame<'_>,
+    cursor: &mut Cursor,
+    composer: &ComposerState,
+    focused: bool,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
     for field in visible_fields(composer) {
-        if y + 2 > bottom {
+        if cursor.y + 2 > cursor.bottom {
             break;
         }
         let reserved = if field == ComposerField::To {
@@ -93,14 +129,17 @@ pub fn render(
         } else {
             0
         };
-        let (label, mut value) = field_row(composer, field, focused, theme, inner_w, reserved);
+        let (label, mut value) =
+            field_row(composer, field, focused, theme, cursor.inner_w, reserved);
         if field == ComposerField::To {
             let toggles = toggle_spans(composer, focused, theme);
             // Right-align the buttons (mockup `.field-extra`): pad between
             // the value and the buttons.
             let used: usize = value.iter().map(|s| s.content.width()).sum();
             let toggle_w: usize = toggles.iter().map(|s| s.content.width()).sum();
-            let pad = inner_w.saturating_sub(LABEL_WIDTH + 2 + used + toggle_w);
+            let pad = cursor
+                .inner_w
+                .saturating_sub(LABEL_WIDTH + 2 + used + toggle_w);
             value.push(Span::raw(" ".repeat(pad)));
             value.extend(toggles.clone());
             // Each toggle is its own click target (mockup `.field-extra
@@ -112,13 +151,13 @@ pub fn render(
             if !composer.show_bcc {
                 toggle_fields.push(ComposerField::BccToggle);
             }
-            let mut toggle_x = x + (LABEL_WIDTH + 2 + used + pad) as u16;
+            let mut toggle_x = cursor.x + (LABEL_WIDTH + 2 + used + pad) as u16;
             for (target, toggle) in toggle_fields.into_iter().zip(&toggles) {
                 let width = toggle.content.width() as u16;
                 hits.push(
                     Rect {
                         x: toggle_x,
-                        y,
+                        y: cursor.y,
                         width,
                         height: 1,
                     },
@@ -127,18 +166,18 @@ pub fn render(
                 toggle_x += width;
             }
         }
-        render_field_row(frame, x, y, inner_w, label, value);
+        render_field_row(frame, cursor.x, cursor.y, cursor.inner_w, label, value);
         // Clicking anywhere on a field row focuses it (Tab's job, plan §10).
         hits.push(
             Rect {
-                x,
-                y,
-                width: inner_w as u16,
+                x: cursor.x,
+                y: cursor.y,
+                width: cursor.inner_w as u16,
                 height: 1,
             },
             ClickTarget::ComposerField(field),
         );
-        y += 1;
+        cursor.y += 1;
         // The subject is the last field: no rule between it and the body
         // (ticket tz12; mockup `.field.body-row` carries `border-bottom: 0`),
         // but one empty line visually separates it from the body (ticket
@@ -147,31 +186,38 @@ pub fn render(
             chrome::hairline(
                 frame,
                 Rect {
-                    x,
-                    y,
-                    width: inner_w as u16,
+                    x: cursor.x,
+                    y: cursor.y,
+                    width: cursor.inner_w as u16,
                     height: 1,
                 },
                 HairlineSide::Bottom,
                 theme,
             );
         }
-        y += 1;
+        cursor.y += 1;
     }
+}
 
-    // Body well (mockup `.msg-body` on its `.field` row): the surface
-    // fill spans the full row, and the text is inset to align with the
-    // subject value column — `BODY_PAD` columns from each edge — with one
-    // text line of padding above and below (ticket tz12). The textarea
-    // paints over the fill with transparent styles, so the well shows
-    // through around and under the text.
-    let divider_y = bottom.saturating_sub(3);
-    let attach_y = bottom.saturating_sub(2);
-    let body_h = divider_y.saturating_sub(y);
+/// Body well (mockup `.msg-body` on its `.field` row): the surface fill
+/// spans the full row, and the text is inset to align with the subject
+/// value column — `BODY_PAD` columns from each edge — with one text line
+/// of padding above and below (ticket tz12). The textarea paints over the
+/// fill with transparent styles, so the well shows through around and
+/// under the text.
+fn render_body(
+    frame: &mut Frame<'_>,
+    cursor: &Cursor,
+    composer: &ComposerState,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
+    let divider_y = cursor.bottom.saturating_sub(3);
+    let body_h = divider_y.saturating_sub(cursor.y);
     let body_well = Rect {
-        x,
-        y,
-        width: inner_w as u16,
+        x: cursor.x,
+        y: cursor.y,
+        width: cursor.inner_w as u16,
         height: body_h,
     };
     if body_h > 0 {
@@ -180,117 +226,141 @@ pub fn render(
             body_well,
         );
         let body_text = Rect {
-            x: x + BODY_PAD as u16,
-            y: y + 1,
-            width: inner_w.saturating_sub(BODY_PAD * 2) as u16,
+            x: cursor.x + BODY_PAD as u16,
+            y: cursor.y + 1,
+            width: cursor.inner_w.saturating_sub(BODY_PAD * 2) as u16,
             height: body_h.saturating_sub(2),
         };
         frame.render_widget(&composer.body, body_text);
     }
     // Clicking the well — padding included — focuses the body.
     hits.push(body_well, ClickTarget::ComposerField(ComposerField::Body));
+}
 
-    // The rule separating the body from the attach/send/discard rows
-    // (mockup `.compose-actions` border-top).
-    if bottom >= y + 3 {
-        chrome::hairline(
-            frame,
-            Rect {
-                x,
-                y: divider_y,
-                width: inner_w as u16,
-                height: 1,
-            },
-            HairlineSide::Top,
-            theme,
-        );
+/// The rule separating the body from the attach/send/discard rows
+/// (mockup `.compose-actions` border-top).
+fn render_divider(frame: &mut Frame<'_>, cursor: &Cursor, theme: &Theme) {
+    if cursor.bottom < cursor.y + 3 {
+        return;
     }
-
-    // Attach row (mockup `.attach-row`): one chip per attached file with
-    // its human-readable size, then the `+ attach` control. Enter removes
-    // a focused chip; Enter on `+ attach` opens the path dialog (plan §15).
-    if bottom > y + 1 {
-        let attach_row = Rect {
-            x,
-            y: attach_y,
-            width: inner_w as u16,
+    chrome::hairline(
+        frame,
+        Rect {
+            x: cursor.x,
+            y: cursor.bottom.saturating_sub(3),
+            width: cursor.inner_w as u16,
             height: 1,
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(attach_spans(composer, focused, theme))),
-            attach_row,
+        },
+        HairlineSide::Top,
+        theme,
+    );
+}
+
+/// Attach row (mockup `.attach-row`): one chip per attached file with its
+/// human-readable size, then the `+ attach` control. Enter removes a
+/// focused chip; Enter on `+ attach` opens the path dialog (plan §15).
+fn render_attach_row(
+    frame: &mut Frame<'_>,
+    cursor: &Cursor,
+    composer: &ComposerState,
+    focused: bool,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
+    if cursor.bottom <= cursor.y + 1 {
+        return;
+    }
+    let attach_y = cursor.bottom.saturating_sub(2);
+    let attach_row = Rect {
+        x: cursor.x,
+        y: attach_y,
+        width: cursor.inner_w as u16,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(attach_spans(composer, focused, theme))),
+        attach_row,
+    );
+    // Chips and the add control are separate click targets; removing a
+    // focused chip and opening the path dialog are Enter's jobs.
+    let mut target_x = cursor.x;
+    for (index, attachment) in composer.draft.attachments.iter().enumerate() {
+        let label = format!(
+            " {} · {} ",
+            attachment.name,
+            crate::ui::text::human_size(attachment.size)
         );
-        // Chips and the add control are separate click targets; removing a
-        // focused chip and opening the path dialog are Enter's jobs.
-        let mut target_x = x;
-        for (index, attachment) in composer.draft.attachments.iter().enumerate() {
-            let label = format!(
-                " {} · {} ",
-                attachment.name,
-                crate::ui::text::human_size(attachment.size)
-            );
-            let width = label.width() as u16;
-            hits.push(
-                Rect {
-                    x: target_x,
-                    y: attach_y,
-                    width,
-                    height: 1,
-                },
-                ClickTarget::ComposerField(ComposerField::Attachment(index)),
-            );
-            target_x += width + 1; // trailing gap span
-        }
+        let width = label.width() as u16;
         hits.push(
             Rect {
                 x: target_x,
                 y: attach_y,
-                width: " [ + attach ] ".width() as u16,
+                width,
                 height: 1,
             },
-            ClickTarget::ComposerField(ComposerField::Attach),
+            ClickTarget::ComposerField(ComposerField::Attachment(index)),
         );
+        target_x += width + 1; // trailing gap span
     }
-
-    // Action row: Send (accent) and Discard (warning), mockup
-    // `.compose-actions`.
-    if bottom > y {
-        let actions = Rect {
-            x,
-            y: bottom - 1,
-            width: inner_w as u16,
+    hits.push(
+        Rect {
+            x: target_x,
+            y: attach_y,
+            width: " [ + attach ] ".width() as u16,
             height: 1,
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(action_spans(composer, focused, theme))),
-            actions,
-        );
-        let send_label = if composer.sending {
-            " [ Sending… ] "
-        } else {
-            " [ Send ^↵ ] "
-        };
-        let send_w = send_label.width() as u16;
-        let discard_w = " Discard ".width() as u16;
-        hits.push(
-            Rect {
-                x,
-                y: actions.y,
-                width: send_w,
-                height: 1,
-            },
-            ClickTarget::ComposerField(ComposerField::Send),
-        );
-        hits.push(
-            Rect {
-                x: x + send_w + 3, // the gap span between the buttons
-                y: actions.y,
-                width: discard_w,
-                height: 1,
-            },
-            ClickTarget::ComposerField(ComposerField::Discard),
-        );
+        },
+        ClickTarget::ComposerField(ComposerField::Attach),
+    );
+}
+
+/// Action row: Send (accent) and Discard (warning), mockup
+/// `.compose-actions`.
+fn render_actions(
+    frame: &mut Frame<'_>,
+    cursor: &Cursor,
+    composer: &ComposerState,
+    focused: bool,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
+    if cursor.bottom <= cursor.y {
+        return;
     }
+    let actions = Rect {
+        x: cursor.x,
+        y: cursor.bottom - 1,
+        width: cursor.inner_w as u16,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(action_spans(composer, focused, theme))),
+        actions,
+    );
+    let send_label = if composer.sending {
+        " [ Sending… ] "
+    } else {
+        " [ Send ^↵ ] "
+    };
+    let send_w = send_label.width() as u16;
+    let discard_w = " Discard ".width() as u16;
+    hits.push(
+        Rect {
+            x: cursor.x,
+            y: actions.y,
+            width: send_w,
+            height: 1,
+        },
+        ClickTarget::ComposerField(ComposerField::Send),
+    );
+    hits.push(
+        Rect {
+            x: cursor.x + send_w + 3, // the gap span between the buttons
+            y: actions.y,
+            width: discard_w,
+            height: 1,
+        },
+        ClickTarget::ComposerField(ComposerField::Discard),
+    );
 }
 
 /// Attachment chips + the `+ attach` control (mockup `.attach-row` / `.att`

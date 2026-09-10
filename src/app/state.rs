@@ -10,7 +10,7 @@ use crate::app::operation::OperationRegistry;
 use crate::app::overlay::Overlay;
 use crate::app::route::Route;
 use crate::domain::{Mailbox, MailboxId, MailboxRole, Message, MessageSummary, Page};
-use crate::ui::theme::Theme;
+use crate::view::theme::Theme;
 use chrono::{DateTime, FixedOffset};
 
 /// Async load lifecycle for backend-fed collections (mock-fed in Phase 1).
@@ -89,7 +89,7 @@ pub struct AppState {
     /// Interior-mutable because both the clamp path and the renderer hold
     /// only `&AppState`; the app is single-threaded and no accessor
     /// re-enters while borrowing, so `RefCell` suffices.
-    pub(crate) reader_doc: std::cell::RefCell<Option<crate::ui::screens::reader::CachedReaderDoc>>,
+    pub(crate) reader_doc: std::cell::RefCell<Option<crate::app::reader::CachedReaderDoc>>,
     /// The keyboard binding table (configurable keybindings): defaults
     /// seeded, then reshaped by `[tmail.keybindings]`. Consulted by the
     /// translation layer (`input::keyboard`) and the status-bar hints, so

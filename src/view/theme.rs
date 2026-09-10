@@ -220,6 +220,17 @@ impl Theme {
         std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
     }
 
+    /// The attachment explorer's widget theme, built from the palette
+    /// tokens. No block: the dialog draws its own chrome around the list.
+    pub fn explorer_theme(&self) -> ratatui_explorer::Theme {
+        ratatui_explorer::Theme::new()
+            .with_style(Style::new().fg(self.text))
+            .with_item_style(Style::new().fg(self.text))
+            .with_dir_style(Style::new().fg(self.text_soft))
+            .with_highlight_item_style(Style::new().fg(self.text).bg(self.accent_bg))
+            .with_highlight_dir_style(Style::new().fg(self.text).bg(self.accent_bg))
+    }
+
     /// Convert a normalized `#rrggbb` string (as validated and normalized
     /// by [`crate::config::parse_hex_color`]) into a color (ticket wrs7).
     pub fn color_from_hex(hex: &str) -> Option<Color> {

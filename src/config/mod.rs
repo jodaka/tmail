@@ -127,26 +127,10 @@ pub fn parse_hex_color(value: &str) -> Option<String> {
     }
 }
 
-/// A loaded configuration plus every problem found while reading it, in
-/// file order. Issues are user-facing, actionable, and secret-free.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct LoadIssues {
-    pub items: Vec<String>,
-}
-
-impl LoadIssues {
-    fn push(&mut self, message: impl Into<String>) {
-        self.items.push(message.into());
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-
-    pub fn iter(&self) -> std::slice::Iter<'_, String> {
-        self.items.iter()
-    }
-}
+/// Every problem found while reading a config file, in file order. Issues
+/// are user-facing, actionable, and secret-free. A plain list: loaders only
+/// append, and the startup summary only iterates.
+pub type LoadIssues = Vec<String>;
 
 /// Resolved, validated configuration. The flat TOML sections bunch into
 /// named groups mirroring the file ([`MailConfig`],
@@ -428,21 +412,23 @@ fn tmail_table<'a>(tmail: Option<&'a toml::Value>, path: &[&str]) -> Option<&'a 
     tmail_value(tmail, path).and_then(toml::Value::as_table)
 }
 
-/// One boolean setting whose default is `false`: present values must be
+/// One boolean setting with a `default`: a present value must be
 /// `true`/`false`, anything else is reported (`"must be true or false;
-/// using false"`) and the default applies; an absent key is silent. The
-/// skeleton shared by `mouse` and `[tmail.ui].clock`.
-fn get_bool_default_false(
+/// using <default>"`) and the default applies; an absent key is silent.
+/// The skeleton shared by `mouse`, `[tmail.ui].clock`, and
+/// `[tmail.mail].page_size_auto`.
+fn get_bool(
     value: Option<&toml::Value>,
+    default: bool,
     label: &str,
     issues: &mut LoadIssues,
 ) -> bool {
     match value.map(toml::Value::as_bool) {
-        None => false, // absent key: no issue
+        None => default, // absent key: no issue
         Some(Some(on)) => on,
         Some(None) => {
-            issues.push(format!("{label} must be true or false; using false"));
-            false
+            issues.push(format!("{label} must be true or false; using {default}"));
+            default
         }
     }
 }
@@ -504,10 +490,19 @@ pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssu
     {
         config.account = Some(account);
     }
-    config.mouse =
-        get_bool_default_false(tmail_value(tmail, &["mouse"]), "[tmail].mouse", &mut issues);
+    config.mouse = get_bool(
+        tmail_value(tmail, &["mouse"]),
+        false,
+        "[tmail].mouse",
+        &mut issues,
+    );
+    config.mail.page_size_auto = get_bool(
+        tmail_value(tmail, &["mail", "page_size_auto"]),
+        true,
+        "[tmail.mail].mail.page_size_auto",
+        &mut issues,
+    );
     parse_page_size(tmail, &mut config, &mut issues);
-    parse_page_size_auto(tmail, &mut config, &mut issues);
     parse_refresh_interval(tmail, &mut config, &mut issues);
     parse_autosave_delay(tmail, &mut config, &mut issues);
     parse_editor(tmail, &mut config, &mut issues);
@@ -547,37 +542,20 @@ pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssu
 
 fn parse_page_size(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
     let value = tmail_value(tmail, &["mail", "page_size"]);
+    let invalid = |n: i64| {
+        format!(
+            "[tmail.mail].mail.page_size must be a positive integer, not {n}; using {DEFAULT_PAGE_SIZE}"
+        )
+    };
     match get_nonneg_int(
         value,
         "[tmail.mail].mail.page_size must be an integer; using {DEFAULT_PAGE_SIZE}".to_string(),
-        |n| {
-            format!("[tmail.mail].mail.page_size must be a positive integer, not {n}; using {DEFAULT_PAGE_SIZE}")
-        },
+        invalid,
         issues,
     ) {
-        Err(()) => {}
-        Ok(None) => {}
+        Err(()) | Ok(None) => {}
         Ok(Some(size)) if size > 0 => config.mail.page_size = size as usize,
-        Ok(Some(size)) => issues.push(format!(
-            "[tmail.mail].mail.page_size must be a positive integer, not {size}; using {DEFAULT_PAGE_SIZE}"
-        )),
-    }
-}
-
-/// `[tmail.mail].mail.page_size_auto` (ticket kjfq): a boolean; anything else
-/// is reported and the default (true) applies.
-fn parse_page_size_auto(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    match tmail
-        .and_then(|tmail| tmail.get("mail"))
-        .and_then(|mail| mail.get("page_size_auto"))
-    {
-        None => {}
-        Some(value) => match value.as_bool() {
-            Some(auto) => config.mail.page_size_auto = auto,
-            None => issues.push(String::from(
-                "[tmail.mail].mail.page_size_auto must be true or false; using true",
-            )),
-        },
+        Ok(Some(size)) => issues.push(invalid(size)),
     }
 }
 
@@ -659,8 +637,9 @@ fn parse_cache_limits(tmail: Option<&toml::Value>, config: &mut Config, issues: 
 /// `[tmail.ui].clock` (ticket w7f5): show the top-right date/time clock.
 /// Off by default.
 fn parse_ui_clock(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    config.ui.clock = get_bool_default_false(
+    config.ui.clock = get_bool(
         tmail_value(tmail, &["ui", "clock"]),
+        false,
         "[tmail.ui].clock",
         issues,
     );
@@ -1361,8 +1340,8 @@ mod tests {
     fn non_bool_mouse_reports_and_disables() {
         let (config, issues) = parse_with_issues("[tmail]\nmouse = \"yes\"\n", None);
         assert!(!config.mouse);
-        assert_eq!(issues.items.len(), 1);
-        assert!(issues.items[0].contains("mouse"));
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("mouse"));
     }
 
     #[test]
@@ -1371,8 +1350,8 @@ mod tests {
             let text = format!("[tmail.composer]\nautosave_delay_ms = {delay}\n");
             let (config, issues) = parse_with_issues(&text, None);
             assert_eq!(config.composer.autosave_delay_ms, DEFAULT_AUTOSAVE_DELAY_MS);
-            assert_eq!(issues.items.len(), 1, "{delay}");
-            assert!(issues.items[0].contains("autosave_delay_ms"));
+            assert_eq!(issues.len(), 1, "{delay}");
+            assert!(issues[0].contains("autosave_delay_ms"));
         }
         let (config, issues) =
             parse_with_issues("[tmail.composer]\nautosave_delay_ms = 500\n", None);
@@ -1384,8 +1363,8 @@ mod tests {
     fn unknown_theme_name_reports() {
         let (config, issues) = parse_with_issues("[tmail.theme]\nname = \"solarized\"\n", None);
         assert_eq!(config.theme.name, "default");
-        assert_eq!(issues.items.len(), 1);
-        assert!(issues.items[0].contains("solarized"));
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("solarized"));
     }
 
     #[test]
@@ -1424,16 +1403,16 @@ mod tests {
             None,
         );
         assert_eq!(config.composer.editor, "builtin");
-        assert_eq!(issues.items.len(), 1);
-        assert!(issues.items[0].contains("editor"));
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("editor"));
     }
 
     #[test]
     fn missing_selected_account_reports() {
         let (config, issues) = parse_with_issues("[tmail]\naccount = \"ghost\"\n", None);
         assert_eq!(config.account.as_deref(), Some("ghost"));
-        assert_eq!(issues.items.len(), 1);
-        assert!(issues.items[0].contains("[accounts.ghost]"));
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("[accounts.ghost]"));
     }
 
     #[test]
@@ -1443,16 +1422,16 @@ mod tests {
             None,
         );
         assert_eq!(config.downloads_dir, None);
-        assert_eq!(issues.items.len(), 1);
-        assert!(issues.items[0].contains("absolute path"));
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("absolute path"));
     }
 
     #[test]
     fn malformed_toml_reports_sanitized() {
         let (config, issues) = parse_with_issues("not [ valid toml", None);
         assert_eq!(config, Config::default());
-        assert_eq!(issues.items.len(), 1);
-        assert!(issues.items[0].contains("not valid TOML"));
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("not valid TOML"));
     }
 
     #[test]
@@ -1464,7 +1443,7 @@ mod tests {
             None,
         );
         let _ = config;
-        let joined = issues.items.join("\n");
+        let joined = issues.join("\n");
         assert!(!joined.contains("hunter2"), "leaked: {joined}");
     }
 
@@ -1510,21 +1489,21 @@ mod theme_override_tests {
     #[test]
     fn bad_hex_reports_the_token() {
         let (_, issues) = parse_with_issues("[tmail.theme]\naccent = \"blue\"\n", None);
-        assert_eq!(issues.items.len(), 1);
-        assert!(issues.items[0].contains("accent"), "{issues:?}");
-        assert!(issues.items[0].contains("hex"), "{issues:?}");
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("accent"), "{issues:?}");
+        assert!(issues[0].contains("hex"), "{issues:?}");
 
         let (_, issues) = parse_with_issues("[tmail.theme]\naccent = 7\n", None);
-        assert_eq!(issues.items.len(), 1);
-        assert!(issues.items[0].contains("accent"), "{issues:?}");
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("accent"), "{issues:?}");
     }
 
     #[test]
     fn unknown_theme_token_reports_the_known_ones() {
         let (_, issues) = parse_with_issues("[tmail.theme]\nfont = \"x\"\n", None);
-        assert_eq!(issues.items.len(), 1);
-        assert!(issues.items[0].contains("font"), "{issues:?}");
-        assert!(issues.items[0].contains("background"), "{issues:?}");
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("font"), "{issues:?}");
+        assert!(issues[0].contains("background"), "{issues:?}");
     }
 
     #[test]
@@ -1539,7 +1518,7 @@ mod theme_override_tests {
         // The error names the token and the expected shape, never the
         // offending value's raw content beyond the token context.
         let (_, issues) = parse_with_issues("[tmail.theme]\naccent = \"#zz\"\n", None);
-        assert!(issues.items.iter().all(|i| !i.contains("zz")));
+        assert!(issues.iter().all(|i| !i.contains("zz")));
     }
 }
 
@@ -1561,8 +1540,8 @@ mod ui_clock_tests {
     #[test]
     fn non_bool_clock_reports() {
         let (_, issues) = parse_with_issues("[tmail.ui]\nclock = \"yes\"\n", None);
-        assert_eq!(issues.items.len(), 1);
-        assert!(issues.items[0].contains("clock"), "{issues:?}");
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("clock"), "{issues:?}");
     }
 }
 
@@ -1589,14 +1568,14 @@ mod view_mode_tests {
     fn unknown_view_mode_reports_and_falls_back() {
         let (config, issues) = parse_with_issues("[tmail]\nview_mode = \"spacious\"\n", None);
         assert_eq!(config.view_mode, ViewMode::Compact, "default applies");
-        assert_eq!(issues.items.len(), 1, "{issues:?}");
-        assert!(issues.items[0].contains("view_mode"), "{issues:?}");
-        assert!(issues.items[0].contains("comfortable"), "{issues:?}");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].contains("view_mode"), "{issues:?}");
+        assert!(issues[0].contains("comfortable"), "{issues:?}");
 
         // A non-string value is reported the same way.
         let (config, issues) = parse_with_issues("[tmail]\nview_mode = 3\n", None);
         assert_eq!(config.view_mode, ViewMode::Compact);
-        assert_eq!(issues.items.len(), 1, "{issues:?}");
+        assert_eq!(issues.len(), 1, "{issues:?}");
     }
 
     #[test]
@@ -1630,12 +1609,12 @@ mod status_timeout_tests {
     fn invalid_status_timeout_reports_and_falls_back() {
         let (config, issues) = parse_with_issues("[tmail]\nstatus_timeout = -3\n", None);
         assert_eq!(config.status_timeout, 0);
-        assert_eq!(issues.items.len(), 1, "{issues:?}");
-        assert!(issues.items[0].contains("status_timeout"), "{issues:?}");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].contains("status_timeout"), "{issues:?}");
 
         let (config, issues) = parse_with_issues("[tmail]\nstatus_timeout = \"soon\"\n", None);
         assert_eq!(config.status_timeout, 0);
-        assert_eq!(issues.items.len(), 1, "{issues:?}");
+        assert_eq!(issues.len(), 1, "{issues:?}");
     }
 }
 
@@ -1683,21 +1662,16 @@ mod theme_table_tests {
         // (empty) theme entry still exists.
         assert_eq!(config.theme.tables.len(), 1);
         assert!(config.theme.tables[0].1.is_empty());
-        assert_eq!(issues.items.len(), 2, "{issues:?}");
-        assert!(
-            issues
-                .items
-                .iter()
-                .all(|i| i.contains("[tmail.themes.broken]"))
-        );
+        assert_eq!(issues.len(), 2, "{issues:?}");
+        assert!(issues.iter().all(|i| i.contains("[tmail.themes.broken]")));
     }
 
     #[test]
     fn non_table_user_theme_reports() {
         let (config, issues) = parse_with_issues("[tmail.themes]\nflat = 3\n", None);
         assert!(config.theme.tables.is_empty());
-        assert_eq!(issues.items.len(), 1);
-        assert!(issues.items[0].contains("[tmail.themes.flat]"));
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("[tmail.themes.flat]"));
     }
 
     #[test]
@@ -1738,19 +1712,16 @@ mod cache_limit_tests {
             "[tmail.cache]\nmax_messages = -1\nmax_bytes = \"big\"\n",
             None,
         );
-        assert_eq!(issues.items.len(), 2, "{issues:?}");
+        assert_eq!(issues.len(), 2, "{issues:?}");
         assert!(
-            issues.items.iter().any(|i| i.contains("max_messages")),
+            issues.iter().any(|i| i.contains("max_messages")),
             "{issues:?}"
         );
-        assert!(
-            issues.items.iter().any(|i| i.contains("max_bytes")),
-            "{issues:?}"
-        );
+        assert!(issues.iter().any(|i| i.contains("max_bytes")), "{issues:?}");
 
         let (_, issues) = parse_with_issues("[tmail.cache]\nflavor = \"vanilla\"\n", None);
-        assert_eq!(issues.items.len(), 1);
-        assert!(issues.items[0].contains("flavor"), "{issues:?}");
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("flavor"), "{issues:?}");
     }
 }
 
@@ -1800,9 +1771,9 @@ mod keybinding_tests {
             garbage = true
         "##;
         let (_, issues) = parse_with_issues(text, None);
-        assert_eq!(issues.items.len(), 2, "{issues:?}");
-        assert!(issues.items[0].contains("[tmail.keybindings.broken].star"));
-        assert!(issues.items[1].contains("garbage"));
+        assert_eq!(issues.len(), 2, "{issues:?}");
+        assert!(issues[0].contains("[tmail.keybindings.broken].star"));
+        assert!(issues[1].contains("garbage"));
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod mock;
 pub mod operation;
 pub mod overlay;
 pub mod page_cache;
+pub(crate) mod reader;
 pub mod reducer;
 pub mod route;
 pub mod sanitize;

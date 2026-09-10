@@ -17,44 +17,9 @@ use crate::ui::chrome;
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
-/// Rows the list shows before it starts scrolling.
-const MAX_VISIBLE_ROWS: usize = 10;
-
-/// Geometry of the picker for one terminal size and theme count. Shared by
-/// the renderer and the reducer's cursor/scroll clamping, so the clamp the
-/// reducer computes always matches what is drawn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PickerLayout {
-    /// Outer bordered rectangle.
-    pub area: Rect,
-    /// Number of theme rows visible at once.
-    pub visible_rows: usize,
-}
-
-/// Compute the picker geometry. The dialog always fits: it shrinks to the
-/// terminal and keeps at least one theme row even in tiny terminals.
-pub fn layout(size: (u16, u16), theme_count: usize) -> PickerLayout {
-    let width = 34u16.min(size.0.max(1));
-    // Inside the borders: the theme rows plus one hint line.
-    let height = ((theme_count.min(MAX_VISIBLE_ROWS) as u16) + 3).min(size.1.max(1));
-    let visible_rows = height.saturating_sub(3).max(1) as usize;
-    PickerLayout {
-        area: chrome::centered(size, width, height),
-        visible_rows,
-    }
-}
-
-/// Rows visible in the dialog at `size` (what the reducer keeps the cursor
-/// and scroll inside), independent of the theme count cap.
-pub fn visible_rows(size: (u16, u16)) -> usize {
-    layout(size, usize::MAX).visible_rows
-}
-
-/// Largest valid scroll offset for the theme list at `size` (what the
-/// reducer clamps against).
-pub fn max_scroll(theme_count: usize, size: (u16, u16)) -> usize {
-    theme_count.saturating_sub(visible_rows(size))
-}
+pub use crate::view::overlay::picker_layout as layout;
+pub use crate::view::overlay::picker_max_scroll as max_scroll;
+pub use crate::view::overlay::picker_visible_rows as visible_rows;
 
 /// Render the picker, when open, above everything already drawn.
 pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme: &Theme) {

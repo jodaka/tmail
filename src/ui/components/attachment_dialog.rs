@@ -24,17 +24,6 @@ fn layout(size: (u16, u16)) -> Rect {
     centered(size, width, height)
 }
 
-/// The explorer widget's theme, built from the app's palette tokens.
-/// No block: the dialog draws its own chrome around the list.
-pub(crate) fn explorer_theme(theme: &Theme) -> ratatui_explorer::Theme {
-    ratatui_explorer::Theme::new()
-        .with_style(Style::new().fg(theme.text))
-        .with_item_style(Style::new().fg(theme.text))
-        .with_dir_style(Style::new().fg(theme.text_soft))
-        .with_highlight_item_style(Style::new().fg(theme.text).bg(theme.accent_bg))
-        .with_highlight_dir_style(Style::new().fg(theme.text).bg(theme.accent_bg))
-}
-
 /// Render the dialog, when open, above everything already drawn.
 pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme: &Theme) {
     let Some(Overlay::AttachmentExplorer(dialog)) = &state.overlay else {
@@ -175,7 +164,7 @@ mod tests {
     #[test]
     fn explorer_theme_uses_the_palette_tokens() {
         let theme = Theme::default_dark();
-        let explorer = explorer_theme(&theme);
+        let explorer = theme.explorer_theme();
         assert_eq!(explorer.item_style().fg, Some(theme.text));
         assert_eq!(explorer.highlight_item_style().bg, Some(theme.accent_bg));
         assert_eq!(explorer.dir_style().fg, Some(theme.text_soft));

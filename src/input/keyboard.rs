@@ -49,170 +49,10 @@ fn to_action_with(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action
     // Text-entry foci consume their editing keys before any binding
     // lookup; the structural keys (Esc/Enter/Tab) fall through to the
     // keymap so cancel/activate/focus stay configurable there too.
-    match focus {
-        Focus::SearchField => match key.code {
-            // Any printable character (chords included — see below) types.
-            KeyCode::Char(c) if !ctrl && !alt => {
-                return Some(Action::SearchEdit(SearchEdit::Char(c)));
-            }
-            KeyCode::Backspace => return Some(Action::SearchEdit(SearchEdit::Backspace)),
-            // Structural keys — and the arrows, which page/move the list
-            // behind the field, as before — fall through to the keymap.
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab => {}
-            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {}
-            // A ctrl/alt chord pierces text entry only as quit/refresh
-            // (below); every other chord still types the character, as
-            // before (Ctrl+A types an `a` into the query).
-            KeyCode::Char(_) => {
-                return match keymap.lookup(&key, focus) {
-                    Some(action @ (Action::Quit | Action::Refresh)) => Some(action),
-                    _ => Some(Action::SearchEdit(SearchEdit::Char(
-                        key.code.as_char().expect("Char code"),
-                    ))),
-                };
-            }
-            _ => return None,
-        },
-        Focus::Dialog => match key.code {
-            // The attachment file chooser (ticket 95x0): the explorer
-            // navigates with the arrows (Shift is irrelevant to it), Left
-            // and Backspace go to the parent, Right opens the selected
-            // directory. Enter stays the keymap's `activate` binding so
-            // the reducer decides between descending and submitting the
-            // selected file; Esc/Tab fall through for cancel/focus.
-            KeyCode::Up => return Some(Action::AttachmentBrowse(AttachmentBrowse::Up)),
-            KeyCode::Down => return Some(Action::AttachmentBrowse(AttachmentBrowse::Down)),
-            KeyCode::Left | KeyCode::Backspace => {
-                return Some(Action::AttachmentBrowse(AttachmentBrowse::Parent));
-            }
-            KeyCode::Right => return Some(Action::AttachmentBrowse(AttachmentBrowse::Open)),
-            KeyCode::PageUp => return Some(Action::AttachmentBrowse(AttachmentBrowse::PageUp)),
-            KeyCode::PageDown => {
-                return Some(Action::AttachmentBrowse(AttachmentBrowse::PageDown));
-            }
-            // Structural keys fall through; every other key is inert
-            // (there is no text entry anymore).
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab => {}
-            _ => return None,
-        },
-        Focus::Composer => {
-            match key.code {
-                KeyCode::Char(c) if !ctrl && !alt => {
-                    return Some(Action::ComposerEdit(ComposerEdit::Char(c)));
-                }
-                KeyCode::Backspace => {
-                    return Some(Action::ComposerEdit(ComposerEdit::Backspace));
-                }
-                KeyCode::Delete => return Some(Action::ComposerEdit(ComposerEdit::Delete)),
-                // Arrows (ticket kfmt): plain moves the caret, Ctrl moves
-                // by words, Shift extends a selection, Ctrl+Shift selects
-                // whole words. Alt+arrows still fall through to the
-                // global bindings (move/page), as before.
-                KeyCode::Left if !alt => {
-                    return Some(Action::ComposerEdit(match (ctrl, shift) {
-                        (false, false) => ComposerEdit::CursorLeft,
-                        (true, false) => ComposerEdit::WordLeft,
-                        (false, true) => ComposerEdit::SelectLeft,
-                        (true, true) => ComposerEdit::SelectWordLeft,
-                    }));
-                }
-                KeyCode::Right if !alt => {
-                    return Some(Action::ComposerEdit(match (ctrl, shift) {
-                        (false, false) => ComposerEdit::CursorRight,
-                        (true, false) => ComposerEdit::WordRight,
-                        (false, true) => ComposerEdit::SelectRight,
-                        (true, true) => ComposerEdit::SelectWordRight,
-                    }));
-                }
-                // Vertical movement has no word-wise mode; Ctrl keeps the
-                // plain-line semantics it had before.
-                KeyCode::Up if !alt => {
-                    return Some(Action::ComposerEdit(if shift {
-                        ComposerEdit::SelectUp
-                    } else {
-                        ComposerEdit::CursorUp
-                    }));
-                }
-                KeyCode::Down if !alt => {
-                    return Some(Action::ComposerEdit(if shift {
-                        ComposerEdit::SelectDown
-                    } else {
-                        ComposerEdit::CursorDown
-                    }));
-                }
-                // Enter activates the focused control (the reducer routes
-                // it — body focus inserts the newline there); Ctrl+Enter
-                // was handled above.
-                KeyCode::Enter => return Some(Action::Activate),
-                // Ctrl+E hands the body to the external editor (plan §14,
-                // Phase 11): composer-only, regardless of which field holds
-                // focus.
-                KeyCode::Char('e') if ctrl => return Some(Action::EditExternal),
-                // Undo/redo the body editor (ticket kfmt): coalesced
-                // steps, so a typing run reverts at once. Body-only — the
-                // single-line fields have no history.
-                KeyCode::Char('z') if ctrl && !alt => {
-                    return Some(Action::ComposerEdit(ComposerEdit::Undo));
-                }
-                KeyCode::Char('y') if ctrl && !alt => {
-                    return Some(Action::ComposerEdit(ComposerEdit::Redo));
-                }
-                KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => {}
-                _ => {}
-            }
-            // Fall through: global chords (quit, refresh) still fire.
-        }
-        // The account configuration wizard (ADR 0003): printable keys type
-        // into the focused field; `e`/`r` are the discovery-screen
-        // shortcuts (the reducer folds them back into typed text on the
-        // other steps). Structural keys fall through so Esc/Enter/Tab stay
-        // rebindable through the keymap.
-        Focus::Wizard => match key.code {
-            // Space toggles the focused storage-mode row (checkbox
-            // convention, ADR 0003 §3.2 W4); the reducer folds it back
-            // into a typed character on every text field.
-            KeyCode::Char(' ') if !ctrl && !alt => {
-                return Some(Action::Wizard(wizard::WizardAction::ToggleStorageMode));
-            }
-            KeyCode::Char('e') if !ctrl && !alt => {
-                return Some(Action::Wizard(wizard::WizardAction::OverrideServers));
-            }
-            KeyCode::Char('r') if !ctrl && !alt => {
-                return Some(Action::Wizard(wizard::WizardAction::RerunDiscovery));
-            }
-            KeyCode::Char(c) if !ctrl && !alt => {
-                return Some(Action::Wizard(wizard::WizardAction::Edit(
-                    DialogEdit::Char(c),
-                )));
-            }
-            KeyCode::Backspace => {
-                return Some(Action::Wizard(wizard::WizardAction::Edit(
-                    DialogEdit::Backspace,
-                )));
-            }
-            KeyCode::Delete => {
-                return Some(Action::Wizard(wizard::WizardAction::Edit(
-                    DialogEdit::Delete,
-                )));
-            }
-            KeyCode::Left => {
-                return Some(Action::Wizard(wizard::WizardAction::Edit(
-                    DialogEdit::CursorLeft,
-                )));
-            }
-            KeyCode::Right => {
-                return Some(Action::Wizard(wizard::WizardAction::Edit(
-                    DialogEdit::CursorRight,
-                )));
-            }
-            KeyCode::Up => return Some(Action::Wizard(wizard::WizardAction::MoveUp)),
-            KeyCode::Down => return Some(Action::Wizard(wizard::WizardAction::MoveDown)),
-            // Structural keys and chords fall through to the keymap.
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab => {}
-            KeyCode::Char(_) => {}
-            _ => return None,
-        },
-        _ => {}
+    match focus_action(keymap, key, focus, ctrl, alt, shift) {
+        FocusOutcome::Action(action) => return Some(action),
+        FocusOutcome::Inert => return None,
+        FocusOutcome::FallThrough => {}
     }
     let action = keymap.lookup(&key, focus)?;
     // Text entry is pierced only by the quit and refresh chords (plan
@@ -225,6 +65,221 @@ fn to_action_with(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action
         return None;
     }
     Some(action)
+}
+
+/// How a focused mode treats one key before the global keymap runs:
+/// produce an action, consume it as inert, or fall through to the binding
+/// lookup.
+enum FocusOutcome {
+    /// The focus handles the key: translate to this action.
+    Action(Action),
+    /// The focus claims the key but it does nothing (no binding lookup).
+    Inert,
+    /// The focus does not handle the key; consult the keymap.
+    FallThrough,
+}
+
+/// Route one normalized key to the translator of the focused mode.
+fn focus_action(
+    keymap: &KeyMap,
+    key: KeyEvent,
+    focus: Focus,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+) -> FocusOutcome {
+    match focus {
+        Focus::SearchField => search_field_action(keymap, key, ctrl, alt),
+        Focus::Dialog => dialog_action(key),
+        Focus::Composer => composer_action(key, ctrl, alt, shift),
+        Focus::Wizard => wizard_action(key, ctrl, alt),
+        _ => FocusOutcome::FallThrough,
+    }
+}
+
+/// Search-field keys: printable characters and Backspace edit the query;
+/// structural keys and the arrows fall through so the list behind the
+/// field stays navigable.
+fn search_field_action(keymap: &KeyMap, key: KeyEvent, ctrl: bool, alt: bool) -> FocusOutcome {
+    match key.code {
+        // Any printable character (chords included — see below) types.
+        KeyCode::Char(c) if !ctrl && !alt => {
+            return FocusOutcome::Action(Action::SearchEdit(SearchEdit::Char(c)));
+        }
+        KeyCode::Backspace => {
+            return FocusOutcome::Action(Action::SearchEdit(SearchEdit::Backspace));
+        }
+        // Structural keys — and the arrows, which page/move the list
+        // behind the field, as before — fall through to the keymap.
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab => {}
+        KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {}
+        // A ctrl/alt chord pierces text entry only as quit/refresh
+        // (below); every other chord still types the character, as
+        // before (Ctrl+A types an `a` into the query).
+        KeyCode::Char(_) => {
+            return match keymap.lookup(&key, Focus::SearchField) {
+                Some(action @ (Action::Quit | Action::Refresh)) => FocusOutcome::Action(action),
+                _ => FocusOutcome::Action(Action::SearchEdit(SearchEdit::Char(
+                    key.code.as_char().expect("Char code"),
+                ))),
+            };
+        }
+        _ => return FocusOutcome::Inert,
+    }
+    FocusOutcome::FallThrough
+}
+
+/// Dialog keys: the attachment file chooser (ticket 95x0) navigates with
+/// the arrows (Shift is irrelevant to it), Left and Backspace go to the
+/// parent, Right opens the selected directory. Enter stays the keymap's
+/// `activate` binding so the reducer decides between descending and
+/// submitting the selected file; Esc/Tab fall through for cancel/focus.
+fn dialog_action(key: KeyEvent) -> FocusOutcome {
+    match key.code {
+        KeyCode::Up => FocusOutcome::Action(Action::AttachmentBrowse(AttachmentBrowse::Up)),
+        KeyCode::Down => FocusOutcome::Action(Action::AttachmentBrowse(AttachmentBrowse::Down)),
+        KeyCode::Left | KeyCode::Backspace => {
+            FocusOutcome::Action(Action::AttachmentBrowse(AttachmentBrowse::Parent))
+        }
+        KeyCode::Right => FocusOutcome::Action(Action::AttachmentBrowse(AttachmentBrowse::Open)),
+        KeyCode::PageUp => FocusOutcome::Action(Action::AttachmentBrowse(AttachmentBrowse::PageUp)),
+        KeyCode::PageDown => {
+            FocusOutcome::Action(Action::AttachmentBrowse(AttachmentBrowse::PageDown))
+        }
+        // Structural keys fall through; every other key is inert
+        // (there is no text entry anymore).
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab => {
+            FocusOutcome::FallThrough
+        }
+        _ => FocusOutcome::Inert,
+    }
+}
+
+/// Composer keys: printable characters, editing keys, and the caret and
+/// selection chords edit the focused control; Enter activates it (the
+/// reducer routes the body newline); Ctrl+E opens the external editor and
+/// Ctrl+Z/Y undo/redo the body. Everything else — Alt+arrows included —
+/// falls through to the global bindings (quit, refresh).
+fn composer_action(key: KeyEvent, ctrl: bool, alt: bool, shift: bool) -> FocusOutcome {
+    match key.code {
+        KeyCode::Char(c) if !ctrl && !alt => {
+            return FocusOutcome::Action(Action::ComposerEdit(ComposerEdit::Char(c)));
+        }
+        KeyCode::Backspace => {
+            return FocusOutcome::Action(Action::ComposerEdit(ComposerEdit::Backspace));
+        }
+        KeyCode::Delete => {
+            return FocusOutcome::Action(Action::ComposerEdit(ComposerEdit::Delete));
+        }
+        // Arrows (ticket kfmt): plain moves the caret, Ctrl moves
+        // by words, Shift extends a selection, Ctrl+Shift selects
+        // whole words. Alt+arrows still fall through to the
+        // global bindings (move/page), as before.
+        KeyCode::Left if !alt => {
+            return FocusOutcome::Action(Action::ComposerEdit(match (ctrl, shift) {
+                (false, false) => ComposerEdit::CursorLeft,
+                (true, false) => ComposerEdit::WordLeft,
+                (false, true) => ComposerEdit::SelectLeft,
+                (true, true) => ComposerEdit::SelectWordLeft,
+            }));
+        }
+        KeyCode::Right if !alt => {
+            return FocusOutcome::Action(Action::ComposerEdit(match (ctrl, shift) {
+                (false, false) => ComposerEdit::CursorRight,
+                (true, false) => ComposerEdit::WordRight,
+                (false, true) => ComposerEdit::SelectRight,
+                (true, true) => ComposerEdit::SelectWordRight,
+            }));
+        }
+        // Vertical movement has no word-wise mode; Ctrl keeps the
+        // plain-line semantics it had before.
+        KeyCode::Up if !alt => {
+            return FocusOutcome::Action(Action::ComposerEdit(if shift {
+                ComposerEdit::SelectUp
+            } else {
+                ComposerEdit::CursorUp
+            }));
+        }
+        KeyCode::Down if !alt => {
+            return FocusOutcome::Action(Action::ComposerEdit(if shift {
+                ComposerEdit::SelectDown
+            } else {
+                ComposerEdit::CursorDown
+            }));
+        }
+        // Enter activates the focused control (the reducer routes it —
+        // body focus inserts the newline there); Ctrl+Enter was handled
+        // above.
+        KeyCode::Enter => return FocusOutcome::Action(Action::Activate),
+        // Ctrl+E hands the body to the external editor (plan §14,
+        // Phase 11): composer-only, regardless of which field holds focus.
+        KeyCode::Char('e') if ctrl => return FocusOutcome::Action(Action::EditExternal),
+        // Undo/redo the body editor (ticket kfmt): coalesced steps, so a
+        // typing run reverts at once. Body-only — the single-line fields
+        // have no history.
+        KeyCode::Char('z') if ctrl && !alt => {
+            return FocusOutcome::Action(Action::ComposerEdit(ComposerEdit::Undo));
+        }
+        KeyCode::Char('y') if ctrl && !alt => {
+            return FocusOutcome::Action(Action::ComposerEdit(ComposerEdit::Redo));
+        }
+        // Fall through: global chords (quit, refresh) still fire.
+        _ => {}
+    }
+    FocusOutcome::FallThrough
+}
+
+/// Wizard keys (ADR 0003): printable keys type into the focused field;
+/// `e`/`r` are the discovery-screen shortcuts (the reducer folds them back
+/// into typed text on the other steps). Structural keys and chords fall
+/// through so Esc/Enter/Tab stay rebindable through the keymap.
+fn wizard_action(key: KeyEvent, ctrl: bool, alt: bool) -> FocusOutcome {
+    match key.code {
+        // Space toggles the focused storage-mode row (checkbox
+        // convention, ADR 0003 §3.2 W4); the reducer folds it back
+        // into a typed character on every text field.
+        KeyCode::Char(' ') if !ctrl && !alt => {
+            return FocusOutcome::Action(Action::Wizard(wizard::WizardAction::ToggleStorageMode));
+        }
+        KeyCode::Char('e') if !ctrl && !alt => {
+            return FocusOutcome::Action(Action::Wizard(wizard::WizardAction::OverrideServers));
+        }
+        KeyCode::Char('r') if !ctrl && !alt => {
+            return FocusOutcome::Action(Action::Wizard(wizard::WizardAction::RerunDiscovery));
+        }
+        KeyCode::Char(c) if !ctrl && !alt => {
+            return FocusOutcome::Action(Action::Wizard(wizard::WizardAction::Edit(
+                DialogEdit::Char(c),
+            )));
+        }
+        KeyCode::Backspace => {
+            return FocusOutcome::Action(Action::Wizard(wizard::WizardAction::Edit(
+                DialogEdit::Backspace,
+            )));
+        }
+        KeyCode::Delete => {
+            return FocusOutcome::Action(Action::Wizard(wizard::WizardAction::Edit(
+                DialogEdit::Delete,
+            )));
+        }
+        KeyCode::Left => {
+            return FocusOutcome::Action(Action::Wizard(wizard::WizardAction::Edit(
+                DialogEdit::CursorLeft,
+            )));
+        }
+        KeyCode::Right => {
+            return FocusOutcome::Action(Action::Wizard(wizard::WizardAction::Edit(
+                DialogEdit::CursorRight,
+            )));
+        }
+        KeyCode::Up => return FocusOutcome::Action(Action::Wizard(wizard::WizardAction::MoveUp)),
+        KeyCode::Down => {
+            return FocusOutcome::Action(Action::Wizard(wizard::WizardAction::MoveDown));
+        }
+        // Structural keys and chords fall through to the keymap.
+        _ => {}
+    }
+    FocusOutcome::FallThrough
 }
 
 /// Map crossterm's legacy reporting of Ctrl+`\` `]` `^` `_` back to the

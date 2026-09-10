@@ -10,3 +10,4 @@ pub mod domain;
 pub mod input;
 pub mod runtime;
 pub mod ui;
+pub mod view;
