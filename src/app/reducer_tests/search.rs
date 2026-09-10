@@ -17,9 +17,9 @@ fn submit_search_stashes_mailbox_context_and_runs_search() {
     assert_eq!(request.mailbox_id, inbox_id());
     assert_eq!(request.offset, 0);
     assert_eq!(request.limit, 20);
-    assert!(s.operations.get(id).is_some());
+    assert!(s.session.operations.get(id).is_some());
     // The search route sits above the mailbox route…
-    assert_eq!(s.routes.len(), 2);
+    assert_eq!(s.session.routes.len(), 2);
     assert_eq!(
         s.active_route(),
         Some(&Route::Search(crate::app::route::SearchRoute {
@@ -28,37 +28,37 @@ fn submit_search_stashes_mailbox_context_and_runs_search() {
         }))
     );
     // …and the mailbox list context is stashed for an exact return.
-    let stash = s.search_return.as_ref().expect("stash");
+    let stash = s.session.search_return.as_ref().expect("stash");
     assert_eq!(stash.page, page);
     assert_eq!(stash.selection, selection);
     assert_eq!(stash.scroll, scroll);
     // The visible list is emptied while the search runs; focus moves to it.
     assert!(s.messages.items.is_empty());
-    assert_eq!(s.focus, Focus::MessageList);
+    assert_eq!(s.session.focus, Focus::MessageList);
 }
 
 #[test]
 fn submit_search_with_empty_query_is_inert() {
     let mut s = state();
     let before = s.clone();
-    s.focus = Focus::SearchField;
+    s.session.focus = Focus::SearchField;
     let effects = reduce(&mut s, &Action::SubmitSearch);
     no_effects(&effects);
-    assert_eq!(s.routes, before.routes);
-    assert!(s.search_return.is_none());
-    assert!(s.status.message.is_some(), "guidance is shown");
+    assert_eq!(s.session.routes, before.session.routes);
+    assert!(s.session.search_return.is_none());
+    assert!(s.session.status.message.is_some(), "guidance is shown");
 }
 
 #[test]
 fn submit_search_from_the_reader_is_inert() {
     let mut s = state();
     reduce(&mut s, &Action::Activate); // open reader
-    let before = s.routes.clone();
-    s.focus = Focus::SearchField;
-    s.search_query = String::from("quote");
+    let before = s.session.routes.clone();
+    s.session.focus = Focus::SearchField;
+    s.session.search_query = String::from("quote");
     no_effects(&reduce(&mut s, &Action::SubmitSearch));
-    assert_eq!(s.routes, before, "no search above the reader");
-    assert!(s.search_return.is_none());
+    assert_eq!(s.session.routes, before, "no search above the reader");
+    assert!(s.session.search_return.is_none());
 }
 
 #[test]
@@ -185,15 +185,15 @@ fn leaving_search_restores_the_mailbox_context_exactly() {
     );
     // Esc from the search route restores page, selection, and scroll.
     reduce(&mut s, &Action::BackOrCancel);
-    assert_eq!(s.routes.len(), 1);
-    assert!(s.search_return.is_none());
+    assert_eq!(s.session.routes.len(), 1);
+    assert!(s.session.search_return.is_none());
     assert_eq!(s.messages, before.0, "mailbox page restored");
     assert_eq!(s.selection, before.1);
     assert_eq!(s.list_scroll, before.2);
-    assert_eq!(s.focus, Focus::MessageList);
+    assert_eq!(s.session.focus, Focus::MessageList);
     // The search field clears with the results (ticket 32b3): `/` opens
     // an empty field for the next search.
-    assert_eq!(s.search_query, "");
+    assert_eq!(s.session.search_query, "");
 }
 
 #[test]
@@ -201,14 +201,18 @@ fn resubmitting_edits_the_query_without_disturbing_the_stash() {
     let mut s = state();
     let effects = search(&mut s, "quo");
     let (first, _) = expect_search(&effects);
-    let stash = s.search_return.clone().expect("stash");
+    let stash = s.session.search_return.clone().expect("stash");
     // Edit and re-submit while the search route is open.
     let effects = search(&mut s, "te");
     let (second, request) = expect_search(&effects);
     assert_ne!(first, second, "a new operation");
     assert_eq!(request.query, "quote");
-    assert_eq!(s.routes.len(), 2, "no second search route");
-    assert_eq!(s.search_return.as_ref(), Some(&stash), "stash untouched");
+    assert_eq!(s.session.routes.len(), 2, "no second search route");
+    assert_eq!(
+        s.session.search_return.as_ref(),
+        Some(&stash),
+        "stash untouched"
+    );
 }
 
 #[test]
@@ -241,8 +245,11 @@ fn search_operation_supersedes_the_previous_one() {
     let (first, _) = expect_search(&effects);
     let effects = search(&mut s, "te");
     let (second, _) = expect_search(&effects);
-    assert!(s.operations.get(first).is_none(), "older search cancelled");
-    assert!(s.operations.get(second).is_some());
+    assert!(
+        s.session.operations.get(first).is_none(),
+        "older search cancelled"
+    );
+    assert!(s.session.operations.get(second).is_some());
 }
 
 #[test]
@@ -258,16 +265,19 @@ fn switching_mailbox_from_search_rebuilds_the_route_stack() {
         }),
     );
     // Pick another mailbox in the sidebar and activate it.
-    s.focus = Focus::Sidebar;
+    s.session.focus = Focus::Sidebar;
     reduce(&mut s, &Action::MoveDown);
     reduce(&mut s, &Action::Activate);
-    assert_eq!(s.routes.len(), 1);
+    assert_eq!(s.session.routes.len(), 1);
     assert_eq!(
         s.active_route().unwrap().mailbox_id().unwrap().0,
         "sent",
         "the new mailbox replaces search and mailbox alike"
     );
-    assert!(s.search_return.is_none(), "stash dropped with the search");
+    assert!(
+        s.session.search_return.is_none(),
+        "stash dropped with the search"
+    );
 }
 
 #[test]
@@ -285,7 +295,7 @@ fn auto_refresh_arms_on_first_tick_and_fires_after_the_interval() {
     assert_eq!(req.mailbox_id, inbox_id());
     assert_eq!(req.offset, 0);
     assert_eq!(
-        s.operations.get(id).map(|op| op.origin),
+        s.session.operations.get(id).map(|op| op.origin),
         Some(OperationOrigin::Background)
     );
     // Complete the background refresh; the arm point moved, so the next
@@ -321,7 +331,7 @@ fn auto_refresh_stands_down_while_conflicting_work_is_in_flight() {
     let effects = tick(&mut s, 60);
     let (id, _) = expect_page(&effects);
     assert_eq!(
-        s.operations.get(id).map(|op| op.origin),
+        s.session.operations.get(id).map(|op| op.origin),
         Some(OperationOrigin::Background)
     );
 }
@@ -386,10 +396,13 @@ fn background_refresh_failure_never_opens_the_modal() {
     );
     // No Retry/Dismiss modal for background work; the status line carries
     // the failure and the record suppresses repeats (Phase 9.6).
-    assert!(s.overlay.is_none());
-    assert_eq!(s.last_background_error.as_deref(), Some("connect refused"));
+    assert!(s.session.overlay.is_none());
     assert_eq!(
-        s.status.message.as_deref(),
+        s.session.last_background_error.as_deref(),
+        Some("connect refused")
+    );
+    assert_eq!(
+        s.session.status.message.as_deref(),
         Some("Refresh failed — the timer will retry")
     );
 }
@@ -405,24 +418,25 @@ fn background_failure_record_clears_on_success_and_on_manual_refresh() {
         &mut s,
         &failure(id, &OperationKind::LoadPage(req.clone()), "connect refused"),
     );
-    assert!(s.last_background_error.is_some());
+    assert!(s.session.last_background_error.is_some());
     // A success clears the record: a later failure is reported again.
     let effects = tick(&mut s, 120);
     let (id2, req2) = expect_page(&effects);
     complete_page_ok(&mut s, id2, &req2, 0);
-    assert!(s.last_background_error.is_none());
+    assert!(s.session.last_background_error.is_none());
     // A manual refresh that fails is foreground work: it opens the modal.
     reduce(&mut s, &Action::Refresh);
     // (its operation is in flight; complete it with a failure)
     let last = s
+        .session
         .operations
         .foreground()
         .map(|op| op.id)
         .expect("manual refresh");
-    let kind = s.operations.get(last).unwrap().kind.clone();
+    let kind = s.session.operations.get(last).unwrap().kind.clone();
     reduce(&mut s, &failure(last, &kind, "also refused"));
     assert!(
-        matches!(s.overlay, Some(Overlay::Error(_))),
+        matches!(s.session.overlay, Some(Overlay::Error(_))),
         "foreground failure modals"
     );
 }
@@ -431,10 +445,15 @@ fn background_failure_record_clears_on_success_and_on_manual_refresh() {
 fn manual_refresh_failure_still_opens_the_modal() {
     let mut s = state();
     reduce(&mut s, &Action::Refresh);
-    let last = s.operations.foreground().map(|op| op.id).expect("refresh");
-    let kind = s.operations.get(last).unwrap().kind.clone();
+    let last = s
+        .session
+        .operations
+        .foreground()
+        .map(|op| op.id)
+        .expect("refresh");
+    let kind = s.session.operations.get(last).unwrap().kind.clone();
     reduce(&mut s, &failure(last, &kind, "connect refused"));
-    assert!(matches!(s.overlay, Some(Overlay::Error(_))));
+    assert!(matches!(s.session.overlay, Some(Overlay::Error(_))));
     // Manual refresh remains available after dismissing (acceptance).
     reduce(&mut s, &Action::DismissError);
     let effects = reduce(&mut s, &Action::Refresh);

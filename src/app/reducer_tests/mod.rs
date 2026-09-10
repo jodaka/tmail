@@ -119,7 +119,7 @@ fn switch_to(s: &mut AppState, mailbox: &str) {
         .iter()
         .position(|m| m.id.0 == mailbox)
         .unwrap();
-    s.focus = Focus::Sidebar;
+    s.session.focus = Focus::Sidebar;
     let (id, req) = expect_page(&reduce(s, &Action::Activate));
     assert_eq!(req.mailbox_id.0, mailbox);
     assert_eq!(req.offset, 0);
@@ -148,7 +148,7 @@ fn complete_mailboxes(s: &mut AppState, id: OperationId, mailboxes: Vec<Mailbox>
 /// Register a mailbox-listing load on a session whose listing already
 /// applied (the fresh load the cached startup always runs behind it).
 fn start_listing(s: &mut AppState) -> OperationId {
-    s.operations.start(mailboxes_kind()).id
+    s.session.operations.start(mailboxes_kind()).id
 }
 
 // ── Modal interactions (plan §12) ────────────────────────────────────────
@@ -225,13 +225,14 @@ fn reader_with_attachments() -> AppState {
             part_id: 5,
         },
     ];
-    s.routes
+    s.session
+        .routes
         .push(Route::Message(crate::app::route::MessageRoute {
             mailbox_id: summary.mailbox_id.clone(),
             summary,
         }));
     s.open_message = Loadable::Loaded(message);
-    s.focus = Focus::Reader;
+    s.session.focus = Focus::Reader;
     s
 }
 
@@ -255,10 +256,10 @@ fn attachment_request(s: &AppState) -> crate::domain::AttachmentRequest {
 /// Open the composer and return the state (asserts the route/focus).
 fn compose(s: &mut AppState) -> &mut crate::app::composer::ComposerState {
     no_effects(&reduce(s, &Action::Compose));
-    assert_eq!(s.routes.len(), 2);
+    assert_eq!(s.session.routes.len(), 2);
     assert!(matches!(s.active_route(), Some(Route::Composer)));
-    assert_eq!(s.focus, Focus::Composer);
-    s.composer.as_mut().expect("composer open")
+    assert_eq!(s.session.focus, Focus::Composer);
+    s.session.composer.as_mut().expect("composer open")
 }
 
 // ── Reopening drafts from the Drafts list (plan §14) ─────────────────────
@@ -320,7 +321,7 @@ fn fetched_draft(id: &str, message_id: &str) -> Message {
 /// with the listing operation's id, still in flight.
 fn open_attach_dialog(s: &mut AppState) -> (&mut AttachmentFileDialog, OperationId) {
     compose(s);
-    while s.composer.as_ref().unwrap().field != ComposerField::Attach {
+    while s.session.composer.as_ref().unwrap().field != ComposerField::Attach {
         reduce(s, &Action::FocusNext);
     }
     let (id, kind) = effect_parts(&reduce(s, &Action::Activate));
@@ -329,8 +330,8 @@ fn open_attach_dialog(s: &mut AppState) -> (&mut AttachmentFileDialog, Operation
         OperationKind::ListAttachmentFiles { path: None },
         "the chooser opens with a home-directory listing"
     );
-    assert_eq!(s.focus, Focus::Dialog);
-    match s.overlay.as_mut() {
+    assert_eq!(s.session.focus, Focus::Dialog);
+    match s.session.overlay.as_mut() {
         Some(Overlay::AttachmentExplorer(dialog)) => (dialog, id),
         other => panic!("expected the attachment chooser, got {other:?}"),
     }
@@ -449,8 +450,11 @@ fn open_discard_dialog(s: &mut AppState) {
     tick(s, 0);
     reduce(s, &Action::ComposerEdit(ComposerEdit::Char('x')));
     no_effects(&reduce(s, &Action::DiscardDraft));
-    assert!(matches!(s.overlay, Some(Overlay::ConfirmDiscard(_))));
-    assert_eq!(s.focus, Focus::ErrorModal);
+    assert!(matches!(
+        s.session.overlay,
+        Some(Overlay::ConfirmDiscard(_))
+    ));
+    assert_eq!(s.session.focus, Focus::ErrorModal);
 }
 
 /// The message a reply/forward acts on, in its parsed reader form.
@@ -500,23 +504,24 @@ fn open_reader_with(s: &mut AppState, message: Message) {
         is_starred: false,
         has_attachments: false,
     };
-    s.routes
+    s.session
+        .routes
         .push(Route::Message(crate::app::route::MessageRoute {
             mailbox_id: message.mailbox_id.clone(),
             summary,
         }));
-    s.focus = Focus::Reader;
+    s.session.focus = Focus::Reader;
     s.open_message = Loadable::Loaded(message);
 }
 
 fn seeded_composer(s: &AppState) -> &crate::app::composer::ComposerState {
-    s.composer.as_ref().expect("seeded composer")
+    s.session.composer.as_ref().expect("seeded composer")
 }
 
 /// A composed, validly addressed state ready to send.
 fn sendable(s: &mut AppState) {
     compose(s);
-    let composer = s.composer.as_mut().unwrap();
+    let composer = s.session.composer.as_mut().unwrap();
     composer.draft.to = String::from("ada@example.org");
     composer.draft.subject = String::from("Hello");
     composer.draft.body = String::from("Body");
@@ -566,7 +571,7 @@ fn search(s: &mut AppState, query: &str) -> Vec<Effect> {
 
 /// Enable the timer at 60s. The state fixture carries no clock yet.
 fn timer(s: &mut AppState) {
-    s.refresh_interval_seconds = 60;
+    s.settings.refresh_interval_seconds = 60;
 }
 
 // ── Phase 9.5: selection preservation ────────────────────────────────────
@@ -632,7 +637,7 @@ fn complete_preview_ok(
 /// Three-palette state for the picker tests.
 fn picker_state() -> AppState {
     let mut s = state();
-    s.themes = vec![
+    s.settings.themes = vec![
         (
             String::from("default"),
             crate::view::theme::Theme::default_dark(),
@@ -646,7 +651,7 @@ fn picker_state() -> AppState {
             crate::view::theme::Theme::default_dark(),
         ),
     ];
-    s.theme_index = 0;
+    s.settings.theme_index = 0;
     s
 }
 
@@ -662,7 +667,7 @@ fn expect_seed(effects: &[Effect]) -> (OperationId, MessageLocator, SeedKind) {
 
 /// The focus saved with the dialog (what the close restores).
 fn previous_focus_of(s: &AppState) -> Focus {
-    let Some(Overlay::Help(dialog)) = &s.overlay else {
+    let Some(Overlay::Help(dialog)) = &s.session.overlay else {
         panic!("help overlay expected");
     };
     dialog.previous_focus

@@ -14,11 +14,11 @@ fn activate_on_message_list_opens_the_reader() {
         ),
         "kind: {kind:?}"
     );
-    assert!(s.operations.get(id).is_some());
+    assert!(s.session.operations.get(id).is_some());
     // Route stack: reader on top of the mailbox route.
-    assert_eq!(s.routes.len(), 2);
+    assert_eq!(s.session.routes.len(), 2);
     assert_eq!(s.open_summary().unwrap().id, selected.id);
-    assert_eq!(s.focus, Focus::Reader);
+    assert_eq!(s.session.focus, Focus::Reader);
     assert!(matches!(s.open_message, Loadable::Loading));
     assert_eq!(s.reader_scroll, 0);
     // The list underneath is untouched (restoration is by construction).
@@ -45,7 +45,7 @@ fn reader_result_applies_and_marks_unread_read() {
     // Confirmation updates both the list row and the reader's snapshot.
     assert!(s.messages.items[1].is_read);
     assert!(s.open_summary().unwrap().is_read);
-    assert!(s.operations.is_empty());
+    assert!(s.session.operations.is_empty());
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn read_message_load_does_not_trigger_mark_read() {
     let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
     complete_message_ok(&mut s, id);
     // No further operations: a read message needs no flag change.
-    assert!(s.operations.is_empty());
+    assert!(s.session.operations.is_empty());
 }
 
 #[test]
@@ -107,7 +107,11 @@ fn preview_snippets_survive_a_background_refresh() {
         offset: 0,
         limit: 20,
     };
-    let id = s.operations.start(OperationKind::LoadPage(req.clone())).id;
+    let id = s
+        .session
+        .operations
+        .start(OperationKind::LoadPage(req.clone()))
+        .id;
     let effects = complete_page_ok(&mut s, id, &req, 0);
     no_effects(&effects);
     assert_eq!(
@@ -144,7 +148,7 @@ fn preview_snippets_survive_a_background_refresh() {
 fn disk_cached_messages_fill_previews_without_fetching() {
     let mut s = state();
     let dir = tempfile::TempDir::new().expect("tempdir");
-    s.page_cache = Some(crate::app::page_cache::PageCache::open(
+    s.caches.page_cache = Some(crate::app::page_cache::PageCache::open(
         dir.path().to_path_buf(),
         crate::app::page_cache::CacheLimits::default(),
     ));
@@ -152,10 +156,11 @@ fn disk_cached_messages_fill_previews_without_fetching() {
     // message is already on disk.
     for summary in mock::mock_page(&MailboxId(String::from("sent")), 0, 20).items {
         let message = mock::mock_message(&summary);
-        s.page_cache
-            .as_ref()
-            .unwrap()
-            .store_message(&summary.mailbox_id, &summary.id.0, &message);
+        s.caches.page_cache.as_ref().unwrap().store_message(
+            &summary.mailbox_id,
+            &summary.id.0,
+            &message,
+        );
     }
     // Switch to Sent: the fresh page loads, and every preview is served
     // from the cache — no background fetches start, nothing re-requests
@@ -178,13 +183,13 @@ fn disk_cached_messages_fill_previews_without_fetching() {
         s.messages
             .items
             .iter()
-            .all(|m| s.previews.contains_key(&m.id))
+            .all(|m| s.caches.previews.contains_key(&m.id))
     );
     assert!(
         s.messages
             .items
             .iter()
-            .all(|m| s.preview_requested.contains(&m.id))
+            .all(|m| s.caches.preview_requested.contains(&m.id))
     );
 }
 
@@ -197,10 +202,10 @@ fn esc_from_reader_restores_exact_list_state() {
     let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
     complete_message_ok(&mut s, id);
     // The load may start a mark-read op; settle it so nothing is in flight.
-    while !s.operations.is_empty() {
-        let pending = s.operations.foreground().unwrap().id;
+    while !s.session.operations.is_empty() {
+        let pending = s.session.operations.foreground().unwrap().id;
         if matches!(
-            s.operations.get(pending).unwrap().kind,
+            s.session.operations.get(pending).unwrap().kind,
             OperationKind::SetRead { .. }
         ) {
             complete_done(&mut s, pending);
@@ -209,8 +214,8 @@ fn esc_from_reader_restores_exact_list_state() {
         }
     }
     reduce(&mut s, &Action::BackOrCancel);
-    assert_eq!(s.routes.len(), 1);
-    assert_eq!(s.focus, Focus::MessageList);
+    assert_eq!(s.session.routes.len(), 1);
+    assert_eq!(s.session.focus, Focus::MessageList);
     assert!(matches!(s.open_message, Loadable::Idle));
     assert_eq!(s.reader_scroll, 0);
     // Exact restoration: page, selection, scroll.
@@ -239,13 +244,14 @@ fn tab_cycles_the_reader_attachment_cursor_and_wraps() {
             part_id: 5,
         },
     ];
-    s.routes
+    s.session
+        .routes
         .push(Route::Message(crate::app::route::MessageRoute {
             mailbox_id: summary.mailbox_id.clone(),
             summary,
         }));
     s.open_message = Loadable::Loaded(message);
-    s.focus = Focus::Reader;
+    s.session.focus = Focus::Reader;
 
     assert_eq!(s.reader_attachment, None, "cursor starts at the first chip");
     reduce(&mut s, &Action::FocusNext);
@@ -264,7 +270,7 @@ fn tab_is_inert_without_attachments() {
     let mut s = state();
     let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
     complete_message_ok(&mut s, id);
-    assert_eq!(s.focus, Focus::Reader);
+    assert_eq!(s.session.focus, Focus::Reader);
     reduce(&mut s, &Action::FocusNext);
     assert_eq!(s.reader_attachment, None, "no chips: no cursor");
 }

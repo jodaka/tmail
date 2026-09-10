@@ -19,7 +19,10 @@ fn d_saves_the_selected_attachment_with_a_frozen_request() {
     assert_eq!(request.part_id, 3, "first chip by default");
     assert_eq!(request.filename.as_deref(), Some("report.pdf"));
     assert_eq!(request.dir, None, "the backend resolves the downloads dir");
-    assert_eq!(s.status.message.as_deref(), Some("Saving attachment…"));
+    assert_eq!(
+        s.session.status.message.as_deref(),
+        Some("Saving attachment…")
+    );
     // Completing records the final path (possibly collision-renamed).
     let final_path = PathBuf::from("/home/u/Downloads/report (1).pdf");
     reduce(
@@ -30,12 +33,12 @@ fn d_saves_the_selected_attachment_with_a_frozen_request() {
         }),
     );
     assert_eq!(
-        s.saved_attachments.values().collect::<Vec<_>>(),
+        s.caches.saved_attachments.values().collect::<Vec<_>>(),
         vec![&final_path],
         "the path is remembered for Open reuse"
     );
     assert_eq!(
-        s.status.message.as_deref(),
+        s.session.status.message.as_deref(),
         Some(format!("Saved to {}", final_path.display())).as_deref()
     );
 }
@@ -63,20 +66,21 @@ fn save_is_reader_only_and_attachment_gated() {
     // From the list focus the action is inert.
     let mut s = state();
     no_effects(&reduce(&mut s, &Action::SaveAttachment));
-    assert!(s.operations.is_empty());
+    assert!(s.session.operations.is_empty());
     // In the reader without attachments too.
     let mut s = state();
     let summary = s.messages.items[0].clone();
     let message = mock::mock_message(&summary);
-    s.routes
+    s.session
+        .routes
         .push(Route::Message(crate::app::route::MessageRoute {
             mailbox_id: summary.mailbox_id.clone(),
             summary,
         }));
     s.open_message = Loadable::Loaded(message);
-    s.focus = Focus::Reader;
+    s.session.focus = Focus::Reader;
     no_effects(&reduce(&mut s, &Action::SaveAttachment));
-    assert!(s.operations.is_empty());
+    assert!(s.session.operations.is_empty());
 }
 
 /// Enter in the reader presses the selected chip — `o`'s save-then-open
@@ -113,7 +117,9 @@ fn enter_reuses_a_session_saved_attachment_path() {
     let mut s = reader_with_attachments();
     let saved = PathBuf::from("/home/u/Downloads/report.pdf");
     let message_id = s.open_message.as_loaded().unwrap().id.clone();
-    s.saved_attachments.insert((message_id, 3), saved.clone());
+    s.caches
+        .saved_attachments
+        .insert((message_id, 3), saved.clone());
     let effects = reduce(&mut s, &Action::Activate);
     let (_, kind) = effect_parts(&effects);
     assert_eq!(
@@ -128,7 +134,7 @@ fn enter_on_the_reader_without_attachments_is_inert() {
     let mut s = state();
     open_reader_with(&mut s, reply_source()); // no attachments
     no_effects(&reduce(&mut s, &Action::Activate));
-    assert!(s.operations.is_empty());
+    assert!(s.session.operations.is_empty());
 }
 
 #[test]
@@ -147,8 +153,8 @@ fn save_failure_opens_a_retryable_modal() {
             }),
         }),
     );
-    assert!(matches!(s.overlay, Some(Overlay::Error(_))));
-    let retry = match &s.overlay {
+    assert!(matches!(s.session.overlay, Some(Overlay::Error(_))));
+    let retry = match &s.session.overlay {
         Some(Overlay::Error(dialog)) => dialog.retry.clone().expect("retryable"),
         _ => unreachable!(),
     };
@@ -236,7 +242,7 @@ fn o_saves_first_then_chains_the_opener_on_the_confirmed_path() {
             outcome: Ok(OperationOutcome::Done),
         }),
     );
-    assert_eq!(s.status.message.as_deref(), Some("Opened"));
+    assert_eq!(s.session.status.message.as_deref(), Some("Opened"));
 }
 
 #[test]
@@ -244,7 +250,9 @@ fn o_reuses_a_path_saved_this_session_without_a_second_save() {
     let mut s = reader_with_attachments();
     let saved = PathBuf::from("/home/u/Downloads/report.pdf");
     let message_id = s.open_message.as_loaded().unwrap().id.clone();
-    s.saved_attachments.insert((message_id, 3), saved.clone());
+    s.caches
+        .saved_attachments
+        .insert((message_id, 3), saved.clone());
     let effects = reduce(&mut s, &Action::OpenAttachment);
     // Straight to the opener — no download, no duplicate file.
     let (_, kind) = effect_parts(&effects);
@@ -259,7 +267,7 @@ fn o_reuses_a_path_saved_this_session_without_a_second_save() {
 fn open_is_reader_only_and_attachment_gated() {
     let mut s = state();
     no_effects(&reduce(&mut s, &Action::OpenAttachment));
-    assert!(s.operations.is_empty());
+    assert!(s.session.operations.is_empty());
 }
 
 #[test]
@@ -279,8 +287,8 @@ fn save_failure_keeps_the_open_chain_off() {
             }),
         }),
     );
-    assert!(matches!(s.overlay, Some(Overlay::Error(_))));
-    assert!(s.saved_attachments.is_empty());
+    assert!(matches!(s.session.overlay, Some(Overlay::Error(_))));
+    assert!(s.caches.saved_attachments.is_empty());
     // Retrying replays the save (with the chain armed) under a new id.
     let replayed = reduce(&mut s, &Action::RetryError);
     let (_, kind) = effect_parts(&replayed);
@@ -297,17 +305,17 @@ fn save_failure_keeps_the_open_chain_off() {
 fn esc_cancels_message_load_then_second_esc_returns() {
     let mut s = state();
     let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
-    let token = s.operations.cancellation(id).unwrap();
+    let token = s.session.operations.cancellation(id).unwrap();
     // First Esc cancels the foreground load (plan §10 order).
     reduce(&mut s, &Action::BackOrCancel);
     assert!(token.is_cancelled());
-    assert!(s.operations.get(id).is_none());
-    assert_eq!(s.routes.len(), 2, "reader stays open after cancel");
-    assert_eq!(s.focus, Focus::Reader);
+    assert!(s.session.operations.get(id).is_none());
+    assert_eq!(s.session.routes.len(), 2, "reader stays open after cancel");
+    assert_eq!(s.session.focus, Focus::Reader);
     // Second Esc goes back to the list.
     reduce(&mut s, &Action::BackOrCancel);
-    assert_eq!(s.routes.len(), 1);
-    assert_eq!(s.focus, Focus::MessageList);
+    assert_eq!(s.session.routes.len(), 1);
+    assert_eq!(s.session.focus, Focus::MessageList);
 }
 
 #[test]
@@ -333,7 +341,7 @@ fn stale_message_result_after_close_is_dropped() {
         matches!(s.open_message, Loadable::Idle),
         "a result for a closed reader must never mutate state"
     );
-    assert!(s.overlay.is_none());
+    assert!(s.session.overlay.is_none());
 }
 
 #[test]
@@ -343,13 +351,13 @@ fn message_load_failure_opens_modal_and_retry_replays() {
     reduce(&mut s, &failure(id, &kind, "no such message"));
     // Coherent state: reader open, failed placeholder, modal up.
     assert!(matches!(s.open_message, Loadable::Failed(_)));
-    assert!(s.overlay.is_some());
-    assert_eq!(s.routes.len(), 2);
+    assert!(s.session.overlay.is_some());
+    assert_eq!(s.session.routes.len(), 2);
     let effects = reduce(&mut s, &Action::RetryError);
     let (retry_id, retry_kind) = effect_parts(&effects);
     assert_ne!(retry_id, id);
     assert_eq!(retry_kind, kind, "same typed intent");
-    assert!(s.overlay.is_none());
+    assert!(s.session.overlay.is_none());
     assert!(matches!(s.open_message, Loadable::Loading));
 }
 
@@ -417,12 +425,12 @@ fn mark_unread_updates_list_and_route_after_confirmation() {
 #[test]
 fn message_actions_do_not_fire_from_sidebar_focus() {
     let mut s = state();
-    s.focus = Focus::Sidebar;
+    s.session.focus = Focus::Sidebar;
     no_effects(&reduce(&mut s, &Action::ToggleStar));
     no_effects(&reduce(&mut s, &Action::Archive));
     no_effects(&reduce(&mut s, &Action::Trash));
     no_effects(&reduce(&mut s, &Action::MarkUnread));
-    assert!(s.operations.is_empty());
+    assert!(s.session.operations.is_empty());
 }
 
 #[test]
@@ -453,8 +461,8 @@ fn trash_closes_reader_and_removes_row() {
     assert!(matches!(&kind, OperationKind::Trash(_)), "kind: {kind:?}");
     let (_, req) = expect_page(&complete_done(&mut s, id));
     // The reader closed; the row vanished; the page re-syncs.
-    assert_eq!(s.routes.len(), 1);
-    assert_eq!(s.focus, Focus::MessageList);
+    assert_eq!(s.session.routes.len(), 1);
+    assert_eq!(s.session.focus, Focus::MessageList);
     assert!(matches!(s.open_message, Loadable::Idle));
     assert!(s.messages.items.iter().all(|m| m.id != target));
     assert_eq!(req.offset, 0);
@@ -468,8 +476,8 @@ fn archive_failure_keeps_row_and_opens_modal() {
     reduce(&mut s, &failure(id, &kind, "imap server refused"));
     // Coherent failure state: nothing removed, no reload, modal up.
     assert_eq!(s.messages.items.len(), mock::PAGE_SIZE);
-    assert!(s.overlay.is_some());
-    assert!(s.operations.is_empty());
+    assert!(s.session.overlay.is_some());
+    assert!(s.session.operations.is_empty());
 }
 
 #[test]
@@ -479,8 +487,8 @@ fn reader_scrolls_within_content_and_clamps() {
     complete_message_ok(&mut s, id);
     // The scroll viewport is the rows under the fixed header (ticket 6864);
     // the clamp tracks the body alone.
-    let width = s.size.0 as usize;
-    let viewport = crate::view::layout::reader_rows_visible(s.size)
+    let width = s.session.size.0 as usize;
+    let viewport = crate::view::layout::reader_rows_visible(s.session.size)
         .saturating_sub(crate::app::reader::header_line_count(&s, width))
         .max(1);
     let total = crate::app::reader::scroll_line_count(&s, width);
@@ -511,15 +519,15 @@ fn reader_scrolls_within_content_and_clamps() {
 #[test]
 fn focus_cycles_tab_shift_tab() {
     let mut s = state();
-    assert_eq!(s.focus, Focus::MessageList);
+    assert_eq!(s.session.focus, Focus::MessageList);
     reduce(&mut s, &Action::FocusNext);
-    assert_eq!(s.focus, Focus::SearchField);
+    assert_eq!(s.session.focus, Focus::SearchField);
     reduce(&mut s, &Action::FocusNext);
-    assert_eq!(s.focus, Focus::Sidebar);
+    assert_eq!(s.session.focus, Focus::Sidebar);
     reduce(&mut s, &Action::FocusNext);
-    assert_eq!(s.focus, Focus::MessageList);
+    assert_eq!(s.session.focus, Focus::MessageList);
     reduce(&mut s, &Action::FocusPrevious);
-    assert_eq!(s.focus, Focus::Sidebar);
+    assert_eq!(s.session.focus, Focus::Sidebar);
 }
 
 #[test]
@@ -534,22 +542,22 @@ fn modal_focus_is_outside_the_tab_cycle() {
 fn open_search_focuses_field_and_typing_edits_query() {
     let mut s = state();
     reduce(&mut s, &Action::OpenSearch);
-    assert_eq!(s.focus, Focus::SearchField);
+    assert_eq!(s.session.focus, Focus::SearchField);
     for c in "hello".chars() {
         reduce(&mut s, &Action::SearchEdit(SearchEdit::Char(c)));
     }
-    assert_eq!(s.search_query, "hello");
+    assert_eq!(s.session.search_query, "hello");
     reduce(&mut s, &Action::SearchEdit(SearchEdit::Backspace));
-    assert_eq!(s.search_query, "hell");
+    assert_eq!(s.session.search_query, "hell");
 }
 
 #[test]
 fn search_edit_ignored_when_field_not_focused() {
     let mut s = state();
     reduce(&mut s, &Action::SearchEdit(SearchEdit::Char('x')));
-    assert_eq!(s.search_query, "");
+    assert_eq!(s.session.search_query, "");
     reduce(&mut s, &Action::SearchEdit(SearchEdit::Backspace));
-    assert_eq!(s.search_query, "");
+    assert_eq!(s.session.search_query, "");
 }
 
 #[test]
@@ -557,36 +565,36 @@ fn esc_leaves_search_field_before_quitting() {
     let mut s = state();
     reduce(&mut s, &Action::OpenSearch);
     reduce(&mut s, &Action::BackOrCancel);
-    assert_eq!(s.focus, Focus::MessageList);
-    assert!(!s.quit_requested);
+    assert_eq!(s.session.focus, Focus::MessageList);
+    assert!(!s.session.quit_requested);
     reduce(&mut s, &Action::BackOrCancel);
-    assert!(s.quit_requested);
+    assert!(s.session.quit_requested);
 }
 
 #[test]
 fn esc_on_root_quits() {
     let mut s = state();
     reduce(&mut s, &Action::BackOrCancel);
-    assert!(s.quit_requested);
+    assert!(s.session.quit_requested);
 }
 
 #[test]
 fn quit_action_requests_quit() {
     let mut s = state();
     reduce(&mut s, &Action::Quit);
-    assert!(s.quit_requested);
+    assert!(s.session.quit_requested);
 }
 
 #[test]
 fn move_keys_do_not_cross_focus_boundaries() {
     let mut s = state();
     // Moving in the sidebar must not move the message selection.
-    s.focus = Focus::Sidebar;
+    s.session.focus = Focus::Sidebar;
     reduce(&mut s, &Action::MoveDown);
     assert_eq!(s.mailbox_selection, 1);
     assert_eq!(s.selection, 0);
     // Typing chars in the search field must not move anything.
-    s.focus = Focus::SearchField;
+    s.session.focus = Focus::SearchField;
     reduce(&mut s, &Action::SearchEdit(SearchEdit::Char('c')));
     assert_eq!(s.mailbox_selection, 1);
 }
@@ -594,7 +602,7 @@ fn move_keys_do_not_cross_focus_boundaries() {
 #[test]
 fn sidebar_movement_does_not_touch_messages_until_activated() {
     let mut s = state();
-    s.focus = Focus::Sidebar;
+    s.session.focus = Focus::Sidebar;
     reduce(&mut s, &Action::MoveDown);
     assert_eq!(s.active_route().unwrap().mailbox_id().unwrap().0, "inbox");
     reduce(&mut s, &Action::Activate);
@@ -678,7 +686,7 @@ fn resize_updates_size() {
             height: 25,
         },
     );
-    assert_eq!(s.size, (90, 25));
+    assert_eq!(s.session.size, (90, 25));
 }
 
 #[test]
@@ -706,8 +714,8 @@ fn resize_clamps_reader_scroll_after_reflow() {
             height: 20,
         },
     );
-    let width = crate::view::layout::reader_width(s.size).max(10);
-    let viewport = crate::view::layout::reader_rows_visible(s.size)
+    let width = crate::view::layout::reader_width(s.session.size).max(10);
+    let viewport = crate::view::layout::reader_rows_visible(s.session.size)
         .saturating_sub(crate::app::reader::header_line_count(&s, width))
         .max(1) as i64;
     let total = crate::app::reader::scroll_line_count(&s, width) as i64;
@@ -725,8 +733,8 @@ fn resize_clamps_reader_scroll_after_reflow() {
             height: 40,
         },
     );
-    let width = crate::view::layout::reader_width(s.size).max(10);
-    let viewport = crate::view::layout::reader_rows_visible(s.size)
+    let width = crate::view::layout::reader_width(s.session.size).max(10);
+    let viewport = crate::view::layout::reader_rows_visible(s.session.size)
         .saturating_sub(crate::app::reader::header_line_count(&s, width))
         .max(1) as i64;
     let total = crate::app::reader::scroll_line_count(&s, width) as i64;
@@ -753,9 +761,9 @@ fn tick_increments_counter_only() {
     let mut s = state();
     let before = s.clone();
     tick(&mut s, 0);
-    assert_eq!(s.ticks, before.ticks + 1);
+    assert_eq!(s.session.ticks, before.session.ticks + 1);
     assert_eq!(s.selection, before.selection);
-    assert_eq!(s.focus, before.focus);
+    assert_eq!(s.session.focus, before.session.focus);
 }
 
 #[test]
@@ -772,9 +780,9 @@ fn unimplemented_actions_are_safe_noops() {
         no_effects(&reduce(&mut s, &action));
     }
     assert_eq!(s.selection, before.selection);
-    assert_eq!(s.routes, before.routes);
+    assert_eq!(s.session.routes, before.session.routes);
     assert_eq!(s.messages, before.messages);
-    assert_eq!(s.focus, before.focus);
+    assert_eq!(s.session.focus, before.session.focus);
     // Message actions need an operation target under list/reader focus and
     // stay no-ops when the list is empty.
     s.messages.items.clear();
@@ -786,7 +794,7 @@ fn unimplemented_actions_are_safe_noops() {
     ] {
         no_effects(&reduce(&mut s, &action));
     }
-    assert!(s.operations.is_empty());
+    assert!(s.session.operations.is_empty());
 }
 
 #[test]
@@ -806,14 +814,14 @@ fn selection_is_normalized_to_valid_index() {
 #[test]
 fn mailbox_switch_updates_route_only_via_activate() {
     let mut s = state();
-    let before_routes = s.routes.clone();
+    let before_routes = s.session.routes.clone();
     // MoveDown while sidebar focused does not switch the active mailbox…
-    s.focus = Focus::Sidebar;
+    s.session.focus = Focus::Sidebar;
     reduce(&mut s, &Action::MoveDown);
-    assert_eq!(s.routes, before_routes);
+    assert_eq!(s.session.routes, before_routes);
     // …Activate does, keeping the route stack a single root entry.
     reduce(&mut s, &Action::Activate);
-    assert_eq!(s.routes.len(), 1);
+    assert_eq!(s.session.routes.len(), 1);
     assert_eq!(s.active_route().unwrap().mailbox_id().unwrap().0, "sent");
 }
 
@@ -842,7 +850,7 @@ fn enter_on_attach_opens_the_chooser_and_esc_closes_it() {
     open_attach_dialog(&mut s);
     // The chooser opens in its pending state: listing in flight.
     {
-        let dialog = match s.overlay.as_ref().unwrap() {
+        let dialog = match s.session.overlay.as_ref().unwrap() {
             Overlay::AttachmentExplorer(dialog) => dialog,
             _ => panic!("chooser open"),
         };
@@ -852,9 +860,17 @@ fn enter_on_attach_opens_the_chooser_and_esc_closes_it() {
     }
     // BackOrCancel restores the composer focus.
     reduce(&mut s, &Action::BackOrCancel);
-    assert!(s.overlay.is_none());
-    assert_eq!(s.focus, Focus::Composer);
-    assert!(s.composer.as_ref().unwrap().draft.attachments.is_empty());
+    assert!(s.session.overlay.is_none());
+    assert_eq!(s.session.focus, Focus::Composer);
+    assert!(
+        s.session
+            .composer
+            .as_ref()
+            .unwrap()
+            .draft
+            .attachments
+            .is_empty()
+    );
 }
 
 #[test]
@@ -863,7 +879,7 @@ fn the_landed_listing_replaces_the_pending_state() {
     let (_, id) = open_attach_dialog(&mut s);
     let (_guard, dir) = chooser_dir();
     land_listing(&mut s, id, &dir);
-    let dialog = match s.overlay.as_ref().unwrap() {
+    let dialog = match s.session.overlay.as_ref().unwrap() {
         Overlay::AttachmentExplorer(dialog) => dialog,
         _ => panic!("chooser open"),
     };
@@ -885,7 +901,7 @@ fn arrows_move_the_selection_and_enter_submits_a_file() {
     reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
     let expected = dir.join("notes.txt");
     assert_eq!(
-        match s.overlay.as_ref().unwrap() {
+        match s.session.overlay.as_ref().unwrap() {
             Overlay::AttachmentExplorer(dialog) => dialog.selected_file(),
             _ => panic!("chooser open"),
         },
@@ -901,7 +917,10 @@ fn arrows_move_the_selection_and_enter_submits_a_file() {
         "the selected file's path goes to the backend"
     );
     assert!(
-        matches!(s.overlay.as_ref(), Some(Overlay::AttachmentExplorer(_))),
+        matches!(
+            s.session.overlay.as_ref(),
+            Some(Overlay::AttachmentExplorer(_))
+        ),
         "the chooser stays open while validating"
     );
     assert_eq!(kind.summary(), "Checking file");
@@ -924,7 +943,7 @@ fn enter_on_a_directory_lists_it_and_navigation_freezes() {
         }
     );
     {
-        let dialog = match s.overlay.as_ref().unwrap() {
+        let dialog = match s.session.overlay.as_ref().unwrap() {
             Overlay::AttachmentExplorer(dialog) => dialog,
             _ => panic!("chooser open"),
         };
@@ -938,7 +957,7 @@ fn enter_on_a_directory_lists_it_and_navigation_freezes() {
 
     // The landing replaces the working directory.
     land_listing(&mut s, id2, &dir.join("docs"));
-    let dialog = match s.overlay.as_ref().unwrap() {
+    let dialog = match s.session.overlay.as_ref().unwrap() {
         Overlay::AttachmentExplorer(dialog) => dialog,
         _ => panic!("chooser open"),
     };
@@ -993,16 +1012,16 @@ fn validated_file_becomes_a_chip_and_dirties_the_draft() {
     let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
     complete_read_ok(&mut s, id, attachment("notes.txt"));
     // The dialog closed and the chip is focused.
-    assert!(s.overlay.is_none());
-    assert_eq!(s.focus, Focus::Composer);
-    let composer = s.composer.as_ref().unwrap();
+    assert!(s.session.overlay.is_none());
+    assert_eq!(s.session.focus, Focus::Composer);
+    let composer = s.session.composer.as_ref().unwrap();
     assert_eq!(composer.field, ComposerField::Attachment(0));
     let att = &composer.draft.attachments[0];
     assert_eq!(att.name, "notes.txt");
     assert_eq!(att.path, PathBuf::from("/tmp/notes.txt"));
     assert!(composer.draft.is_dirty(), "attaching is a content edit");
     assert_eq!(
-        s.status.message.as_deref(),
+        s.session.status.message.as_deref(),
         Some("Attached notes.txt (1 KB)")
     );
 }
@@ -1029,14 +1048,22 @@ fn validation_failure_stays_in_the_chooser_retryable() {
         }),
     );
     // The chooser stays open with the detail; the selection is unchanged.
-    let dialog = match s.overlay.as_ref().unwrap() {
+    let dialog = match s.session.overlay.as_ref().unwrap() {
         Overlay::AttachmentExplorer(dialog) => dialog,
         _ => panic!("chooser open"),
     };
     assert_eq!(dialog.error.as_deref(), Some("`notes.txt` does not exist"));
     assert!(dialog.selected_file().is_some());
-    assert_eq!(s.focus, Focus::Dialog);
-    assert!(s.composer.as_ref().unwrap().draft.attachments.is_empty());
+    assert_eq!(s.session.focus, Focus::Dialog);
+    assert!(
+        s.session
+            .composer
+            .as_ref()
+            .unwrap()
+            .draft
+            .attachments
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1055,7 +1082,7 @@ fn failed_listing_keeps_the_chooser_open_with_the_detail() {
             }),
         }),
     );
-    let dialog = match s.overlay.as_ref().unwrap() {
+    let dialog = match s.session.overlay.as_ref().unwrap() {
         Overlay::AttachmentExplorer(dialog) => dialog,
         _ => panic!("chooser open"),
     };
@@ -1064,8 +1091,8 @@ fn failed_listing_keeps_the_chooser_open_with_the_detail() {
     assert!(dialog.explorer.is_none(), "nothing to show");
     // Esc still closes it.
     reduce(&mut s, &Action::BackOrCancel);
-    assert!(s.overlay.is_none());
-    assert_eq!(s.focus, Focus::Composer);
+    assert!(s.session.overlay.is_none());
+    assert_eq!(s.session.focus, Focus::Composer);
 }
 
 #[test]
@@ -1080,7 +1107,15 @@ fn stale_results_are_dropped() {
     let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
     reduce(&mut s, &Action::BackOrCancel);
     complete_read_ok(&mut s, id, attachment("notes.txt"));
-    assert!(s.composer.as_ref().unwrap().draft.attachments.is_empty());
+    assert!(
+        s.session
+            .composer
+            .as_ref()
+            .unwrap()
+            .draft
+            .attachments
+            .is_empty()
+    );
 
     // Moving the selection while validating: the older result is stale.
     let (_, id) = open_attach_dialog(&mut s);
@@ -1090,7 +1125,15 @@ fn stale_results_are_dropped() {
     let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
     reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Up));
     complete_read_ok(&mut s, id, attachment("notes.txt"));
-    assert!(s.composer.as_ref().unwrap().draft.attachments.is_empty());
+    assert!(
+        s.session
+            .composer
+            .as_ref()
+            .unwrap()
+            .draft
+            .attachments
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1103,10 +1146,13 @@ fn same_file_attaches_once() {
     reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
     let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
     complete_read_ok(&mut s, id, attachment("notes.txt"));
-    assert_eq!(s.composer.as_ref().unwrap().draft.attachments.len(), 1);
+    assert_eq!(
+        s.session.composer.as_ref().unwrap().draft.attachments.len(),
+        1
+    );
 
     // Re-adding the same path: no duplicate chip, no dirt.
-    let revision = s.composer.as_ref().unwrap().draft.revision;
+    let revision = s.session.composer.as_ref().unwrap().draft.revision;
     let (_, id) = open_attach_dialog(&mut s);
     land_listing(&mut s, id, &dir);
     reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
@@ -1121,14 +1167,17 @@ fn same_file_attaches_once() {
             size: 1234,
         },
     );
-    assert_eq!(s.composer.as_ref().unwrap().draft.attachments.len(), 1);
     assert_eq!(
-        s.composer.as_ref().unwrap().draft.revision,
+        s.session.composer.as_ref().unwrap().draft.attachments.len(),
+        1
+    );
+    assert_eq!(
+        s.session.composer.as_ref().unwrap().draft.revision,
         revision,
         "no duplicate, no content edit"
     );
     assert_eq!(
-        s.status.message.as_deref(),
+        s.session.status.message.as_deref(),
         Some("notes.txt is already attached")
     );
 }
@@ -1140,7 +1189,7 @@ fn listing_results_for_a_closed_chooser_are_dropped() {
     let (_guard, dir) = chooser_dir();
     reduce(&mut s, &Action::BackOrCancel);
     land_listing(&mut s, id, &dir);
-    assert!(s.overlay.is_none(), "nothing resurrected");
+    assert!(s.session.overlay.is_none(), "nothing resurrected");
 }
 
 #[test]
@@ -1152,11 +1201,11 @@ fn enter_on_a_chip_removes_it_and_autosave_follows() {
         composer.add_attachment(attachment("b.pdf"));
     }
     // Tab to the first chip: To → … → Body → Attachment(0).
-    while s.composer.as_ref().unwrap().field != ComposerField::Attachment(0) {
+    while s.session.composer.as_ref().unwrap().field != ComposerField::Attachment(0) {
         reduce(&mut s, &Action::FocusNext);
     }
     no_effects(&reduce(&mut s, &Action::Activate));
-    let composer = s.composer.as_ref().unwrap();
+    let composer = s.session.composer.as_ref().unwrap();
     assert_eq!(composer.draft.attachments.len(), 1);
     assert_eq!(composer.draft.attachments[0].name, "b.pdf");
     assert_eq!(composer.field, ComposerField::Attachment(0), "next chip");

@@ -177,61 +177,93 @@ pub enum NameChoice {
     Suffix(String),
 }
 
-/// The wizard's whole state. Lives in `AppState.wizard` while active.
+/// The startup file snapshot the wizard needs (ADR 0003): captured once
+/// with I/O outside the reducer and handed to [`WizardState::new`]. Only
+/// the wizard writes the file during the session, so this never goes
+/// stale.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WizardState {
-    pub step: WizardStep,
-    /// Manual `--configure` mode (ADR 0003 §3.1): completion and cancel
-    /// exit the app instead of continuing into the mailbox UI.
-    pub manual: bool,
+pub struct ConfigSnapshot {
     /// The resolved save target, shown on the confirm screen.
     pub save_path: Option<PathBuf>,
-    /// Account names already in the config file (snapshotted at wizard
-    /// startup; only the wizard writes the file during the session).
+    /// Account names already in the config file.
     pub existing_names: Vec<String>,
     /// The name of the account holding `default = true` in the file, if
-    /// any (snapshot; see `will_set_default`).
+    /// any (see `will_set_default`).
     pub existing_default_name: Option<String>,
     /// Whether the existing file is group/world-readable (warning when
     /// a raw password is about to join it).
     pub existing_shared_readable: bool,
+}
 
-    // W1
-    pub email: TextField,
-    // W2
+/// W1: the email address being configured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmailStep {
+    pub address: TextField,
+}
+
+/// W2: ranked discovery results and the manual-override sub-form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryStep {
     pub services: Vec<DiscoveredService>,
     pub service_index: usize,
     pub discovering: bool,
     pub override_open: bool,
     pub override_fields: [TextField; OVERRIDE_FIELDS],
     pub override_index: usize,
-    // W3
+    /// The Gmail app-password hint applies (gmail.com/googlemail.com
+    /// domain or a Google provider tag).
+    pub gmail_hint: bool,
+}
+
+/// W3/W4/W5: identity and credentials, kept intact while a test runs or
+/// the user steps back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialStep {
     pub display_name: TextField,
-    // W4
     pub username: TextField,
     pub storage_mode: StorageMode,
     pub password: TextField,
     pub command: TextField,
     pub credentials_index: usize,
-    /// The sanitized failure of the last discovery/test attempt.
-    pub last_error: Option<String>,
-    /// The Gmail app-password hint applies (gmail.com/googlemail.com
-    /// domain or a Google provider tag).
-    pub gmail_hint: bool,
-    // W5
-    // (testing is implied by `step == Testing`; the in-flight id is here)
-    // W6
+}
+
+/// W6/W7: the save confirmation data and the result of the save.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmStep {
     pub mailbox_names: Vec<String>,
     pub aliases: Vec<(String, String)>,
     pub account_name: String,
     pub name_choice: Option<NameChoice>,
     pub name_choice_index: usize,
-    // W7
     pub saved_path: Option<PathBuf>,
     pub saved_created: bool,
     /// The writer's warning for the just-saved file (shared-readable
     /// config + `password.raw`), shown on W7.
     pub permissions_warning: Option<String>,
+}
+
+/// The wizard's whole state. Lives in `AppState.session.wizard` while
+/// active. The per-step groups hold only their screen's fields; the root
+/// keeps the step machine, the cross-step error/in-flight slots, and the
+/// terminal outcomes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WizardState {
+    pub step: WizardStep,
+    /// Manual `--configure` mode (ADR 0003 §3.1): completion and cancel
+    /// exit the app instead of continuing into the mailbox UI.
+    pub manual: bool,
+    /// The startup config-file snapshot (save target, existing accounts).
+    pub config: ConfigSnapshot,
+    /// W1: the email address.
+    pub email: EmailStep,
+    /// W2: discovery results and the manual override.
+    pub discovery: DiscoveryStep,
+    /// W3/W4/W5: identity, username, and secret handling.
+    pub credentials: CredentialStep,
+    /// W6/W7: account-name collision choice and the save result.
+    pub confirm: ConfirmStep,
+    /// The sanitized failure of the last discovery/test attempt.
+    pub last_error: Option<String>,
     /// The id of the operation currently in flight (discovery, test, or
     /// save) — `Esc` cancels it.
     pub in_flight: Option<OperationId>,
@@ -241,45 +273,44 @@ pub struct WizardState {
 }
 
 impl WizardState {
-    /// A fresh wizard on the email screen. `save_path` and the file
-    /// snapshots come from startup (I/O stays out of the reducer).
-    pub fn new(
-        manual: bool,
-        save_path: Option<PathBuf>,
-        existing_names: Vec<String>,
-        existing_default_name: Option<String>,
-        existing_shared_readable: bool,
-    ) -> Self {
+    /// A fresh wizard on the email screen. The [`ConfigSnapshot`] comes
+    /// from startup (I/O stays out of the reducer).
+    pub fn new(manual: bool, config: ConfigSnapshot) -> Self {
         Self {
             step: WizardStep::Email,
             manual,
-            save_path,
-            existing_names,
-            existing_default_name,
-            existing_shared_readable,
-            email: TextField::default(),
-            services: Vec::new(),
-            service_index: 0,
-            discovering: false,
-            override_open: false,
-            override_fields: Default::default(),
-            override_index: 0,
-            display_name: TextField::default(),
-            username: TextField::default(),
-            storage_mode: StorageMode::Raw,
-            password: TextField::secret(""),
-            command: TextField::default(),
-            credentials_index: 0,
+            config,
+            email: EmailStep {
+                address: TextField::default(),
+            },
+            discovery: DiscoveryStep {
+                services: Vec::new(),
+                service_index: 0,
+                discovering: false,
+                override_open: false,
+                override_fields: Default::default(),
+                override_index: 0,
+                gmail_hint: false,
+            },
+            credentials: CredentialStep {
+                display_name: TextField::default(),
+                username: TextField::default(),
+                storage_mode: StorageMode::Raw,
+                password: TextField::secret(""),
+                command: TextField::default(),
+                credentials_index: 0,
+            },
+            confirm: ConfirmStep {
+                mailbox_names: Vec::new(),
+                aliases: Vec::new(),
+                account_name: String::new(),
+                name_choice: None,
+                name_choice_index: 0,
+                saved_path: None,
+                saved_created: false,
+                permissions_warning: None,
+            },
             last_error: None,
-            gmail_hint: false,
-            mailbox_names: Vec::new(),
-            aliases: Vec::new(),
-            account_name: String::new(),
-            name_choice: None,
-            name_choice_index: 0,
-            saved_path: None,
-            saved_created: false,
-            permissions_warning: None,
             in_flight: None,
             cancelled: false,
             completed: false,
@@ -288,7 +319,7 @@ impl WizardState {
 
     /// The chosen discovery candidate, if any.
     pub fn selected_service(&self) -> Option<&DiscoveredService> {
-        self.services.get(self.service_index)
+        self.discovery.services.get(self.discovery.service_index)
     }
 
     /// The provider the final account will carry (manual override
@@ -299,7 +330,7 @@ impl WizardState {
 
     /// Whether the wizard is waiting on an operation it can cancel.
     pub fn is_busy(&self) -> bool {
-        self.discovering || self.step == WizardStep::Testing || self.in_flight.is_some()
+        self.discovery.discovering || self.step == WizardStep::Testing || self.in_flight.is_some()
     }
 
     /// The `default = true` decision the confirm screen previews
@@ -308,9 +339,9 @@ impl WizardState {
     /// writer recomputes the authoritative decision at save time; this
     /// preview never contradicts it.)
     pub fn will_set_default(&self) -> bool {
-        match &self.existing_default_name {
+        match &self.config.existing_default_name {
             None => true,
-            Some(name) => name == &self.account_name,
+            Some(name) => name == &self.confirm.account_name,
         }
     }
 
@@ -318,17 +349,17 @@ impl WizardState {
     /// §3.4): used both for the credential test and the final save.
     pub fn build_draft(&self) -> Option<DraftAccountConfig> {
         let service = self.selected_service()?;
-        let email = self.email.value.trim().to_string();
+        let email = self.email.address.value.trim().to_string();
         if email.is_empty() {
             return None;
         }
-        let display_name = self.display_name.value.trim().to_string();
-        let secret = match self.storage_mode {
-            StorageMode::Raw => SecretStorage::Raw(self.password.value.clone()),
-            StorageMode::Command => SecretStorage::Command(self.command.value.clone()),
+        let display_name = self.credentials.display_name.value.trim().to_string();
+        let secret = match self.credentials.storage_mode {
+            StorageMode::Raw => SecretStorage::Raw(self.credentials.password.value.clone()),
+            StorageMode::Command => SecretStorage::Command(self.credentials.command.value.clone()),
         };
         Some(DraftAccountConfig {
-            name: self.account_name.clone(),
+            name: self.confirm.account_name.clone(),
             email,
             display_name: (!display_name.is_empty()).then_some(display_name),
             imap_server: service.imap.url.clone(),
@@ -338,9 +369,9 @@ impl WizardState {
                 .smtp
                 .as_ref()
                 .is_some_and(|smtp| smtp.security == Security::StartTls),
-            username: self.username.value.clone(),
+            username: self.credentials.username.value.clone(),
             secret,
-            aliases: self.aliases.clone(),
+            aliases: self.confirm.aliases.clone(),
         })
     }
 }
@@ -389,7 +420,7 @@ pub enum WizardAction {
 }
 
 /// Wizard slice of the reducer: every action while
-/// `AppState.wizard` is `Some`. Warmup and mailbox keys never reach it.
+/// `AppState.session.wizard` is `Some`. Warmup and mailbox keys never reach it.
 pub fn wizard_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
     let Action::Wizard(w) = action else {
         return match action {
@@ -405,18 +436,20 @@ pub fn wizard_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             // wizard context); translate them into the wizard vocabulary.
             Action::BackOrCancel => wizard_action(state, &WizardAction::Cancel),
             Action::Activate => {
-                let Some(current) = state.wizard.as_ref() else {
+                let Some(current) = state.session.wizard.as_ref() else {
                     return Vec::new();
                 };
                 let enter = match current.step {
                     WizardStep::Email => WizardAction::SubmitEmail,
-                    WizardStep::Discovery if current.override_open => WizardAction::SubmitOverride,
+                    WizardStep::Discovery if current.discovery.override_open => {
+                        WizardAction::SubmitOverride
+                    }
                     WizardStep::Discovery => WizardAction::SelectService,
                     WizardStep::Identity => WizardAction::SubmitCredentials,
                     // Enter activates the focused control (ADR 0003 §3.2):
                     // on the storage-mode row that is the toggle, not the
                     // credential test.
-                    WizardStep::Credentials if current.credentials_index == 1 => {
+                    WizardStep::Credentials if current.credentials.credentials_index == 1 => {
                         WizardAction::ToggleStorageMode
                     }
                     WizardStep::Credentials => WizardAction::SubmitCredentials,
@@ -442,7 +475,7 @@ pub fn wizard_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
 fn wizard_action(state: &mut AppState, action: &WizardAction) -> Vec<Effect> {
     // The wizard is the only writer of its own state; take it out to
     // satisfy the borrow checker across the step transitions.
-    let mut wizard = state.wizard.take().expect("wizard active");
+    let mut wizard = state.session.wizard.take().expect("wizard active");
 
     let effects = match action {
         WizardAction::Edit(edit) => {
@@ -467,14 +500,14 @@ fn wizard_action(state: &mut AppState, action: &WizardAction) -> Vec<Effect> {
         }
         WizardAction::SubmitEmail => submit_email(&mut wizard, state),
         WizardAction::SelectService => {
-            if wizard.override_open {
+            if wizard.discovery.override_open {
                 submit_override(&mut wizard)
             } else {
                 select_service(&mut wizard)
             }
         }
         WizardAction::OverrideServers => {
-            if wizard.step == WizardStep::Discovery && !wizard.override_open {
+            if wizard.step == WizardStep::Discovery && !wizard.discovery.override_open {
                 open_override(&mut wizard);
                 Vec::new()
             } else {
@@ -485,13 +518,14 @@ fn wizard_action(state: &mut AppState, action: &WizardAction) -> Vec<Effect> {
             }
         }
         WizardAction::RerunDiscovery => {
-            if wizard.step == WizardStep::Discovery && !wizard.override_open {
+            if wizard.step == WizardStep::Discovery && !wizard.discovery.override_open {
                 wizard.last_error = None;
-                wizard.discovering = true;
-                wizard.services.clear();
-                wizard.service_index = 0;
-                let email = wizard.email.value.trim().to_string();
+                wizard.discovery.discovering = true;
+                wizard.discovery.services.clear();
+                wizard.discovery.service_index = 0;
+                let email = wizard.email.address.value.trim().to_string();
                 let effect = state
+                    .session
                     .operations
                     .start(OperationKind::DiscoverConfig { email });
                 wizard.in_flight = Some(effect.id);
@@ -503,14 +537,14 @@ fn wizard_action(state: &mut AppState, action: &WizardAction) -> Vec<Effect> {
         }
         WizardAction::SubmitOverride => submit_override(&mut wizard),
         WizardAction::CancelOverride => {
-            wizard.override_open = false;
+            wizard.discovery.override_open = false;
             Vec::new()
         }
         WizardAction::SubmitCredentials => submit_credentials(&mut wizard, state),
         WizardAction::ToggleStorageMode => {
-            if wizard.step == WizardStep::Credentials && wizard.credentials_index == 1 {
+            if wizard.step == WizardStep::Credentials && wizard.credentials.credentials_index == 1 {
                 // The storage-mode row is focused: flip the mode.
-                wizard.storage_mode = match wizard.storage_mode {
+                wizard.credentials.storage_mode = match wizard.credentials.storage_mode {
                     StorageMode::Raw => StorageMode::Command,
                     StorageMode::Command => StorageMode::Raw,
                 };
@@ -528,7 +562,7 @@ fn wizard_action(state: &mut AppState, action: &WizardAction) -> Vec<Effect> {
         WizardAction::Cancel => cancel_wizard(&mut wizard, state),
     };
 
-    state.wizard = Some(wizard);
+    state.session.wizard = Some(wizard);
     effects
 }
 
@@ -539,26 +573,26 @@ fn wizard_action(state: &mut AppState, action: &WizardAction) -> Vec<Effect> {
 fn wizard_text_entry_focused(wizard: &WizardState) -> bool {
     match wizard.step {
         WizardStep::Email => true,
-        WizardStep::Discovery => wizard.override_open,
+        WizardStep::Discovery => wizard.discovery.override_open,
         WizardStep::Identity => true,
-        WizardStep::Credentials => wizard.credentials_index != 1,
+        WizardStep::Credentials => wizard.credentials.credentials_index != 1,
         WizardStep::Testing | WizardStep::Confirm | WizardStep::Saved => false,
     }
 }
 
 fn edit_wizard_field(wizard: &mut WizardState, edit: &DialogEdit) {
     match wizard.step {
-        WizardStep::Email => wizard.email.apply(edit),
-        WizardStep::Discovery if wizard.override_open => {
-            wizard.override_fields[wizard.override_index].apply(edit)
+        WizardStep::Email => wizard.email.address.apply(edit),
+        WizardStep::Discovery if wizard.discovery.override_open => {
+            wizard.discovery.override_fields[wizard.discovery.override_index].apply(edit)
         }
-        WizardStep::Identity => wizard.display_name.apply(edit),
-        WizardStep::Credentials => match wizard.credentials_index {
-            0 => wizard.username.apply(edit),
+        WizardStep::Identity => wizard.credentials.display_name.apply(edit),
+        WizardStep::Credentials => match wizard.credentials.credentials_index {
+            0 => wizard.credentials.username.apply(edit),
             // The storage toggle (1) is not a text field.
-            2 => match wizard.storage_mode {
-                StorageMode::Raw => wizard.password.apply(edit),
-                StorageMode::Command => wizard.command.apply(edit),
+            2 => match wizard.credentials.storage_mode {
+                StorageMode::Raw => wizard.credentials.password.apply(edit),
+                StorageMode::Command => wizard.credentials.command.apply(edit),
             },
             _ => {}
         },
@@ -571,25 +605,29 @@ fn cycle_wizard_field(wizard: &mut WizardState, delta: i64) {
         *index = (*index as i64 + delta).rem_euclid(len as i64) as usize;
     };
     match wizard.step {
-        WizardStep::Discovery if wizard.override_open => {
-            cycle(&mut wizard.override_index, OVERRIDE_FIELDS)
+        WizardStep::Discovery if wizard.discovery.override_open => {
+            cycle(&mut wizard.discovery.override_index, OVERRIDE_FIELDS)
         }
-        WizardStep::Credentials => cycle(&mut wizard.credentials_index, CREDENTIAL_FIELDS),
+        WizardStep::Credentials => {
+            cycle(&mut wizard.credentials.credentials_index, CREDENTIAL_FIELDS)
+        }
         _ => {}
     }
 }
 
 fn move_wizard_selection(wizard: &mut WizardState, delta: i64) {
     match wizard.step {
-        WizardStep::Discovery if !wizard.services.is_empty() && !wizard.override_open => {
-            let len = wizard.services.len();
-            wizard.service_index =
-                (wizard.service_index as i64 + delta).rem_euclid(len as i64) as usize;
+        WizardStep::Discovery
+            if !wizard.discovery.services.is_empty() && !wizard.discovery.override_open =>
+        {
+            let len = wizard.discovery.services.len();
+            wizard.discovery.service_index =
+                (wizard.discovery.service_index as i64 + delta).rem_euclid(len as i64) as usize;
         }
-        WizardStep::Confirm if wizard.name_choice.is_some() => {
+        WizardStep::Confirm if wizard.confirm.name_choice.is_some() => {
             // Two rows only: replace ↔ suffix.
-            wizard.name_choice_index =
-                (wizard.name_choice_index as i64 + delta).rem_euclid(2) as usize;
+            wizard.confirm.name_choice_index =
+                (wizard.confirm.name_choice_index as i64 + delta).rem_euclid(2) as usize;
         }
         _ => {}
     }
@@ -614,20 +652,23 @@ fn submit_email(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> {
     if wizard.step != WizardStep::Email {
         return Vec::new();
     }
-    let email = wizard.email.value.trim().to_string();
+    let email = wizard.email.address.value.trim().to_string();
     if let Err(message) = validate_email(&email) {
         wizard.last_error = Some(message);
         return Vec::new();
     }
     wizard.last_error = None;
-    wizard.gmail_hint = is_google_domain(&email);
+    wizard.discovery.gmail_hint = is_google_domain(&email);
     wizard.step = WizardStep::Discovery;
-    wizard.discovering = true;
-    wizard.services.clear();
-    wizard.service_index = 0;
-    let effect = state.operations.start(OperationKind::DiscoverConfig {
-        email: email.clone(),
-    });
+    wizard.discovery.discovering = true;
+    wizard.discovery.services.clear();
+    wizard.discovery.service_index = 0;
+    let effect = state
+        .session
+        .operations
+        .start(OperationKind::DiscoverConfig {
+            email: email.clone(),
+        });
     wizard.in_flight = Some(effect.id);
     vec![effect]
 }
@@ -647,9 +688,9 @@ fn is_google_domain(email: &str) -> bool {
 /// empty-result screen, the manual form's data was already folded in).
 fn select_service(wizard: &mut WizardState) -> Vec<Effect> {
     if wizard.step != WizardStep::Discovery
-        || wizard.override_open
-        || wizard.discovering
-        || wizard.services.is_empty()
+        || wizard.discovery.override_open
+        || wizard.discovery.discovering
+        || wizard.discovery.services.is_empty()
     {
         return Vec::new();
     }
@@ -658,18 +699,19 @@ fn select_service(wizard: &mut WizardState) -> Vec<Effect> {
     let username = wizard
         .selected_service()
         .and_then(|service| service.username.clone())
-        .unwrap_or_else(|| wizard.email.value.trim().to_string());
-    wizard.username = TextField::new(username);
+        .unwrap_or_else(|| wizard.email.address.value.trim().to_string());
+    wizard.credentials.username = TextField::new(username);
     // Default suggestion for the display name: the local part.
     let local = wizard
         .email
+        .address
         .value
         .trim()
         .split('@')
         .next()
         .unwrap_or("")
         .to_string();
-    wizard.display_name = TextField::new(local);
+    wizard.credentials.display_name = TextField::new(local);
     wizard.step = WizardStep::Identity;
     Vec::new()
 }
@@ -678,11 +720,11 @@ fn select_service(wizard: &mut WizardState) -> Vec<Effect> {
 /// (ADR 0003 §3.2): `imaps://imap.<domain>:993`, `smtps://smtp.<domain>:465`,
 /// username = the full address.
 fn open_override(wizard: &mut WizardState) {
-    let email = wizard.email.value.trim().to_string();
+    let email = wizard.email.address.value.trim().to_string();
     let domain = email.split('@').nth(1).unwrap_or("example.com").to_string();
-    wizard.override_open = true;
-    wizard.override_index = 0;
-    wizard.override_fields = [
+    wizard.discovery.override_open = true;
+    wizard.discovery.override_index = 0;
+    wizard.discovery.override_fields = [
         TextField::new(format!("imaps://imap.{domain}:993")),
         TextField::new(format!("smtps://smtp.{domain}:465")),
         TextField::new(email),
@@ -693,10 +735,10 @@ fn open_override(wizard: &mut WizardState) {
 /// W2 override submit: the typed servers become a `source = manual`
 /// candidate and skip straight to W4 (ADR 0003 §3.2).
 fn submit_override(wizard: &mut WizardState) -> Vec<Effect> {
-    if wizard.step != WizardStep::Discovery || !wizard.override_open {
+    if wizard.step != WizardStep::Discovery || !wizard.discovery.override_open {
         return Vec::new();
     }
-    let [imap, smtp, username] = &wizard.override_fields;
+    let [imap, smtp, username] = &wizard.discovery.override_fields;
     let (imap_url, imap_security) = match parse_server_url(&imap.value) {
         Ok(parsed) => parsed,
         Err(message) => {
@@ -716,7 +758,7 @@ fn submit_override(wizard: &mut WizardState) -> Vec<Effect> {
         return Vec::new();
     }
     let provider = host_provider(&imap_url);
-    wizard.services = vec![DiscoveredService {
+    wizard.discovery.services = vec![DiscoveredService {
         source: ConfigSource::Manual,
         imap: ServerEndpoint {
             url: imap_url,
@@ -729,12 +771,12 @@ fn submit_override(wizard: &mut WizardState) -> Vec<Effect> {
         provider,
         username: Some(username.value.trim().to_string()),
     }];
-    wizard.service_index = 0;
-    wizard.override_open = false;
+    wizard.discovery.service_index = 0;
+    wizard.discovery.override_open = false;
     // Manual override skips W3 (ADR 0003 §3.2): the display name stays
     // empty and is omitted from the saved account.
-    wizard.username = TextField::new(username.value.trim().to_string());
-    wizard.display_name = TextField::new("");
+    wizard.credentials.username = TextField::new(username.value.trim().to_string());
+    wizard.credentials.display_name = TextField::new("");
     wizard.step = WizardStep::Credentials;
     Vec::new()
 }
@@ -779,17 +821,17 @@ fn submit_credentials(wizard: &mut WizardState, state: &mut AppState) -> Vec<Eff
     if wizard.step != WizardStep::Credentials {
         return Vec::new();
     }
-    if wizard.username.value.trim().is_empty() {
+    if wizard.credentials.username.value.trim().is_empty() {
         wizard.last_error = Some(String::from("enter the login username"));
         return Vec::new();
     }
-    match &wizard.storage_mode {
-        StorageMode::Raw if wizard.password.value.is_empty() => {
+    match &wizard.credentials.storage_mode {
+        StorageMode::Raw if wizard.credentials.password.value.is_empty() => {
             wizard.last_error = Some(String::from("enter the password, or switch to a command"));
             return Vec::new();
         }
         StorageMode::Command => {
-            let command = wizard.command.value.trim().to_string();
+            let command = wizard.credentials.command.value.trim().to_string();
             if command.is_empty() {
                 wizard.last_error =
                     Some(String::from("enter the command that prints the password"));
@@ -807,10 +849,10 @@ fn submit_credentials(wizard: &mut WizardState, state: &mut AppState) -> Vec<Eff
 
     // The account id is fixed before the test so the temp config and
     // the final save carry the same name.
-    let email = wizard.email.value.trim().to_string();
+    let email = wizard.email.address.value.trim().to_string();
     let domain = email.split('@').nth(1).unwrap_or("").to_string();
-    wizard.account_name = crate::config::write::sanitize_account_name(&domain);
-    wizard.aliases.clear();
+    wizard.confirm.account_name = crate::config::write::sanitize_account_name(&domain);
+    wizard.confirm.aliases.clear();
 
     let Some(draft) = wizard.build_draft() else {
         wizard.last_error = Some(String::from(
@@ -821,7 +863,7 @@ fn submit_credentials(wizard: &mut WizardState, state: &mut AppState) -> Vec<Eff
 
     wizard.last_error = None;
     wizard.step = WizardStep::Testing;
-    let effect = state.operations.start(OperationKind::TestAccount {
+    let effect = state.session.operations.start(OperationKind::TestAccount {
         draft: Box::new(draft),
     });
     wizard.in_flight = Some(effect.id);
@@ -834,12 +876,12 @@ fn confirm_save(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> {
         return Vec::new();
     }
     // The collision choice may rename the account (ADR 0003 §3.6).
-    if wizard.name_choice_index == 1
-        && let Some(NameChoice::Suffix(suffix)) = wizard.name_choice.clone()
+    if wizard.confirm.name_choice_index == 1
+        && let Some(NameChoice::Suffix(suffix)) = wizard.confirm.name_choice.clone()
     {
-        wizard.account_name = suffix;
+        wizard.confirm.account_name = suffix;
     }
-    let Some(path) = wizard.save_path.clone() else {
+    let Some(path) = wizard.config.save_path.clone() else {
         wizard.last_error = Some(String::from("no config file path could be resolved"));
         return Vec::new();
     };
@@ -847,11 +889,11 @@ fn confirm_save(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> {
         wizard.last_error = Some(String::from("the draft is incomplete; go back and retry"));
         return Vec::new();
     };
-    draft.name = wizard.account_name.clone();
-    draft.aliases = wizard.aliases.clone();
+    draft.name = wizard.confirm.account_name.clone();
+    draft.aliases = wizard.confirm.aliases.clone();
 
     wizard.last_error = None;
-    let effect = state.operations.start(OperationKind::SaveAccount {
+    let effect = state.session.operations.start(OperationKind::SaveAccount {
         path,
         draft: Box::new(draft),
     });
@@ -867,7 +909,7 @@ fn dismiss_saved(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> 
         return Vec::new();
     }
     wizard.completed = true;
-    state.quit_requested = true;
+    state.session.quit_requested = true;
     Vec::new()
 }
 
@@ -875,14 +917,14 @@ fn dismiss_saved(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> 
 /// (ADR 0003 §3.2). A busy operation is cancelled first.
 fn cancel_wizard(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> {
     // Override form first: Esc closes the form, keeping the results.
-    if wizard.step == WizardStep::Discovery && wizard.override_open {
-        wizard.override_open = false;
+    if wizard.step == WizardStep::Discovery && wizard.discovery.override_open {
+        wizard.discovery.override_open = false;
         return Vec::new();
     }
     match wizard.step {
         WizardStep::Email => {
             wizard.cancelled = true;
-            state.quit_requested = true;
+            state.session.quit_requested = true;
         }
         WizardStep::Discovery => {
             wizard.step = WizardStep::Email;
@@ -892,7 +934,7 @@ fn cancel_wizard(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> 
             wizard.step = WizardStep::Discovery;
         }
         WizardStep::Credentials => {
-            wizard.step = if wizard.services.is_empty() {
+            wizard.step = if wizard.discovery.services.is_empty() {
                 // Nothing to go back to: the only way forward was the
                 // manual override, entered from discovery.
                 WizardStep::Discovery
@@ -905,7 +947,7 @@ fn cancel_wizard(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> 
             // Cancel the test and return to the credentials screen with
             // the fields intact (ADR 0003 §3.2 W5).
             if let Some(id) = wizard.in_flight.take() {
-                state.operations.cancel(id);
+                state.session.operations.cancel(id);
             }
             wizard.step = WizardStep::Credentials;
         }
@@ -913,7 +955,7 @@ fn cancel_wizard(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> 
             // The save is in flight: Esc cancels it, staying on the
             // confirm screen.
             if let Some(id) = wizard.in_flight.take() {
-                state.operations.cancel(id);
+                state.session.operations.cancel(id);
             }
         }
         WizardStep::Confirm => {
@@ -932,11 +974,11 @@ fn cancel_wizard(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> 
 fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
     // Reject unknown, cancelled, or superseded ids (plan §11): the
     // operation is finished out of the registry first.
-    let Some(op) = state.operations.finish(result.id) else {
+    let Some(op) = state.session.operations.finish(result.id) else {
         return Vec::new();
     };
     let kind = op.kind;
-    let Some(wizard) = state.wizard.as_mut() else {
+    let Some(wizard) = state.session.wizard.as_mut() else {
         return Vec::new();
     };
     if wizard.in_flight != Some(result.id) {
@@ -945,10 +987,10 @@ fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effec
     wizard.in_flight = None;
     match (&kind, &result.outcome) {
         (OperationKind::DiscoverConfig { .. }, Ok(OperationOutcome::Discovered(services))) => {
-            wizard.discovering = false;
-            wizard.services = services.clone();
-            wizard.service_index = 0;
-            if wizard.services.is_empty() {
+            wizard.discovery.discovering = false;
+            wizard.discovery.services = services.clone();
+            wizard.discovery.service_index = 0;
+            if wizard.discovery.services.is_empty() {
                 // Nothing found: the manual-override form is the only
                 // way forward (ADR 0003 §3.2 W2).
                 wizard.last_error = None;
@@ -957,7 +999,7 @@ fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effec
             Vec::new()
         }
         (OperationKind::DiscoverConfig { .. }, Err(failure)) => {
-            wizard.discovering = false;
+            wizard.discovery.discovering = false;
             wizard.last_error = Some(failure.detail.clone());
             Vec::new()
         }
@@ -965,8 +1007,9 @@ fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effec
             OperationKind::TestAccount { .. },
             Ok(OperationOutcome::TestAccountCompleted { mailboxes }),
         ) => {
-            wizard.mailbox_names = mailboxes.clone();
-            wizard.aliases = derive_aliases(&wizard.mailbox_names, wizard.provider());
+            wizard.confirm.mailbox_names = mailboxes.clone();
+            wizard.confirm.aliases =
+                derive_aliases(&wizard.confirm.mailbox_names, wizard.provider());
             prepare_confirm(wizard);
             wizard.step = WizardStep::Confirm;
             Vec::new()
@@ -986,9 +1029,9 @@ fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effec
                 permissions_warning,
             }),
         ) => {
-            wizard.saved_path = Some(path.clone());
-            wizard.saved_created = *created;
-            wizard.permissions_warning = permissions_warning.clone();
+            wizard.confirm.saved_path = Some(path.clone());
+            wizard.confirm.saved_created = *created;
+            wizard.confirm.permissions_warning = permissions_warning.clone();
             wizard.step = WizardStep::Saved;
             Vec::new()
         }
@@ -1005,19 +1048,24 @@ fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effec
 /// (collision-suffix suggestion), the derived alias preview, and the
 /// `default` decision.
 fn prepare_confirm(wizard: &mut WizardState) {
-    if wizard.account_name.is_empty() {
-        let email = wizard.email.value.trim().to_string();
+    if wizard.confirm.account_name.is_empty() {
+        let email = wizard.email.address.value.trim().to_string();
         let domain = email.split('@').nth(1).unwrap_or("");
-        wizard.account_name = crate::config::write::sanitize_account_name(domain);
+        wizard.confirm.account_name = crate::config::write::sanitize_account_name(domain);
     }
-    let collides = wizard.existing_names.contains(&wizard.account_name);
-    wizard.name_choice = if collides {
-        let suffix =
-            crate::config::write::next_free_name(&wizard.existing_names, &wizard.account_name);
-        wizard.name_choice_index = 0;
+    let collides = wizard
+        .config
+        .existing_names
+        .contains(&wizard.confirm.account_name);
+    wizard.confirm.name_choice = if collides {
+        let suffix = crate::config::write::next_free_name(
+            &wizard.config.existing_names,
+            &wizard.confirm.account_name,
+        );
+        wizard.confirm.name_choice_index = 0;
         Some(NameChoice::Suffix(suffix))
     } else {
-        wizard.name_choice_index = 0;
+        wizard.confirm.name_choice_index = 0;
         None
     };
 }

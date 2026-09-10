@@ -168,14 +168,14 @@ pub struct DiscardDialog {
 }
 
 /// The theme picker dialog (ticket k5ba). The list itself lives in
-/// `AppState.themes` — the same entries the renderer cycles — so the
+/// `AppState.settings.themes` — the same entries the renderer cycles — so the
 /// dialog only tracks where the user is inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThemePickerDialog {
     /// Theme index the picker opened with; Esc restores it (the preview
     /// mutates the live index while navigating).
     pub original: usize,
-    /// Cursor into `AppState.themes`; the highlighted theme is previewed
+    /// Cursor into `AppState.settings.themes`; the highlighted theme is previewed
     /// at once (`theme_index` follows the cursor).
     pub cursor: usize,
     /// First visible row when the theme list outgrows the dialog.

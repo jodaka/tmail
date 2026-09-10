@@ -55,11 +55,11 @@ pub fn render(
     // The account configuration wizard replaces the whole chrome (ADR 0003
     // §3.7): first run has no data for the shell to show, and the wizard
     // owns every key while active. No modals can be open underneath it.
-    if state.wizard.is_some() {
+    if state.session.wizard.is_some() {
         screens::wizard::render(frame, area, state, theme);
         return;
     }
-    let mode = layout::mode_for(state.size.0, state.size.1);
+    let mode = layout::mode_for(state.session.size.0, state.session.size.1);
     if mode == LayoutMode::TooSmall {
         render_too_small(frame, area, state, theme);
         // The modals still open even in too-small terminals: failures and
@@ -121,8 +121,8 @@ fn render_modals(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, hits: &
 fn render_too_small(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
     let message = format!(
         "Terminal too small ({}×{})\ntmail needs at least {}×{} columns/rows.\nEnlarge the window or press Esc to quit.",
-        state.size.0,
-        state.size.1,
+        state.session.size.0,
+        state.session.size.1,
         layout::COMPACT_MIN_WIDTH,
         layout::COMPACT_MIN_HEIGHT,
     );

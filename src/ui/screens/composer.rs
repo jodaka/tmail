@@ -41,7 +41,7 @@ pub fn render(
     theme: &Theme,
     hits: &mut HitMap,
 ) {
-    let Some(composer) = &state.composer else {
+    let Some(composer) = &state.session.composer else {
         return;
     };
     if !matches!(state.active_route(), Some(Route::Composer)) {
@@ -50,7 +50,7 @@ pub fn render(
     if area.width < 12 || area.height < 4 {
         return;
     }
-    let focused = state.focus == Focus::Composer;
+    let focused = state.session.focus == Focus::Composer;
     let mut cursor = Cursor {
         x: area.x + 2,
         y: area.y,

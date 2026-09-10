@@ -96,7 +96,7 @@ pub fn render(
         }
         // The clear hint reads the `cancel` binding: rebinding it in the
         // config keeps this row honest (and an unbound cancel hides it).
-        if let Some(clear) = state.keymap.hint(None, "cancel") {
+        if let Some(clear) = state.settings.keymap.hint(None, "cancel") {
             spans.push(Span::styled(
                 format!("  {clear} clear"),
                 Style::new().fg(theme.muted).bg(theme.background),
@@ -108,11 +108,15 @@ pub fn render(
         // their hints read from it. Send stays the fixed Ctrl+Enter chord.
         let hints: Vec<(Option<String>, &str)> = vec![
             (
-                state.keymap.hint(None, "focus_next").map(String::from),
+                state
+                    .settings
+                    .keymap
+                    .hint(None, "focus_next")
+                    .map(String::from),
                 "next field",
             ),
             (
-                state.keymap.hint(None, "cancel").map(String::from),
+                state.settings.keymap.hint(None, "cancel").map(String::from),
                 "save & leave",
             ),
             (Some(String::from("^↵")), "send"),
@@ -121,30 +125,61 @@ pub fn render(
     } else if reader {
         let context = Some(Context::Reader);
         let mut hints: Vec<(Option<String>, &str)> = vec![
-            (state.keymap.move_hint(context), "scroll"),
+            (state.settings.keymap.move_hint(context), "scroll"),
             (
-                state.keymap.hint(context, "cancel").map(String::from),
+                state
+                    .settings
+                    .keymap
+                    .hint(context, "cancel")
+                    .map(String::from),
                 "back",
             ),
             (
-                state.keymap.hint(context, "reply").map(String::from),
+                state
+                    .settings
+                    .keymap
+                    .hint(context, "reply")
+                    .map(String::from),
                 "reply",
             ),
             (
-                state.keymap.hint(context, "forward").map(String::from),
+                state
+                    .settings
+                    .keymap
+                    .hint(context, "forward")
+                    .map(String::from),
                 "forward",
             ),
             (
-                state.keymap.hint(context, "archive").map(String::from),
+                state
+                    .settings
+                    .keymap
+                    .hint(context, "archive")
+                    .map(String::from),
                 "archive",
             ),
-            (state.keymap.hint(context, "star").map(String::from), "star"),
             (
-                state.keymap.hint(context, "trash").map(String::from),
+                state
+                    .settings
+                    .keymap
+                    .hint(context, "star")
+                    .map(String::from),
+                "star",
+            ),
+            (
+                state
+                    .settings
+                    .keymap
+                    .hint(context, "trash")
+                    .map(String::from),
                 "delete",
             ),
             (
-                state.keymap.hint(context, "open_help").map(String::from),
+                state
+                    .settings
+                    .keymap
+                    .hint(context, "open_help")
+                    .map(String::from),
                 "shortcuts",
             ),
         ];
@@ -158,6 +193,7 @@ pub fn render(
         {
             hints.push((
                 state
+                    .settings
                     .keymap
                     .hint(context, "save_attachment")
                     .map(String::from),
@@ -165,6 +201,7 @@ pub fn render(
             ));
             hints.push((
                 state
+                    .settings
                     .keymap
                     .hint(context, "open_attachment")
                     .map(String::from),
@@ -175,37 +212,69 @@ pub fn render(
     } else {
         let context = Some(Context::List);
         let hints: Vec<(Option<String>, &str)> = vec![
-            (state.keymap.move_hint(context), "move"),
+            (state.settings.keymap.move_hint(context), "move"),
             (
-                state.keymap.hint(context, "activate").map(String::from),
+                state
+                    .settings
+                    .keymap
+                    .hint(context, "activate")
+                    .map(String::from),
                 "open",
             ),
             (
                 state
+                    .settings
                     .keymap
                     .hint(context, "toggle_selected")
                     .map(String::from),
                 "select",
             ),
-            (state.keymap.hint(context, "star").map(String::from), "star"),
             (
-                state.keymap.hint(context, "archive").map(String::from),
+                state
+                    .settings
+                    .keymap
+                    .hint(context, "star")
+                    .map(String::from),
+                "star",
+            ),
+            (
+                state
+                    .settings
+                    .keymap
+                    .hint(context, "archive")
+                    .map(String::from),
                 "archive",
             ),
             (
-                state.keymap.hint(context, "trash").map(String::from),
+                state
+                    .settings
+                    .keymap
+                    .hint(context, "trash")
+                    .map(String::from),
                 "delete",
             ),
             (
-                state.keymap.hint(context, "compose").map(String::from),
+                state
+                    .settings
+                    .keymap
+                    .hint(context, "compose")
+                    .map(String::from),
                 "compose",
             ),
             (
-                state.keymap.hint(context, "open_search").map(String::from),
+                state
+                    .settings
+                    .keymap
+                    .hint(context, "open_search")
+                    .map(String::from),
                 "search",
             ),
             (
-                state.keymap.hint(context, "open_help").map(String::from),
+                state
+                    .settings
+                    .keymap
+                    .hint(context, "open_help")
+                    .map(String::from),
                 "shortcuts",
             ),
         ];
@@ -219,7 +288,7 @@ pub fn render(
     // act on. Clipped to the space left of the hints so they never
     // overlap, with one column of padding off the right border
     // (ticket h1d7).
-    if let Some(message) = &state.status.message {
+    if let Some(message) = &state.session.status.message {
         let left_used: usize = spans.iter().map(|s| s.content.width()).sum();
         // 3 columns of existing slack plus the 1 padding column.
         let budget = (area.width as usize)
@@ -293,14 +362,14 @@ fn status_message_style(theme: &Theme, state: &AppState) -> Style {
 /// `0.0..=1.0`: `1.0` until the fade window opens, then linearly to `0.0`
 /// as the timeout elapses.
 fn status_alpha(state: &AppState) -> f64 {
-    if state.status_timeout_seconds == 0 {
+    if state.settings.status_timeout_seconds == 0 {
         return 1.0;
     }
-    let (Some(now), Some(shown_at)) = (state.clock, state.status.shown_at) else {
+    let (Some(now), Some(shown_at)) = (state.session.clock, state.session.status.shown_at) else {
         return 1.0;
     };
     let elapsed = (now - shown_at).num_milliseconds().max(0) as f64 / 1000.0;
-    let remaining = state.status_timeout_seconds as f64 - elapsed;
+    let remaining = state.settings.status_timeout_seconds as f64 - elapsed;
     (remaining / STATUS_FADE_SECONDS).clamp(0.0, 1.0)
 }
 

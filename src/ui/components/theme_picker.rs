@@ -23,10 +23,10 @@ pub use crate::view::overlay::picker_visible_rows as visible_rows;
 
 /// Render the picker, when open, above everything already drawn.
 pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme: &Theme) {
-    let Some(Overlay::ThemePicker(dialog)) = &state.overlay else {
+    let Some(Overlay::ThemePicker(dialog)) = &state.session.overlay else {
         return;
     };
-    let layout = layout(state.size, state.themes.len());
+    let layout = layout(state.session.size, state.settings.themes.len());
     if layout.area.width < 6 || layout.area.height < 3 {
         return;
     }
@@ -46,13 +46,14 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
     // row text and fills end one column short of it.
     let rows_height = inner.height.saturating_sub(1);
     let visible = rows_height as usize;
-    let scrolling = state.themes.len() > visible;
+    let scrolling = state.settings.themes.len() > visible;
     let row_width = if scrolling {
         inner.width.saturating_sub(1)
     } else {
         inner.width
     };
     for (drawn, (index, (name, _))) in state
+        .settings
         .themes
         .iter()
         .enumerate()
@@ -89,7 +90,8 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
     if scrolling {
         // The thumb tracks the scroll window the reducer keeps centered on
         // the cursor (position = first visible row, like the message list).
-        let mut scrollbar_state = ScrollbarState::new(state.themes.len()).position(dialog.scroll);
+        let mut scrollbar_state =
+            ScrollbarState::new(state.settings.themes.len()).position(dialog.scroll);
         frame.render_stateful_widget(
             chrome::scrollbar(theme),
             Rect {

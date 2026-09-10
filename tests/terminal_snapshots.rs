@@ -21,7 +21,7 @@ fn draw(width: u16, height: u16) -> ratatui::buffer::Buffer {
 /// what was actually drawn (Phase 10.1).
 fn draw_with_hits(width: u16, height: u16) -> (ratatui::buffer::Buffer, HitMap) {
     let mut state = mock_initial_state();
-    state.size = (width, height);
+    state.session.size = (width, height);
     // Production renders with the active palette each frame (main), so the
     // harness does too — the theme picker previews by switching it.
     let theme = state.active_theme();
@@ -150,7 +150,7 @@ fn drafts_rows_show_recipients_instead_of_senders() {
         .into_iter()
         .find(|m| m.role == Some(tmail::domain::MailboxRole::Drafts))
         .expect("mock has a drafts mailbox");
-    state.routes = vec![tmail::app::route::Route::Mailbox(
+    state.session.routes = vec![tmail::app::route::Route::Mailbox(
         tmail::app::route::MailboxRoute {
             mailbox_id: drafts.id.clone(),
         },
@@ -161,7 +161,7 @@ fn drafts_rows_show_recipients_instead_of_senders() {
         .unwrap();
     state.messages = mock::mock_page(&drafts.id, 0, mock::PAGE_SIZE);
     state.selection = 0;
-    state.size = (152, 40);
+    state.session.size = (152, 40);
     let (buffer, _) = draw_state_hits(&state, 152, 40);
     let text = text_of(&buffer);
     assert!(
@@ -242,7 +242,7 @@ fn focus_marker_follows_the_focused_pane() {
     // Sidebar focused: the cursor folder (Inbox, selection 0) shows the
     // bar and the selected message does not.
     let mut state = mock_initial_state();
-    state.focus = tmail::app::Focus::Sidebar;
+    state.session.focus = tmail::app::Focus::Sidebar;
     let buffer = buffer_after(&mut state, &[], 152, 40);
     let text = text_of(&buffer);
     let folder_row = text
@@ -404,7 +404,7 @@ fn theme_picker_shows_a_scrollbar_when_the_list_overflows() {
     let theme = Theme::default_dark();
     let mut state = mock_initial_state();
     // Twelve palettes against the dialog's ten visible rows: it scrolls.
-    state.themes = (0..12)
+    state.settings.themes = (0..12)
         .map(|i| (format!("theme-{i:02}"), Theme::default_dark()))
         .collect();
 
@@ -538,7 +538,7 @@ fn buffer_after(
     // harness reads it after the actions ran — the theme picker previews
     // by switching it.
     let theme = state.active_theme();
-    state.size = (width, height);
+    state.session.size = (width, height);
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend");
     let mut hits = HitMap::default();
@@ -721,19 +721,19 @@ fn reader_state(selection: usize) -> tmail::app::AppState {
     let mut state = mock_initial_state();
     let summary = state.messages.items[selection].clone();
     let message = mock::mock_message(&summary);
-    state.routes.push(Route::Message(MessageRoute {
+    state.session.routes.push(Route::Message(MessageRoute {
         mailbox_id: MailboxId(String::from("inbox")),
         summary,
     }));
     state.open_message = Loadable::Loaded(message);
-    state.focus = Focus::Reader;
+    state.session.focus = Focus::Reader;
     state
 }
 
 #[test]
 fn reader_renders_exactly_one_message_document() {
     let mut state = reader_state(0);
-    state.size = (152, 40);
+    state.session.size = (152, 40);
     let text = draw_after(&mut state, &[], 152, 40);
     // Header block.
     assert!(
@@ -764,7 +764,7 @@ fn reader_renders_exactly_one_message_document() {
 #[test]
 fn reader_status_bar_advertises_attachment_actions_only_with_attachments() {
     let mut with = reader_state(0);
-    with.size = (152, 40);
+    with.session.size = (152, 40);
     let message = match &mut with.open_message {
         Loadable::Loaded(message) => message,
         other => panic!("reader_state leaves the message loaded: {other:?}"),
@@ -808,12 +808,12 @@ fn reader_loading_state_renders_placeholder() {
 #[test]
 fn reader_scrolls_body_with_reducer_state() {
     let mut state = reader_state(0);
-    state.size = (152, 40);
+    state.session.size = (152, 40);
     // The body scrolls beneath the fixed header (ticket 6864): the clamp
     // tracks the body against the viewport under the header.
-    let width = state.size.0 as usize;
+    let width = state.session.size.0 as usize;
     let total = tmail::ui::screens::reader::scroll_line_count(&state, width);
-    let viewport = tmail::ui::layout::reader_rows_visible(state.size)
+    let viewport = tmail::ui::layout::reader_rows_visible(state.session.size)
         .saturating_sub(tmail::ui::screens::reader::header_line_count(&state, width));
     assert!(total > viewport, "document must overflow: {total} lines");
     // Scroll to the end the way the reducer does.
@@ -837,12 +837,12 @@ fn reader_idle_message_never_panics() {
     // A reader route whose data was cleared (defensive state): the summary
     // snapshot still carries subject/sender, the body is the idle note.
     let summary = state.messages.items[1].clone();
-    state.routes.push(Route::Message(MessageRoute {
+    state.session.routes.push(Route::Message(MessageRoute {
         mailbox_id: MailboxId(String::from("inbox")),
         summary,
     }));
     state.open_message = Loadable::Idle;
-    state.focus = Focus::Reader;
+    state.session.focus = Focus::Reader;
     let text = draw_after(&mut state, &[], 152, 40);
     assert!(
         text.contains("Re: gyuto for September"),
@@ -871,12 +871,12 @@ fn reader_handles_missing_fields() {
         html_body: None,
         attachments: Vec::new(),
     };
-    state.routes.push(Route::Message(MessageRoute {
+    state.session.routes.push(Route::Message(MessageRoute {
         mailbox_id: MailboxId(String::from("inbox")),
         summary,
     }));
     state.open_message = Loadable::Loaded(message);
-    state.focus = Focus::Reader;
+    state.session.focus = Focus::Reader;
     let text = draw_after(&mut state, &[], 152, 40);
     assert!(
         text.contains("(no subject)"),
@@ -954,7 +954,7 @@ fn composer_sidebar_marks_drafts_and_stays_focusable() {
     // Tab out of the composer (from its last control): the sidebar holds
     // focus — cursor bar on the cursor folder, Drafts still marked active,
     // and the composer caret gone.
-    state.composer.as_mut().unwrap().field = ComposerField::Discard;
+    state.session.composer.as_mut().unwrap().field = ComposerField::Discard;
     let buffer = buffer_after(&mut state, &[Action::FocusNext], 152, 40);
     let text = text_of(&buffer);
     let (inbox_y, _) = position_of(&text, "Inbox");
@@ -1030,8 +1030,8 @@ fn composer_flags_invalid_addresses_in_the_warning_color() {
     let mut theme = Theme::default_dark();
     theme.warning = ratatui::style::Color::Rgb(0xAB, 0x00, 0x01);
     let mut state = mock_initial_state();
-    state.themes = vec![(String::from("default"), theme)];
-    state.theme_index = 0;
+    state.settings.themes = vec![(String::from("default"), theme)];
+    state.settings.theme_index = 0;
     let mut actions = vec![Action::Compose];
     for c in "broken".chars() {
         actions.push(Action::ComposerEdit(ComposerEdit::Char(c)));
@@ -1058,7 +1058,7 @@ fn composer_flags_invalid_addresses_in_the_warning_color() {
 #[test]
 fn search_results_render_query_head_and_empty_note() {
     let mut state = mock_initial_state();
-    state.size = (152, 40);
+    state.session.size = (152, 40);
     let mut actions: Vec<Action> = vec![Action::OpenSearch];
     for c in "quote".chars() {
         actions.push(Action::SearchEdit(tmail::app::action::SearchEdit::Char(c)));
@@ -1315,7 +1315,7 @@ fn snapshot_too_small_just_below_the_compact_floor() {
 #[test]
 fn comfortable_view_mode_splits_rows_with_faint_separators() {
     let mut state = mock_initial_state();
-    state.view_mode = tmail::config::ViewMode::Comfortable;
+    state.settings.view_mode = tmail::config::ViewMode::Comfortable;
     let (buffer, hits) = draw_state_hits(&state, 152, 40);
     let theme = Theme::default_dark();
 
@@ -1496,7 +1496,7 @@ fn hit_map_records_composer_controls() {
 fn mouse_translation_end_to_end_uses_the_rendered_map() {
     use tmail::input::mouse;
     let mut state = mock_initial_state();
-    state.size = (152, 40);
+    state.session.size = (152, 40);
     let (_, hits) = draw_state_hits(&state, 152, 40);
     // A wheel event over the list scrolls the focused list (plan §10).
     let wheel = crossterm::event::MouseEvent {
@@ -1537,7 +1537,7 @@ fn mouse_translation_end_to_end_uses_the_rendered_map() {
 #[test]
 fn monochrome_theme_renders_the_same_content() {
     let mut state = mock_initial_state();
-    state.size = (152, 40);
+    state.session.size = (152, 40);
     let theme = Theme::monochrome();
     let now = mock::now();
     let ctx = RenderContext::new(now, dates::format_clock(now));
@@ -1937,7 +1937,9 @@ fn attachment_chooser_renders_the_explorer_and_chrome() {
     let mut state = mock_initial_state();
     reducer::reduce(&mut state, &Action::Compose);
     // Walk to the `+ attach` control and open the chooser.
-    while state.composer.as_ref().unwrap().field != tmail::app::composer::ComposerField::Attach {
+    while state.session.composer.as_ref().unwrap().field
+        != tmail::app::composer::ComposerField::Attach
+    {
         reducer::reduce(&mut state, &Action::FocusNext);
     }
     let mut effects = reducer::reduce(&mut state, &Action::Activate);
@@ -1977,7 +1979,8 @@ fn attachment_chooser_renders_the_explorer_and_chrome() {
     let mut state2 = mock_initial_state();
     let mut effects = {
         reducer::reduce(&mut state2, &Action::Compose);
-        while state2.composer.as_ref().unwrap().field != tmail::app::composer::ComposerField::Attach
+        while state2.session.composer.as_ref().unwrap().field
+            != tmail::app::composer::ComposerField::Attach
         {
             reducer::reduce(&mut state2, &Action::FocusNext);
         }
@@ -2092,7 +2095,7 @@ fn attachment_rows_end_in_the_paperclip_emoji() {
 #[test]
 fn select_all_marks_rows_and_the_header_stays_a_plain_label() {
     let mut state = mock_initial_state();
-    state.focus = tmail::app::Focus::MessageList;
+    state.session.focus = tmail::app::Focus::MessageList;
     let before = text_of(&buffer_after(&mut state, &[], 152, 40));
     // The header is a plain label now (ticket fypg): three columns of
     // padding, no checkbox, never focus-marked.
@@ -2106,7 +2109,7 @@ fn select_all_marks_rows_and_the_header_stays_a_plain_label() {
     // One draw after SelectAll: rows flip and the header does NOT change —
     // no checkbox exists to mark.
     let mut state = mock_initial_state();
-    state.focus = tmail::app::Focus::MessageList;
+    state.session.focus = tmail::app::Focus::MessageList;
     let buffer = buffer_after(&mut state, &[Action::SelectAll], 152, 40);
     let text = text_of(&buffer);
     assert_absent(&text, "[X]", (152, 40));
@@ -2137,7 +2140,7 @@ fn select_all_marks_rows_and_the_header_stays_a_plain_label() {
 #[test]
 fn selection_mode_status_bar_lists_the_bulk_buttons() {
     let mut state = mock_initial_state();
-    state.focus = tmail::app::Focus::MessageList;
+    state.session.focus = tmail::app::Focus::MessageList;
     let (buffer, hits) = draw_with_hits_at(&mut state, &[Action::SelectAll], 152, 40);
     let text = text_of(&buffer);
     assert!(text.contains("selected:"), "count label:\n{text}");
@@ -2184,7 +2187,7 @@ fn draw_with_hits_at(
     for action in actions {
         reducer::reduce(state, action);
     }
-    state.size = (width, height);
+    state.session.size = (width, height);
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend");
     let mut hits = HitMap::default();
@@ -2199,7 +2202,7 @@ fn selected_rows_show_the_checkbox_and_star_gets_a_trailing_space() {
     // Bulk-marked rows render the checkbox in the icon column (ticket
     // cvc4), whatever their star state; every icon is followed by a space.
     let mut state = mock_initial_state();
-    state.focus = tmail::app::Focus::MessageList;
+    state.session.focus = tmail::app::Focus::MessageList;
     let buffer = buffer_after(&mut state, &[Action::SelectAll], 152, 40);
     let text = text_of(&buffer);
     let cursor_row = text
@@ -2261,7 +2264,7 @@ fn reader_header_stays_fixed_and_the_scrollbar_tracks_the_body() {
     // Ticket 6864: the header never scrolls; a long body gets a vertical
     // scrollbar on the right edge of the body area.
     let mut state = reader_state(0);
-    state.size = (152, 40);
+    state.session.size = (152, 40);
     let before = text_of(&buffer_after(&mut state, &[], 152, 40));
     // Header pinned at the top of the reader area (row 4, under the
     // topbar), body beneath it.
@@ -2292,7 +2295,7 @@ fn reader_header_stays_fixed_and_the_scrollbar_tracks_the_body() {
 fn reader_without_overflow_draws_no_scrollbar() {
     // A short body fits the viewport: no scrollbar column.
     let mut state = reader_state(0);
-    state.size = (152, 40);
+    state.session.size = (152, 40);
     if let Loadable::Loaded(message) = &mut state.open_message {
         message.plain_body = Some(String::from("one short line\n"));
     }
@@ -2310,7 +2313,7 @@ fn status_message_sits_in_the_bottom_right_corner() {
     // Ticket en85: the status message replaces the encoding/size readout,
     // right-aligned in the status bar's content row.
     let mut state = mock_initial_state();
-    state.size = (152, 40);
+    state.session.size = (152, 40);
     state.set_status("Mailboxes loaded");
     let buffer = buffer_after(&mut state, &[], 152, 40);
     // The status bar content row is the one under its top hairline.
@@ -2335,7 +2338,7 @@ fn search_compose_and_sidebar_cursor_sit_on_plain_backgrounds() {
     // the sidebar cursor row shows the `selection` fill.
     let theme = Theme::default_dark();
     let mut state = mock_initial_state();
-    state.size = (152, 40);
+    state.session.size = (152, 40);
     let idle = buffer_after(&mut state, &[], 152, 40);
     // Search field interior (x=24..84, y=0..3), past the placeholder text.
     assert_eq!(idle[(70, 1)].bg, theme.background, "search well (idle)");
@@ -2344,7 +2347,7 @@ fn search_compose_and_sidebar_cursor_sit_on_plain_backgrounds() {
 
     // The focused search field keeps the page background; the accent
     // border marks focus.
-    state.focus = tmail::app::focus::Focus::SearchField;
+    state.session.focus = tmail::app::focus::Focus::SearchField;
     let focused = buffer_after(&mut state, &[], 152, 40);
     assert_eq!(
         focused[(70, 1)].bg,
@@ -2355,7 +2358,7 @@ fn search_compose_and_sidebar_cursor_sit_on_plain_backgrounds() {
 
     // Sidebar cursor row: the selection fill under the second folder;
     // other rows stay on the page background (folder 0 is the active one).
-    state.focus = tmail::app::focus::Focus::Sidebar;
+    state.session.focus = tmail::app::focus::Focus::Sidebar;
     state.mailbox_selection = 1;
     let sidebar = buffer_after(&mut state, &[], 152, 40);
     assert_eq!(sidebar[(5, 10)].bg, theme.selection, "sidebar cursor row");
@@ -2370,7 +2373,7 @@ fn search_compose_and_sidebar_cursor_sit_on_plain_backgrounds() {
 #[test]
 fn range_label_aligns_with_the_date_column() {
     let mut state = mock_initial_state();
-    state.size = (152, 40);
+    state.session.size = (152, 40);
 
     // Compact, 20 items in a 31-row list: no scrollbar. The date text
     // ("10:42", 5 chars in an 8-wide cell) ends 3 columns in; so must the
@@ -2387,7 +2390,7 @@ fn range_label_aligns_with_the_date_column() {
 
     // Comfortable density: the list scrolls (20 items > 15 visible), the
     // scrollbar shaves one column off the rows, and the label follows.
-    state.view_mode = tmail::config::ViewMode::Comfortable;
+    state.settings.view_mode = tmail::config::ViewMode::Comfortable;
     let buffer = buffer_after(&mut state, &[], 152, 40);
     let header_edge = last_text_col(&buffer, 4);
     assert_eq!(
@@ -2430,8 +2433,8 @@ fn status_message_fades_over_the_closing_timeout_window() {
     // accent color until the last 0.3 s, then fades into the background.
     let theme = Theme::default_dark();
     let mut state = mock_initial_state();
-    state.size = (152, 40);
-    state.status_timeout_seconds = 5;
+    state.session.size = (152, 40);
+    state.settings.status_timeout_seconds = 5;
     reducer::reduce(
         &mut state,
         &Action::Tick {
@@ -2537,7 +2540,7 @@ fn sidebar_splits_folders_and_labels_with_a_blank_row() {
         mailbox("пароли", "пароли", None, None),
     ];
     let mut state = mock_initial_state();
-    state.size = (152, 40);
+    state.session.size = (152, 40);
     state.mailboxes = Loadable::Loaded(mailboxes);
     let (buffer, hits) = draw_state_hits(&state, 152, 40);
     // Folder rows start at y=9; six folders end at y=14, the blank row is
@@ -2594,20 +2597,22 @@ fn message_list_shows_a_scrollbar_only_when_rows_overflow() {
 
 // ── Account configuration wizard (ADR 0003 W5) ───────────────────────────
 
-use tmail::app::wizard::{StorageMode, WizardAction, WizardState};
+use tmail::app::wizard::{ConfigSnapshot, StorageMode, WizardAction, WizardState};
 use tmail::discovery::{ConfigSource, DiscoveredService, Provider, Security, ServerEndpoint};
 
 /// A fresh wizard state over the mock shell, with a resolved save path.
 fn wizard_state() -> tmail::app::AppState {
     let mut state = mock_initial_state();
-    state.wizard = Some(WizardState::new(
+    state.session.wizard = Some(WizardState::new(
         false,
-        Some(std::path::PathBuf::from("/tmp/himalaya/config.toml")),
-        Vec::new(),
-        None,
-        false,
+        ConfigSnapshot {
+            save_path: Some(std::path::PathBuf::from("/tmp/himalaya/config.toml")),
+            existing_names: Vec::new(),
+            existing_default_name: None,
+            existing_shared_readable: false,
+        },
     ));
-    state.focus = tmail::app::Focus::Wizard;
+    state.session.focus = tmail::app::Focus::Wizard;
     state
 }
 
@@ -2669,8 +2674,8 @@ fn wizard_email_screen_shows_validation_error_in_place() {
 #[test]
 fn wizard_discovery_screen_lists_ranked_services_with_source_labels() {
     let mut state = wizard_state();
-    if let Some(wizard) = state.wizard.as_mut() {
-        wizard.email.value = String::from("u@gmail.com");
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.email.address.value = String::from("u@gmail.com");
     }
     let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
     let id = submit[0].id;
@@ -2699,8 +2704,8 @@ fn wizard_discovery_screen_lists_ranked_services_with_source_labels() {
 #[test]
 fn wizard_discovery_screen_shows_the_detecting_spinner() {
     let mut state = wizard_state();
-    if let Some(wizard) = state.wizard.as_mut() {
-        wizard.email.value = String::from("u@gmail.com");
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.email.address.value = String::from("u@gmail.com");
     }
     let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
     assert!(!submit.is_empty(), "the discovery effect starts");
@@ -2717,8 +2722,8 @@ fn wizard_discovery_screen_shows_the_detecting_spinner() {
 #[test]
 fn wizard_empty_discovery_opens_the_manual_override_form() {
     let mut state = wizard_state();
-    if let Some(wizard) = state.wizard.as_mut() {
-        wizard.email.value = String::from("u@custom.example");
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.email.address.value = String::from("u@custom.example");
     }
     let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
     let id = submit[0].id;
@@ -2743,8 +2748,8 @@ fn wizard_empty_discovery_opens_the_manual_override_form() {
 #[test]
 fn wizard_identity_screen_recaps_the_chosen_servers() {
     let mut state = wizard_state();
-    if let Some(wizard) = state.wizard.as_mut() {
-        wizard.email.value = String::from("u@gmail.com");
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.email.address.value = String::from("u@gmail.com");
     }
     let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
     let id = submit[0].id;
@@ -2768,11 +2773,11 @@ fn wizard_identity_screen_recaps_the_chosen_servers() {
 #[test]
 fn wizard_credentials_screen_masks_the_password_and_shows_the_gmail_hint() {
     let mut state = wizard_state();
-    if let Some(wizard) = state.wizard.as_mut() {
-        wizard.email.value = String::from("u@gmail.com");
-        wizard.password.value = String::from("app-password");
-        wizard.password.cursor = 11;
-        wizard.credentials_index = 2;
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.email.address.value = String::from("u@gmail.com");
+        wizard.credentials.password.value = String::from("app-password");
+        wizard.credentials.password.cursor = 11;
+        wizard.credentials.credentials_index = 2;
     }
     let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
     let id = submit[0].id;
@@ -2801,10 +2806,10 @@ fn wizard_credentials_screen_masks_the_password_and_shows_the_gmail_hint() {
 #[test]
 fn wizard_credentials_command_mode_shows_the_command_field() {
     let mut state = wizard_state();
-    if let Some(wizard) = state.wizard.as_mut() {
-        wizard.email.value = String::from("u@gmail.com");
-        wizard.storage_mode = StorageMode::Command;
-        wizard.command.value = String::from("pass show mail/gmail");
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.email.address.value = String::from("u@gmail.com");
+        wizard.credentials.storage_mode = StorageMode::Command;
+        wizard.credentials.command.value = String::from("pass show mail/gmail");
     }
     let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
     let id = submit[0].id;
@@ -2834,10 +2839,10 @@ fn drive_to_testing(
     state: &mut tmail::app::AppState,
     mailboxes: Vec<String>,
 ) -> tmail::app::OperationId {
-    if let Some(wizard) = state.wizard.as_mut() {
-        wizard.email.value = String::from("u@gmail.com");
-        wizard.password.value = String::from("p");
-        wizard.credentials_index = 2;
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.email.address.value = String::from("u@gmail.com");
+        wizard.credentials.password.value = String::from("p");
+        wizard.credentials.credentials_index = 2;
     }
     let submit = reducer::reduce(state, &Action::Wizard(WizardAction::SubmitEmail));
     let discovery_id = submit[0].id;
@@ -2895,10 +2900,10 @@ fn wizard_confirm_screen_shows_aliases_path_and_storage() {
 #[test]
 fn wizard_saved_screen_reports_the_path_and_permissions() {
     let mut state = wizard_state();
-    if let Some(wizard) = state.wizard.as_mut() {
-        wizard.email.value = String::from("u@gmail.com");
-        wizard.password.value = String::from("p");
-        wizard.credentials_index = 2;
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.email.address.value = String::from("u@gmail.com");
+        wizard.credentials.password.value = String::from("p");
+        wizard.credentials.credentials_index = 2;
     }
     let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
     let discovery_id = submit[0].id;
@@ -2946,8 +2951,8 @@ fn wizard_saved_screen_reports_the_path_and_permissions() {
 #[test]
 fn wizard_confirm_screen_warns_when_the_config_is_shared_readable() {
     let mut state = wizard_state();
-    if let Some(wizard) = state.wizard.as_mut() {
-        wizard.existing_shared_readable = true;
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.config.existing_shared_readable = true;
     }
     drive_to_testing(&mut state, vec![String::from("INBOX")]);
     let text = text_of(&buffer_after(&mut state, &[], 100, 30));
@@ -2984,9 +2989,9 @@ fn wizard_focused_fields_show_the_inline_caret() {
 
     // With typed text the caret rides after the last character.
     let mut state = wizard_state();
-    if let Some(wizard) = state.wizard.as_mut() {
-        wizard.email.value = String::from("u@example.com");
-        wizard.email.cursor = 13;
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.email.address.value = String::from("u@example.com");
+        wizard.email.address.cursor = 13;
     }
     let buffer = buffer_after(&mut state, &[], 80, 24);
     assert_eq!(
@@ -2997,8 +3002,8 @@ fn wizard_focused_fields_show_the_inline_caret() {
 
     // W3 identity: the Name box is focused.
     let mut state = wizard_state();
-    if let Some(wizard) = state.wizard.as_mut() {
-        wizard.email.value = String::from("u@example.com");
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.email.address.value = String::from("u@example.com");
     }
     let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
     let id = submit[0].id;
@@ -3015,8 +3020,8 @@ fn wizard_focused_fields_show_the_inline_caret() {
 
     // W4 credentials: the username row is focused first.
     let mut state = wizard_state();
-    if let Some(wizard) = state.wizard.as_mut() {
-        wizard.email.value = String::from("u@example.com");
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.email.address.value = String::from("u@example.com");
     }
     let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
     let id = submit[0].id;
@@ -3035,9 +3040,9 @@ fn wizard_focused_fields_show_the_inline_caret() {
     // A mid-string cursor replaces the character cell (still exactly
     // one caret cell).
     let mut state = wizard_state();
-    if let Some(wizard) = state.wizard.as_mut() {
-        wizard.email.value = String::from("u@example.com");
-        wizard.email.cursor = 1;
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.email.address.value = String::from("u@example.com");
+        wizard.email.address.cursor = 1;
     }
     let buffer = buffer_after(&mut state, &[], 80, 24);
     assert_eq!(count_accent_bg(&buffer, theme.accent), 1);

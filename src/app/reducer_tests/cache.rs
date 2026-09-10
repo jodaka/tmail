@@ -24,7 +24,7 @@ fn cached_page_serves_instantly_and_the_fresh_load_still_runs() {
         total: None,
     };
     cache.store(&MailboxId(String::from("sent")), None, &cached);
-    s.page_cache = Some(cache);
+    s.caches.page_cache = Some(cache);
 
     // Switch to Sent: the cached rows render immediately…
     reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1)));
@@ -43,7 +43,11 @@ fn cached_page_serves_instantly_and_the_fresh_load_still_runs() {
             offset: 0,
             limit: 20,
         };
-        let id = s.operations.start(OperationKind::LoadPage(req.clone())).id;
+        let id = s
+            .session
+            .operations
+            .start(OperationKind::LoadPage(req.clone()))
+            .id;
         reduce(
             &mut s,
             &Action::BackendCompleted(OperationResult {
@@ -76,18 +80,19 @@ fn cached_page_serves_instantly_and_the_fresh_load_still_runs() {
         "the remaining rows fetch after the cached row's request: {effects:?}"
     );
     assert_eq!(
-        s.preview_requested.len(),
+        s.caches.preview_requested.len(),
         expected.items.len(),
         "one preview request per row overall"
     );
     for (locator, summary) in previews.iter().zip(expected.items.iter().skip(1)) {
         assert_eq!(&locator.id, &summary.id);
         assert_eq!(&locator.mailbox, &summary.mailbox_id);
-        assert!(s.preview_requested.contains(&summary.id), "deduped");
+        assert!(s.caches.preview_requested.contains(&summary.id), "deduped");
     }
     assert_eq!(s.messages.items.len(), expected.items.len());
     // The successful load overwrote the cache entry.
     let cached = s
+        .caches
         .page_cache
         .as_ref()
         .unwrap()
@@ -108,7 +113,7 @@ fn cold_start_serves_cached_mailboxes_and_first_page_instantly() {
     cache.store_mailboxes(crate::app::mock::mock_mailboxes().as_slice());
     let page = crate::app::mock::mock_page(&inbox_id(), 0, crate::app::mock::PAGE_SIZE);
     cache.store(&inbox_id(), None, &page);
-    s.page_cache = Some(cache);
+    s.caches.page_cache = Some(cache);
 
     // Cold start: mailboxes are not loaded yet.
     s.mailboxes = crate::app::state::Loadable::Loading;
@@ -145,12 +150,13 @@ fn opening_a_message_serves_the_cached_copy_instantly() {
         dir.path().to_path_buf(),
         crate::app::page_cache::CacheLimits::default(),
     );
-    s.page_cache = Some(cache);
+    s.caches.page_cache = Some(cache);
     s.selection = 0;
     let summary = s.selected_message().unwrap().clone();
     // A previously viewed copy of this exact message.
     let seen = crate::app::mock::mock_message(&summary);
-    s.page_cache
+    s.caches
+        .page_cache
         .as_ref()
         .unwrap()
         .store_message(&summary.mailbox_id, &summary.id.0, &seen);
@@ -173,7 +179,7 @@ fn opening_a_message_serves_the_cached_copy_instantly() {
 fn preview_result_fills_the_list_snippet_and_caches_the_message() {
     let mut s = state();
     let dir = tempfile::TempDir::new().expect("tempdir");
-    s.page_cache = Some(crate::app::page_cache::PageCache::open(
+    s.caches.page_cache = Some(crate::app::page_cache::PageCache::open(
         dir.path().to_path_buf(),
         crate::app::page_cache::CacheLimits::default(),
     ));
@@ -182,11 +188,11 @@ fn preview_result_fills_the_list_snippet_and_caches_the_message() {
     assert_eq!(previews.len(), 4, "one preview per Sent row");
 
     let (id, locator) = previews[0].clone();
-    let op = s.operations.get(id).expect("preview in flight");
+    let op = s.session.operations.get(id).expect("preview in flight");
     // Preview fetches are silent background work: they never take the
     // `Esc`-cancel / spinner slot.
     assert_eq!(op.origin, OperationOrigin::Background);
-    assert_ne!(s.operations.foreground().map(|o| o.id), Some(id));
+    assert_ne!(s.session.operations.foreground().map(|o| o.id), Some(id));
 
     let summary = s
         .messages
@@ -207,7 +213,8 @@ fn preview_result_fills_the_list_snippet_and_caches_the_message() {
     assert!(snippet.starts_with("body line 01"), "{snippet}");
     // …and the full message is cached for an instant open.
     assert!(
-        s.page_cache
+        s.caches
+            .page_cache
             .as_ref()
             .unwrap()
             .load_message(&locator.mailbox, &locator.id.0)
@@ -267,7 +274,11 @@ fn preview_fetch_reconciles_the_row_attachment_flag() {
         offset: 0,
         limit: 20,
     };
-    let id = s.operations.start(OperationKind::LoadPage(req.clone())).id;
+    let id = s
+        .session
+        .operations
+        .start(OperationKind::LoadPage(req.clone()))
+        .id;
     complete_page_ok(&mut s, id, &req, 0);
     let row = s
         .messages
@@ -284,7 +295,7 @@ fn preview_fetch_reconciles_the_row_attachment_flag() {
 fn cached_copies_reconcile_the_row_attachment_flag_without_a_fetch() {
     let mut s = state();
     let dir = tempfile::TempDir::new().expect("tempdir");
-    s.page_cache = Some(crate::app::page_cache::PageCache::open(
+    s.caches.page_cache = Some(crate::app::page_cache::PageCache::open(
         dir.path().to_path_buf(),
         crate::app::page_cache::CacheLimits::default(),
     ));
@@ -297,7 +308,8 @@ fn cached_copies_reconcile_the_row_attachment_flag_without_a_fetch() {
         size: None,
         part_id: 2,
     }];
-    s.page_cache
+    s.caches
+        .page_cache
         .as_ref()
         .unwrap()
         .store_message(&first.mailbox_id, &first.id.0, &message);
@@ -363,8 +375,8 @@ fn preview_failure_is_silent_and_never_retried() {
     );
     // Decorative work: no Retry/Dismiss modal, no status noise, and the
     // row keeps no snippet.
-    assert!(s.overlay.is_none());
-    assert!(s.status.message.is_none());
+    assert!(s.session.overlay.is_none());
+    assert!(s.session.status.message.is_none());
     let row = s
         .messages
         .items
@@ -378,7 +390,11 @@ fn preview_failure_is_silent_and_never_retried() {
         offset: 0,
         limit: 20,
     };
-    let id = s.operations.start(OperationKind::LoadPage(req.clone())).id;
+    let id = s
+        .session
+        .operations
+        .start(OperationKind::LoadPage(req.clone()))
+        .id;
     let effects = complete_page_ok(&mut s, id, &req, 0);
     assert!(
         expect_previews(&effects)
@@ -401,11 +417,11 @@ fn esc_never_cancels_in_flight_previews() {
     // Esc closes the reader — the previews are not foreground work for it
     // to absorb.
     reduce(&mut s, &Action::BackOrCancel);
-    assert_eq!(s.routes.len(), 1, "reader closed");
+    assert_eq!(s.session.routes.len(), 1, "reader closed");
     assert!(
         previews
             .iter()
-            .all(|(id, _)| s.operations.get(*id).is_some()),
+            .all(|(id, _)| s.session.operations.get(*id).is_some()),
         "every preview is still in flight"
     );
 }
@@ -444,7 +460,7 @@ fn preview_fetches_roll_within_the_window() {
         offset: 0,
         limit: 20,
     };
-    let id = s.operations.start(OperationKind::LoadPage(req)).id;
+    let id = s.session.operations.start(OperationKind::LoadPage(req)).id;
     let effects = reduce(
         &mut s,
         &Action::BackendCompleted(OperationResult {
@@ -466,5 +482,9 @@ fn preview_fetches_roll_within_the_window() {
     let effects = complete_preview_ok(&mut s, first, &summary);
     let refill = expect_previews(&effects);
     assert_eq!(refill.len(), 1, "the next queued row starts");
-    assert_eq!(s.preview_requested.len(), 7, "queued rows are tracked");
+    assert_eq!(
+        s.caches.preview_requested.len(),
+        7,
+        "queued rows are tracked"
+    );
 }

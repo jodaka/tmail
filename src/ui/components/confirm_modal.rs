@@ -29,10 +29,10 @@ pub fn render(
     theme: &Theme,
     hits: &mut HitMap,
 ) {
-    let Some(Overlay::ConfirmDiscard(dialog)) = &state.overlay else {
+    let Some(Overlay::ConfirmDiscard(dialog)) = &state.session.overlay else {
         return;
     };
-    let area = layout(state.size);
+    let area = layout(state.session.size);
     if area.width < 6 || area.height < 4 {
         return;
     }

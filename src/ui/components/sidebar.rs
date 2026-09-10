@@ -86,7 +86,7 @@ pub fn render(
                     break;
                 }
                 let is_active = Some(&mailbox.id) == active_id;
-                let cursor = state.focus == Focus::Sidebar && i == state.mailbox_selection;
+                let cursor = state.session.focus == Focus::Sidebar && i == state.mailbox_selection;
                 let row_area = Rect {
                     x: area.x,
                     y,
@@ -107,7 +107,7 @@ pub fn render(
         // m3by). `Idle` cannot occur for the sidebar slot, but the
         // fallback keeps the exhaustive match honest.
         crate::app::state::Loadable::Loading | crate::app::state::Loadable::Idle => {
-            super::spinner::render_centered(frame, rows.folders, theme, state.ticks);
+            super::spinner::render_centered(frame, rows.folders, theme, state.session.ticks);
         }
         crate::app::state::Loadable::Failed(_) => {
             chrome::render_note(frame, rows.folders, theme, "mailboxes unavailable")

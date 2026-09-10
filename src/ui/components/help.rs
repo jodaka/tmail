@@ -26,13 +26,13 @@ fn layout(size: (u16, u16), rows: usize) -> Rect {
 
 /// Render the popup, when open, above everything already drawn.
 pub fn render(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
-    let Some(crate::app::overlay::Overlay::Help(dialog)) = &state.overlay else {
+    let Some(crate::app::overlay::Overlay::Help(dialog)) = &state.session.overlay else {
         return;
     };
     // The screen underneath decides what is relevant, not the popup's own
     // focus slot.
-    let entries = state.keymap.help_entries(dialog.previous_focus);
-    let area = layout(state.size, entries.len());
+    let entries = state.settings.keymap.help_entries(dialog.previous_focus);
+    let area = layout(state.session.size, entries.len());
     let Some(inner) =
         chrome::modal_frame(frame, area, &Span::raw(" Shortcuts "), theme.accent, theme)
     else {

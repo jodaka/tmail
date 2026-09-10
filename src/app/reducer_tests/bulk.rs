@@ -7,7 +7,7 @@ use super::*;
 #[test]
 fn space_toggles_the_selection_mark_on_the_focused_row() {
     let mut s = state();
-    s.focus = Focus::MessageList;
+    s.session.focus = Focus::MessageList;
     s.selection = 2;
     let id = s.selected_message().unwrap().id.clone();
 
@@ -27,9 +27,9 @@ fn space_does_nothing_outside_the_list_focus() {
     let mut s = state();
     let id = s.messages.items[0].id.clone();
     s.selected.insert(id.clone());
-    s.focus = Focus::Sidebar;
+    s.session.focus = Focus::Sidebar;
     no_effects(&reduce(&mut s, &Action::ToggleSelected));
-    s.focus = Focus::Reader;
+    s.session.focus = Focus::Reader;
     no_effects(&reduce(&mut s, &Action::ToggleSelected));
     assert!(s.selected.contains(&id), "marks never change off-list");
 }
@@ -37,7 +37,7 @@ fn space_does_nothing_outside_the_list_focus() {
 #[test]
 fn select_all_marks_every_visible_row_and_toggles_back() {
     let mut s = state();
-    s.focus = Focus::MessageList;
+    s.session.focus = Focus::MessageList;
     no_effects(&reduce(&mut s, &Action::SelectAll));
     assert_eq!(
         s.visible_selected_count(),
@@ -53,7 +53,7 @@ fn select_all_marks_every_visible_row_and_toggles_back() {
 #[test]
 fn selection_survives_paging_but_not_mailbox_switch() {
     let mut s = state();
-    s.focus = Focus::MessageList;
+    s.session.focus = Focus::MessageList;
     no_effects(&reduce(&mut s, &Action::SelectAll));
     let marked: Vec<_> = s.selected.iter().cloned().collect();
 
@@ -79,7 +79,7 @@ fn selection_survives_paging_but_not_mailbox_switch() {
 #[test]
 fn bulk_archive_starts_one_operation_per_selected_message() {
     let mut s = state();
-    s.focus = Focus::MessageList;
+    s.session.focus = Focus::MessageList;
     s.selection = 0;
     no_effects(&reduce(&mut s, &Action::ToggleSelected));
     reduce(&mut s, &Action::MoveDown);
@@ -93,19 +93,20 @@ fn bulk_archive_starts_one_operation_per_selected_message() {
         assert!(matches!(effect.kind, OperationKind::Archive(_)));
     }
     assert!(
-        s.status
+        s.session
+            .status
             .message
             .as_deref()
             .is_some_and(|m| m.contains("2 messages")),
         "status announces the batch: {:?}",
-        s.status.message
+        s.session.status.message
     );
 }
 
 #[test]
 fn bulk_trash_read_and_unread_follow_the_same_pattern() {
     let mut s = state();
-    s.focus = Focus::MessageList;
+    s.session.focus = Focus::MessageList;
     no_effects(&reduce(&mut s, &Action::SelectAll));
     let count = s.messages.items.len();
 
@@ -137,7 +138,7 @@ fn bulk_trash_read_and_unread_follow_the_same_pattern() {
 #[test]
 fn mark_read_single_row_when_no_selection() {
     let mut s = state();
-    s.focus = Focus::MessageList;
+    s.session.focus = Focus::MessageList;
     s.selection = 1;
     let target = s.selected_message().unwrap().id.clone();
     let (id, kind) = expect_kind(&reduce(&mut s, &Action::MarkRead));
@@ -153,12 +154,12 @@ fn mark_read_single_row_when_no_selection() {
 #[test]
 fn reader_shortcuts_do_not_act_on_the_selection() {
     let mut s = state();
-    s.focus = Focus::MessageList;
+    s.session.focus = Focus::MessageList;
     no_effects(&reduce(&mut s, &Action::SelectAll));
     // Open the first message; the reader takes focus.
     let (load_id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
     complete_message_ok(&mut s, load_id);
-    assert_eq!(s.focus, Focus::Reader);
+    assert_eq!(s.session.focus, Focus::Reader);
 
     // Selection still on, but `e` in the reader archives the open message,
     // not the batch.
@@ -175,7 +176,7 @@ fn reader_shortcuts_do_not_act_on_the_selection() {
 #[test]
 fn moved_messages_leave_the_selection() {
     let mut s = state();
-    s.focus = Focus::MessageList;
+    s.session.focus = Focus::MessageList;
     s.selection = 0;
     no_effects(&reduce(&mut s, &Action::ToggleSelected));
     reduce(&mut s, &Action::MoveDown);
@@ -201,12 +202,15 @@ fn moved_messages_leave_the_selection() {
 #[test]
 fn esc_clears_the_selection_when_nothing_is_pending() {
     let mut s = state();
-    s.focus = Focus::MessageList;
+    s.session.focus = Focus::MessageList;
     no_effects(&reduce(&mut s, &Action::SelectAll));
     assert!(s.selection_active());
     reduce(&mut s, &Action::BackOrCancel);
     assert!(s.selected.is_empty(), "Esc releases the selection first");
-    assert!(!s.quit_requested, "Esc does not quit while clearing");
+    assert!(
+        !s.session.quit_requested,
+        "Esc does not quit while clearing"
+    );
 }
 
 #[test]
@@ -227,5 +231,5 @@ fn bulk_button_click_dispatches_the_advertised_action() {
     );
     // The click focused the list, so bulk semantics (not reader semantics)
     // applied.
-    assert_eq!(s.focus, Focus::MessageList);
+    assert_eq!(s.session.focus, Focus::MessageList);
 }

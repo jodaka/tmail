@@ -167,7 +167,7 @@ pub fn coalesce(batch: Vec<Event>, hits: &mouse::HitMap, state: &AppState) -> Ve
         let action = match event {
             Event::Key(key) => {
                 key_seen = true;
-                keyboard::to_action(&state.keymap, key, state.focus)
+                keyboard::to_action(&state.settings.keymap, key, state.session.focus)
             }
             Event::Mouse(mouse_event) => {
                 if key_seen
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn clicks_survive_a_key_and_open_a_run_of_their_own() {
         let mut state = mock_initial_state();
-        state.focus = crate::app::focus::Focus::MessageList;
+        state.session.focus = crate::app::focus::Focus::MessageList;
         let mut hits = mouse::HitMap::default();
         hits.push(Rect::new(0, 5, 40, 1), ClickTarget::MessageRow(3));
         let events = vec![key(KeyCode::Esc), click()];

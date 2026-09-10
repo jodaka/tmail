@@ -334,7 +334,7 @@ pub fn mock_page(mailbox_id: &MailboxId, offset: usize, limit: usize) -> Page<Me
 pub fn mock_initial_state() -> crate::app::state::AppState {
     let mut state = AppState::initial(PAGE_SIZE);
     state.mailboxes = Loadable::Loaded(mock_mailboxes());
-    state.routes = vec![Route::Mailbox(MailboxRoute {
+    state.session.routes = vec![Route::Mailbox(MailboxRoute {
         mailbox_id: MailboxId(String::from("inbox")),
     })];
     state.mailbox_selection = 0;

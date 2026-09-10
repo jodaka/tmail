@@ -40,7 +40,7 @@ pub fn render(
     theme: &Theme,
     hits: &mut HitMap,
 ) {
-    let Some(Overlay::Error(dialog)) = &state.overlay else {
+    let Some(Overlay::Error(dialog)) = &state.session.overlay else {
         return;
     };
     let area = frame.area();

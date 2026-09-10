@@ -33,10 +33,13 @@ fn enter_on_the_open_draft_in_drafts_reuses_it_without_a_fetch() {
     // round-trip, content and remote identity intact.
     no_effects(&reduce(&mut s, &Action::Activate));
     assert!(matches!(s.active_route(), Some(Route::Composer)));
-    let draft = &s.composer.as_ref().unwrap().draft;
+    let draft = &s.session.composer.as_ref().unwrap().draft;
     assert_eq!(draft.to, "d");
     assert_eq!(draft.remote_id, Some(MessageId(String::from("copy-1"))));
-    assert!(!s.operations.has_foreground(), "no fetch was started");
+    assert!(
+        !s.session.operations.has_foreground(),
+        "no fetch was started"
+    );
 }
 
 #[test]
@@ -63,7 +66,7 @@ fn enter_on_a_remote_draft_fetches_and_opens_the_composer() {
     );
     // The composer opened over the list with the copy's fields…
     assert!(matches!(s.active_route(), Some(Route::Composer)));
-    let draft = &s.composer.as_ref().unwrap().draft;
+    let draft = &s.session.composer.as_ref().unwrap().draft;
     assert_eq!(draft.to, "dest@example.com");
     assert_eq!(draft.cc, "cc@example.com");
     assert_eq!(draft.bcc, "bcc@example.com");
@@ -95,7 +98,7 @@ fn esc_cancels_a_draft_fetch_and_the_list_stays() {
     s.selection = 0;
     let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
     reduce(&mut s, &Action::BackOrCancel);
-    assert!(s.composer.is_none());
+    assert!(s.session.composer.is_none());
     assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
     // The cancelled fetch's result can never mutate state (plan §11).
     reduce(
@@ -108,7 +111,10 @@ fn esc_cancels_a_draft_fetch_and_the_list_stays() {
             )))),
         }),
     );
-    assert!(s.composer.is_none(), "cancelled results are dropped");
+    assert!(
+        s.session.composer.is_none(),
+        "cancelled results are dropped"
+    );
 }
 
 #[test]
@@ -143,9 +149,9 @@ fn enter_on_a_draft_row_secures_the_parked_draft_and_swaps() {
         }),
     );
     assert!(matches!(s.active_route(), Some(Route::Composer)));
-    let draft = &s.composer.as_ref().unwrap().draft;
+    let draft = &s.session.composer.as_ref().unwrap().draft;
     assert_eq!(draft.subject, "Hello", "the fetched draft is editing");
-    assert_eq!(s.status.message.as_deref(), Some("Draft opened"));
+    assert_eq!(s.session.status.message.as_deref(), Some("Draft opened"));
 }
 
 #[test]
@@ -161,7 +167,7 @@ fn enter_on_a_draft_row_force_saves_an_unsaved_parked_draft() {
         ..crate::domain::Draft::default()
     };
     parked.note_edit(Some(mock::now()));
-    s.composer = Some(crate::app::composer::ComposerState::from_draft(parked));
+    s.session.composer = Some(crate::app::composer::ComposerState::from_draft(parked));
     s.messages.items = vec![draft_row("copy-9", Some("other@tmail.local"))];
     s.selection = 0;
     let effects = reduce(&mut s, &Action::Activate);
@@ -192,7 +198,7 @@ fn enter_on_a_draft_row_force_saves_an_unsaved_parked_draft() {
         }),
     );
     assert!(matches!(s.active_route(), Some(Route::Composer)));
-    assert_eq!(s.composer.as_ref().unwrap().draft.subject, "Hello");
+    assert_eq!(s.session.composer.as_ref().unwrap().draft.subject, "Hello");
 }
 
 #[test]
@@ -221,7 +227,7 @@ fn rapid_draft_opens_supersede_and_the_last_row_wins() {
             )))),
         }),
     );
-    assert!(s.composer.is_none(), "superseded result dropped");
+    assert!(s.session.composer.is_none(), "superseded result dropped");
     reduce(
         &mut s,
         &Action::BackendCompleted(OperationResult {
@@ -234,7 +240,13 @@ fn rapid_draft_opens_supersede_and_the_last_row_wins() {
     );
     assert!(matches!(s.active_route(), Some(Route::Composer)));
     assert_eq!(
-        s.composer.as_ref().unwrap().draft.message_id.as_deref(),
+        s.session
+            .composer
+            .as_ref()
+            .unwrap()
+            .draft
+            .message_id
+            .as_deref(),
         Some("<b@tmail.local>")
     );
 }
@@ -263,7 +275,7 @@ fn draft_fetch_is_dropped_when_the_selection_moved() {
             )))),
         }),
     );
-    assert!(s.composer.is_none(), "stale fetch dropped");
+    assert!(s.session.composer.is_none(), "stale fetch dropped");
     assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
 }
 
@@ -275,7 +287,7 @@ fn enter_on_a_draft_row_replaces_a_blank_c_draft() {
     compose(&mut s);
     // Esc with no edits: the preserved draft is pristine blank.
     reduce(&mut s, &Action::BackOrCancel);
-    assert!(s.composer.as_ref().unwrap().draft.is_blank());
+    assert!(s.session.composer.as_ref().unwrap().draft.is_blank());
     switch_to(&mut s, "drafts");
     s.messages.items = vec![draft_row("copy-9", Some("other@tmail.local"))];
     s.selection = 0;
@@ -296,7 +308,7 @@ fn enter_on_a_draft_row_replaces_a_blank_c_draft() {
         }),
     );
     assert!(matches!(s.active_route(), Some(Route::Composer)));
-    let draft = &s.composer.as_ref().unwrap().draft;
+    let draft = &s.session.composer.as_ref().unwrap().draft;
     assert_eq!(draft.subject, "Hello", "the fetched draft is editing");
     assert_eq!(draft.body, "draft body");
 }
@@ -319,7 +331,10 @@ fn draft_fetch_result_is_dropped_after_a_mailbox_switch() {
             )))),
         }),
     );
-    assert!(s.composer.is_none(), "the stale fetch must not compose");
+    assert!(
+        s.session.composer.is_none(),
+        "the stale fetch must not compose"
+    );
     assert_eq!(
         s.active_route().and_then(Route::mailbox_id).unwrap().0,
         "sent"
@@ -348,7 +363,7 @@ fn draft_fetch_result_never_clobbers_a_newer_draft() {
             )))),
         }),
     );
-    let draft = &s.composer.as_ref().unwrap().draft;
+    let draft = &s.session.composer.as_ref().unwrap().draft;
     assert_eq!(draft.to, "n", "the fetch must not clobber the newer draft");
     assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
 }
@@ -362,10 +377,13 @@ fn reply_seeds_a_composer_on_top_of_the_reader() {
     no_effects(&reduce(&mut s, &Action::Reply));
     // Route stack: composer above the still-open reader; Esc from the
     // composer returns to reading.
-    assert_eq!(s.routes.len(), 3);
+    assert_eq!(s.session.routes.len(), 3);
     assert!(matches!(s.active_route(), Some(Route::Composer)));
-    assert_eq!(s.focus, Focus::Composer);
-    assert_eq!(s.status.message.as_deref(), Some("Reply draft ready"));
+    assert_eq!(s.session.focus, Focus::Composer);
+    assert_eq!(
+        s.session.status.message.as_deref(),
+        Some("Reply draft ready")
+    );
     let composer = seeded_composer(&s);
     assert_eq!(composer.draft.to, "Bob <bob@example.org>");
     assert_eq!(composer.draft.subject, "Re: Plan review");
@@ -418,7 +436,7 @@ fn reply_needs_a_target() {
     s.open_message = Loadable::Idle;
     no_effects(&reduce(&mut s, &Action::Reply));
     no_effects(&reduce(&mut s, &Action::Forward));
-    assert!(s.composer.is_none());
+    assert!(s.session.composer.is_none());
     // Reader open but the message still loading: the seed fetch starts
     // from the reader's summary, so this is now the pending-fetch case
     // (covered by `reply_from_the_list_fetches_then_seeds_the_composer`).
@@ -434,7 +452,7 @@ fn reply_never_clobbers_an_existing_draft() {
     let composer = seeded_composer(&s);
     assert_eq!(composer.draft.to, "k", "existing draft untouched");
     assert_eq!(
-        s.status.message.as_deref(),
+        s.session.status.message.as_deref(),
         Some("A draft is already open — send or discard it first")
     );
 }
@@ -450,14 +468,20 @@ fn reply_replaces_a_draft_left_behind() {
     reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('k')));
     reduce(&mut s, &Action::BackOrCancel); // Esc: save & leave
     assert!(matches!(s.active_route(), Some(Route::Message(_))));
-    assert!(s.composer.is_some(), "the left draft stays in state");
+    assert!(
+        s.session.composer.is_some(),
+        "the left draft stays in state"
+    );
     no_effects(&reduce(&mut s, &Action::Reply));
     let composer = seeded_composer(&s);
     assert_eq!(
         composer.draft.to, "Bob <bob@example.org>",
         "the reply seed replaces the left-behind draft"
     );
-    assert_eq!(s.status.message.as_deref(), Some("Reply draft ready"));
+    assert_eq!(
+        s.session.status.message.as_deref(),
+        Some("Reply draft ready")
+    );
 }
 
 #[test]
@@ -470,7 +494,10 @@ fn forward_replaces_a_draft_left_behind() {
     no_effects(&reduce(&mut s, &Action::Forward));
     let composer = seeded_composer(&s);
     assert_eq!(composer.draft.subject, "Fwd: Plan review");
-    assert_eq!(s.status.message.as_deref(), Some("Forward draft ready"));
+    assert_eq!(
+        s.session.status.message.as_deref(),
+        Some("Forward draft ready")
+    );
 }
 
 #[test]
@@ -480,19 +507,19 @@ fn leaving_a_seeded_reply_returns_to_the_reader() {
     reduce(&mut s, &Action::Reply);
     reduce(&mut s, &Action::BackOrCancel); // Esc: save/leave
     assert!(matches!(s.active_route(), Some(Route::Message(_))));
-    assert_eq!(s.focus, Focus::MessageList);
+    assert_eq!(s.session.focus, Focus::MessageList);
     // The seeded draft stays in state (for the Drafts list).
-    assert!(s.composer.is_some());
+    assert!(s.session.composer.is_some());
     // `c` starts a blank new email instead of reopening it (ticket v5x8).
     reduce(&mut s, &Action::Compose);
-    let composer = s.composer.as_ref().unwrap();
+    let composer = s.session.composer.as_ref().unwrap();
     assert_eq!(composer.draft.in_reply_to, None, "a blank new email");
 }
 
 #[test]
 fn reply_all_merges_recipients_dedups_and_excludes_self() {
     let mut s = state();
-    s.account_email = Some(String::from("probe@tmail.local"));
+    s.settings.account_email = Some(String::from("probe@tmail.local"));
     let mut message = reply_source();
     // Carol appears in To and Cc; the account itself was a recipient.
     message.headers.to.push(Address {
@@ -509,7 +536,10 @@ fn reply_all_merges_recipients_dedups_and_excludes_self() {
     });
     open_reader_with(&mut s, message);
     no_effects(&reduce(&mut s, &Action::ReplyAll));
-    assert_eq!(s.status.message.as_deref(), Some("Reply-all draft ready"));
+    assert_eq!(
+        s.session.status.message.as_deref(),
+        Some("Reply-all draft ready")
+    );
     let composer = seeded_composer(&s);
     // Sender first; the account's own address (probe@) is excluded even
     // though it was in To; Carol keeps her first (To) form, and her Cc
@@ -531,14 +561,14 @@ fn reply_all_merges_recipients_dedups_and_excludes_self() {
 fn ctrl_enter_sends_only_from_the_composer() {
     let mut s = state();
     no_effects(&reduce(&mut s, &Action::Send));
-    assert!(s.composer.is_none());
+    assert!(s.session.composer.is_none());
     // A draft may exist without the composer route (left-open draft): the
     // route gate still applies.
     compose(&mut s);
     reduce(&mut s, &Action::BackOrCancel);
     no_effects(&reduce(&mut s, &Action::Send));
-    assert!(s.composer.is_some(), "draft data preserved");
-    assert!(s.operations.is_empty());
+    assert!(s.session.composer.is_some(), "draft data preserved");
+    assert!(s.session.operations.is_empty());
 }
 
 #[test]
@@ -554,11 +584,11 @@ fn send_refuses_an_empty_recipient_list() {
     }
     no_effects(&reduce(&mut s, &Action::Send));
     assert_eq!(
-        s.status.message.as_deref(),
+        s.session.status.message.as_deref(),
         Some("Cannot send: add at least one recipient")
     );
     assert!(
-        s.composer.as_ref().unwrap().draft.to.is_empty(),
+        s.session.composer.as_ref().unwrap().draft.to.is_empty(),
         "draft untouched"
     );
 }
@@ -572,10 +602,10 @@ fn send_refuses_invalid_addresses() {
     }
     no_effects(&reduce(&mut s, &Action::Send));
     assert_eq!(
-        s.status.message.as_deref(),
+        s.session.status.message.as_deref(),
         Some("Cannot send: fix the invalid address entries")
     );
-    assert!(s.operations.is_empty(), "nothing was started");
+    assert!(s.session.operations.is_empty(), "nothing was started");
 }
 
 #[test]
@@ -588,17 +618,17 @@ fn send_freezes_the_composer_and_starts_one_operation() {
     assert_eq!(message.to[0].email, "ada@example.org");
     assert_eq!(message.content.subject, "Hello");
     assert_eq!(message.content.body, "Body");
-    assert!(s.operations.get(id).is_some());
-    let composer = s.composer.as_ref().unwrap();
+    assert!(s.session.operations.get(id).is_some());
+    let composer = s.session.composer.as_ref().unwrap();
     assert!(composer.sending);
-    assert_eq!(s.status.message.as_deref(), Some("Sending…"));
+    assert_eq!(s.session.status.message.as_deref(), Some("Sending…"));
     // Edits are frozen while the send runs; the draft keeps its content.
     reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
-    let composer = s.composer.as_ref().unwrap();
+    let composer = s.session.composer.as_ref().unwrap();
     assert_eq!(composer.draft.body, "Body");
     // A second send is refused.
     no_effects(&reduce(&mut s, &Action::Send));
-    assert_eq!(s.operations.len(), 1);
+    assert_eq!(s.session.operations.len(), 1);
     let _ = id;
 }
 
@@ -620,12 +650,12 @@ fn send_failure_keeps_the_draft_intact() {
         }),
     );
     // Draft intact and editable again; no route change.
-    let composer = s.composer.as_ref().unwrap();
+    let composer = s.session.composer.as_ref().unwrap();
     assert!(!composer.sending);
     assert_eq!(composer.draft.to, "ada@example.org");
     assert_eq!(composer.draft.body, "Body");
     assert!(matches!(s.active_route(), Some(Route::Composer)));
-    assert!(s.overlay.is_some(), "Retry/Dismiss modal opens");
+    assert!(s.session.overlay.is_some(), "Retry/Dismiss modal opens");
 }
 
 #[test]
@@ -633,15 +663,15 @@ fn send_success_leaves_the_composer_and_resolves_the_draft() {
     let mut s = state();
     sendable(&mut s);
     // The draft was saved before sending: the remote copy must be swept.
-    let composer = s.composer.as_mut().unwrap();
+    let composer = s.session.composer.as_mut().unwrap();
     composer.draft.remote_id = Some(MessageId(String::from("remote-draft")));
     let (id, _) = expect_send(&reduce(&mut s, &Action::Send));
     let effects = complete_send(&mut s, id, SendOutcome::Sent);
     // Composer closed, back to the mailbox, status confirms success.
-    assert!(s.composer.is_none());
-    assert_eq!(s.routes.len(), 1);
-    assert_eq!(s.focus, Focus::MessageList);
-    assert_eq!(s.status.message.as_deref(), Some("Message sent"));
+    assert!(s.session.composer.is_none());
+    assert_eq!(s.session.routes.len(), 1);
+    assert_eq!(s.session.focus, Focus::MessageList);
+    assert_eq!(s.session.status.message.as_deref(), Some("Message sent"));
     // One cleanup operation: journal entry + remote copy removal.
     let (cleanup_id, kind) = effect_parts(&effects);
     match &kind {
@@ -656,7 +686,7 @@ fn send_success_leaves_the_composer_and_resolves_the_draft() {
         }
         other => panic!("expected DeleteDraft(Sent), got {other:?}"),
     }
-    assert!(s.operations.get(cleanup_id).is_some());
+    assert!(s.session.operations.get(cleanup_id).is_some());
 }
 
 #[test]
@@ -669,8 +699,11 @@ fn send_success_after_leaving_still_resolves_the_draft() {
     reduce(&mut s, &Action::BackOrCancel);
     assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
     let effects = complete_send(&mut s, id, SendOutcome::Sent);
-    assert!(s.composer.is_none(), "the sent draft must not linger");
-    assert_eq!(s.routes.len(), 1, "already left: no route to pop");
+    assert!(
+        s.session.composer.is_none(),
+        "the sent draft must not linger"
+    );
+    assert_eq!(s.session.routes.len(), 1, "already left: no route to pop");
     assert_eq!(effect_parts(&effects).1.summary(), "Cleaning up sent draft");
 }
 
@@ -694,8 +727,8 @@ fn sent_draft_cleanup_failure_never_claims_a_failed_send() {
         }),
     );
     // Delivery was confirmed: no modal, no status regression.
-    assert!(s.overlay.is_none());
-    assert_eq!(s.status.message.as_deref(), Some("Message sent"));
+    assert!(s.session.overlay.is_none());
+    assert_eq!(s.session.status.message.as_deref(), Some("Message sent"));
 }
 
 #[test]
@@ -718,7 +751,10 @@ fn cleanup_of_a_discarded_draft_still_opens_the_modal_on_failure() {
             }),
         }),
     );
-    assert!(s.overlay.is_some(), "discard cleanup failures stay visible");
+    assert!(
+        s.session.overlay.is_some(),
+        "discard cleanup failures stay visible"
+    );
 }
 
 // ── Ambiguous sends (plan §12, Phase 7.7) ────────────────────────────────
@@ -738,7 +774,7 @@ fn ambiguous_send_opens_the_duplicate_warning_and_keeps_the_draft() {
             detail: String::from("SMTP DATA failed: Reached unexpected EOF"),
         },
     );
-    let Some(Overlay::Error(dialog)) = &s.overlay else {
+    let Some(Overlay::Error(dialog)) = &s.session.overlay else {
         panic!("modal open");
     };
     assert!(dialog.ambiguous, "the modal must carry the ambiguity flag");
@@ -752,11 +788,14 @@ fn ambiguous_send_opens_the_duplicate_warning_and_keeps_the_draft() {
         })
     );
     // The draft is intact and editable again; nothing claimed success.
-    let composer = s.composer.as_ref().unwrap();
+    let composer = s.session.composer.as_ref().unwrap();
     assert!(!composer.sending);
     assert_eq!(composer.draft.body, "Body");
     assert!(matches!(s.active_route(), Some(Route::Composer)));
-    assert_eq!(s.status.message.as_deref(), Some("Send outcome unclear"));
+    assert_eq!(
+        s.session.status.message.as_deref(),
+        Some("Send outcome unclear")
+    );
 }
 
 #[test]
@@ -773,8 +812,11 @@ fn ambiguous_send_never_shows_a_failure_title_or_status() {
         },
     );
     // Not success ("Message sent"), not definite failure ("Send failed").
-    assert_eq!(s.status.message.as_deref(), Some("Send outcome unclear"));
-    let Some(Overlay::Error(dialog)) = &s.overlay else {
+    assert_eq!(
+        s.session.status.message.as_deref(),
+        Some("Send outcome unclear")
+    );
+    let Some(Overlay::Error(dialog)) = &s.session.overlay else {
         panic!("modal open");
     };
     assert!(dialog.ambiguous);
@@ -797,8 +839,8 @@ fn retrying_an_ambiguous_send_replays_the_frozen_message() {
     let (retry_id, replay) = expect_send(&effects);
     assert_ne!(retry_id, id, "a retry gets a new operation id");
     assert_eq!(replay, message, "the exact same bytes are re-sent");
-    assert!(s.overlay.is_none());
-    let composer = s.composer.as_ref().unwrap();
+    assert!(s.session.overlay.is_none());
+    let composer = s.session.composer.as_ref().unwrap();
     assert!(composer.sending, "the retry send is in flight again");
 }
 
@@ -815,28 +857,28 @@ fn failed_before_delivery_send_reports_definite_failure_safely() {
             detail: String::from("connect 127.0.0.1:3425: connection refused"),
         },
     );
-    assert_eq!(s.status.message.as_deref(), Some("Send failed"));
-    let Some(Overlay::Error(dialog)) = &s.overlay else {
+    assert_eq!(s.session.status.message.as_deref(), Some("Send failed"));
+    let Some(Overlay::Error(dialog)) = &s.session.overlay else {
         panic!("modal open");
     };
     // Nothing was transmitted: retrying is safe, no duplicate warning.
     assert!(!dialog.ambiguous);
     assert!(dialog.retry.is_some());
-    let composer = s.composer.as_ref().unwrap();
+    let composer = s.session.composer.as_ref().unwrap();
     assert_eq!(composer.draft.body, "Body", "draft intact");
 }
 
 #[test]
 fn reply_from_the_list_fetches_then_seeds_the_composer() {
     let mut s = state();
-    assert_eq!(s.focus, Focus::MessageList);
+    assert_eq!(s.session.focus, Focus::MessageList);
     let effects = reduce(&mut s, &Action::Reply);
     let (id, locator, kind) = expect_seed(&effects);
     assert_eq!(kind, SeedKind::Reply);
     assert_eq!(locator.id, s.messages.items[0].id);
     // The fetch is in flight; the composer has not opened yet.
     assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
-    assert!(s.composer.is_none());
+    assert!(s.session.composer.is_none());
     // The fetched message seeds the composer exactly like the reader path.
     let message = mock::mock_message(&s.messages.items[0]);
     no_effects(&reduce(
@@ -847,7 +889,7 @@ fn reply_from_the_list_fetches_then_seeds_the_composer() {
         }),
     ));
     assert!(matches!(s.active_route(), Some(Route::Composer)));
-    assert_eq!(s.focus, Focus::Composer);
+    assert_eq!(s.session.focus, Focus::Composer);
     let composer = seeded_composer(&s);
     assert!(
         composer.draft.subject.starts_with("Re:"),
@@ -876,7 +918,7 @@ fn forward_from_the_list_quotes_the_fetched_message() {
         "{}",
         composer.draft.subject
     );
-    assert_ne!(s.status.message.as_deref(), None);
+    assert_ne!(s.session.status.message.as_deref(), None);
 }
 
 #[test]
@@ -894,8 +936,8 @@ fn a_failed_list_seed_opens_the_modal_without_a_composer() {
         matches!(s.active_route(), Some(Route::Mailbox(_))),
         "no composer on failure"
     );
-    assert!(s.composer.is_none());
-    assert!(matches!(s.overlay, Some(Overlay::Error(_))));
+    assert!(s.session.composer.is_none());
+    assert!(matches!(s.session.overlay, Some(Overlay::Error(_))));
 }
 
 #[test]
@@ -914,7 +956,7 @@ fn pressing_reply_twice_supersedes_the_first_fetch() {
             outcome: Ok(OperationOutcome::Message(Box::new(message.clone()))),
         }),
     ));
-    assert!(s.composer.is_none());
+    assert!(s.session.composer.is_none());
     // The newest fetch wins and seeds.
     no_effects(&reduce(
         &mut s,
@@ -923,5 +965,5 @@ fn pressing_reply_twice_supersedes_the_first_fetch() {
             outcome: Ok(OperationOutcome::Message(Box::new(message))),
         }),
     ));
-    assert!(s.composer.is_some());
+    assert!(s.session.composer.is_some());
 }

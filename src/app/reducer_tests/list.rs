@@ -27,12 +27,15 @@ fn page_next_requests_next_page_and_applies_result() {
     let (id, req) = expect_page(&reduce(&mut s, &Action::PageNext));
     assert_eq!(req.offset, mock::PAGE_SIZE);
     // The request is registered and in flight for the active mailbox.
-    assert_eq!(s.operations.page_in_flight(&inbox_id()), Some(req.clone()));
+    assert_eq!(
+        s.session.operations.page_in_flight(&inbox_id()),
+        Some(req.clone())
+    );
     // The old page and selection stay visible until the result lands.
     assert_eq!(s.messages.offset, 0);
     assert_eq!(s.selection, 3);
     complete_page_ok(&mut s, id, &req, mock::PAGE_SIZE);
-    assert_eq!(s.operations.page_in_flight(&inbox_id()), None);
+    assert_eq!(s.session.operations.page_in_flight(&inbox_id()), None);
     assert_eq!(s.messages.offset, mock::PAGE_SIZE);
     assert_eq!(s.messages.items.len(), 5);
     // The previous selection's message is not on this page.
@@ -75,13 +78,13 @@ fn rapid_page_next_supersedes_the_older_request() {
     let mut s = state();
     s.messages.total = None;
     let (first_id, first) = expect_page(&reduce(&mut s, &Action::PageNext));
-    let first_token = s.operations.cancellation(first_id).unwrap();
+    let first_token = s.session.operations.cancellation(first_id).unwrap();
     let (second_id, second) = expect_page(&reduce(&mut s, &Action::PageNext));
     assert_eq!(second.offset, first.offset + mock::PAGE_SIZE);
     // Superseding cancelled the older operation and removed it, so its
     // result — however late — can never apply (plan §11).
     assert!(first_token.is_cancelled());
-    assert!(s.operations.get(first_id).is_none());
+    assert!(s.session.operations.get(first_id).is_none());
     reduce(
         &mut s,
         &Action::BackendCompleted(OperationResult {
@@ -114,7 +117,7 @@ fn unknown_operation_result_is_ignored() {
         }),
     );
     assert_eq!(s.messages, before.messages);
-    assert_eq!(s.overlay, None);
+    assert_eq!(s.session.overlay, None);
 }
 
 #[test]
@@ -131,7 +134,10 @@ fn payload_kind_mismatch_is_ignored() {
         }),
     );
     assert_eq!(s.messages.offset, 0);
-    assert!(s.operations.get(id).is_none(), "operation completed");
+    assert!(
+        s.session.operations.get(id).is_none(),
+        "operation completed"
+    );
 }
 
 #[test]
@@ -147,7 +153,7 @@ fn page_result_for_other_mailbox_is_dropped() {
         .iter()
         .position(|m| m.id.0 == "sent")
         .unwrap();
-    s.focus = Focus::Sidebar;
+    s.session.focus = Focus::Sidebar;
     let (sent_op, sent_req) = expect_page(&reduce(&mut s, &Action::Activate));
     assert_eq!(sent_req.mailbox_id.0, "sent");
     // The slower inbox result arrives after the switch: it must never
@@ -175,7 +181,7 @@ fn page_load_failure_opens_the_retry_modal_and_keeps_last_page() {
     reduce(&mut s, &failure(id, &page_kind(&req), "himalaya exploded"));
     assert_eq!(s.messages.offset, 0, "last coherent page stays");
     assert_eq!(s.messages.items.len(), mock::PAGE_SIZE);
-    let Some(Overlay::Error(dialog)) = &s.overlay else {
+    let Some(Overlay::Error(dialog)) = &s.session.overlay else {
         panic!("error modal must open on failure");
     };
     assert_eq!(dialog.code, Some(1));
@@ -186,8 +192,11 @@ fn page_load_failure_opens_the_retry_modal_and_keeps_last_page() {
             kind: page_kind(&req)
         })
     );
-    assert_eq!(s.focus, Focus::ErrorModal);
-    assert_eq!(s.status.message.as_deref(), Some("Operation failed"));
+    assert_eq!(s.session.focus, Focus::ErrorModal);
+    assert_eq!(
+        s.session.status.message.as_deref(),
+        Some("Operation failed")
+    );
 }
 
 #[test]
@@ -198,7 +207,7 @@ fn selection_identity_survives_refresh() {
     let selected: MessageId = s.selected_message().expect("selection").id.clone();
     let (id, req) = expect_page(&reduce(&mut s, &Action::Refresh));
     assert_eq!(req.offset, 0);
-    assert_eq!(s.status.message.as_deref(), Some("Refreshing…"));
+    assert_eq!(s.session.status.message.as_deref(), Some("Refreshing…"));
     complete_page_ok(&mut s, id, &req, 0);
     assert_eq!(
         s.selected_message().expect("selection after refresh").id,
@@ -243,14 +252,14 @@ fn activate_on_sidebar_switches_mailbox_and_resets_list() {
     assert_eq!(s.selection, 0);
     assert_eq!(s.messages.offset, 0);
     assert_eq!(s.messages.items.len(), 4);
-    assert_eq!(s.focus, Focus::MessageList);
+    assert_eq!(s.session.focus, Focus::MessageList);
 }
 
 #[test]
 fn activate_on_same_mailbox_is_noop() {
     let mut s = state();
     s.selection = 5;
-    s.focus = Focus::Sidebar;
+    s.session.focus = Focus::Sidebar;
     no_effects(&reduce(&mut s, &Action::Activate));
     assert_eq!(s.selection, 5);
     assert_eq!(s.messages.offset, 0);
@@ -300,16 +309,16 @@ fn refresh_before_mailboxes_load_starts_the_listing() {
     let mut s = AppState::initial(mock::PAGE_SIZE);
     let (id, kind) = boot(&mut s);
     assert_eq!(kind, mailboxes_kind());
-    assert!(s.operations.get(id).is_some());
+    assert!(s.session.operations.get(id).is_some());
     // A second refresh while loading must not stack a duplicate request.
     no_effects(&reduce(&mut s, &Action::Refresh));
-    assert_eq!(s.operations.len(), 1);
+    assert_eq!(s.session.operations.len(), 1);
 }
 
 #[test]
 fn mailboxes_loaded_selects_inbox_role() {
     let mut s = AppState::initial(mock::PAGE_SIZE);
-    assert_eq!(s.routes.len(), 0);
+    assert_eq!(s.session.routes.len(), 0);
     let (id, kind) = boot(&mut s);
     assert_eq!(kind, mailboxes_kind());
     reduce(
@@ -322,7 +331,7 @@ fn mailboxes_loaded_selects_inbox_role() {
     let (_, req) = expect_page(&reduce(&mut s, &Action::Refresh));
     assert_eq!(req.mailbox_id.0, "inbox");
     assert_eq!(req.offset, 0);
-    assert_eq!(s.routes.len(), 1);
+    assert_eq!(s.session.routes.len(), 1);
     assert_eq!(s.mailbox_selection, 0);
     assert!(s.mailboxes.as_loaded().is_some());
 }
@@ -370,9 +379,9 @@ fn mailboxes_loaded_empty_is_valid_not_an_error() {
             outcome: Ok(OperationOutcome::Mailboxes(Vec::new())),
         }),
     ));
-    assert_eq!(s.routes.len(), 0);
+    assert_eq!(s.session.routes.len(), 0);
     assert!(s.messages.items.is_empty());
-    assert!(!s.quit_requested);
+    assert!(!s.session.quit_requested);
 }
 
 #[test]
@@ -381,15 +390,15 @@ fn mailboxes_failure_opens_modal_and_retry_reloads() {
     let (id, kind) = boot(&mut s);
     reduce(&mut s, &failure(id, &kind, "no such account"));
     assert!(matches!(s.mailboxes, Loadable::Failed(_)));
-    assert!(s.overlay.is_some());
+    assert!(s.session.overlay.is_some());
     // Retry replays the typed mailbox-load intent under a new id.
     let effects = reduce(&mut s, &Action::RetryError);
     let (retry_id, retry_kind) = effect_parts(&effects);
     assert_eq!(retry_kind, mailboxes_kind());
     assert_ne!(retry_id, id, "retry gets a fresh operation id");
-    assert!(s.overlay.is_none(), "modal closed on retry");
+    assert!(s.session.overlay.is_none(), "modal closed on retry");
     assert!(matches!(s.mailboxes, Loadable::Loading));
-    assert!(s.operations.get(retry_id).is_some());
+    assert!(s.session.operations.get(retry_id).is_some());
 }
 
 #[test]
@@ -400,12 +409,12 @@ fn fresh_mailbox_listing_keeps_the_composer_open() {
     let mut s = state();
     let id = start_listing(&mut s);
     compose(&mut s);
-    let body_before = s.composer.as_ref().unwrap().body.lines().join("\n");
+    let body_before = s.session.composer.as_ref().unwrap().body.lines().join("\n");
     complete_mailboxes(&mut s, id, mock::mock_mailboxes());
     // Still composing, draft intact; the sidebar data refreshed in place.
     assert!(matches!(s.active_route(), Some(Route::Composer)));
     assert_eq!(
-        s.composer.as_ref().unwrap().body.lines().join("\n"),
+        s.session.composer.as_ref().unwrap().body.lines().join("\n"),
         body_before
     );
     assert!(s.mailboxes.as_loaded().is_some());
@@ -424,7 +433,7 @@ fn fresh_mailbox_listing_keeps_list_page_and_selection() {
     assert_eq!(s.selected_message().unwrap().id, selected);
     assert_eq!(s.messages.items.len(), mock::PAGE_SIZE);
     assert_eq!(s.messages.offset, 0);
-    assert_eq!(s.routes.len(), 1);
+    assert_eq!(s.session.routes.len(), 1);
 }
 
 #[test]
@@ -518,10 +527,10 @@ fn input_and_ticks_keep_working_while_an_operation_is_in_flight() {
     // Foreground work never blocks rendering or input (plan §3): movement
     // and ticks apply while the request is in flight.
     tick(&mut s, 0);
-    assert_eq!(s.ticks, 1);
+    assert_eq!(s.session.ticks, 1);
     reduce(&mut s, &Action::MoveDown);
     assert_eq!(s.selection, 1);
-    assert!(s.operations.page_in_flight(&inbox_id()).is_some());
+    assert!(s.session.operations.page_in_flight(&inbox_id()).is_some());
 }
 
 #[test]
@@ -584,7 +593,7 @@ fn resize_to_degenerate_sizes_never_panics_or_invalidates() {
                 height: size.1,
             },
         );
-        assert_eq!(s.size, size);
+        assert_eq!(s.session.size, size);
         // The selection stays a valid index into the page.
         assert!(s.selection < s.messages.items.len().max(1));
         assert!(s.list_scroll < s.messages.items.len().max(1));
@@ -615,8 +624,8 @@ fn resize_while_a_modal_is_open_keeps_state_coherent() {
     let mut s = state();
     let (id, req) = expect_page(&reduce(&mut s, &Action::PageNext));
     reduce(&mut s, &failure(id, &page_kind(&req), "imap down"));
-    assert!(matches!(s.overlay, Some(Overlay::Error(_))));
-    if let Some(Overlay::Error(dialog)) = s.overlay.as_mut() {
+    assert!(matches!(s.session.overlay, Some(Overlay::Error(_))));
+    if let Some(Overlay::Error(dialog)) = s.session.overlay.as_mut() {
         dialog.scroll = 50; // far past the end at any size
     }
     reduce(
@@ -629,12 +638,12 @@ fn resize_while_a_modal_is_open_keeps_state_coherent() {
     // The modal scroll only clamps on the next Move/scroll action, and the
     // clamp uses the new size — never panics, never negative.
     reduce(&mut s, &Action::MoveDown);
-    if let Some(Overlay::Error(dialog)) = &s.overlay {
+    if let Some(Overlay::Error(dialog)) = &s.session.overlay {
         let max = crate::view::overlay::error_modal_max_scroll(
             &dialog.detail,
             dialog.code,
             dialog.ambiguous,
-            s.size,
+            s.session.size,
         );
         assert!(dialog.scroll <= max);
     }
@@ -667,7 +676,7 @@ fn resize_never_pushes_the_attachment_cursor_out_of_range() {
 #[test]
 fn auto_page_size_tracks_the_visible_rows_on_resize() {
     let mut s = state();
-    s.page_size_auto = true;
+    s.settings.page_size_auto = true;
     // Shrink the terminal: the limit becomes however many rows fit the
     // list, and the visible page reloads in the background (ticket kjfq).
     reduce(
@@ -702,7 +711,7 @@ fn auto_page_size_tracks_the_visible_rows_on_resize() {
         crate::view::layout::messages_visible((152, 28), ViewMode::Compact).max(1)
     );
     assert_eq!(
-        s.operations.get(id).map(|op| op.origin),
+        s.session.operations.get(id).map(|op| op.origin),
         Some(OperationOrigin::Background),
         "silent reload"
     );
@@ -714,8 +723,8 @@ fn comfortable_view_mode_halves_the_auto_page_size() {
     // message, so an auto-sized page holds half as many (and resize keeps
     // tracking it).
     let mut s = state();
-    s.page_size_auto = true;
-    s.view_mode = ViewMode::Comfortable;
+    s.settings.page_size_auto = true;
+    s.settings.view_mode = ViewMode::Comfortable;
     reduce(
         &mut s,
         &Action::Resize {
@@ -733,7 +742,7 @@ fn comfortable_view_mode_halves_the_auto_page_size() {
 #[test]
 fn manual_page_size_is_untouched_by_resize() {
     let mut s = state();
-    s.page_size_auto = false;
+    s.settings.page_size_auto = false;
     reduce(
         &mut s,
         &Action::Resize {
@@ -742,5 +751,8 @@ fn manual_page_size_is_untouched_by_resize() {
         },
     );
     assert_eq!(s.messages.limit, mock::PAGE_SIZE, "page_size rules");
-    assert!(s.operations.is_empty(), "no reload without auto sizing");
+    assert!(
+        s.session.operations.is_empty(),
+        "no reload without auto sizing"
+    );
 }

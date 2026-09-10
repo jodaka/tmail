@@ -89,7 +89,7 @@ pub fn to_action(event: MouseEvent, hits: &HitMap, state: &AppState) -> Option<A
         // Click on release: a press that turns into a drag never activates
         // anything.
         MouseEventKind::Up(MouseButton::Left) => {
-            let modal_open = state.overlay.is_some();
+            let modal_open = state.session.overlay.is_some();
             hits.hit_test(event.column, event.row, modal_open)
                 .map(Action::Click)
         }
@@ -103,7 +103,7 @@ pub fn to_action(event: MouseEvent, hits: &HitMap, state: &AppState) -> Option<A
 /// modal scroll. Text fields and the composer are deliberately unmapped:
 /// wheeling over them must not move carets.
 fn wheel(state: &AppState, delta: i64) -> Option<Action> {
-    let action = match state.focus {
+    let action = match state.session.focus {
         Focus::MessageList | Focus::Sidebar | Focus::Reader | Focus::ErrorModal => {
             if delta < 0 {
                 Action::MoveUp
@@ -203,13 +203,13 @@ mod tests {
             Focus::Reader,
             Focus::ErrorModal,
         ] {
-            state.focus = focus;
+            state.session.focus = focus;
             assert_eq!(wheel(&state, 1), Some(Action::MoveDown), "{focus:?}");
             assert_eq!(wheel(&state, -1), Some(Action::MoveUp), "{focus:?}");
         }
         // Editing foci: the wheel must not move carets.
         for focus in [Focus::SearchField, Focus::Composer, Focus::Dialog] {
-            state.focus = focus;
+            state.session.focus = focus;
             assert_eq!(wheel(&state, 1), None, "{focus:?}");
         }
     }

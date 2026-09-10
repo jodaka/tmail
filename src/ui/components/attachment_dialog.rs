@@ -26,10 +26,10 @@ fn layout(size: (u16, u16)) -> Rect {
 
 /// Render the dialog, when open, above everything already drawn.
 pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme: &Theme) {
-    let Some(Overlay::AttachmentExplorer(dialog)) = &state.overlay else {
+    let Some(Overlay::AttachmentExplorer(dialog)) = &state.session.overlay else {
         return;
     };
-    let area = layout(state.size);
+    let area = layout(state.session.size);
     if area.width < 8 || area.height < 5 {
         return;
     }

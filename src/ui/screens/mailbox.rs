@@ -61,7 +61,7 @@ pub fn render(
     // with a faint horizontal separator, so each message costs two lines
     // and fewer fit — the same math as `layout::messages_visible`, which
     // the reducer uses for scroll and page sizing.
-    let row_height = state.view_mode.row_height();
+    let row_height = state.settings.view_mode.row_height();
     let visible = rows.height as usize / row_height;
     let scrolling = state.messages.items.len() > visible;
     let row_width = if scrolling {
@@ -112,7 +112,7 @@ pub fn render(
                 now,
                 selected,
                 bulk_selected,
-                focused: state.focus == Focus::MessageList,
+                focused: state.session.focus == Focus::MessageList,
                 shows_recipient,
             },
         );
@@ -154,10 +154,10 @@ pub fn render(
     // is empty and a load is in flight, show the pane spinner instead
     // (ticket m3by: one loader look everywhere, centered in the panel).
     if !drew_any_row && list_load_in_flight(state) {
-        crate::ui::components::spinner::render_centered(frame, rows, theme, state.ticks);
+        crate::ui::components::spinner::render_centered(frame, rows, theme, state.session.ticks);
     } else if !drew_any_row
         && matches!(state.active_route(), Some(Route::Search(_)))
-        && state.operations.foreground().is_none()
+        && state.session.operations.foreground().is_none()
     {
         chrome::render_note(frame, rows, theme, "(no results)");
     }
@@ -168,12 +168,13 @@ pub fn render(
 fn list_load_in_flight(state: &AppState) -> bool {
     match state.active_route() {
         Some(Route::Search(route)) => state
+            .session
             .operations
             .search_in_flight(&route.mailbox_id)
             .is_some(),
         Some(route) => route
             .mailbox_id()
-            .is_some_and(|id| state.operations.page_in_flight(id).is_some()),
+            .is_some_and(|id| state.session.operations.page_in_flight(id).is_some()),
         None => false,
     }
 }

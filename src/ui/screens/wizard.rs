@@ -2,7 +2,7 @@
 //!
 //! A full-screen panel: during first run the shell has no data to show,
 //! so the wizard replaces the whole chrome (topbar, sidebar, status bar)
-//! and the renderer dispatches straight here while `AppState.wizard` is
+//! and the renderer dispatches straight here while `AppState.session.wizard` is
 //! set. Layout: a 3-row title band (text vertically centered), the step
 //! content centered vertically and horizontally in between, and a 3-row
 //! status band with the hotkeys, separated from the body by a horizontal
@@ -38,7 +38,7 @@ const CHROME_ROWS: u16 = 7;
 /// Render the wizard over the whole terminal area. (Keyboard-first: the
 /// wizard records no click targets in v1 — mouse input is inert here.)
 pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
-    let Some(wizard) = &state.wizard else {
+    let Some(wizard) = &state.session.wizard else {
         return;
     };
     if area.width < 46 || area.height < CHROME_ROWS + 4 {
@@ -125,7 +125,7 @@ fn step_title(step: WizardStep) -> &'static str {
 fn hint_spans<'a>(wizard: &WizardState, theme: &'a Theme) -> Vec<Span<'a>> {
     let hints: &[&str] = match wizard.step {
         WizardStep::Email => &["↵ detect settings", "Esc cancel", "Ctrl+C quit"],
-        WizardStep::Discovery if wizard.override_open => {
+        WizardStep::Discovery if wizard.discovery.override_open => {
             &["Tab next field", "↵ use servers", "Esc steps back"]
         }
         WizardStep::Discovery => &[
@@ -136,7 +136,7 @@ fn hint_spans<'a>(wizard: &WizardState, theme: &'a Theme) -> Vec<Span<'a>> {
             "Esc steps back",
         ],
         WizardStep::Identity => &["↵ continue", "Esc steps back"],
-        WizardStep::Credentials if wizard.credentials_index == 1 => {
+        WizardStep::Credentials if wizard.credentials.credentials_index == 1 => {
             &["Tab next field", "↵/space switch storage", "Esc steps back"]
         }
         WizardStep::Credentials => &["Tab next field", "↵ test connection", "Esc steps back"],
@@ -221,8 +221,8 @@ fn render_email(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme: 
         y,
         "Email",
         value_spans(
-            &wizard.email.value,
-            wizard.email.cursor,
+            &wizard.email.address.value,
+            wizard.email.address.cursor,
             true,
             false,
             input_inner_width(column),
@@ -238,10 +238,10 @@ fn render_email(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme: 
 fn render_discovery(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme: &Theme) {
     let column = content_column(body);
 
-    if wizard.discovering {
+    if wizard.discovery.discovering {
         // Spinner row + message; the spinner animates from the tick
         // counter (deterministic in tests).
-        let email = wizard.email.value.trim();
+        let email = wizard.email.address.value.trim();
         let y = centered_y(column, 1);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
@@ -262,7 +262,7 @@ fn render_discovery(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, the
         return;
     }
 
-    if wizard.override_open {
+    if wizard.discovery.override_open {
         let error_height = u16::from(wizard.last_error.is_some());
         let content_height =
             2 + INPUT_HEIGHT + 1 + INPUT_HEIGHT + 1 + INPUT_HEIGHT + 1 + error_height;
@@ -284,7 +284,7 @@ fn render_discovery(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, the
         y += 1;
         let labels = ["IMAP server", "SMTP server", "Username"];
         for (index, label) in labels.iter().enumerate() {
-            let field = &wizard.override_fields[index];
+            let field = &wizard.discovery.override_fields[index];
             input_box(
                 frame,
                 column,
@@ -293,12 +293,12 @@ fn render_discovery(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, the
                 value_spans(
                     &field.value,
                     field.cursor,
-                    wizard.override_index == index,
+                    wizard.discovery.override_index == index,
                     false,
                     input_inner_width(column),
                     theme,
                 ),
-                wizard.override_index == index,
+                wizard.discovery.override_index == index,
                 theme,
             );
             y += INPUT_HEIGHT + 1;
@@ -307,7 +307,7 @@ fn render_discovery(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, the
         return;
     }
 
-    if wizard.services.is_empty() {
+    if wizard.discovery.services.is_empty() {
         let error_height = u16::from(wizard.last_error.is_some());
         let content_height = 1 + 1 + error_height;
         let mut y = centered_y(column, content_height);
@@ -324,7 +324,7 @@ fn render_discovery(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, the
     }
 
     let error_height = u16::from(wizard.last_error.is_some());
-    let content_height = 1 + 1 + wizard.services.len() as u16 + 1 + error_height;
+    let content_height = 1 + 1 + wizard.discovery.services.len() as u16 + 1 + error_height;
     let mut y = centered_y(column, content_height);
     intro(
         frame,
@@ -334,11 +334,11 @@ fn render_discovery(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, the
         "Detected settings — choose a candidate:",
     );
     y += 1;
-    for (index, service) in wizard.services.iter().enumerate() {
+    for (index, service) in wizard.discovery.services.iter().enumerate() {
         if y >= column.y + column.height {
             break;
         }
-        let selected = index == wizard.service_index;
+        let selected = index == wizard.discovery.service_index;
         let marker = if selected { "›" } else { " " };
         let smtp = match &service.smtp {
             Some(smtp) => smtp.url.as_str(),
@@ -402,8 +402,8 @@ fn render_identity(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, them
         y,
         "Name",
         value_spans(
-            &wizard.display_name.value,
-            wizard.display_name.cursor,
+            &wizard.credentials.display_name.value,
+            wizard.credentials.display_name.cursor,
             true,
             false,
             input_inner_width(column),
@@ -418,7 +418,7 @@ fn render_identity(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, them
         column,
         &mut y,
         "Email",
-        wizard.email.value.trim(),
+        wizard.email.address.value.trim(),
         theme,
     );
     recap(frame, column, &mut y, "IMAP", imap, theme);
@@ -427,7 +427,8 @@ fn render_identity(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, them
 
 fn render_credentials(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme: &Theme) {
     let column = content_column(body);
-    let gmail = wizard.gmail_hint || wizard.provider() == Some(crate::discovery::Provider::Gmail);
+    let gmail =
+        wizard.discovery.gmail_hint || wizard.provider() == Some(crate::discovery::Provider::Gmail);
     let gmail_height = if gmail { 2 } else { 0 };
     let error_height = u16::from(wizard.last_error.is_some());
     let content_height =
@@ -440,20 +441,20 @@ fn render_credentials(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, t
         y,
         "Username",
         value_spans(
-            &wizard.username.value,
-            wizard.username.cursor,
-            wizard.credentials_index == 0,
+            &wizard.credentials.username.value,
+            wizard.credentials.username.cursor,
+            wizard.credentials.credentials_index == 0,
             false,
             input_inner_width(column),
             theme,
         ),
-        wizard.credentials_index == 0,
+        wizard.credentials.credentials_index == 0,
         theme,
     );
     y += INPUT_HEIGHT + 1;
 
     // The storage-mode toggle as its own box (checkbox row inside).
-    let storage_focused = wizard.credentials_index == 1;
+    let storage_focused = wizard.credentials.credentials_index == 1;
     let storage = Rect {
         x: column.x,
         y,
@@ -465,13 +466,13 @@ fn render_credentials(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, t
     frame.render_widget(block, storage);
     let raw = toggle_chip(
         "store password in config",
-        wizard.storage_mode == StorageMode::Raw,
+        wizard.credentials.storage_mode == StorageMode::Raw,
         storage_focused,
         theme,
     );
     let cmd = toggle_chip(
         "fetch via command",
-        wizard.storage_mode == StorageMode::Command,
+        wizard.credentials.storage_mode == StorageMode::Command,
         storage_focused,
         theme,
     );
@@ -482,9 +483,10 @@ fn render_credentials(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, t
     y += INPUT_HEIGHT + 1;
 
     // The secret field: masked in raw mode, the command in command mode.
-    match wizard.storage_mode {
+    match wizard.credentials.storage_mode {
         StorageMode::Raw => {
-            let masked: String = "•".repeat(wizard.password.value.chars().count().min(64));
+            let masked: String =
+                "•".repeat(wizard.credentials.password.value.chars().count().min(64));
             input_box(
                 frame,
                 column,
@@ -492,13 +494,13 @@ fn render_credentials(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, t
                 "Password",
                 value_spans(
                     &masked,
-                    wizard.password.cursor,
-                    wizard.credentials_index == 2,
+                    wizard.credentials.password.cursor,
+                    wizard.credentials.credentials_index == 2,
                     true,
                     input_inner_width(column),
                     theme,
                 ),
-                wizard.credentials_index == 2,
+                wizard.credentials.credentials_index == 2,
                 theme,
             );
         }
@@ -509,14 +511,14 @@ fn render_credentials(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, t
                 y,
                 "Command",
                 value_spans(
-                    &wizard.command.value,
-                    wizard.command.cursor,
-                    wizard.credentials_index == 2,
+                    &wizard.credentials.command.value,
+                    wizard.credentials.command.cursor,
+                    wizard.credentials.credentials_index == 2,
                     false,
                     input_inner_width(column),
                     theme,
                 ),
-                wizard.credentials_index == 2,
+                wizard.credentials.credentials_index == 2,
                 theme,
             );
         }
@@ -548,7 +550,10 @@ fn render_testing(frame: &mut Frame<'_>, body: Rect, state: &AppState, theme: &T
     let y = centered_y(column, 1);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(spinner::frame(state.ticks), Style::new().fg(theme.accent)),
+            Span::styled(
+                spinner::frame(state.session.ticks),
+                Style::new().fg(theme.accent),
+            ),
             Span::styled(" Testing IMAP connection…", Style::new().fg(theme.text)),
         ]))
         .centered(),
@@ -569,17 +574,19 @@ fn render_confirm(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme
         .and_then(|s| s.smtp.as_ref())
         .map(|smtp| smtp.url.as_str())
         .unwrap_or("smtp: not found");
-    let secret = match wizard.storage_mode {
+    let secret = match wizard.credentials.storage_mode {
         StorageMode::Raw => String::from("stored in config (****)"),
-        StorageMode::Command => format!("via command: {}", wizard.command.value),
+        StorageMode::Command => format!("via command: {}", wizard.credentials.command.value),
     };
-    let choice_height = wizard.name_choice.as_ref().map(|_| 3).unwrap_or(0);
-    let warning_height =
-        u16::from(wizard.existing_shared_readable && wizard.storage_mode == StorageMode::Raw);
+    let choice_height = wizard.confirm.name_choice.as_ref().map(|_| 3).unwrap_or(0);
+    let warning_height = u16::from(
+        wizard.config.existing_shared_readable
+            && wizard.credentials.storage_mode == StorageMode::Raw,
+    );
     let error_height = u16::from(wizard.last_error.is_some());
     let content_height = 8
         + 1
-        + (wizard.aliases.len() as u16 + 1)
+        + (wizard.confirm.aliases.len() as u16 + 1)
         + 1
         + choice_height
         + warning_height
@@ -587,9 +594,15 @@ fn render_confirm(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme
     let mut y = centered_y(column, content_height);
 
     for (label, value) in [
-        ("Account", format!("[accounts.{}]", wizard.account_name)),
-        ("Email", wizard.email.value.trim().to_string()),
-        ("Name", wizard.display_name.value.trim().to_string()),
+        (
+            "Account",
+            format!("[accounts.{}]", wizard.confirm.account_name),
+        ),
+        ("Email", wizard.email.address.value.trim().to_string()),
+        (
+            "Name",
+            wizard.credentials.display_name.value.trim().to_string(),
+        ),
         ("IMAP", imap.to_string()),
         ("SMTP", smtp.to_string()),
         ("Password", secret),
@@ -604,6 +617,7 @@ fn render_confirm(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme
         (
             "Config",
             wizard
+                .config
                 .save_path
                 .as_ref()
                 .map(|path| path.display().to_string())
@@ -614,9 +628,9 @@ fn render_confirm(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme
     }
 
     // Derived aliases (ADR 0003 §3.5).
-    if !wizard.aliases.is_empty() {
+    if !wizard.confirm.aliases.is_empty() {
         y += 1;
-        for (role, mailbox) in &wizard.aliases {
+        for (role, mailbox) in &wizard.confirm.aliases {
             if y >= column.y + column.height {
                 break;
             }
@@ -626,7 +640,7 @@ fn render_confirm(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme
 
     // Name-collision choice (ADR 0003 §3.6): replace by default, or save
     // under the -2 suffix.
-    if let Some(choice) = &wizard.name_choice {
+    if let Some(choice) = &wizard.confirm.name_choice {
         y += 1;
         let replace = choice_row("replace the existing account", 0, wizard, theme);
         let suffix = match choice {
@@ -647,7 +661,8 @@ fn render_confirm(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme
     }
 
     // Shared-readable warning (ADR 0003 §3.6): raw secrets only.
-    if wizard.existing_shared_readable && wizard.storage_mode == StorageMode::Raw {
+    if wizard.config.existing_shared_readable && wizard.credentials.storage_mode == StorageMode::Raw
+    {
         intro(
             frame,
             column,
@@ -662,12 +677,13 @@ fn render_confirm(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme
 fn render_saved(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme: &Theme) {
     let column = content_column(body);
     let path = wizard
+        .confirm
         .saved_path
         .as_ref()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| String::from("-"));
-    let warning_height = u16::from(wizard.permissions_warning.is_some());
-    let created_height = u16::from(wizard.saved_created);
+    let warning_height = u16::from(wizard.confirm.permissions_warning.is_some());
+    let created_height = u16::from(wizard.confirm.saved_created);
     let content_height = 1 + created_height + warning_height + 1 + 1;
     let mut y = centered_y(column, content_height);
 
@@ -678,7 +694,7 @@ fn render_saved(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme: 
         theme,
         &format!("Account saved to {path}"),
     );
-    if wizard.saved_created {
+    if wizard.confirm.saved_created {
         intro(
             frame,
             column,
@@ -687,7 +703,7 @@ fn render_saved(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme: 
             "The config file was created with permissions 0600.",
         );
     }
-    if let Some(warning) = &wizard.permissions_warning {
+    if let Some(warning) = &wizard.confirm.permissions_warning {
         intro(frame, column, &mut y, theme, warning);
     }
     y += 1;
@@ -824,7 +840,7 @@ fn choice_row<'a>(
     wizard: &WizardState,
     theme: &'a Theme,
 ) -> Span<'a> {
-    let selected = wizard.name_choice_index == index;
+    let selected = wizard.confirm.name_choice_index == index;
     let marker = if selected { "(•)" } else { "( )" };
     if selected {
         Span::styled(

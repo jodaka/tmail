@@ -13,14 +13,16 @@ use crate::discovery::{ConfigSource, Provider, Security, ServerEndpoint};
 
 fn state() -> AppState {
     let mut state = mock_initial_state();
-    state.wizard = Some(WizardState::new(
+    state.session.wizard = Some(WizardState::new(
         false,
-        Some(std::path::PathBuf::from("/tmp/tmail-test-config.toml")),
-        Vec::new(),
-        None,
-        false,
+        ConfigSnapshot {
+            save_path: Some(std::path::PathBuf::from("/tmp/tmail-test-config.toml")),
+            existing_names: Vec::new(),
+            existing_default_name: None,
+            existing_shared_readable: false,
+        },
     ));
-    state.focus = Focus::Wizard;
+    state.session.focus = Focus::Wizard;
     state
 }
 
@@ -32,18 +34,18 @@ fn fresh_wizard_state() -> AppState {
 
 fn manual_state() -> AppState {
     let mut state = fresh_wizard_state();
-    if let Some(wizard) = state.wizard.as_mut() {
+    if let Some(wizard) = state.session.wizard.as_mut() {
         wizard.manual = true;
     }
     state
 }
 
 fn wizard(state: &AppState) -> &WizardState {
-    state.wizard.as_ref().expect("wizard active")
+    state.session.wizard.as_ref().expect("wizard active")
 }
 
 fn wizard_mut(state: &mut AppState) -> &mut WizardState {
-    state.wizard.as_mut().expect("wizard active")
+    state.session.wizard.as_mut().expect("wizard active")
 }
 
 fn act(state: &mut AppState, action: WizardAction) -> Vec<Effect> {
@@ -114,7 +116,7 @@ fn account_saved(path: &str, created: bool) -> OperationOutcome {
 /// Drives the happy path up to the saved screen through real reducer
 /// transitions. Returns the state (for further assertions).
 fn drive_to_saved(state: &mut AppState) {
-    wizard_mut(state).email = TextField::new("u@example.com");
+    wizard_mut(state).email.address = TextField::new("u@example.com");
     let effects = act(state, WizardAction::SubmitEmail);
     assert!(matches!(
         effects.first().expect("discover effect").kind,
@@ -126,7 +128,7 @@ fn drive_to_saved(state: &mut AppState) {
     assert_eq!(wizard(state).step, WizardStep::Identity);
     act(state, WizardAction::SubmitCredentials); // → W4
     assert_eq!(wizard(state).step, WizardStep::Credentials);
-    wizard_mut(state).password = TextField::secret("app-password");
+    wizard_mut(state).credentials.password = TextField::secret("app-password");
     let effects = act(state, WizardAction::SubmitCredentials); // → W5 test
     assert!(matches!(
         effects.first().expect("test effect").kind,
@@ -151,21 +153,24 @@ fn full_success_path_reaches_saved() {
     // The derived aliases (Gmail preset) ride along on the confirm
     // screen and the draft.
     assert_eq!(
-        wizard(&state).aliases,
+        wizard(&state).confirm.aliases,
         vec![
             (String::from("inbox"), String::from("INBOX")),
             (String::from("sent"), String::from("[Gmail]/Sent Mail")),
         ]
     );
-    assert_eq!(wizard(&state).account_name, "example");
+    assert_eq!(wizard(&state).confirm.account_name, "example");
     assert!(wizard(&state).will_set_default(), "no existing default");
-    assert!(wizard(&state).saved_created);
+    assert!(wizard(&state).confirm.saved_created);
     assert!(!wizard(&state).completed);
     // First-run dismiss ends the session (main.rs restarts into the
     // mailbox UI with the fresh config).
     act(&mut state, WizardAction::DismissSaved);
     assert!(wizard(&state).completed);
-    assert!(state.quit_requested, "the session must end for the restart");
+    assert!(
+        state.session.quit_requested,
+        "the session must end for the restart"
+    );
 }
 
 #[test]
@@ -175,7 +180,10 @@ fn dismiss_ends_the_session_in_both_modes() {
     drive_to_saved(&mut manual);
     act(&mut manual, WizardAction::DismissSaved);
     assert!(wizard(&manual).completed);
-    assert!(manual.quit_requested, "manual mode exits after saving");
+    assert!(
+        manual.session.quit_requested,
+        "manual mode exits after saving"
+    );
 
     // First-run: the session ends too, and main.rs restarts into the
     // normal mailbox UI with the fresh config.
@@ -184,7 +192,7 @@ fn dismiss_ends_the_session_in_both_modes() {
     act(&mut first_run, WizardAction::DismissSaved);
     assert!(wizard(&first_run).completed);
     assert!(
-        first_run.quit_requested,
+        first_run.session.quit_requested,
         "the session must end for the restart"
     );
 }
@@ -195,26 +203,26 @@ fn email_field_edits_flow_through_wizard_actions() {
     for c in "u@example.com".chars() {
         act(&mut state, WizardAction::Edit(DialogEdit::Char(c)));
     }
-    assert_eq!(wizard(&state).email.value, "u@example.com");
+    assert_eq!(wizard(&state).email.address.value, "u@example.com");
     act(&mut state, WizardAction::Edit(DialogEdit::Backspace));
-    assert_eq!(wizard(&state).email.value, "u@example.co");
+    assert_eq!(wizard(&state).email.address.value, "u@example.co");
     act(&mut state, WizardAction::Edit(DialogEdit::CursorLeft));
     act(&mut state, WizardAction::Edit(DialogEdit::Char('X')));
-    assert_eq!(wizard(&state).email.value, "u@example.cXo");
+    assert_eq!(wizard(&state).email.address.value, "u@example.cXo");
 }
 
 #[test]
 fn invalid_email_is_reported_and_discovery_does_not_start() {
     let mut state = state();
-    wizard_mut(&mut state).email = TextField::new("not-an-email");
+    wizard_mut(&mut state).email.address = TextField::new("not-an-email");
     let effects = act(&mut state, WizardAction::SubmitEmail);
     no_effects(&effects);
     assert_eq!(wizard(&state).step, WizardStep::Email);
     assert!(wizard(&state).last_error.is_some());
-    assert!(!wizard(&state).discovering);
+    assert!(!wizard(&state).discovery.discovering);
 
     // Multiple @ is invalid too.
-    wizard_mut(&mut state).email = TextField::new("a@b@c");
+    wizard_mut(&mut state).email.address = TextField::new("a@b@c");
     let effects = act(&mut state, WizardAction::SubmitEmail);
     no_effects(&effects);
     assert_eq!(wizard(&state).step, WizardStep::Email);
@@ -227,7 +235,7 @@ fn no_effects(effects: &[Effect]) {
 #[test]
 fn discovery_result_ranks_into_the_list_and_enter_accepts() {
     let mut state = state();
-    wizard_mut(&mut state).email = TextField::new("u@example.com");
+    wizard_mut(&mut state).email.address = TextField::new("u@example.com");
     let effects = act(&mut state, WizardAction::SubmitEmail);
     // Two candidates: the Gmail provider rule (wins) and a plain SRV one.
     let mut srv = gmail_service();
@@ -240,10 +248,10 @@ fn discovery_result_ranks_into_the_list_and_enter_accepts() {
         discovered(vec![gmail_service(), srv.clone()]),
     );
 
-    assert_eq!(wizard(&state).services.len(), 2);
-    assert_eq!(wizard(&state).service_index, 0);
+    assert_eq!(wizard(&state).discovery.services.len(), 2);
+    assert_eq!(wizard(&state).discovery.service_index, 0);
     assert_eq!(
-        wizard(&state).services[0].source,
+        wizard(&state).discovery.services[0].source,
         ConfigSource::Provider(Provider::Gmail),
         "the provider rule preselects first"
     );
@@ -251,9 +259,9 @@ fn discovery_result_ranks_into_the_list_and_enter_accepts() {
     // Enter accepts the preselected candidate and prefills identity.
     act(&mut state, WizardAction::SelectService);
     assert_eq!(wizard(&state).step, WizardStep::Identity);
-    assert_eq!(wizard(&state).username.value, "u@example.com");
+    assert_eq!(wizard(&state).credentials.username.value, "u@example.com");
     assert_eq!(
-        wizard(&state).display_name.value,
+        wizard(&state).credentials.display_name.value,
         "u",
         "local part suggested"
     );
@@ -262,15 +270,15 @@ fn discovery_result_ranks_into_the_list_and_enter_accepts() {
 #[test]
 fn empty_discovery_opens_the_manual_override_form() {
     let mut state = state();
-    wizard_mut(&mut state).email = TextField::new("u@custom.example");
+    wizard_mut(&mut state).email.address = TextField::new("u@custom.example");
     let effects = act(&mut state, WizardAction::SubmitEmail);
     complete(&mut state, &effects, discovered(Vec::new()));
 
     assert!(
-        wizard(&state).override_open,
+        wizard(&state).discovery.override_open,
         "manual override is the only way forward"
     );
-    let [imap, smtp, username] = &wizard(&state).override_fields;
+    let [imap, smtp, username] = &wizard(&state).discovery.override_fields;
     assert_eq!(imap.value, "imaps://imap.custom.example:993");
     assert_eq!(smtp.value, "smtps://smtp.custom.example:465");
     assert_eq!(username.value, "u@custom.example");
@@ -279,27 +287,31 @@ fn empty_discovery_opens_the_manual_override_form() {
 #[test]
 fn manual_override_skips_straight_to_credentials() {
     let mut state = state();
-    wizard_mut(&mut state).email = TextField::new("u@custom.example");
+    wizard_mut(&mut state).email.address = TextField::new("u@custom.example");
     let effects = act(&mut state, WizardAction::SubmitEmail);
     complete(&mut state, &effects, discovered(Vec::new()));
 
     let effects = act(&mut state, WizardAction::SubmitOverride);
     no_effects(&effects);
     assert_eq!(wizard(&state).step, WizardStep::Credentials);
-    assert_eq!(wizard(&state).services.len(), 1);
-    assert_eq!(wizard(&state).services[0].source, ConfigSource::Manual);
-    assert_eq!(wizard(&state).services[0].provider, None);
+    assert_eq!(wizard(&state).discovery.services.len(), 1);
     assert_eq!(
-        wizard(&state).services[0].imap.security,
+        wizard(&state).discovery.services[0].source,
+        ConfigSource::Manual
+    );
+    assert_eq!(wizard(&state).discovery.services[0].provider, None);
+    assert_eq!(
+        wizard(&state).discovery.services[0].imap.security,
         Security::Tls,
         "imaps:// implies implicit TLS"
     );
 
     // And the credentials submit builds a manual draft.
-    wizard_mut(&mut state).password = TextField::secret("pw");
+    wizard_mut(&mut state).credentials.password = TextField::secret("pw");
     let effects = act(&mut state, WizardAction::SubmitCredentials);
     let id = effects[0].id;
-    let OperationKind::TestAccount { draft } = &state.operations.get(id).unwrap().kind else {
+    let OperationKind::TestAccount { draft } = &state.session.operations.get(id).unwrap().kind
+    else {
         panic!("expected a TestAccount operation");
     };
     assert_eq!(draft.imap_server, "imaps://imap.custom.example:993");
@@ -309,25 +321,25 @@ fn manual_override_skips_straight_to_credentials() {
 #[test]
 fn test_failure_returns_to_credentials_with_fields_intact() {
     let mut state = state();
-    wizard_mut(&mut state).email = TextField::new("u@example.com");
+    wizard_mut(&mut state).email.address = TextField::new("u@example.com");
     let effects = act(&mut state, WizardAction::SubmitEmail);
     complete(&mut state, &effects, discovered(vec![gmail_service()]));
     act(&mut state, WizardAction::SelectService);
     act(&mut state, WizardAction::SubmitCredentials);
-    wizard_mut(&mut state).password = TextField::secret("app-password");
+    wizard_mut(&mut state).credentials.password = TextField::secret("app-password");
     let effects = act(&mut state, WizardAction::SubmitCredentials);
     fail_with(&mut state, &effects, "login failed");
 
     assert_eq!(wizard(&state).step, WizardStep::Credentials);
     assert_eq!(wizard(&state).last_error.as_deref(), Some("login failed"));
     assert_eq!(
-        wizard(&state).password.value,
+        wizard(&state).credentials.password.value,
         "app-password",
         "fields intact"
     );
 
     // Retry re-runs the test with the edited values; nothing accumulates.
-    wizard_mut(&mut state).password = TextField::secret("fixed-password");
+    wizard_mut(&mut state).credentials.password = TextField::secret("fixed-password");
     let effects = act(&mut state, WizardAction::SubmitCredentials);
     assert!(matches!(
         effects.first().expect("test effect").kind,
@@ -340,12 +352,12 @@ fn test_failure_returns_to_credentials_with_fields_intact() {
 #[test]
 fn a_test_failure_detail_is_stored_sanitized_and_debug_redacted() {
     let mut state = state();
-    wizard_mut(&mut state).email = TextField::new("u@example.com");
+    wizard_mut(&mut state).email.address = TextField::new("u@example.com");
     let effects = act(&mut state, WizardAction::SubmitEmail);
     complete(&mut state, &effects, discovered(vec![gmail_service()]));
     act(&mut state, WizardAction::SelectService);
     act(&mut state, WizardAction::SubmitCredentials);
-    wizard_mut(&mut state).password = TextField::secret("hunter2");
+    wizard_mut(&mut state).credentials.password = TextField::secret("hunter2");
     let effects = act(&mut state, WizardAction::SubmitCredentials);
     // The manager sanitizes before the reducer ever sees a failure
     // (the same rule as every backend completion): synthesize what it
@@ -369,17 +381,17 @@ fn a_test_failure_detail_is_stored_sanitized_and_debug_redacted() {
 #[test]
 fn cancel_steps_back_through_every_screen_and_quits_from_the_first() {
     let mut state = state();
-    wizard_mut(&mut state).email = TextField::new("u@example.com");
+    wizard_mut(&mut state).email.address = TextField::new("u@example.com");
     let effects = act(&mut state, WizardAction::SubmitEmail);
     complete(&mut state, &effects, discovered(vec![gmail_service()]));
     act(&mut state, WizardAction::SelectService);
     act(&mut state, WizardAction::SubmitCredentials);
-    wizard_mut(&mut state).password = TextField::secret("pw");
+    wizard_mut(&mut state).credentials.password = TextField::secret("pw");
     let effects = act(&mut state, WizardAction::SubmitCredentials);
     assert_eq!(wizard(&state).step, WizardStep::Testing);
 
     // Esc on Testing cancels the operation and returns to W4.
-    let token = state.operations.cancellation(effects[0].id);
+    let token = state.session.operations.cancellation(effects[0].id);
     act(&mut state, WizardAction::Cancel);
     assert_eq!(wizard(&state).step, WizardStep::Credentials);
     assert!(
@@ -398,7 +410,7 @@ fn cancel_steps_back_through_every_screen_and_quits_from_the_first() {
     // Esc on the first step cancels the wizard and quits the app.
     act(&mut state, WizardAction::Cancel);
     assert!(wizard(&state).cancelled);
-    assert!(state.quit_requested);
+    assert!(state.session.quit_requested);
 }
 
 #[test]
@@ -419,12 +431,12 @@ fn save_failure_stays_on_confirm_and_reports() {
 }
 
 fn drive_to_confirm(state: &mut AppState) {
-    wizard_mut(state).email = TextField::new("u@example.com");
+    wizard_mut(state).email.address = TextField::new("u@example.com");
     let effects = act(state, WizardAction::SubmitEmail);
     complete(state, &effects, discovered(vec![gmail_service()]));
     act(state, WizardAction::SelectService);
     act(state, WizardAction::SubmitCredentials);
-    wizard_mut(state).password = TextField::secret("pw");
+    wizard_mut(state).credentials.password = TextField::secret("pw");
     let effects = act(state, WizardAction::SubmitCredentials);
     complete(state, &effects, test_ok(&["INBOX"]));
 }
@@ -446,7 +458,7 @@ fn warmup_is_suppressed_while_the_wizard_is_active() {
 #[test]
 fn unknown_and_stale_results_are_rejected() {
     let mut state = state();
-    wizard_mut(&mut state).email = TextField::new("u@example.com");
+    wizard_mut(&mut state).email.address = TextField::new("u@example.com");
     let effects = act(&mut state, WizardAction::SubmitEmail);
     let id = effects[0].id;
 
@@ -458,14 +470,14 @@ fn unknown_and_stale_results_are_rejected() {
             outcome: Ok(discovered(vec![gmail_service()])),
         }),
     );
-    assert!(wizard(&state).discovering);
+    assert!(wizard(&state).discovery.discovering);
 
     // The real one applies.
     complete(&mut state, &effects, discovered(vec![gmail_service()]));
-    assert!(!wizard(&state).discovering);
+    assert!(!wizard(&state).discovery.discovering);
 
     // A replay of the same (now-finished) id is rejected.
-    let before = wizard(&state).services.len();
+    let before = wizard(&state).discovery.services.len();
     reduce(
         &mut state,
         &Action::BackendCompleted(OperationResult {
@@ -473,7 +485,7 @@ fn unknown_and_stale_results_are_rejected() {
             outcome: Ok(discovered(Vec::new())),
         }),
     );
-    assert_eq!(wizard(&state).services.len(), before);
+    assert_eq!(wizard(&state).discovery.services.len(), before);
 }
 
 #[test]
@@ -485,16 +497,16 @@ fn storage_mode_toggle_switches_the_secret_field_and_validates_the_command() {
     assert_eq!(wizard(&state).step, WizardStep::Credentials);
 
     // The raw password is required in raw mode.
-    wizard_mut(&mut state).storage_mode = StorageMode::Raw;
-    wizard_mut(&mut state).password = TextField::secret("");
+    wizard_mut(&mut state).credentials.storage_mode = StorageMode::Raw;
+    wizard_mut(&mut state).credentials.password = TextField::secret("");
     let effects = act(&mut state, WizardAction::SubmitCredentials);
     no_effects(&effects);
     assert!(wizard(&state).last_error.is_some());
 
     // Command mode validates the program exists and rejects shell
     // metacharacters (Tmail never spawns a shell).
-    wizard_mut(&mut state).storage_mode = StorageMode::Command;
-    wizard_mut(&mut state).command = TextField::new("pass show mail/gmail; rm -rf /");
+    wizard_mut(&mut state).credentials.storage_mode = StorageMode::Command;
+    wizard_mut(&mut state).credentials.command = TextField::new("pass show mail/gmail; rm -rf /");
     let effects = act(&mut state, WizardAction::SubmitCredentials);
     no_effects(&effects);
     assert!(
@@ -506,7 +518,7 @@ fn storage_mode_toggle_switches_the_secret_field_and_validates_the_command() {
     );
 
     // A missing program is reported the same way the editor is.
-    wizard_mut(&mut state).command = TextField::new("definitely-not-a-program-xyz");
+    wizard_mut(&mut state).credentials.command = TextField::new("definitely-not-a-program-xyz");
     let effects = act(&mut state, WizardAction::SubmitCredentials);
     no_effects(&effects);
     assert!(
@@ -522,16 +534,19 @@ fn storage_mode_toggle_switches_the_secret_field_and_validates_the_command() {
 fn collision_suffix_is_offered_and_selected() {
     let mut state = state();
     // The config already holds an `example` account.
-    state.wizard = Some(WizardState::new(
+    state.session.wizard = Some(WizardState::new(
         false,
-        Some(std::path::PathBuf::from("/tmp/tmail-test-config.toml")),
-        vec![String::from("example")],
-        Some(String::from("example")),
-        false,
+        ConfigSnapshot {
+            save_path: Some(std::path::PathBuf::from("/tmp/tmail-test-config.toml")),
+            existing_names: vec![String::from("example")],
+            existing_default_name: Some(String::from("example")),
+            existing_shared_readable: false,
+        },
     ));
     drive_to_confirm(&mut state);
 
     let choice = wizard(&state)
+        .confirm
         .name_choice
         .as_ref()
         .expect("collision detected");
@@ -540,7 +555,7 @@ fn collision_suffix_is_offered_and_selected() {
         NameChoice::Replace => panic!("default choice must be replace, with -2 offered"),
     }
     // Replace is highlighted first (the default), the suffix is one ↓ away.
-    assert_eq!(wizard(&state).name_choice_index, 0);
+    assert_eq!(wizard(&state).confirm.name_choice_index, 0);
     assert!(
         wizard(&state).will_set_default(),
         "replacing the file's default account keeps it default"
@@ -548,10 +563,11 @@ fn collision_suffix_is_offered_and_selected() {
 
     // Choosing the suffix renames the saved account.
     act(&mut state, WizardAction::MoveDown);
-    assert_eq!(wizard(&state).name_choice_index, 1);
+    assert_eq!(wizard(&state).confirm.name_choice_index, 1);
     let effects = act(&mut state, WizardAction::ConfirmSave);
     let id = effects[0].id;
-    let OperationKind::SaveAccount { draft, .. } = &state.operations.get(id).unwrap().kind else {
+    let OperationKind::SaveAccount { draft, .. } = &state.session.operations.get(id).unwrap().kind
+    else {
         panic!("expected a SaveAccount operation");
     };
     assert_eq!(draft.name, "example-2");
@@ -560,11 +576,11 @@ fn collision_suffix_is_offered_and_selected() {
 #[test]
 fn gmail_domain_and_provider_flag_the_app_password_hint() {
     let mut state = state();
-    wizard_mut(&mut state).email = TextField::new("u@gmail.com");
+    wizard_mut(&mut state).email.address = TextField::new("u@gmail.com");
     let effects = act(&mut state, WizardAction::SubmitEmail);
     complete(&mut state, &effects, discovered(vec![gmail_service()]));
     act(&mut state, WizardAction::SelectService);
-    assert!(wizard(&state).gmail_hint, "domain rule");
+    assert!(wizard(&state).discovery.gmail_hint, "domain rule");
     assert_eq!(
         wizard(&state).provider(),
         Some(Provider::Gmail),
@@ -606,14 +622,14 @@ fn collision_suffix_rule_generates_the_next_free_name() {
 #[test]
 fn the_draft_requires_smtp_and_the_email() {
     let mut state = state();
-    wizard_mut(&mut state).email = TextField::new("u@example.com");
+    wizard_mut(&mut state).email.address = TextField::new("u@example.com");
     let mut smtpless = gmail_service();
     smtpless.smtp = None;
     let effects = act(&mut state, WizardAction::SubmitEmail);
     complete(&mut state, &effects, discovered(vec![smtpless]));
     act(&mut state, WizardAction::SelectService);
     act(&mut state, WizardAction::SubmitCredentials);
-    wizard_mut(&mut state).password = TextField::secret("pw");
+    wizard_mut(&mut state).credentials.password = TextField::secret("pw");
     let effects = act(&mut state, WizardAction::SubmitCredentials);
     no_effects(&effects);
     assert!(
@@ -634,21 +650,24 @@ fn enter_on_the_storage_row_toggles_the_mode_without_testing() {
     // Tab once: username → the storage-mode row (Tab order feedback:
     // the storage choice comes before the secret it governs).
     act(&mut state, WizardAction::FocusNext);
-    assert_eq!(wizard(&state).credentials_index, 1);
+    assert_eq!(wizard(&state).credentials.credentials_index, 1);
 
     // Enter activates the focused control: the mode flips, no test runs.
     let effects = reduce(&mut state, &Action::Activate);
     no_effects(&effects);
     assert_eq!(wizard(&state).step, WizardStep::Credentials);
-    assert_eq!(wizard(&state).storage_mode, StorageMode::Command);
+    assert_eq!(
+        wizard(&state).credentials.storage_mode,
+        StorageMode::Command
+    );
     assert!(
-        state.operations.is_empty(),
+        state.session.operations.is_empty(),
         "no credential test may start from the toggle row"
     );
 
     // Enter again flips back to raw.
     reduce(&mut state, &Action::Activate);
-    assert_eq!(wizard(&state).storage_mode, StorageMode::Raw);
+    assert_eq!(wizard(&state).credentials.storage_mode, StorageMode::Raw);
 }
 
 #[test]
@@ -659,35 +678,41 @@ fn space_on_the_storage_row_toggles_and_space_types_everywhere_else() {
     // Space while the username row is focused types a space into the
     // username, it does not toggle.
     act(&mut state, WizardAction::ToggleStorageMode);
-    assert_eq!(wizard(&state).storage_mode, StorageMode::Raw);
-    assert!(wizard(&state).username.value.ends_with(' '));
+    assert_eq!(wizard(&state).credentials.storage_mode, StorageMode::Raw);
+    assert!(wizard(&state).credentials.username.value.ends_with(' '));
 
     // Tab once: the storage row is next in the cycle — space toggles.
     act(&mut state, WizardAction::FocusNext);
-    assert_eq!(wizard(&state).credentials_index, 1);
+    assert_eq!(wizard(&state).credentials.credentials_index, 1);
     act(&mut state, WizardAction::ToggleStorageMode);
-    assert_eq!(wizard(&state).storage_mode, StorageMode::Command);
+    assert_eq!(
+        wizard(&state).credentials.storage_mode,
+        StorageMode::Command
+    );
 
     // Tab again: the secret row — space types there (passwords and
     // commands may contain spaces).
     act(&mut state, WizardAction::FocusNext);
     act(&mut state, WizardAction::ToggleStorageMode);
-    assert_eq!(wizard(&state).storage_mode, StorageMode::Command);
+    assert_eq!(
+        wizard(&state).credentials.storage_mode,
+        StorageMode::Command
+    );
 
     // And spaces typed into the command field survive (the fold-back):
     // the focus is already on the secret row in command mode, so the
     // space above was the command field's first character.
-    assert_eq!(wizard(&state).credentials_index, 2);
+    assert_eq!(wizard(&state).credentials.credentials_index, 2);
     act(&mut state, WizardAction::Edit(DialogEdit::Char('p')));
     act(&mut state, WizardAction::Edit(DialogEdit::Char(' ')));
     act(&mut state, WizardAction::Edit(DialogEdit::Char('a')));
-    assert_eq!(wizard(&state).command.value, " p a");
+    assert_eq!(wizard(&state).credentials.command.value, " p a");
 }
 
 #[test]
 fn a_display_name_may_contain_spaces() {
     let mut state = state();
-    wizard_mut(&mut state).email = TextField::new("u@example.com");
+    wizard_mut(&mut state).email.address = TextField::new("u@example.com");
     let effects = act(&mut state, WizardAction::SubmitEmail);
     complete(&mut state, &effects, discovered(vec![gmail_service()]));
     act(&mut state, WizardAction::SelectService);
@@ -697,12 +722,12 @@ fn a_display_name_may_contain_spaces() {
     act(&mut state, WizardAction::Edit(DialogEdit::Char('A')));
     act(&mut state, WizardAction::ToggleStorageMode);
     act(&mut state, WizardAction::Edit(DialogEdit::Char('B')));
-    assert_eq!(wizard(&state).display_name.value, "uA B");
+    assert_eq!(wizard(&state).credentials.display_name.value, "uA B");
 }
 
 /// Drives the wizard to the credentials screen (fields focused).
 fn drive_to_credentials(state: &mut AppState) {
-    wizard_mut(state).email = TextField::new("u@example.com");
+    wizard_mut(state).email.address = TextField::new("u@example.com");
     let effects = act(state, WizardAction::SubmitEmail);
     complete(state, &effects, discovered(vec![gmail_service()]));
     act(state, WizardAction::SelectService);

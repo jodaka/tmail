@@ -37,10 +37,10 @@ pub fn render(
         width: area.width.min(22),
         height: 1,
     };
-    if state.operations.foreground().is_some() {
+    if state.session.operations.foreground().is_some() {
         frame.render_widget(
             Paragraph::new(Span::styled(
-                super::spinner::frame(state.ticks),
+                super::spinner::frame(state.session.ticks),
                 Style::new().fg(theme.accent),
             )),
             brand_area,
@@ -69,7 +69,7 @@ pub fn render(
         height: 3,
     };
     if search_area.width >= 4 {
-        let focused = state.focus == crate::app::focus::Focus::SearchField;
+        let focused = state.session.focus == crate::app::focus::Focus::SearchField;
         let border_style = if focused {
             Style::new().fg(theme.accent)
         } else {
@@ -82,7 +82,7 @@ pub fn render(
             .border_set(symbols::border::ROUNDED)
             .border_style(border_style)
             .style(Style::new().bg(theme.background));
-        let query = &state.search_query;
+        let query = &state.session.search_query;
         let prompt = Span::styled("/", Style::new().fg(theme.dim));
         let text = if query.is_empty() && !focused {
             Span::styled(" Search mail", Style::new().fg(theme.dim))

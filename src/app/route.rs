@@ -41,11 +41,11 @@ pub enum Route {
     Search(SearchRoute),
     Message(MessageRoute),
     /// The built-in composer (plan §19 Phase 6). The draft data lives in
-    /// `AppState.composer`, so leaving pops the route but preserves the
+    /// `AppState.session.composer`, so leaving pops the route but preserves the
     /// draft for reopening.
     Composer,
     /// The account configuration wizard (ADR 0003): a full-screen route
-    /// owned by `AppState.wizard`. Background refreshes must not touch a
+    /// owned by `AppState.session.wizard`. Background refreshes must not touch a
     /// mailbox list while it is active — there is no account yet.
     Wizard,
 }

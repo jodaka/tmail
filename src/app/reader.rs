@@ -273,7 +273,7 @@ pub(crate) fn scroll_document(state: &AppState, width: usize) -> Rc<Vec<ReaderLi
     );
     let selected_chip = state.reader_attachment;
     let cached_hit = {
-        let cache = state.reader_doc.borrow();
+        let cache = state.caches.reader_doc.borrow();
         cache.as_ref().is_some_and(|cached| {
             cached.message_id == message.id
                 && cached.width == width
@@ -283,6 +283,7 @@ pub(crate) fn scroll_document(state: &AppState, width: usize) -> Rc<Vec<ReaderLi
     };
     if cached_hit {
         let lines = state
+            .caches
             .reader_doc
             .borrow()
             .as_ref()
@@ -291,7 +292,7 @@ pub(crate) fn scroll_document(state: &AppState, width: usize) -> Rc<Vec<ReaderLi
         return lines;
     }
     let lines = Rc::new(scroll_lines(state, width));
-    *state.reader_doc.borrow_mut() = Some(CachedReaderDoc {
+    *state.caches.reader_doc.borrow_mut() = Some(CachedReaderDoc {
         message_id: message.id.clone(),
         width,
         selected_chip,
@@ -419,12 +420,12 @@ mod tests {
                 part_id: 2,
             }],
         };
-        state.routes.push(Route::Message(MessageRoute {
+        state.session.routes.push(Route::Message(MessageRoute {
             mailbox_id: MailboxId(String::from("inbox")),
             summary,
         }));
         state.open_message = Loadable::Loaded(message);
-        state.focus = crate::app::focus::Focus::Reader;
+        state.session.focus = crate::app::focus::Focus::Reader;
         state
     }
 
@@ -496,7 +497,7 @@ mod tests {
             html_body: None,
             attachments: Vec::new(),
         };
-        state.routes.push(Route::Message(MessageRoute {
+        state.session.routes.push(Route::Message(MessageRoute {
             mailbox_id: MailboxId(String::from("inbox")),
             summary,
         }));
@@ -524,7 +525,7 @@ mod tests {
             )),
             attachments: Vec::new(),
         };
-        state.routes.push(Route::Message(MessageRoute {
+        state.session.routes.push(Route::Message(MessageRoute {
             mailbox_id: MailboxId(String::from("inbox")),
             summary,
         }));
@@ -572,7 +573,7 @@ mod tests {
             html_body: Some(String::from("<div>   </div>")),
             attachments: Vec::new(),
         };
-        state.routes.push(Route::Message(MessageRoute {
+        state.session.routes.push(Route::Message(MessageRoute {
             mailbox_id: MailboxId(String::from("inbox")),
             summary,
         }));
@@ -593,7 +594,7 @@ mod tests {
             html_body: Some(String::from("<div>   </div>")),
             attachments: Vec::new(),
         };
-        state.routes.push(Route::Message(MessageRoute {
+        state.session.routes.push(Route::Message(MessageRoute {
             mailbox_id: MailboxId(String::from("inbox")),
             summary,
         }));
@@ -609,7 +610,7 @@ mod tests {
     #[test]
     fn loading_and_failed_states_render() {
         let mut state = mock::mock_initial_state();
-        state.routes.push(Route::Message(MessageRoute {
+        state.session.routes.push(Route::Message(MessageRoute {
             mailbox_id: MailboxId(String::from("inbox")),
             summary: summary(),
         }));

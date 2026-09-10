@@ -48,14 +48,14 @@ fn intercept(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
     // while active: it intercepts every action — mailbox navigation,
     // warmup refreshes, modals — before anything else can react. Clock,
     // size, quit, and backend results stay live.
-    if state.wizard.is_some() {
+    if state.session.wizard.is_some() {
         return Some(wizard_reduce(state, action));
     }
     // A mouse click on a modal button must reach the modal path before the
     // interception swallows everything else (plan §9: a modal intercepts
     // all input; Phase 10.2 adds its buttons as clickable).
     if let Action::Click(target) = action
-        && state.overlay.is_some()
+        && state.session.overlay.is_some()
     {
         return Some(match target {
             ClickTarget::ErrorButton(button) => click_error_button(state, *button),
@@ -134,7 +134,7 @@ fn dispatch(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::Tick { now } => tick(state, **now),
         Action::Resize { width, height } => resize(state, *width, *height),
         Action::Quit => {
-            state.quit_requested = true;
+            state.session.quit_requested = true;
             Vec::new()
         }
     }
@@ -145,8 +145,10 @@ fn dispatch(state: &mut AppState, action: &Action) -> Vec<Effect> {
 /// sidebar focus inside compose mode is gated the same way: submitting
 /// cannot run over the composer, so the field must not strand focus there.
 fn open_search(state: &mut AppState) -> Vec<Effect> {
-    if state.focus != Focus::Composer && !matches!(state.active_route(), Some(Route::Composer)) {
-        state.focus = Focus::SearchField;
+    if state.session.focus != Focus::Composer
+        && !matches!(state.active_route(), Some(Route::Composer))
+    {
+        state.session.focus = Focus::SearchField;
     }
     Vec::new()
 }
@@ -159,8 +161,8 @@ fn open_search(state: &mut AppState) -> Vec<Effect> {
 /// a send of this draft is in flight (Phase 7.6) all editing is frozen:
 /// the bytes on the wire must stay what the user saw.
 fn composer_edit(state: &mut AppState, edit: &ComposerEdit) -> Vec<Effect> {
-    if state.focus == Focus::Composer
-        && let Some(composer) = state.composer.as_mut()
+    if state.session.focus == Focus::Composer
+        && let Some(composer) = state.session.composer.as_mut()
     {
         if composer.sending {
             tracing::debug!("composer edits frozen while sending");
@@ -174,7 +176,7 @@ fn composer_edit(state: &mut AppState, edit: &ComposerEdit) -> Vec<Effect> {
                 }
             };
             if content_changed {
-                composer.sync_draft(state.clock);
+                composer.sync_draft(state.session.clock);
             }
         }
     }
@@ -185,8 +187,8 @@ fn composer_edit(state: &mut AppState, edit: &ComposerEdit) -> Vec<Effect> {
 /// to the terminal (the reducer stays I/O-free). The status line names the
 /// mode so the state change is never silent.
 fn toggle_mouse_capture(state: &mut AppState) -> Vec<Effect> {
-    state.mouse_capture = !state.mouse_capture;
-    state.set_status(if state.mouse_capture {
+    state.settings.mouse_capture = !state.settings.mouse_capture;
+    state.set_status(if state.settings.mouse_capture {
         "Mouse capture on — hold Shift to select text · m toggles"
     } else {
         "Mouse capture off — text selection available · m toggles"
@@ -201,7 +203,7 @@ fn toggle_mouse_capture(state: &mut AppState) -> Vec<Effect> {
 /// theme switches (theme picker preview) can never show a stale style.
 fn sync_body_caret(state: &mut AppState) {
     let theme = state.active_theme();
-    if let Some(composer) = state.composer.as_mut() {
+    if let Some(composer) = state.session.composer.as_mut() {
         composer.sync_body_styles(&theme);
     }
 }
@@ -214,7 +216,7 @@ pub(crate) fn reduce_unwizarded(state: &mut AppState, action: &Action) -> Vec<Ef
         Action::Tick { now } => tick(state, **now),
         Action::Resize { width, height } => resize(state, *width, *height),
         Action::Quit => {
-            state.quit_requested = true;
+            state.session.quit_requested = true;
             Vec::new()
         }
         _ => Vec::new(),
@@ -222,8 +224,8 @@ pub(crate) fn reduce_unwizarded(state: &mut AppState, action: &Action) -> Vec<Ef
 }
 
 fn tick(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset>) -> Vec<Effect> {
-    state.ticks += 1;
-    state.clock = Some(now);
+    state.session.ticks += 1;
+    state.session.clock = Some(now);
     clear_expired_status(state, now);
     let mut effects = autosave_tick(state, now);
     effects.extend(auto_refresh_tick(state, now));
@@ -231,14 +233,16 @@ fn tick(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset>) -> Vec
 }
 
 fn resize(state: &mut AppState, width: u16, height: u16) -> Vec<Effect> {
-    state.size = (width, height);
+    state.session.size = (width, height);
     // Ticket kjfq: auto-sized pages track the terminal — the limit
     // is however many rows fit the list right now. A change re-loads
     // the visible page in the background (supersession collapses a
     // resize storm; the newest request wins) so the list refills.
     let mut effects = Vec::new();
-    if state.page_size_auto {
-        let visible = crate::view::layout::messages_visible(state.size, state.view_mode).max(1);
+    if state.settings.page_size_auto {
+        let visible =
+            crate::view::layout::messages_visible(state.session.size, state.settings.view_mode)
+                .max(1);
         if state.messages.limit != visible {
             state.messages.limit = visible;
             if !state.messages.items.is_empty() {
@@ -260,16 +264,16 @@ fn resize(state: &mut AppState, width: u16, height: u16) -> Vec<Effect> {
 /// window (`statusbar::render`); here it only leaves the state. The
 /// default `0` keeps a message until the next one replaces it.
 fn clear_expired_status(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset>) {
-    if state.status_timeout_seconds == 0 || state.status.message.is_none() {
+    if state.settings.status_timeout_seconds == 0 || state.session.status.message.is_none() {
         return;
     }
-    let Some(shown_at) = state.status.shown_at else {
+    let Some(shown_at) = state.session.status.shown_at else {
         return;
     };
     let elapsed = (now - shown_at).num_seconds().max(0) as u64;
-    if elapsed >= state.status_timeout_seconds {
-        state.status.message = None;
-        state.status.shown_at = None;
+    if elapsed >= state.settings.status_timeout_seconds {
+        state.session.status.message = None;
+        state.session.status.shown_at = None;
     }
 }
 
@@ -278,7 +282,7 @@ fn clear_expired_status(state: &mut AppState, now: chrono::DateTime<chrono::Fixe
 /// dialog likewise falls through for `BackendCompleted`: the pending
 /// validation result must land while the dialog is up.
 fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
-    match state.overlay {
+    match state.session.overlay {
         Some(Overlay::Error(_)) => Some(error_modal_reduce(state, action)),
         Some(Overlay::ConfirmDiscard(_)) => Some(discard_modal_reduce(state, action)),
         Some(Overlay::AttachmentExplorer(_)) => match action {
@@ -300,16 +304,16 @@ fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
 /// close keys — Esc, `?`, or `Ctrl+h` (whichever the user pressed) all
 /// close, restoring the focus underneath.
 fn help_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
-    let Some(Overlay::Help(dialog)) = state.overlay.take() else {
+    let Some(Overlay::Help(dialog)) = state.session.overlay.take() else {
         return Vec::new();
     };
     match action {
         Action::BackOrCancel | Action::OpenHelp | Action::Activate => {
-            state.focus = dialog.previous_focus;
+            state.session.focus = dialog.previous_focus;
         }
         _ => {
             // Swallowed: restore the dialog (everything else is inert).
-            state.overlay = Some(Overlay::Help(dialog));
+            state.session.overlay = Some(Overlay::Help(dialog));
         }
     }
     Vec::new()
@@ -319,9 +323,9 @@ fn help_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
 /// — wizard input is entirely its own — and not when another overlay is
 /// open (the modal path above keeps the existing one).
 fn open_help(state: &mut AppState) -> Vec<Effect> {
-    if state.wizard.is_some()
+    if state.session.wizard.is_some()
         || !matches!(
-            state.focus,
+            state.session.focus,
             Focus::MessageList
                 | Focus::Reader
                 | Focus::Sidebar
@@ -331,10 +335,10 @@ fn open_help(state: &mut AppState) -> Vec<Effect> {
     {
         return Vec::new();
     }
-    state.overlay = Some(Overlay::Help(HelpDialog {
-        previous_focus: state.focus,
+    state.session.overlay = Some(Overlay::Help(HelpDialog {
+        previous_focus: state.session.focus,
     }));
-    state.focus = Focus::Help;
+    state.session.focus = Focus::Help;
     Vec::new()
 }
 
@@ -342,16 +346,19 @@ fn open_help(state: &mut AppState) -> Vec<Effect> {
 fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
     // Scroll budget from the same layout math the renderer uses, so the
     // reducer and the drawn modal always agree on the clamp.
-    let (max_scroll, viewport) = match &state.overlay {
+    let (max_scroll, viewport) = match &state.session.overlay {
         Some(Overlay::Error(dialog)) => {
-            let layout =
-                crate::view::overlay::error_modal_layout(state.size, dialog.code, dialog.ambiguous);
+            let layout = crate::view::overlay::error_modal_layout(
+                state.session.size,
+                dialog.code,
+                dialog.ambiguous,
+            );
             (
                 crate::view::overlay::error_modal_max_scroll(
                     &dialog.detail,
                     dialog.code,
                     dialog.ambiguous,
-                    state.size,
+                    state.session.size,
                 ),
                 layout.viewport_lines,
             )
@@ -360,7 +367,7 @@ fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         // practice (discard_modal_reduce handles its own overlay).
         _ => (0, 1),
     };
-    let Some(Overlay::Error(dialog)) = state.overlay.as_mut() else {
+    let Some(Overlay::Error(dialog)) = state.session.overlay.as_mut() else {
         return Vec::new();
     };
     match action {
@@ -372,8 +379,8 @@ fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::FocusPrevious => dialog.button = dialog.button.previous(),
         Action::BackOrCancel | Action::DismissError => {
             let focus = dialog.previous_focus;
-            state.overlay = None;
-            state.focus = focus;
+            state.session.overlay = None;
+            state.session.focus = focus;
         }
         Action::Activate | Action::RetryError => {
             // `RetryError` always retries; `Enter` acts on the focused
@@ -383,8 +390,8 @@ fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
             let retry = dialog.retry.clone().filter(|_| wants_retry);
             let focus = dialog.previous_focus;
             if let Some(spec) = retry {
-                state.overlay = None;
-                state.focus = focus;
+                state.session.overlay = None;
+                state.session.focus = focus;
                 // Retrying replays the equivalent typed intent under a
                 // *new* operation id (plan §12; acceptance: new id). The
                 // loading placeholders reset so no stale failure text
@@ -401,14 +408,16 @@ fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
                         // this draft"), not the failed revision: retry
                         // materializes the newest revision so retrying
                         // after further edits never pushes stale content.
-                        if let Some(composer) = state.composer.as_mut()
+                        if let Some(composer) = state.session.composer.as_mut()
                             && composer.draft.local_id.as_ref() == Some(&draft.local_id)
-                            && let Some(now) = state.clock
+                            && let Some(now) = state.session.clock
                         {
                             let fresh = composer.draft.start_save(now);
-                            return vec![state.operations.start(OperationKind::SaveDraft {
-                                draft: Box::new(fresh),
-                            })];
+                            return vec![state.session.operations.start(
+                                OperationKind::SaveDraft {
+                                    draft: Box::new(fresh),
+                                },
+                            )];
                         }
                         // No live draft (or no clock yet): replay the
                         // stored snapshot unchanged — the safe direction
@@ -419,18 +428,18 @@ fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
                         // verbatim (plan §12: the intent is replayed
                         // unchanged, under a new id). The composer freezes
                         // again while the replay runs.
-                        if let Some(composer) = state.composer.as_mut() {
+                        if let Some(composer) = state.session.composer.as_mut() {
                             composer.sending = true;
                         }
                     }
                     _ => {}
                 }
-                return vec![state.operations.start(spec.kind)];
+                return vec![state.session.operations.start(spec.kind)];
             }
             if !wants_retry {
                 // Enter on Dismiss: close without new work.
-                state.overlay = None;
-                state.focus = focus;
+                state.session.overlay = None;
+                state.session.focus = focus;
             }
             // `RetryError` on a non-retryable failure keeps the modal open.
             return Vec::new();
@@ -444,7 +453,7 @@ fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
 /// Confirm-discard dialog handling (plan §14). Every input is swallowed
 /// except button switching, keep (Esc/Keep button), and confirm.
 fn discard_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
-    let Some(Overlay::ConfirmDiscard(dialog)) = state.overlay.as_mut() else {
+    let Some(Overlay::ConfirmDiscard(dialog)) = state.session.overlay.as_mut() else {
         return Vec::new();
     };
     match action {
@@ -453,17 +462,17 @@ fn discard_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
         // Esc keeps the draft: closing the dialog is not a discard.
         Action::BackOrCancel => {
             let focus = dialog.previous_focus;
-            state.overlay = None;
-            state.focus = focus;
+            state.session.overlay = None;
+            state.session.focus = focus;
         }
         Action::Activate => {
             let confirm = dialog.button == ConfirmButton::Discard;
             let focus = dialog.previous_focus;
-            let dialog = state.overlay.take().expect("dialog open");
+            let dialog = state.session.overlay.take().expect("dialog open");
             let Overlay::ConfirmDiscard(dialog) = dialog else {
                 unreachable!("checked above")
             };
-            state.focus = focus;
+            state.session.focus = focus;
             if confirm {
                 return confirm_discard(state, dialog.draft);
             }
@@ -479,14 +488,14 @@ fn discard_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
 /// operation. Any in-flight save of the same draft is cancelled first so
 /// it cannot resurrect the draft after the sweep ran.
 fn confirm_discard(state: &mut AppState, draft: crate::domain::DraftSnapshot) -> Vec<Effect> {
-    state.composer = None;
+    state.session.composer = None;
     if let Some(Route::Composer) = state.active_route() {
-        state.routes.pop();
-        state.focus = Focus::MessageList;
+        state.session.routes.pop();
+        state.session.focus = Focus::MessageList;
     }
-    state.operations.cancel_draft_saves(&draft.local_id);
+    state.session.operations.cancel_draft_saves(&draft.local_id);
     state.set_status("Draft discarded");
-    vec![state.operations.start(OperationKind::DeleteDraft {
+    vec![state.session.operations.start(OperationKind::DeleteDraft {
         draft: Box::new(draft),
         reason: DraftRemovalReason::Discard,
     })]
@@ -499,7 +508,7 @@ fn confirm_discard(state: &mut AppState, draft: crate::domain::DraftSnapshot) ->
 /// selected file for backend validation; Esc cancels. Rejections keep
 /// the dialog open with the detail inline.
 fn attachment_dialog_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
-    let Some(Overlay::AttachmentExplorer(dialog)) = state.overlay.as_mut() else {
+    let Some(Overlay::AttachmentExplorer(dialog)) = state.session.overlay.as_mut() else {
         return Vec::new();
     };
     // Directory changes and submissions are backend work: the dialog is
@@ -529,6 +538,7 @@ fn attachment_dialog_reduce(state: &mut AppState, action: &Action) -> Vec<Effect
                     dialog.error = None;
                     vec![
                         state
+                            .session
                             .operations
                             .start(OperationKind::ListAttachmentFiles { path: Some(path) }),
                     ]
@@ -548,6 +558,7 @@ fn attachment_dialog_reduce(state: &mut AppState, action: &Action) -> Vec<Effect
                         dialog.error = None;
                         vec![
                             state
+                                .session
                                 .operations
                                 .start(OperationKind::ListAttachmentFiles { path: Some(dir) }),
                         ]
@@ -558,6 +569,7 @@ fn attachment_dialog_reduce(state: &mut AppState, action: &Action) -> Vec<Effect
                         dialog.error = None;
                         vec![
                             state
+                                .session
                                 .operations
                                 .start(OperationKind::ReadAttachment { path: file }),
                         ]
@@ -569,8 +581,8 @@ fn attachment_dialog_reduce(state: &mut AppState, action: &Action) -> Vec<Effect
         // Esc closes without attaching (plan §10: Esc cancels overlays).
         Action::BackOrCancel => {
             let focus = dialog.previous_focus;
-            state.overlay = None;
-            state.focus = focus;
+            state.session.overlay = None;
+            state.session.focus = focus;
             Vec::new()
         }
         // Everything else is swallowed while the dialog is open.
@@ -582,28 +594,31 @@ fn attachment_dialog_reduce(state: &mut AppState, action: &Action) -> Vec<Effect
 /// palette — Enter is a no-op until the user moves, and the preview begins
 /// from where the user already is. No-op without a theme list.
 fn open_theme_picker(state: &mut AppState) -> Vec<Effect> {
-    if state.themes.is_empty() {
+    if state.settings.themes.is_empty() {
         return Vec::new();
     }
-    let cursor = state.theme_index.min(state.themes.len() - 1);
+    let cursor = state
+        .settings
+        .theme_index
+        .min(state.settings.themes.len() - 1);
     // The scroll window opens with the cursor row on screen: a long theme
     // list must not hide the palette the user is currently on.
-    let visible = crate::view::overlay::picker_visible_rows(state.size).max(1);
+    let visible = crate::view::overlay::picker_visible_rows(state.session.size).max(1);
     let scroll = if cursor >= visible {
         (cursor + 1 - visible).min(crate::view::overlay::picker_max_scroll(
-            state.themes.len(),
-            state.size,
+            state.settings.themes.len(),
+            state.session.size,
         ))
     } else {
         0
     };
-    state.overlay = Some(Overlay::ThemePicker(ThemePickerDialog {
-        original: state.theme_index,
+    state.session.overlay = Some(Overlay::ThemePicker(ThemePickerDialog {
+        original: state.settings.theme_index,
         cursor,
         scroll,
-        previous_focus: state.focus,
+        previous_focus: state.session.focus,
     }));
-    state.focus = Focus::ThemePicker;
+    state.session.focus = Focus::ThemePicker;
     Vec::new()
 }
 
@@ -615,10 +630,10 @@ fn open_theme_picker(state: &mut AppState) -> Vec<Effect> {
 fn theme_picker_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
     // Viewport math comes from the renderer's layout, so the clamp the
     // reducer computes always matches what is drawn.
-    let len = state.themes.len();
-    let visible = crate::view::overlay::picker_visible_rows(state.size).max(1);
-    let max_scroll = crate::view::overlay::picker_max_scroll(len, state.size);
-    let Some(Overlay::ThemePicker(dialog)) = state.overlay.as_mut() else {
+    let len = state.settings.themes.len();
+    let visible = crate::view::overlay::picker_visible_rows(state.session.size).max(1);
+    let max_scroll = crate::view::overlay::picker_max_scroll(len, state.session.size);
+    let Some(Overlay::ThemePicker(dialog)) = state.session.overlay.as_mut() else {
         return Vec::new();
     };
     match action {
@@ -638,26 +653,27 @@ fn theme_picker_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
                 dialog.scroll
             };
             // The highlighted theme is the preview: it applies at once.
-            state.theme_index = next;
+            state.settings.theme_index = next;
         }
         Action::BackOrCancel => {
             // Esc never changes the theme: the preview is undone by
             // restoring the index the picker opened with.
-            state.theme_index = dialog.original.min(len.saturating_sub(1));
+            state.settings.theme_index = dialog.original.min(len.saturating_sub(1));
             let focus = dialog.previous_focus;
-            state.overlay = None;
-            state.focus = focus;
+            state.session.overlay = None;
+            state.session.focus = focus;
         }
         Action::Activate => {
             let name = state
+                .settings
                 .themes
-                .get(state.theme_index)
+                .get(state.settings.theme_index)
                 .map(|(name, _)| name.as_str())
                 .unwrap_or("default")
                 .to_owned();
             let focus = dialog.previous_focus;
-            state.overlay = None;
-            state.focus = focus;
+            state.session.overlay = None;
+            state.session.focus = focus;
             state.set_status(format!("Theme: {name}"));
         }
         _ => {}
@@ -668,16 +684,16 @@ fn theme_picker_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
 /// Open the Retry/Dismiss modal for a failed operation (plan §12).
 fn open_error_modal(state: &mut AppState, failure: &OperationFailure) -> Vec<Effect> {
     tracing::warn!(code = ?failure.code, detail = %failure.detail, "operation failed");
-    state.overlay = Some(Overlay::Error(ErrorDialog {
+    state.session.overlay = Some(Overlay::Error(ErrorDialog {
         code: failure.code,
         detail: failure.detail.clone(),
         retry: failure.retry.clone(),
         ambiguous: failure.ambiguous,
         scroll: 0,
         button: ModalButton::Dismiss,
-        previous_focus: state.focus,
+        previous_focus: state.session.focus,
     }));
-    state.focus = Focus::ErrorModal;
+    state.session.focus = Focus::ErrorModal;
     state.set_status("Operation failed");
     Vec::new()
 }
@@ -708,7 +724,7 @@ fn click(state: &mut AppState, target: ClickTarget) -> Vec<Effect> {
             // list first so the bulk path (not the reader path) applies,
             // then run the advertised action's exact code path.
             if state.selection_active() {
-                state.focus = Focus::MessageList;
+                state.session.focus = Focus::MessageList;
             }
             match op {
                 BulkOp::Trash => reduce(state, &Action::Trash),
@@ -723,7 +739,7 @@ fn click(state: &mut AppState, target: ClickTarget) -> Vec<Effect> {
 /// Click a modal button: focus it (the same state Tab produces), then run
 /// the same path Enter would (plan §12).
 fn click_error_button(state: &mut AppState, button: ModalButton) -> Vec<Effect> {
-    if let Some(Overlay::Error(dialog)) = state.overlay.as_mut() {
+    if let Some(Overlay::Error(dialog)) = state.session.overlay.as_mut() {
         // A dimmed Retry button (failure without a retry intent) does
         // nothing, like a Retry that only `Tab` could reach.
         if button == ModalButton::Retry && dialog.retry.is_none() {
@@ -740,7 +756,7 @@ fn click_error_button(state: &mut AppState, button: ModalButton) -> Vec<Effect> 
 /// Click a confirm-discard button (plan §14): focus, then the same
 /// confirm/keep path Enter takes.
 fn click_confirm_button(state: &mut AppState, button: ConfirmButton) -> Vec<Effect> {
-    if let Some(Overlay::ConfirmDiscard(dialog)) = state.overlay.as_mut() {
+    if let Some(Overlay::ConfirmDiscard(dialog)) = state.session.overlay.as_mut() {
         dialog.button = button;
     }
     reduce(state, &Action::Activate)
@@ -754,7 +770,7 @@ fn click_mailbox(state: &mut AppState, index: usize) -> Vec<Effect> {
     if index >= count {
         return Vec::new();
     }
-    state.focus = Focus::Sidebar;
+    state.session.focus = Focus::Sidebar;
     if index == state.mailbox_selection {
         return match state.selected_mailbox().cloned() {
             Some(mailbox) => switch_mailbox(state, &mailbox.id),
@@ -771,7 +787,7 @@ fn click_message_row(state: &mut AppState, index: usize) -> Vec<Effect> {
     if index >= state.messages.items.len() {
         return Vec::new();
     }
-    state.focus = Focus::MessageList;
+    state.session.focus = Focus::MessageList;
     if index == state.selection {
         return match state.selected_message().cloned() {
             Some(summary) => open_selected(state, summary),
@@ -798,7 +814,7 @@ fn click_reader_attachment(state: &mut AppState, index: usize) -> Vec<Effect> {
     if index >= count {
         return Vec::new();
     }
-    state.focus = Focus::Reader;
+    state.session.focus = Focus::Reader;
     if state.reader_attachment.unwrap_or(0) == index {
         return reduce(state, &Action::OpenAttachment);
     }
@@ -814,13 +830,14 @@ fn click_composer_field(state: &mut AppState, field: ComposerField) -> Vec<Effec
         return Vec::new();
     }
     let focused = state
+        .session
         .composer
         .as_mut()
         .is_some_and(|composer| composer.focus_field(field));
     if !focused {
         return Vec::new();
     }
-    state.focus = Focus::Composer;
+    state.session.focus = Focus::Composer;
     if field.accepts_text() {
         Vec::new()
     } else {
@@ -856,7 +873,7 @@ fn open_reply_all(state: &mut AppState) -> Vec<Effect> {
             state.set_status("A draft is already open — send or discard it first");
             return Vec::new();
         }
-        let own = state.account_email.clone();
+        let own = state.settings.account_email.clone();
         let seed = crate::domain::reply::seed_reply(
             message,
             crate::domain::ReplyKind::ReplyAll,
@@ -886,7 +903,7 @@ fn open_forward(state: &mut AppState) -> Vec<Effect> {
 /// message.
 fn seed_from_list(state: &mut AppState, kind: crate::app::operation::SeedKind) -> Vec<Effect> {
     // Same target rule as every list/reader message action.
-    let locator = match state.focus {
+    let locator = match state.session.focus {
         Focus::MessageList | Focus::Reader => state.action_target(),
         _ => None,
     };
@@ -904,6 +921,7 @@ fn seed_from_list(state: &mut AppState, kind: crate::app::operation::SeedKind) -
     });
     vec![
         state
+            .session
             .operations
             .start(OperationKind::SeedComposer { locator, kind }),
     ]
@@ -931,7 +949,7 @@ fn install_seed(
             crate::domain::reply::seed_reply(
                 &message,
                 crate::domain::ReplyKind::ReplyAll,
-                state.account_email.as_deref(),
+                state.settings.account_email.as_deref(),
             ),
             "Reply-all draft ready",
         ),
@@ -970,11 +988,11 @@ fn open_seeded_composer(
 /// the current route. The one-composer rule lives with the callers: this
 /// installs unconditionally.
 fn install_composer_draft(state: &mut AppState, draft: crate::domain::Draft, status: &str) {
-    state.composer = Some(ComposerState::from_draft(draft));
+    state.session.composer = Some(ComposerState::from_draft(draft));
     if !matches!(state.active_route(), Some(Route::Composer)) {
-        state.routes.push(Route::Composer);
+        state.session.routes.push(Route::Composer);
     }
-    state.focus = Focus::Composer;
+    state.session.focus = Focus::Composer;
     state.set_status(status);
 }
 
@@ -984,7 +1002,7 @@ fn install_composer_draft(state: &mut AppState, draft: crate::domain::Draft, sta
 /// Shortcuts are list/reader context (plan §10); they never fire from the
 /// sidebar or search field.
 fn message_target(state: &AppState) -> Option<MessageLocator> {
-    match state.focus {
+    match state.session.focus {
         Focus::MessageList | Focus::Reader => state.action_target(),
         _ => None,
     }
@@ -995,7 +1013,7 @@ fn message_target(state: &AppState) -> Option<MessageLocator> {
 /// Reader shortcuts keep acting on the open message even while a selection
 /// exists — the selection belongs to the list behind the reader.
 fn bulk_targets(state: &AppState) -> Option<Vec<MessageLocator>> {
-    if state.focus != Focus::MessageList || !state.selection_active() {
+    if state.session.focus != Focus::MessageList || !state.selection_active() {
         return None;
     }
     let locators = state.selected_locators();
@@ -1058,11 +1076,11 @@ fn toggle_star(state: &mut AppState) -> Vec<Effect> {
     let Some(locator) = message_target(state) else {
         return Vec::new();
     };
-    let starred = match state.focus {
+    let starred = match state.session.focus {
         Focus::Reader => state.open_summary().is_some_and(|s| s.is_starred),
         _ => state.selected_message().is_some_and(|s| s.is_starred),
     };
-    vec![state.operations.start(OperationKind::SetStarred {
+    vec![state.session.operations.start(OperationKind::SetStarred {
         locator,
         starred: !starred,
     })]
@@ -1086,16 +1104,16 @@ fn bulk_or_single(
         state.set_status(bulk.replace("{count}", &locators.len().to_string()));
         return locators
             .into_iter()
-            .map(|locator| state.operations.start(make(locator)))
+            .map(|locator| state.session.operations.start(make(locator)))
             .collect();
     }
-    if list_only && state.focus != Focus::MessageList {
+    if list_only && state.session.focus != Focus::MessageList {
         return Vec::new();
     }
     match message_target(state) {
         Some(locator) => {
             state.set_status(single);
-            vec![state.operations.start(make(locator))]
+            vec![state.session.operations.start(make(locator))]
         }
         None => Vec::new(),
     }
@@ -1108,7 +1126,7 @@ fn bulk_or_single(
 /// can be marked by pressing Space repeatedly. The mark rides the backend
 /// id, so it survives paging and refreshes while the row stays listed.
 fn toggle_selected(state: &mut AppState) -> Vec<Effect> {
-    if state.focus != Focus::MessageList {
+    if state.session.focus != Focus::MessageList {
         return Vec::new();
     }
     let Some(summary) = state.selected_message() else {
@@ -1158,7 +1176,7 @@ fn toggle_select_all(state: &mut AppState) -> Vec<Effect> {
 /// (open) reuses a path saved this session or saves first, then chains
 /// the platform opener (Phase 8.5).
 fn save_selected_attachment(state: &mut AppState, open_after: bool) -> Vec<Effect> {
-    if state.focus != Focus::Reader {
+    if state.session.focus != Focus::Reader {
         tracing::debug!("save attachment ignored outside the reader");
         return Vec::new();
     }
@@ -1179,10 +1197,15 @@ fn save_selected_attachment(state: &mut AppState, open_after: bool) -> Vec<Effec
         dir: None,
     };
     state.set_status("Saving attachment…");
-    vec![state.operations.start(OperationKind::SaveAttachment {
-        request,
-        open_after,
-    })]
+    vec![
+        state
+            .session
+            .operations
+            .start(OperationKind::SaveAttachment {
+                request,
+                open_after,
+            }),
+    ]
 }
 
 /// Open the selected reader attachment with the platform handler (plan
@@ -1190,7 +1213,7 @@ fn save_selected_attachment(state: &mut AppState, open_after: bool) -> Vec<Effec
 /// landed (no duplicate downloads); otherwise the attachment is saved
 /// first and the opener chains on the confirmed path.
 fn open_selected_attachment(state: &mut AppState) -> Vec<Effect> {
-    if state.focus != Focus::Reader {
+    if state.session.focus != Focus::Reader {
         tracing::debug!("open attachment ignored outside the reader");
         return Vec::new();
     }
@@ -1201,9 +1224,14 @@ fn open_selected_attachment(state: &mut AppState) -> Vec<Effect> {
         return Vec::new();
     };
     let key = (message.id.clone(), attachment.part_id);
-    if let Some(path) = state.saved_attachments.get(&key).cloned() {
+    if let Some(path) = state.caches.saved_attachments.get(&key).cloned() {
         tracing::debug!(path = %path.display(), "opening previously saved attachment");
-        return vec![state.operations.start(OperationKind::OpenPath { path })];
+        return vec![
+            state
+                .session
+                .operations
+                .start(OperationKind::OpenPath { path }),
+        ];
     }
     save_selected_attachment(state, true)
 }
@@ -1219,6 +1247,7 @@ fn attachment_saved(state: &mut AppState, path: &std::path::Path) -> Vec<Effect>
         return Vec::new();
     };
     state
+        .caches
         .saved_attachments
         .insert((message.id.clone(), attachment.part_id), path.to_path_buf());
     state.set_status(format!("Saved to {}", path.display()));
@@ -1238,14 +1267,14 @@ fn send_from_composer(state: &mut AppState) -> Vec<Effect> {
         tracing::debug!("send ignored outside the composer");
         return Vec::new();
     }
-    let Some(composer) = state.composer.as_ref() else {
+    let Some(composer) = state.session.composer.as_ref() else {
         return Vec::new();
     };
     if composer.sending {
         tracing::debug!("send ignored: one is already in flight");
         return Vec::new();
     }
-    if state.operations.is_sending() {
+    if state.session.operations.is_sending() {
         state.set_status("A send is already in progress");
         return Vec::new();
     }
@@ -1280,11 +1309,11 @@ fn send_from_composer(state: &mut AppState) -> Vec<Effect> {
             return Vec::new();
         }
     };
-    if let Some(composer) = state.composer.as_mut() {
+    if let Some(composer) = state.session.composer.as_mut() {
         composer.sending = true;
     }
     state.set_status("Sending…");
-    vec![state.operations.start(OperationKind::Send {
+    vec![state.session.operations.start(OperationKind::Send {
         message: Box::new(message),
     })]
 }
@@ -1304,7 +1333,7 @@ fn send_completed(
         other => {
             // The draft stays exactly as it was, editable again; the modal
             // carries the typed retry intent.
-            if let Some(composer) = state.composer.as_mut() {
+            if let Some(composer) = state.session.composer.as_mut() {
                 composer.sending = false;
             }
             let failure = OperationFailure {
@@ -1349,15 +1378,16 @@ fn confirm_send(state: &mut AppState) -> Vec<Effect> {
     // The composer may have been left mid-send (Esc saves/leaves); the
     // draft data — with its stable ids — is what gets resolved here.
     let snapshot = state
+        .session
         .composer
         .take()
         .map(|composer| composer.draft.snapshot());
     if matches!(state.active_route(), Some(Route::Composer)) {
-        state.routes.pop();
-        state.focus = Focus::MessageList;
+        state.session.routes.pop();
+        state.session.focus = Focus::MessageList;
     }
     match snapshot {
-        Some(snapshot) => vec![state.operations.start(OperationKind::DeleteDraft {
+        Some(snapshot) => vec![state.session.operations.start(OperationKind::DeleteDraft {
             draft: Box::new(snapshot),
             reason: DraftRemovalReason::Sent,
         })],
@@ -1378,10 +1408,10 @@ fn confirm_send(state: &mut AppState) -> Vec<Effect> {
 /// (Phase 9.6).
 fn list_failure(state: &mut AppState, failure: &OperationFailure, origin: OperationOrigin) {
     if origin == OperationOrigin::Background {
-        if state.last_background_error.as_deref() != Some(failure.detail.as_str()) {
+        if state.session.last_background_error.as_deref() != Some(failure.detail.as_str()) {
             tracing::info!(detail = %failure.detail, "background refresh failed");
             state.set_status("Refresh failed — the timer will retry");
-            state.last_background_error = Some(failure.detail.clone());
+            state.session.last_background_error = Some(failure.detail.clone());
         } else {
             tracing::debug!("identical background refresh failure; status unchanged");
         }
@@ -1405,7 +1435,7 @@ fn unexpected_payload(id: OperationId, kind: &str) -> Vec<Effect> {
 }
 
 fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
-    let Some(op) = state.operations.get(result.id) else {
+    let Some(op) = state.session.operations.get(result.id) else {
         tracing::debug!(id = %result.id, "dropping result for unknown or cancelled operation");
         return Vec::new();
     };
@@ -1414,7 +1444,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
     // The result is consumed exactly once before dispatch: a handler's
     // currency check reads only routes and state, and the operation must
     // not count as in flight while its outcome is applied.
-    state.operations.finish(result.id);
+    state.session.operations.finish(result.id);
     match &kind {
         OperationKind::LoadMailboxes => complete_load_mailboxes(state, result),
         OperationKind::LoadPage(request) => complete_load_page(state, request, origin, result),
@@ -1470,7 +1500,7 @@ fn complete_load_mailboxes(state: &mut AppState, result: &OperationResult) -> Ve
         Ok(OperationOutcome::Mailboxes(mailboxes)) => {
             // Ticket haeb: every successful listing refreshes the cached
             // sidebar.
-            if let Some(cache) = &state.page_cache {
+            if let Some(cache) = &state.caches.page_cache {
                 cache.store_mailboxes(mailboxes);
             }
             mailboxes_loaded(state, mailboxes.clone())
@@ -1513,12 +1543,12 @@ fn complete_load_page(
     }
     match &result.outcome {
         Ok(OperationOutcome::Page(page)) => {
-            state.last_background_error = None;
+            state.session.last_background_error = None;
             let effects = apply_page(state, page.clone());
             // Ticket haeb: every successful load refreshes the cached page —
             // with the previews applied (ticket wxtx), so the next cold
             // start renders rows without re-fetching anything.
-            if let Some(cache) = &state.page_cache {
+            if let Some(cache) = &state.caches.page_cache {
                 cache.store(&request.mailbox_id, None, &state.messages);
             }
             effects
@@ -1561,11 +1591,11 @@ fn complete_search(
     }
     match &result.outcome {
         Ok(OperationOutcome::Page(page)) => {
-            state.last_background_error = None;
+            state.session.last_background_error = None;
             let effects = apply_page(state, page.clone());
             // Ticket haeb: search results cache under their query — with
             // the previews applied (ticket wxtx).
-            if let Some(cache) = &state.page_cache {
+            if let Some(cache) = &state.caches.page_cache {
                 cache.store(&request.mailbox_id, Some(&request.query), &state.messages);
             }
             effects
@@ -1757,7 +1787,7 @@ fn complete_send(
         Ok(OperationOutcome::SendOutcome(outcome)) => send_completed(state, outcome, message),
         Ok(_) => unexpected_payload(result.id, "send"),
         Err(failure) => {
-            if let Some(composer) = state.composer.as_mut() {
+            if let Some(composer) = state.session.composer.as_mut() {
                 composer.sending = false;
             }
             state.set_status("Send failed");
@@ -1780,6 +1810,7 @@ fn complete_save_attachment(
             if open_after {
                 return vec![
                     state
+                        .session
                         .operations
                         .start(OperationKind::OpenPath { path: path.clone() }),
                 ];
@@ -1812,7 +1843,7 @@ fn drafts_restored(state: &mut AppState, drafts: &[crate::domain::RestoredDraft]
     let Some(restored) = drafts.iter().max_by_key(|entry| entry.draft.revision) else {
         return Vec::new();
     };
-    if state.composer.is_some() {
+    if state.session.composer.is_some() {
         tracing::debug!("draft restore skipped: a composer draft already exists");
         return Vec::new();
     }
@@ -1835,7 +1866,7 @@ fn drafts_restored(state: &mut AppState, drafts: &[crate::domain::RestoredDraft]
         revision: snapshot.revision,
         saved_revision: restored.saved_revision,
         saved_at: None,
-        last_edit_at: state.clock,
+        last_edit_at: state.session.clock,
         save,
         local_id: Some(snapshot.local_id),
         message_id: snapshot.message_id,
@@ -1849,7 +1880,7 @@ fn drafts_restored(state: &mut AppState, drafts: &[crate::domain::RestoredDraft]
         saved_revision = draft.saved_revision,
         "draft restored from journal"
     );
-    state.composer = Some(ComposerState::from_draft(draft));
+    state.session.composer = Some(ComposerState::from_draft(draft));
     Vec::new()
 }
 
@@ -1866,6 +1897,7 @@ fn save_draft_completed(
     result: &OperationResult,
 ) -> Vec<Effect> {
     let current = state
+        .session
         .composer
         .as_ref()
         .is_some_and(|c| c.draft.local_id.as_ref() == Some(&snapshot.local_id));
@@ -1876,13 +1908,14 @@ fn save_draft_completed(
         );
         return Vec::new();
     }
-    let composer = state.composer.as_mut().expect("checked above");
+    let composer = state.session.composer.as_mut().expect("checked above");
     match &result.outcome {
         Ok(OperationOutcome::DraftSaved { remote_id }) => {
-            let chain =
-                composer
-                    .draft
-                    .confirm_saved(snapshot.revision, remote_id.clone(), state.clock);
+            let chain = composer.draft.confirm_saved(
+                snapshot.revision,
+                remote_id.clone(),
+                state.session.clock,
+            );
             if chain {
                 // Remain dirty and save again (plan §14): one follow-up
                 // save covering the newest revision. It supersedes nothing
@@ -1919,7 +1952,7 @@ fn attachment_validated(
     path: &std::path::Path,
     result: &OperationResult,
 ) -> Vec<Effect> {
-    let Some(Overlay::AttachmentExplorer(dialog)) = state.overlay.as_ref() else {
+    let Some(Overlay::AttachmentExplorer(dialog)) = state.session.overlay.as_ref() else {
         tracing::debug!(id = %result.id, "dropping attachment validation for a closed dialog");
         return Vec::new();
     };
@@ -1934,9 +1967,9 @@ fn attachment_validated(
         Ok(OperationOutcome::Attachment(att)) => {
             let att = att.clone();
             let focus = dialog.previous_focus;
-            state.overlay = None;
-            state.focus = focus;
-            let Some(composer) = state.composer.as_mut() else {
+            state.session.overlay = None;
+            state.session.focus = focus;
+            let Some(composer) = state.session.composer.as_mut() else {
                 tracing::debug!("validated attachment ignored: no composer");
                 return Vec::new();
             };
@@ -1947,7 +1980,7 @@ fn attachment_validated(
                 composer.field = ComposerField::Attachment(last);
                 // Attaching is a content edit: the revision bumps and the
                 // autosave journal carries the new attachment list.
-                composer.draft.note_edit(state.clock);
+                composer.draft.note_edit(state.session.clock);
                 state.set_status(format!(
                     "Attached {name} ({})",
                     crate::view::text::human_size(size)
@@ -1961,7 +1994,7 @@ fn attachment_validated(
             // Detailed and retryable in place: the chooser stays open with
             // the same selection (plan §15 acceptance, ticket 95x0).
             let detail = failure.detail.clone();
-            if let Some(Overlay::AttachmentExplorer(dialog)) = state.overlay.as_mut() {
+            if let Some(Overlay::AttachmentExplorer(dialog)) = state.session.overlay.as_mut() {
                 dialog.error = Some(detail);
             }
             Vec::new()
@@ -1976,7 +2009,7 @@ fn attachment_validated(
 /// keeps the dialog open with the detail inline (navigation stays free,
 /// so the user can head elsewhere or Esc).
 fn attachment_listing_ready(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
-    if !matches!(state.overlay, Some(Overlay::AttachmentExplorer(_))) {
+    if !matches!(state.session.overlay, Some(Overlay::AttachmentExplorer(_))) {
         tracing::debug!(id = %result.id, "dropping directory listing for a closed dialog");
         return Vec::new();
     }
@@ -1987,7 +2020,7 @@ fn attachment_listing_ready(state: &mut AppState, result: &OperationResult) -> V
             // cannot happen while a modal is up, so this sticks.
             let theme = state.active_theme();
             explorer.set_theme(theme.explorer_theme());
-            if let Some(Overlay::AttachmentExplorer(dialog)) = state.overlay.as_mut() {
+            if let Some(Overlay::AttachmentExplorer(dialog)) = state.session.overlay.as_mut() {
                 dialog.explorer = Some(explorer);
                 dialog.listing = false;
                 dialog.error = None;
@@ -1996,7 +2029,7 @@ fn attachment_listing_ready(state: &mut AppState, result: &OperationResult) -> V
         }
         Err(failure) => {
             let detail = failure.detail.clone();
-            if let Some(Overlay::AttachmentExplorer(dialog)) = state.overlay.as_mut() {
+            if let Some(Overlay::AttachmentExplorer(dialog)) = state.session.overlay.as_mut() {
                 dialog.listing = false;
                 dialog.error = Some(detail);
             }
@@ -2017,7 +2050,7 @@ fn apply_flag(state: &mut AppState, locator: &MessageLocator, change: FlagChange
                 .as_ref()
                 .is_some_and(|mid| summary.message_id.as_ref() == Some(mid))
     };
-    if let Some(Route::Message(route)) = state.routes.last_mut()
+    if let Some(Route::Message(route)) = state.session.routes.last_mut()
         && matches(&route.summary)
     {
         match change {
@@ -2076,7 +2109,7 @@ fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
     let message_id = message.id.clone();
     let has_attachments = !message.attachments.is_empty();
     // Ticket haeb: cache the viewed message (bounded by [tmail.cache]).
-    if let Some(cache) = &state.page_cache
+    if let Some(cache) = &state.caches.page_cache
         && let Some(Route::Message(route)) = state.active_route()
     {
         cache.store_message(&route.mailbox_id, &message_id.0, &message);
@@ -2089,8 +2122,11 @@ fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
     if let Some(snippet) = snippet {
         // The session keeps the preview: page loads and refreshes restore
         // it instead of re-fetching the message (ticket wxtx).
-        state.previews.insert(message_id.clone(), snippet.clone());
-        if let Some(Route::Message(route)) = state.routes.last_mut()
+        state
+            .caches
+            .previews
+            .insert(message_id.clone(), snippet.clone());
+        if let Some(Route::Message(route)) = state.session.routes.last_mut()
             && route.summary.id == message_id
             && route.summary.snippet.is_none()
         {
@@ -2114,7 +2150,7 @@ fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
         return Vec::new();
     }
     let locator = route.summary.into_locator();
-    vec![state.operations.start(OperationKind::SetRead {
+    vec![state.session.operations.start(OperationKind::SetRead {
         locator,
         read: true,
     })]
@@ -2187,7 +2223,7 @@ fn mailboxes_loaded(state: &mut AppState, mailboxes: Vec<Mailbox>) -> Vec<Effect
     // start: the stack is rooted at a mailbox — possibly under a reader,
     // search, or composer the user opened while the fetch ran; those all
     // stay.
-    if !matches!(state.routes.first(), Some(Route::Mailbox(_))) {
+    if !matches!(state.session.routes.first(), Some(Route::Mailbox(_))) {
         state.mailboxes = Loadable::Loaded(mailboxes.clone());
         return apply_mailbox_listing(state, mailboxes);
     }
@@ -2208,7 +2244,7 @@ fn refresh_sidebar_listing(state: &mut AppState, mailboxes: Vec<Mailbox>) {
         .and_then(|list| list.get(state.mailbox_selection))
         .map(|m| m.id.clone());
     // The mailbox the UI is rooted at (the warm path guarantees one).
-    let active_id = match state.routes.first() {
+    let active_id = match state.session.routes.first() {
         Some(Route::Mailbox(route)) => Some(route.mailbox_id.clone()),
         _ => None,
     };
@@ -2242,7 +2278,7 @@ fn apply_mailbox_listing(state: &mut AppState, mailboxes: Vec<Mailbox>) -> Vec<E
     match chosen {
         Some(index) => {
             let mailbox_id = mailboxes[index].id.clone();
-            state.routes = vec![Route::Mailbox(MailboxRoute { mailbox_id })];
+            state.session.routes = vec![Route::Mailbox(MailboxRoute { mailbox_id })];
             state.mailbox_selection = index;
             state.selection = 0;
             state.list_scroll = 0;
@@ -2253,7 +2289,7 @@ fn apply_mailbox_listing(state: &mut AppState, mailboxes: Vec<Mailbox>) -> Vec<E
         None => {
             // The account genuinely has no mailboxes; an empty list
             // is a valid state, not an error (plan §16).
-            state.routes.clear();
+            state.session.routes.clear();
             state.messages = Page::empty(state.messages.limit);
             Vec::new()
         }
@@ -2267,7 +2303,7 @@ fn apply_mailbox_listing(state: &mut AppState, mailboxes: Vec<Mailbox>) -> Vec<E
 /// search route owns the visible list with query results — a mailbox page
 /// must never land there, so the walk stops.
 fn visible_mailbox_page(state: &AppState) -> Option<&MailboxId> {
-    for route in state.routes.iter().rev() {
+    for route in state.session.routes.iter().rev() {
         match route {
             Route::Mailbox(route) => return Some(&route.mailbox_id),
             Route::Search(_) => return None,
@@ -2332,7 +2368,7 @@ fn apply_page(state: &mut AppState, page: Page<crate::domain::MessageSummary>) -
     // clear them (ticket wxtx).
     for item in &mut state.messages.items {
         if item.snippet.is_none()
-            && let Some(text) = state.previews.get(&item.id)
+            && let Some(text) = state.caches.previews.get(&item.id)
         {
             item.snippet = Some(text.clone());
         }
@@ -2356,17 +2392,19 @@ const MAX_IN_FLIGHT_PREVIEWS: usize = 6;
 /// independently, within the rolling window. Rows beyond the window stay
 /// unrequested so the next apply or preview completion picks them up.
 fn start_missing_previews(state: &mut AppState) -> Vec<Effect> {
-    let mut budget = MAX_IN_FLIGHT_PREVIEWS.saturating_sub(state.operations.previews_in_flight());
+    let mut budget =
+        MAX_IN_FLIGHT_PREVIEWS.saturating_sub(state.session.operations.previews_in_flight());
     let mut effects = Vec::new();
     let candidates: Vec<crate::domain::MessageSummary> = state
         .messages
         .items
         .iter()
-        .filter(|s| s.snippet.is_none() && !state.preview_requested.contains(&s.id))
+        .filter(|s| s.snippet.is_none() && !state.caches.preview_requested.contains(&s.id))
         .cloned()
         .collect();
     for summary in candidates {
         let cached = state
+            .caches
             .page_cache
             .as_ref()
             .and_then(|cache| cache.load_message(&summary.mailbox_id, &summary.id.0));
@@ -2377,8 +2415,11 @@ fn start_missing_previews(state: &mut AppState) -> Vec<Effect> {
                 // preview from the copy on disk and remember it for the
                 // session. The read refreshed the entry's LRU stamp, so a
                 // previewed message stays cached like a viewed one.
-                state.preview_requested.insert(summary.id.clone());
-                state.previews.insert(summary.id.clone(), text.clone());
+                state.caches.preview_requested.insert(summary.id.clone());
+                state
+                    .caches
+                    .previews
+                    .insert(summary.id.clone(), text.clone());
                 if let Some(item) = state.messages.items.iter_mut().find(|s| s.id == summary.id) {
                     item.snippet = Some(text);
                     item.has_attachments = cached
@@ -2390,7 +2431,7 @@ fn start_missing_previews(state: &mut AppState) -> Vec<Effect> {
                 // Fetched before, but the body carries no preview text
                 // (an empty body): satisfied, nothing to request. The
                 // attachment flag still reconciles from the cached copy.
-                state.preview_requested.insert(summary.id.clone());
+                state.caches.preview_requested.insert(summary.id.clone());
                 sync_row_attachments(
                     state,
                     &summary.id,
@@ -2402,9 +2443,10 @@ fn start_missing_previews(state: &mut AppState) -> Vec<Effect> {
             None if budget > 0 => {
                 // Genuinely unknown: fetch in the background, once.
                 budget -= 1;
-                state.preview_requested.insert(summary.id.clone());
+                state.caches.preview_requested.insert(summary.id.clone());
                 effects.push(
                     state
+                        .session
                         .operations
                         .start_background(OperationKind::Preview(summary.into_locator())),
                 );
@@ -2422,12 +2464,15 @@ fn start_missing_previews(state: &mut AppState) -> Vec<Effect> {
 /// result for a message no longer listed (mailbox switched, row moved) is
 /// dropped — but still cached, so it helps if the message returns.
 fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
-    if let Some(cache) = &state.page_cache {
+    if let Some(cache) = &state.caches.page_cache {
         cache.store_message(&message.mailbox_id, &message.id.0, &message);
     }
     let message_id = message.id.clone();
     if let Some(text) = crate::view::rich::preview_text(&message) {
-        state.previews.insert(message_id.clone(), text.clone());
+        state
+            .caches
+            .previews
+            .insert(message_id.clone(), text.clone());
     }
     // The parsed message knows attachments better than the envelope did
     // (ticket r84f: IMAP envelopes carry no body structure, so the flag
@@ -2437,7 +2482,7 @@ fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
     if let Some(summary) = state.messages.items.iter_mut().find(|s| s.id == message_id) {
         summary.has_attachments = has_attachments;
         if summary.snippet.is_none() {
-            summary.snippet = state.previews.get(&message_id).cloned();
+            summary.snippet = state.caches.previews.get(&message_id).cloned();
         }
     }
     start_missing_previews(state)
@@ -2454,9 +2499,9 @@ fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
 /// field, message list) are off screen while the
 /// composer replaces the list, so the cycle skips them.
 fn focus_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
-    match state.focus {
+    match state.session.focus {
         Focus::Composer => {
-            let Some(composer) = state.composer.as_mut() else {
+            let Some(composer) = state.session.composer.as_mut() else {
                 return Vec::new();
             };
             // The sidebar sits just past the cycle's ends: Tab leaves from
@@ -2464,7 +2509,7 @@ fn focus_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
             let step_out = (delta > 0 && composer.field == ComposerField::Discard)
                 || (delta < 0 && composer.field == ComposerField::To);
             if step_out {
-                state.focus = Focus::Sidebar;
+                state.session.focus = Focus::Sidebar;
             } else if delta > 0 {
                 composer.focus_next();
             } else {
@@ -2475,13 +2520,13 @@ fn focus_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
         // Back into the composer: Tab re-enters at the first control,
         // Shift+Tab at the last — one linear cycle.
         Focus::Sidebar if matches!(state.active_route(), Some(Route::Composer)) => {
-            state.focus = Focus::Composer;
+            state.session.focus = Focus::Composer;
             let field = if delta > 0 {
                 ComposerField::To
             } else {
                 ComposerField::Discard
             };
-            if let Some(composer) = state.composer.as_mut() {
+            if let Some(composer) = state.session.composer.as_mut() {
                 composer.focus_field(field);
             }
             Vec::new()
@@ -2493,10 +2538,10 @@ fn focus_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
             Vec::new()
         }
         _ => {
-            state.focus = if delta > 0 {
-                state.focus.next()
+            state.session.focus = if delta > 0 {
+                state.session.focus.next()
             } else {
-                state.focus.previous()
+                state.session.focus.previous()
             };
             Vec::new()
         }
@@ -2504,7 +2549,7 @@ fn focus_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
 }
 
 fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
-    match state.focus {
+    match state.session.focus {
         Focus::MessageList => {
             let len = state.messages.items.len();
             if len == 0 {
@@ -2541,7 +2586,7 @@ fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
 
 /// Left/Right: pages in the message list, viewport steps in the reader.
 fn page_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
-    match state.focus {
+    match state.session.focus {
         Focus::Reader => {
             let (viewport, _) = reader_scroll_bounds(state);
             scroll_reader(state, delta * viewport);
@@ -2567,8 +2612,8 @@ fn scroll_reader(state: &mut AppState, delta: i64) {
 /// the scrollable body length, from the same pure functions the renderer
 /// draws — reducer and frame can never disagree (ticket 6864).
 fn reader_scroll_bounds(state: &AppState) -> (i64, i64) {
-    let width = crate::view::layout::reader_width(state.size).max(10);
-    let viewport = crate::view::layout::reader_rows_visible(state.size)
+    let width = crate::view::layout::reader_width(state.session.size).max(10);
+    let viewport = crate::view::layout::reader_rows_visible(state.session.size)
         .saturating_sub(crate::app::reader::header_line_count(state, width))
         .max(1) as i64;
     let total = crate::app::reader::scroll_line_count(state, width) as i64;
@@ -2594,7 +2639,8 @@ fn clamp_reader_scroll(state: &mut AppState) {
 /// view-mode aware: comfortable rows cost two lines), keeping the
 /// bookkeeping consistent with what is actually drawn.
 fn keep_selection_visible(state: &mut AppState) {
-    let visible = crate::view::layout::messages_visible(state.size, state.view_mode).max(1);
+    let visible =
+        crate::view::layout::messages_visible(state.session.size, state.settings.view_mode).max(1);
     if state.selection < state.list_scroll {
         state.list_scroll = state.selection;
     } else if state.selection >= state.list_scroll + visible {
@@ -2607,7 +2653,7 @@ fn keep_selection_visible(state: &mut AppState) {
 }
 
 fn change_page(state: &mut AppState, delta: i64) -> Vec<Effect> {
-    if state.focus != Focus::MessageList {
+    if state.session.focus != Focus::MessageList {
         return Vec::new();
     }
     let limit = state.messages.limit.max(1) as i64;
@@ -2617,12 +2663,13 @@ fn change_page(state: &mut AppState, delta: i64) -> Vec<Effect> {
     // (mailbox page vs search results, Phase 9).
     let base = match state.active_route() {
         Some(Route::Search(route)) => state
+            .session
             .operations
             .search_in_flight(&route.mailbox_id)
             .map(|pending| pending.offset as i64),
         Some(route) => route
             .mailbox_id()
-            .and_then(|id| state.operations.page_in_flight(id))
+            .and_then(|id| state.session.operations.page_in_flight(id))
             .map(|pending| pending.offset as i64),
         None => None,
     }
@@ -2667,7 +2714,7 @@ fn request_visible_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
             // fresh load starts right after and replaces the page.
             let mut effects = Vec::new();
             if state.messages.items.is_empty()
-                && let Some(cache) = &state.page_cache
+                && let Some(cache) = &state.caches.page_cache
                 && let Some(page) = cache.load(
                     &request.mailbox_id,
                     Some(&request.query),
@@ -2677,7 +2724,12 @@ fn request_visible_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
             {
                 effects.extend(apply_page(state, page));
             }
-            effects.push(state.operations.start(OperationKind::Search(request)));
+            effects.push(
+                state
+                    .session
+                    .operations
+                    .start(OperationKind::Search(request)),
+            );
             effects
         }
         Some(route) => match route.mailbox_id().cloned() {
@@ -2694,13 +2746,18 @@ fn request_visible_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
                 // after and its result overwrites this page.
                 let mut effects = Vec::new();
                 if state.messages.items.is_empty()
-                    && let Some(cache) = &state.page_cache
+                    && let Some(cache) = &state.caches.page_cache
                     && let Some(page) =
                         cache.load(&request.mailbox_id, None, request.offset, request.limit)
                 {
                     effects.extend(apply_page(state, page));
                 }
-                effects.push(state.operations.start(OperationKind::LoadPage(request)));
+                effects.push(
+                    state
+                        .session
+                        .operations
+                        .start(OperationKind::LoadPage(request)),
+                );
                 effects
             }
             None => Vec::new(),
@@ -2722,6 +2779,7 @@ fn request_visible_page_background(state: &mut AppState, offset: usize) -> Vec<E
             };
             vec![
                 state
+                    .session
                     .operations
                     .start_background(OperationKind::Search(request)),
             ]
@@ -2735,6 +2793,7 @@ fn request_visible_page_background(state: &mut AppState, offset: usize) -> Vec<E
                 };
                 vec![
                     state
+                        .session
                         .operations
                         .start_background(OperationKind::LoadPage(request)),
                 ]
@@ -2762,17 +2821,22 @@ fn request_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
     // and its result overwrites the cache and the page.
     let mut effects = Vec::new();
     if state.messages.items.is_empty()
-        && let Some(cache) = &state.page_cache
+        && let Some(cache) = &state.caches.page_cache
         && let Some(page) = cache.load(&request.mailbox_id, None, request.offset, request.limit)
     {
         effects.extend(apply_page(state, page));
     }
-    effects.push(state.operations.start(OperationKind::LoadPage(request)));
+    effects.push(
+        state
+            .session
+            .operations
+            .start(OperationKind::LoadPage(request)),
+    );
     effects
 }
 
 fn activate(state: &mut AppState) -> Vec<Effect> {
-    match state.focus {
+    match state.session.focus {
         Focus::Sidebar => match state.selected_mailbox().cloned() {
             Some(mailbox) => switch_mailbox(state, &mailbox.id),
             None => Vec::new(),
@@ -2794,7 +2858,7 @@ fn activate(state: &mut AppState) -> Vec<Effect> {
         | Focus::SearchField
         | Focus::ErrorModal
         | Focus::Wizard => {
-            if state.focus == Focus::SearchField {
+            if state.session.focus == Focus::SearchField {
                 reduce(state, &Action::SubmitSearch)
             } else {
                 Vec::new()
@@ -2809,25 +2873,25 @@ fn activate(state: &mut AppState) -> Vec<Effect> {
 /// To/Cc/Bcc/Subject itself does nothing (single-line fields have no
 /// activation).
 fn activate_composer(state: &mut AppState) -> Vec<Effect> {
-    let Some(field) = state.composer.as_ref().map(|c| c.field) else {
+    let Some(field) = state.session.composer.as_ref().map(|c| c.field) else {
         return Vec::new();
     };
     match field {
         ComposerField::Body => {
-            if let Some(composer) = state.composer.as_mut() {
+            if let Some(composer) = state.session.composer.as_mut() {
                 composer.apply(&crate::app::action::ComposerEdit::Newline);
             }
             Vec::new()
         }
         ComposerField::CcToggle => {
-            if let Some(composer) = state.composer.as_mut() {
+            if let Some(composer) = state.session.composer.as_mut() {
                 composer.show_cc = true;
                 composer.enter_cc();
             }
             Vec::new()
         }
         ComposerField::BccToggle => {
-            if let Some(composer) = state.composer.as_mut() {
+            if let Some(composer) = state.session.composer.as_mut() {
                 composer.show_bcc = true;
                 composer.enter_bcc();
             }
@@ -2849,20 +2913,21 @@ fn activate_composer(state: &mut AppState) -> Vec<Effect> {
 /// pending state and the explorer arrives with the result. No-op without
 /// a composer.
 fn open_attachment_dialog(state: &mut AppState) -> Vec<Effect> {
-    if state.composer.is_none() {
+    if state.session.composer.is_none() {
         return Vec::new();
     }
-    state.overlay = Some(Overlay::AttachmentExplorer(Box::new(
+    state.session.overlay = Some(Overlay::AttachmentExplorer(Box::new(
         AttachmentFileDialog {
             explorer: None,
             listing: true,
             error: None,
-            previous_focus: state.focus,
+            previous_focus: state.session.focus,
         },
     )));
-    state.focus = Focus::Dialog;
+    state.session.focus = Focus::Dialog;
     vec![
         state
+            .session
             .operations
             .start(OperationKind::ListAttachmentFiles { path: None }),
     ]
@@ -2872,7 +2937,7 @@ fn open_attachment_dialog(state: &mut AppState) -> Vec<Effect> {
 /// send"). Removal is a content edit: the revision bumps and autosave
 /// journals the shorter attachment list.
 fn remove_attachment(state: &mut AppState, index: usize) -> Vec<Effect> {
-    let Some(composer) = state.composer.as_mut() else {
+    let Some(composer) = state.session.composer.as_mut() else {
         return Vec::new();
     };
     let removed = composer
@@ -2882,7 +2947,7 @@ fn remove_attachment(state: &mut AppState, index: usize) -> Vec<Effect> {
         .map(|att| att.name.clone());
     composer.remove_attachment(index);
     if let Some(name) = removed {
-        composer.draft.note_edit(state.clock);
+        composer.draft.note_edit(state.session.clock);
         state.set_status(format!("Removed {name}"));
     }
     Vec::new()
@@ -2916,7 +2981,7 @@ fn is_same_draft(draft: &crate::domain::Draft, summary: &crate::domain::MessageS
 /// Whether a composer screen is open right now (the one-composer rule,
 /// plan §14): a draft the user is editing — or parked with Tab while
 /// picking a mailbox — is never clobbered. A draft left behind (`Esc`
-/// saved it) stays in `AppState.composer` for the Drafts list, but it no
+/// saved it) stays in `AppState.session.composer` for the Drafts list, but it no
 /// longer blocks a reply/forward (ticket 61qx): the seed replaces it, and
 /// its possibly in-flight save result is dropped by the local_id currency
 /// check in `save_draft_completed`.
@@ -2941,7 +3006,7 @@ enum Secured {
 }
 
 fn secure_parked_draft(state: &mut AppState) -> Secured {
-    let Some(composer) = state.composer.as_ref() else {
+    let Some(composer) = state.session.composer.as_ref() else {
         return Secured::Nothing;
     };
     if !composer.draft.is_dirty() {
@@ -2949,6 +3014,7 @@ fn secure_parked_draft(state: &mut AppState) -> Secured {
     }
     let in_flight = composer.draft.local_id.as_ref().is_some_and(|local_id| {
         state
+            .session
             .operations
             .is_saving_draft(local_id, composer.draft.revision)
     });
@@ -2970,6 +3036,7 @@ fn secure_parked_draft(state: &mut AppState) -> Secured {
 /// yet — before the first tick — where the save cannot be stamped.
 fn open_draft_message(state: &mut AppState, summary: crate::domain::MessageSummary) -> Vec<Effect> {
     let same = state
+        .session
         .composer
         .as_ref()
         .is_some_and(|c| is_same_draft(&c.draft, &summary));
@@ -2988,7 +3055,12 @@ fn open_draft_message(state: &mut AppState, summary: crate::domain::MessageSumma
     }
     let locator = summary.into_locator();
     state.set_status("Opening draft…");
-    effects.push(state.operations.start(OperationKind::OpenDraft(locator)));
+    effects.push(
+        state
+            .session
+            .operations
+            .start(OperationKind::OpenDraft(locator)),
+    );
     effects
 }
 
@@ -3036,23 +3108,28 @@ fn draft_message_loaded(state: &mut AppState, message: crate::domain::Message) -
 fn open_message(state: &mut AppState, summary: crate::domain::MessageSummary) -> Vec<Effect> {
     let mailbox_id = summary.mailbox_id.clone();
     let locator = summary.into_locator();
-    state.routes.push(Route::Message(MessageRoute {
+    state.session.routes.push(Route::Message(MessageRoute {
         mailbox_id,
         summary,
     }));
-    state.focus = Focus::Reader;
+    state.session.focus = Focus::Reader;
     state.open_message = Loadable::Loading;
     state.reader_scroll = 0;
     state.reader_attachment = None;
     // Ticket haeb: a previously viewed message renders instantly from the
     // cache; the fresh load still runs and replaces it (so read/unread
     // state and any remote changes converge).
-    if let Some(cache) = &state.page_cache
+    if let Some(cache) = &state.caches.page_cache
         && let Some(message) = cache.load_message(&locator.mailbox, &locator.id.0)
     {
         state.open_message = Loadable::Loaded(message);
     }
-    vec![state.operations.start(OperationKind::LoadMessage(locator))]
+    vec![
+        state
+            .session
+            .operations
+            .start(OperationKind::LoadMessage(locator)),
+    ]
 }
 
 /// Close the reader if it is open: pop its route and drop its data. The
@@ -3060,11 +3137,11 @@ fn open_message(state: &mut AppState, summary: crate::domain::MessageSummary) ->
 /// and scroll are restored by construction.
 fn close_reader(state: &mut AppState) {
     if matches!(state.active_route(), Some(Route::Message(_))) {
-        state.routes.pop();
+        state.session.routes.pop();
         state.open_message = Loadable::Idle;
         state.reader_scroll = 0;
         state.reader_attachment = None;
-        state.focus = Focus::MessageList;
+        state.session.focus = Focus::MessageList;
     }
 }
 
@@ -3076,14 +3153,15 @@ fn close_reader(state: &mut AppState) {
 /// loop runs synchronously — the terminal must be suspended from the thread
 /// that owns it (steps 2–7). The editor edits the body only.
 fn edit_externally(state: &mut AppState) -> Vec<Effect> {
-    if state.focus != Focus::Composer || state.composer.is_none() {
+    if state.session.focus != Focus::Composer || state.session.composer.is_none() {
         return Vec::new();
     }
-    let Some(program) = state.editor_command.clone() else {
+    let Some(program) = state.settings.editor_command.clone() else {
         // Builtin editor configured: nothing external to run.
         return Vec::new();
     };
     let body = state
+        .session
         .composer
         .as_ref()
         .map(|composer| composer.body.lines().join("\n"))
@@ -3091,11 +3169,12 @@ fn edit_externally(state: &mut AppState) -> Vec<Effect> {
     // Step 1 (save first) — forced save when the draft has unsaved edits;
     // a clean draft is already saved, so the editor opens immediately.
     let mut effects = draft_save_effect(state).into_iter().collect::<Vec<_>>();
-    if let Some(composer) = state.composer.as_mut() {
+    if let Some(composer) = state.session.composer.as_mut() {
         composer.external_editing = true;
     }
     effects.push(
         state
+            .session
             .operations
             .start(OperationKind::EditExternally { program, body }),
     );
@@ -3112,11 +3191,12 @@ fn editor_finished(
     id: OperationId,
     result: Result<String, String>,
 ) -> Vec<Effect> {
-    state.operations.finish(id);
+    state.session.operations.finish(id);
     let should_save = match result {
         Ok(content) => {
-            let now = state.clock;
+            let now = state.session.clock;
             let changed = state
+                .session
                 .composer
                 .as_mut()
                 .map(|composer| {
@@ -3135,7 +3215,7 @@ fn editor_finished(
             }
         }
         Err(detail) => {
-            if let Some(composer) = state.composer.as_mut() {
+            if let Some(composer) = state.session.composer.as_mut() {
                 composer.external_editing = false;
             }
             state.set_status(format!("External editor failed: {detail}"));
@@ -3151,7 +3231,7 @@ fn editor_finished(
 
 /// Open the composer with a blank new email (the `c` key and the sidebar
 /// Compose button, plan §19 Phase 6, ticket v5x8). A draft left open
-/// earlier stays preserved in `AppState.composer` — its forced save on
+/// earlier stays preserved in `AppState.session.composer` — its forced save on
 /// leave keeps the Drafts-mailbox copy current — but composing again
 /// always starts clean: the saved draft is reopened explicitly from the
 /// Drafts list. Already composing is a no-op; only one composer exists
@@ -3160,49 +3240,49 @@ fn open_composer(state: &mut AppState) -> Vec<Effect> {
     if matches!(state.active_route(), Some(Route::Composer)) {
         return Vec::new();
     }
-    state.composer = Some(ComposerState::new());
+    state.session.composer = Some(ComposerState::new());
     open_composer_screen(state);
     Vec::new()
 }
 
 /// Push the composer route and hand it focus, showing whatever draft
-/// `AppState.composer` holds (a fresh blank one, a seeded reply, or a
+/// `AppState.session.composer` holds (a fresh blank one, a seeded reply, or a
 /// draft reopened from the Drafts list).
 fn open_composer_screen(state: &mut AppState) {
     if !matches!(state.active_route(), Some(Route::Composer)) {
-        state.routes.push(Route::Composer);
+        state.session.routes.push(Route::Composer);
     }
-    state.focus = Focus::Composer;
+    state.session.focus = Focus::Composer;
 }
 
 /// Start the journal restore (plan §19 Phase 6 crash/restart acceptance).
 /// Dispatched once at startup by the runtime.
 fn load_drafts(state: &mut AppState) -> Vec<Effect> {
-    if state.operations.is_loading_drafts() {
+    if state.session.operations.is_loading_drafts() {
         return Vec::new();
     }
-    vec![state.operations.start(OperationKind::LoadDrafts)]
+    vec![state.session.operations.start(OperationKind::LoadDrafts)]
 }
 
 /// Open the confirm-discard dialog (plan §14: discard only after explicit
 /// confirmation). A no-op without a draft.
 fn open_discard_confirm(state: &mut AppState) -> Vec<Effect> {
-    let Some(composer) = state.composer.as_ref() else {
+    let Some(composer) = state.session.composer.as_ref() else {
         return Vec::new();
     };
     let draft = composer.draft.snapshot();
-    state.overlay = Some(Overlay::ConfirmDiscard(DiscardDialog {
+    state.session.overlay = Some(Overlay::ConfirmDiscard(DiscardDialog {
         draft,
         button: ConfirmButton::Keep,
-        previous_focus: state.focus,
+        previous_focus: state.session.focus,
     }));
-    state.focus = Focus::ErrorModal;
+    state.session.focus = Focus::ErrorModal;
     Vec::new()
 }
 
 /// Leave the composer (plan §14): pop the route, return to the prior
 /// route, and FORCE a save of any unsaved revision — no debounce, never a
-/// silent discard. The draft data stays in `AppState.composer` so the
+/// silent discard. The draft data stays in `AppState.session.composer` so the
 /// save can complete and the Drafts list can reopen it without a fetch;
 /// `c` itself starts a fresh blank draft (ticket v5x8). A save of the
 /// current revision already in flight is not duplicated; an in-flight save
@@ -3211,14 +3291,15 @@ fn leave_composer(state: &mut AppState) -> Vec<Effect> {
     if !matches!(state.active_route(), Some(Route::Composer)) {
         return Vec::new();
     }
-    state.routes.pop();
-    state.focus = Focus::MessageList;
-    let Some(composer) = state.composer.as_ref() else {
+    state.session.routes.pop();
+    state.session.focus = Focus::MessageList;
+    let Some(composer) = state.session.composer.as_ref() else {
         return Vec::new();
     };
     let dirty = composer.draft.is_dirty();
     let in_flight = composer.draft.local_id.as_ref().is_some_and(|local_id| {
         state
+            .session
             .operations
             .is_saving_draft(local_id, composer.draft.revision)
     });
@@ -3238,7 +3319,7 @@ fn leave_composer(state: &mut AppState) -> Vec<Effect> {
 /// registry supersedes any older save of the same draft, so only the
 /// newest revision is ever pushed (ADR 0002 §D.2 coalescing).
 fn autosave_tick(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset>) -> Vec<Effect> {
-    let Some(composer) = state.composer.as_mut() else {
+    let Some(composer) = state.session.composer.as_mut() else {
         return Vec::new();
     };
     // Phase 11.5: the external editor owns the body file — no background
@@ -3255,7 +3336,10 @@ fn autosave_tick(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset
         composer.draft.last_edit_at = Some(now);
         return Vec::new();
     }
-    if !composer.draft.autosave_due(now, state.autosave_delay_ms) {
+    if !composer
+        .draft
+        .autosave_due(now, state.settings.autosave_delay_ms)
+    {
         return Vec::new();
     }
     tracing::debug!(
@@ -3263,7 +3347,7 @@ fn autosave_tick(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset
         "debounce elapsed; saving draft"
     );
     let snapshot = composer.draft.start_save(now);
-    vec![state.operations.start(OperationKind::SaveDraft {
+    vec![state.session.operations.start(OperationKind::SaveDraft {
         draft: Box::new(snapshot),
     })]
 }
@@ -3272,13 +3356,13 @@ fn autosave_tick(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset
 /// follow-up after a stale success, retries). `None` when there is no
 /// composer, no clock yet, or nothing unsaved to write.
 fn draft_save_effect(state: &mut AppState) -> Option<Effect> {
-    let now = state.clock?;
-    let composer = state.composer.as_mut()?;
+    let now = state.session.clock?;
+    let composer = state.session.composer.as_mut()?;
     if !composer.draft.is_dirty() {
         return None;
     }
     let snapshot = composer.draft.start_save(now);
-    Some(state.operations.start(OperationKind::SaveDraft {
+    Some(state.session.operations.start(OperationKind::SaveDraft {
         draft: Box::new(snapshot),
     }))
 }
@@ -3295,14 +3379,14 @@ fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Vec<Effect> {
     // mailbox: the stack is rebuilt around the new root mailbox route — a
     // reader may sit above a search route — and the search's stashed
     // mailbox context is dropped with it (Phase 9.1).
-    if !state.routes.is_empty() {
-        state.routes.clear();
-        state.search_return = None;
+    if !state.session.routes.is_empty() {
+        state.session.routes.clear();
+        state.session.search_return = None;
         state.open_message = Loadable::Idle;
         state.reader_scroll = 0;
         state.reader_attachment = None;
     }
-    state.routes.push(Route::Mailbox(MailboxRoute {
+    state.session.routes.push(Route::Mailbox(MailboxRoute {
         mailbox_id: mailbox_id.clone(),
     }));
     state.mailbox_selection = state
@@ -3312,7 +3396,7 @@ fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Vec<Effect> {
         .unwrap_or(0);
     state.selection = 0;
     state.list_scroll = 0;
-    state.focus = Focus::MessageList;
+    state.session.focus = Focus::MessageList;
     // The selection set belongs to the previous mailbox's list (ticket
     // p0s3): ids from another folder must never leak into bulk operations
     // here.
@@ -3330,12 +3414,12 @@ fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Vec<Effect> {
 /// "`Esc` save/leave; never silently discard"): leaving forces a save of
 /// the draft instead of cancelling the in-flight autosave.
 fn back_or_cancel(state: &mut AppState) -> Vec<Effect> {
-    if let Some(Overlay::Error(dialog)) = state.overlay.take() {
-        state.focus = dialog.previous_focus;
+    if let Some(Overlay::Error(dialog)) = state.session.overlay.take() {
+        state.session.focus = dialog.previous_focus;
         return Vec::new();
     }
-    if state.focus == Focus::SearchField {
-        state.focus = Focus::MessageList;
+    if state.session.focus == Focus::SearchField {
+        state.session.focus = Focus::MessageList;
         return Vec::new();
     }
     if matches!(state.active_route(), Some(Route::Composer)) {
@@ -3343,19 +3427,19 @@ fn back_or_cancel(state: &mut AppState) -> Vec<Effect> {
         // leaves it either way, preserving the draft (plan §14).
         return leave_composer(state);
     }
-    if let Some(op) = state.operations.cancel_foreground() {
+    if let Some(op) = state.session.operations.cancel_foreground() {
         tracing::info!(id = %op.id, kind = ?op.kind, "cancelled foreground operation");
         state.set_status(format!("{} — cancelled", op.kind.summary()));
         return Vec::new();
     }
     // With nothing to cancel or close, an active selection is the next
     // thing Esc releases (ticket p0s3) before it goes back or quits.
-    if state.selection_active() && !matches!(state.focus, Focus::Reader | Focus::Composer) {
+    if state.selection_active() && !matches!(state.session.focus, Focus::Reader | Focus::Composer) {
         state.selected.clear();
         state.set_status("Selection cleared");
         return Vec::new();
     }
-    if state.routes.len() > 1 {
+    if state.session.routes.len() > 1 {
         // Leave an open search first: its results are regenerated on
         // re-submit, the mailbox context underneath is stashed (Phase 9.1).
         if matches!(state.active_route(), Some(Route::Search(_))) {
@@ -3364,27 +3448,27 @@ fn back_or_cancel(state: &mut AppState) -> Vec<Effect> {
         }
         // Pop the reader: the mailbox route underneath still holds the
         // exact page, selection, and scroll.
-        state.routes.pop();
+        state.session.routes.pop();
         state.open_message = Loadable::Idle;
         state.reader_scroll = 0;
         state.reader_attachment = None;
-        state.focus = Focus::MessageList;
+        state.session.focus = Focus::MessageList;
         return Vec::new();
     }
     // Root route with nothing to cancel or close: exit cleanly (plan §19
     // Phase 1 acceptance: app exits with Esc/quit).
-    state.quit_requested = true;
+    state.session.quit_requested = true;
     Vec::new()
 }
 
 fn search_edit(state: &mut AppState, edit: &SearchEdit) {
-    if state.focus != Focus::SearchField {
+    if state.session.focus != Focus::SearchField {
         return;
     }
     match edit {
-        SearchEdit::Char(c) => state.search_query.push(*c),
+        SearchEdit::Char(c) => state.session.search_query.push(*c),
         SearchEdit::Backspace => {
-            state.search_query.pop();
+            state.session.search_query.pop();
         }
     }
 }
@@ -3400,10 +3484,10 @@ fn search_edit(state: &mut AppState, edit: &SearchEdit) {
 fn submit_search(state: &mut AppState) -> Vec<Effect> {
     // Submitting is the search field's Enter; dispatched elsewhere it is
     // inert (the field is the only submit affordance, plan §10).
-    if state.focus != Focus::SearchField {
+    if state.session.focus != Focus::SearchField {
         return Vec::new();
     }
-    let query = state.search_query.clone();
+    let query = state.session.search_query.clone();
     if query.trim().is_empty() {
         state.set_status("Type something to search for");
         return Vec::new();
@@ -3418,16 +3502,16 @@ fn submit_search(state: &mut AppState) -> Vec<Effect> {
     };
     let already_searching = matches!(state.active_route(), Some(Route::Search(_)));
     if already_searching {
-        if let Some(Route::Search(route)) = state.routes.last_mut() {
+        if let Some(Route::Search(route)) = state.session.routes.last_mut() {
             route.query = query.clone();
         }
     } else {
-        state.search_return = Some(ListStash {
+        state.session.search_return = Some(ListStash {
             page: state.messages.clone(),
             selection: state.selection,
             scroll: state.list_scroll,
         });
-        state.routes.push(Route::Search(SearchRoute {
+        state.session.routes.push(Route::Search(SearchRoute {
             query: query.clone(),
             mailbox_id: mailbox_id.clone(),
         }));
@@ -3435,14 +3519,19 @@ fn submit_search(state: &mut AppState) -> Vec<Effect> {
     state.selection = 0;
     state.list_scroll = 0;
     state.messages = Page::empty(state.messages.limit);
-    state.focus = Focus::MessageList;
+    state.session.focus = Focus::MessageList;
     let limit = state.messages.limit.max(1);
-    vec![state.operations.start(OperationKind::Search(SearchRequest {
-        mailbox_id,
-        query,
-        offset: 0,
-        limit,
-    }))]
+    vec![
+        state
+            .session
+            .operations
+            .start(OperationKind::Search(SearchRequest {
+                mailbox_id,
+                query,
+                offset: 0,
+                limit,
+            })),
+    ]
 }
 
 /// Leave the search route: restore the stashed mailbox list context
@@ -3452,14 +3541,14 @@ fn submit_search(state: &mut AppState) -> Vec<Effect> {
 /// field for the next search.
 fn leave_search(state: &mut AppState) {
     if matches!(state.active_route(), Some(Route::Search(_))) {
-        state.routes.pop();
-        if let Some(stash) = state.search_return.take() {
+        state.session.routes.pop();
+        if let Some(stash) = state.session.search_return.take() {
             state.messages = stash.page;
             state.selection = stash.selection;
             state.list_scroll = stash.scroll;
         }
-        state.focus = Focus::MessageList;
-        state.search_query.clear();
+        state.session.focus = Focus::MessageList;
+        state.session.search_query.clear();
         // Search selections do not follow the user back to the mailbox
         // list (ticket p0s3): the visible set changed entirely.
         state.selected.clear();
@@ -3472,28 +3561,28 @@ fn leave_search(state: &mut AppState) {
 /// timer, so a manual refresh never collides with an imminent auto one.
 fn refresh(state: &mut AppState) -> Vec<Effect> {
     if !matches!(state.mailboxes, Loadable::Loaded(_)) {
-        if state.operations.is_loading_mailboxes() {
+        if state.session.operations.is_loading_mailboxes() {
             return Vec::new();
         }
         let mut effects = Vec::new();
         // Ticket haeb: the cached mailbox listing renders the sidebar
         // (and, through the page cache, the first page) instantly; the
         // fresh listing still loads and replaces it.
-        if let Some(cache) = &state.page_cache
+        if let Some(cache) = &state.caches.page_cache
             && let Some(mailboxes) = cache.load_mailboxes()
             && !mailboxes.is_empty()
         {
             state.mailboxes = Loadable::Loaded(mailboxes.clone());
             effects = apply_mailbox_listing(state, mailboxes);
         }
-        effects.push(state.operations.start(OperationKind::LoadMailboxes));
+        effects.push(state.session.operations.start(OperationKind::LoadMailboxes));
         return effects;
     }
     if state.active_route().is_none() {
         return Vec::new();
     }
     state.set_status("Refreshing…");
-    state.last_refresh_at = state.clock;
+    state.session.last_refresh_at = state.session.clock;
     request_visible_page(state, state.messages.offset)
 }
 
@@ -3507,15 +3596,15 @@ fn auto_refresh_tick(
     state: &mut AppState,
     now: chrono::DateTime<chrono::FixedOffset>,
 ) -> Vec<Effect> {
-    if state.refresh_interval_seconds == 0 {
+    if state.settings.refresh_interval_seconds == 0 {
         return Vec::new();
     }
-    let Some(last) = state.last_refresh_at else {
-        state.last_refresh_at = Some(now);
+    let Some(last) = state.session.last_refresh_at else {
+        state.session.last_refresh_at = Some(now);
         return Vec::new();
     };
     let elapsed = (now - last).num_seconds().max(0) as u64;
-    if elapsed < state.refresh_interval_seconds {
+    if elapsed < state.settings.refresh_interval_seconds {
         return Vec::new();
     }
     // The timer never interrupts interactive work: it stands down while a
@@ -3524,15 +3613,15 @@ fn auto_refresh_tick(
     // block it), and retries on the next tick once they clear. The first
     // tick arms the timer (the reducer has no clock before then).
     fn conflicts(state: &AppState) -> bool {
-        state.overlay.is_some()
+        state.session.overlay.is_some()
             || matches!(state.active_route(), Some(Route::Composer))
-            || state.operations.has_foreground()
+            || state.session.operations.has_foreground()
     }
     if conflicts(state) {
         tracing::debug!("auto refresh stood down: conflicting work in flight");
         return Vec::new();
     }
-    state.last_refresh_at = Some(now);
+    state.session.last_refresh_at = Some(now);
     tracing::debug!(elapsed, "auto refresh");
     request_visible_page_background(state, state.messages.offset)
 }

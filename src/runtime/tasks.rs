@@ -57,7 +57,7 @@ impl OperationManager {
     }
 
     /// Launch one effect. The cancellation token comes from the operation
-    /// registry (`AppState.operations`), so `Esc` reaches the child process.
+    /// registry (`AppState.session.operations`), so `Esc` reaches the child process.
     pub fn launch(&self, effect: Effect, ctx: RequestContext) {
         let backend = Arc::clone(&self.backend);
         let opener = Arc::clone(&self.opener);

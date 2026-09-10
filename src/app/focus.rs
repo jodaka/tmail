@@ -17,7 +17,7 @@ pub enum Focus {
     /// the body; single-letter shortcuts act on the open message.
     Reader,
     /// The composer screen is open (plan §19 Phase 6): the focused control
-    /// lives in `AppState.composer`; single-letter shortcuts never fire
+    /// lives in `AppState.session.composer`; single-letter shortcuts never fire
     /// while a text field is focused (plan §10).
     Composer,
     /// The attachment file chooser is open (plan §15, ticket 95x0): a

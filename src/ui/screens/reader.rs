@@ -49,7 +49,7 @@ pub fn render(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let width = crate::ui::layout::reader_width(state.size).max(10);
+    let width = crate::ui::layout::reader_width(state.session.size).max(10);
     let header = header_lines(state, width);
     let body = scroll_document(state, width);
 
@@ -60,7 +60,12 @@ pub fn render(
     // While the message loads the body carries nothing: the centered pane
     // spinner stands in for it (ticket m3by).
     if matches!(state.open_message, Loadable::Loading) {
-        crate::ui::components::spinner::render_centered(frame, body_area, theme, state.ticks);
+        crate::ui::components::spinner::render_centered(
+            frame,
+            body_area,
+            theme,
+            state.session.ticks,
+        );
         return;
     }
     render_body(frame, body_area, theme, &body, state.reader_scroll);

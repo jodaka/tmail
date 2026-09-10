@@ -212,7 +212,7 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
         applied_title: String::new(),
     };
     let mut state = seed_state(&config, keymap, invocation.theme.as_deref())?;
-    tracing::info!(size = ?state.size, "shell started (real backend)");
+    tracing::info!(size = ?state.session.size, "shell started (real backend)");
 
     // Backend results re-enter the reducer as actions; the manager spawns
     // one cancellable task per effect.
@@ -329,54 +329,12 @@ fn seed_state(
     requested_theme: Option<&str>,
 ) -> anyhow::Result<AppState> {
     let mut state = AppState::initial(config.mail.page_size);
-    // The configured keymap replaces the defaults-only seed (the reducer
-    // and hint rows read it through `state`).
-    state.keymap = keymap;
-    // Reply-all excludes the configured account address (Phase 7.5).
-    state.account_email = config.account_email.clone();
-    // Periodic refresh timer (Phase 9.4); `0` disables it.
-    state.refresh_interval_seconds = config.mail.refresh_interval_seconds;
-    // Draft autosave debounce (Phase 10.4 wiring of
-    // `[tmail.composer].composer.autosave_delay_ms`).
-    state.autosave_delay_ms = config.composer.autosave_delay_ms;
-    // `[tmail].view_mode` list density (Gmail-style): comfortable splits
-    // message rows with faint horizontal separators, so each message
-    // takes two terminal lines.
-    state.view_mode = config.view_mode;
-    // Status-message fade-and-clear window (ticket h1d7); `0` disables it.
-    state.status_timeout_seconds = config.status_timeout;
-    // The external editor argv (Phase 11.4); `None` = builtin editor.
-    state.editor_command = config.composer.editor_command.clone();
-    // Tmail-owned summary cache (ticket haeb): instant warm starts, the
-    // fresh page always loads in the background afterwards.
-    state.page_cache = tmail::app::page_cache::PageCache::open_default(
-        config.account.as_deref(),
-        tmail::app::page_cache::CacheLimits {
-            max_messages: config.cache.max_messages,
-            max_bytes: config.cache.max_bytes,
-        },
-    );
-    // Mouse capture starts in the configured mode (Phase 10.4); `m`
-    // toggles it at runtime via `Action::ToggleMouseCapture`.
-    state.mouse_capture = config.mouse;
-    if let Ok((width, height)) = crossterm::terminal::size() {
-        state.size = (width, height);
-    }
-    // Ticket kjfq: `page_size_auto` sizes each page to the number of
-    // message rows the terminal can show, so the page fits the list
-    // without scrolling; manual pagination keeps `[tmail.mail].mail.page_size`.
-    // The view mode decides how many lines a message costs.
-    state.page_size_auto = config.mail.page_size_auto;
-    if config.mail.page_size_auto {
-        state.messages.limit =
-            tmail::ui::layout::messages_visible(state.size, state.view_mode).max(1);
-    }
     // Runtime-switchable theme list (ticket z0s4): the two built-ins —
     // the `[tmail.theme]` selection with its color overrides (ticket wrs7)
     // landing on the startup entry — plus every `[tmail.themes.<name>]`
     // table. NO_COLOR wins over all of it (plan §18): every palette
     // becomes monochrome, so switching stays a harmless no-op.
-    let (mut themes, theme_index) = Theme::theme_list(
+    let (mut themes, mut theme_index) = Theme::theme_list(
         &config.theme.name,
         &config.theme.overrides,
         &config.theme.tables,
@@ -386,28 +344,66 @@ fn seed_state(
             *theme = Theme::monochrome();
         }
     }
-    state.themes = themes;
-    state.theme_index = theme_index;
     // `--theme <name>` overrides the configured selection (feedback:
     // `tmail --configure --theme light`). Validated against the built
     // list, so `[tmail.themes.<name>]` tables are selectable too; an
     // unknown name is a startup error naming the alternatives.
     if let Some(name) = requested_theme {
-        state.theme_index = state
-            .themes
+        theme_index = themes
             .iter()
             .position(|(candidate, _)| candidate == name)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "unknown theme {name:?}; available: {}",
-                    state
-                        .themes
+                    themes
                         .iter()
                         .map(|(candidate, _)| candidate.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
             })?;
+    }
+    // The set-once config knobs collapse into one construction (the
+    // per-field plumbing moved here when `Settings` was grouped): the
+    // configured keymap replaces the defaults-only seed; reply-all excludes
+    // the account address (Phase 7.5); the refresh timer (Phase 9.4,
+    // `0` disables), draft autosave debounce (Phase 10.4), list density
+    // (Gmail-style separators), status fade window (ticket h1d7), external
+    // editor argv (Phase 11.4, `None` = builtin), and initial mouse capture
+    // (Phase 10.4) all come straight from the file.
+    state.settings = tmail::app::Settings {
+        keymap,
+        account_email: config.account_email.clone(),
+        refresh_interval_seconds: config.mail.refresh_interval_seconds,
+        page_size_auto: config.mail.page_size_auto,
+        autosave_delay_ms: config.composer.autosave_delay_ms,
+        view_mode: config.view_mode,
+        status_timeout_seconds: config.status_timeout,
+        editor_command: config.composer.editor_command.clone(),
+        mouse_capture: config.mouse,
+        themes,
+        theme_index,
+    };
+    // Tmail-owned summary cache (ticket haeb): instant warm starts, the
+    // fresh page always loads in the background afterwards.
+    state.caches.page_cache = tmail::app::page_cache::PageCache::open_default(
+        config.account.as_deref(),
+        tmail::app::page_cache::CacheLimits {
+            max_messages: config.cache.max_messages,
+            max_bytes: config.cache.max_bytes,
+        },
+    );
+    if let Ok((width, height)) = crossterm::terminal::size() {
+        state.session.size = (width, height);
+    }
+    // Ticket kjfq: `page_size_auto` sizes each page to the number of
+    // message rows the terminal can show, so the page fits the list
+    // without scrolling; manual pagination keeps `[tmail.mail].mail.page_size`.
+    // The view mode decides how many lines a message costs.
+    if config.mail.page_size_auto {
+        state.messages.limit =
+            tmail::ui::layout::messages_visible(state.session.size, state.settings.view_mode)
+                .max(1);
     }
     Ok(state)
 }
@@ -429,15 +425,17 @@ fn start_wizard(state: &mut AppState, invocation: &Invocation) {
             )
         })
         .unwrap_or_else(|| (Vec::new(), None, false));
-    state.wizard = Some(tmail::app::wizard::WizardState::new(
+    state.session.wizard = Some(tmail::app::wizard::WizardState::new(
         invocation.configure,
-        save_path,
-        existing_names,
-        default_name,
-        shared_readable,
+        tmail::app::wizard::ConfigSnapshot {
+            save_path,
+            existing_names,
+            existing_default_name: default_name,
+            existing_shared_readable: shared_readable,
+        },
     ));
-    state.routes.push(tmail::app::route::Route::Wizard);
-    state.focus = tmail::app::Focus::Wizard;
+    state.session.routes.push(tmail::app::route::Route::Wizard);
+    state.session.focus = tmail::app::Focus::Wizard;
 }
 
 /// The main loop: draw a frame, then wait for one batch of input or one
@@ -452,7 +450,7 @@ async fn run_event_loop(
     config: &tmail::config::Config,
 ) -> anyhow::Result<()> {
     // Mouse capture starts in the configured mode; the reducer owns the
-    // intent as `state.mouse_capture`, and the runtime applies any change.
+    // intent as `state.settings.mouse_capture`, and the runtime applies any change.
     let mut capture_applied = config.mouse;
     loop {
         // Title sync ahead of the draw: the reducer may have changed the
@@ -489,7 +487,7 @@ async fn run_event_loop(
             .draw(|frame| tmail::ui::render(frame, state, &theme, &ctx, &mut hits))
             .context("terminal draw failed")?;
 
-        if state.quit_requested {
+        if state.session.quit_requested {
             tracing::info!("quit requested; leaving event loop");
             break;
         }
@@ -550,10 +548,15 @@ async fn run_event_loop(
 /// completion restarts into the normal mailbox UI without leaving the
 /// process.
 fn finish_session(state: &AppState, config: &tmail::config::Config) -> SessionOutcome {
-    if let Some(wizard) = &state.wizard {
+    if let Some(wizard) = &state.session.wizard {
         if wizard.completed {
             if wizard.manual {
-                if let Some(path) = wizard.saved_path.clone().or_else(|| config.path.clone()) {
+                if let Some(path) = wizard
+                    .confirm
+                    .saved_path
+                    .clone()
+                    .or_else(|| config.path.clone())
+                {
                     println!("{}", path.display());
                 }
                 return SessionOutcome::Exit(ExitCode::SUCCESS);
@@ -589,7 +592,7 @@ async fn handle_effects(
             // keystrokes (plan §14 steps 2 and 5).
             assets.events_control.pause();
             drop(assets.guard.take().expect("terminal guard to suspend"));
-            let mouse = state.mouse_capture;
+            let mouse = state.settings.mouse_capture;
             let result = tmail::runtime::editor::run(&program, &body).await;
             // Step 7: restore the terminal even on editor failure —
             // unconditionally, before anything else runs. The fresh guard
@@ -630,7 +633,7 @@ fn launch_one(manager: &OperationManager, state: &AppState, effect: Effect) {
         tracing::warn!(id = %effect.id, "external editor effect reached the manager; dropped");
         return;
     }
-    let Some(token) = state.operations.cancellation(effect.id) else {
+    let Some(token) = state.session.operations.cancellation(effect.id) else {
         tracing::warn!(id = %effect.id, "effect without a registered operation");
         return;
     };
@@ -645,13 +648,13 @@ fn launch_one(manager: &OperationManager, state: &AppState, effect: Effect) {
 /// reducer owns (plan §10 feedback: `m` toggles capture at runtime). The
 /// reducer stays I/O-free; this is where the terminal actually changes.
 fn sync_mouse_capture(state: &AppState, applied: &mut bool) {
-    if state.mouse_capture != *applied {
-        if let Err(err) = terminal::set_mouse_capture(state.mouse_capture) {
+    if state.settings.mouse_capture != *applied {
+        if let Err(err) = terminal::set_mouse_capture(state.settings.mouse_capture) {
             tracing::warn!(%err, "failed to switch mouse capture");
         }
-        *applied = state.mouse_capture;
+        *applied = state.settings.mouse_capture;
         tracing::debug!(
-            mouse_capture = state.mouse_capture,
+            mouse_capture = state.settings.mouse_capture,
             "mouse capture switched"
         );
     }

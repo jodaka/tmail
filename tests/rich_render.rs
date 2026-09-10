@@ -100,7 +100,7 @@ fn reader_state(message: Message) -> AppState {
         is_starred: false,
         has_attachments: !message.attachments.is_empty(),
     };
-    state.routes.push(Route::Message(MessageRoute {
+    state.session.routes.push(Route::Message(MessageRoute {
         mailbox_id: message.mailbox_id.clone(),
         summary,
     }));
@@ -111,7 +111,7 @@ fn reader_state(message: Message) -> AppState {
 /// Draw the reader showing fixture `name` and return the buffer.
 fn draw_reader(name: &str, width: u16, height: u16) -> ratatui::buffer::Buffer {
     let mut state = reader_state(fixture(name));
-    state.size = (width, height);
+    state.session.size = (width, height);
     let theme = Theme::default_dark();
     let now = now();
     let ctx = RenderContext::new(now, dates::format_clock(now));
