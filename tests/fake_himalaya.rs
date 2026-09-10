@@ -427,22 +427,27 @@ if [ "$SUB" = "flag" ]; then
 fi
 
 if [ "$SUB" = "attachment" ]; then
-  # The `-d` destination directory is the value after the flag.
+  # The `-d` destination directory is the value after the flag; the
+  # requested attachment id is the positional before `--json`.
   DIR=""
+  ID=""
   p2=""
   for a in "$@"; do
     case "$p2" in
       -d) DIR="$a" ;;
     esac
+    if [ "$a" = "--json" ]; then ID="$p2"; fi
     p2="$a"
   done
   case "@ATTACHMENT_MODE@" in
     ok)
       # Act like himalaya: write the decoded part into the requested
-      # directory and report the row with the output path.
+      # directory and report the row with the output path. The row's id
+      # echoes the requested id so an off-by-one request fails the match
+      # here instead of silently succeeding.
       mkdir -p "$DIR"
       printf 'PDF-PAYLOAD-01' > "$DIR/report.pdf"
-      printf '%s' '{"attachments":[{"id":"3","filename":"report.pdf","mime":"application/pdf","size":14,"inline":false,"path":"'"$DIR"'/report.pdf"}]}'
+      printf '%s' '{"attachments":[{"id":"'"$ID"'","filename":"report.pdf","mime":"application/pdf","size":14,"inline":false,"path":"'"$DIR"'/report.pdf"}]}'
       ;;
     traversal)
       # A hostile filename in the MIME metadata; the file itself lives

@@ -312,7 +312,13 @@ fn attachment(dto: &dto::MessageReadDto, index: usize) -> Option<Attachment> {
         name: disposition_name.or(type_name),
         mime_type,
         size,
-        part_id: index,
+        // Himalaya's attachment commands identify parts by the 1-based
+        // position in the MIME tree (`id = part_index + 1`, its own
+        // `attachment download` loop over `message.attachments`), while
+        // this index is 0-based. Off by one here sends `attachment
+        // download` after a nonexistent part ("No attachment with id N on
+        // message …"), so store the id the download expects.
+        part_id: index + 1,
     })
 }
 
@@ -717,7 +723,7 @@ mod tests {
         assert_eq!(pdf.name.as_deref(), Some("report.pdf"));
         assert_eq!(pdf.mime_type.as_deref(), Some("application/pdf"));
         assert_eq!(pdf.size, Some(5));
-        assert_eq!(pdf.part_id, 1);
+        assert_eq!(pdf.part_id, 2, "part index 1 → download id 2");
         let jpg = &message.attachments[1];
         assert_eq!(
             jpg.name.as_deref(),
@@ -726,7 +732,7 @@ mod tests {
         );
         assert_eq!(jpg.mime_type.as_deref(), Some("image/jpeg"));
         assert_eq!(jpg.size, Some(2));
-        assert_eq!(jpg.part_id, 2);
+        assert_eq!(jpg.part_id, 3, "part index 2 → download id 3");
     }
 
     #[test]

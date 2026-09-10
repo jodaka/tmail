@@ -457,7 +457,9 @@ fn message_read_argv_is_exact_and_maps_domain_message() {
         Some("application/pdf")
     );
     assert_eq!(message.attachments[0].size, Some(3));
-    assert_eq!(message.attachments[0].part_id, 1);
+    // The fixture lists part index 1; `attachment download` expects the
+    // 1-based id (Himalaya's `part_index + 1`).
+    assert_eq!(message.attachments[0].part_id, 2);
 }
 
 #[test]
@@ -1098,6 +1100,40 @@ fn attachment_save_downloads_into_a_private_tempdir_then_lands_in_the_dest() {
     assert_eq!(&argv[10..], &["env-1", "3", "--json"]);
     // The row's reported path resolved inside the requested tempdir.
     let _ = rest;
+}
+
+#[test]
+fn attachment_save_uses_the_part_id_mapped_from_message_read() {
+    // Regression: `message read` reports 0-based part indexes while
+    // `attachment download` expects the 1-based id (`part index + 1`).
+    // A save driven by a mapped attachment — no hand-built part id —
+    // must ask for the id himalaya actually serves.
+    let fake = FakeHimalaya::spawn_attachment("ok");
+    let backend = backend(&fake, Some("probe"));
+    let message =
+        block(backend.get_message(ctx(), locator("INBOX", "env-1"))).expect("read succeeds");
+    let attachment = message.attachments.first().expect("fixture attachment");
+    assert_eq!(attachment.part_id, 2, "fixture part index 1 → id 2");
+    let dest = tempfile::TempDir::new().expect("dest dir");
+    let request = AttachmentRequest {
+        locator: MessageLocator {
+            mailbox: message.mailbox_id.clone(),
+            id: message.id.clone(),
+            message_id: message.headers.message_id.clone(),
+        },
+        part_id: attachment.part_id,
+        filename: attachment.name.clone(),
+        dir: Some(dest.path().to_path_buf()),
+    };
+    let saved = block(backend.save_attachment(ctx(), request)).expect("save succeeds");
+    assert_eq!(saved, dest.path().join("fake.pdf"));
+    assert_eq!(std::fs::read(&saved).unwrap(), b"PDF-PAYLOAD-01");
+
+    // The download argv carries the mapped 1-based id, and the fake's
+    // echoed row id is what `find_row` matched.
+    let argv = fake.argv();
+    let download = argv.last().expect("download invocation");
+    assert_eq!(&download[download.len() - 3..], &["env-1", "2", "--json"]);
 }
 
 #[test]

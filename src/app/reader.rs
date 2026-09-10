@@ -32,11 +32,14 @@ pub(crate) enum ReaderLine {
         text: String,
     },
     /// One attachment chip (mockup `.att`). `selected` marks the chip the
-    /// save/open keys act on; it renders with the cursor marker and the
-    /// accent style.
+    /// save/open keys act on (the Tab-focused chip, or the first chip
+    /// while nothing is focused): it renders with the cursor marker and
+    /// the accent style. `focused` marks the actual Tab focus and carries
+    /// the button fill, so the cursor is unmistakable.
     Chip {
         text: String,
         selected: bool,
+        focused: bool,
     },
     Rich(RichLine),
 }
@@ -299,6 +302,9 @@ pub(crate) fn scroll_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
             lines.push(ReaderLine::Chip {
                 text: text::truncate(&format!("{INDENT}{marker}[ {name} · {mime} · {size} ]"), w),
                 selected: index == selected,
+                // The default target is not focus: only the Tab cursor
+                // paints the button fill.
+                focused: state.reader_focus == Some(ReaderFocus::Attachment(index)),
             });
         }
     }

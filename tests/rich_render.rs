@@ -275,8 +275,8 @@ fn attachment_metadata_lists_deterministically() {
             .iter()
             .map(|a| a.part_id)
             .collect::<Vec<_>>(),
-        vec![2, 3],
-        "part 0 is the multipart container; attachment ids keep wire order"
+        vec![3, 4],
+        "part 0 is the multipart container; ids are 1-based and keep wire order"
     );
     assert!(
         dup.attachments

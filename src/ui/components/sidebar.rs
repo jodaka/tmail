@@ -128,16 +128,18 @@ fn render_folder_row(
     cursor: bool,
 ) {
     let width = area.width as usize;
-    // Row anatomy (ticket ye28): 1 marker col + 2 left pad + name +
+    // Row anatomy (ticket ye28): 1 marker col + 1 left pad + name +
     // ` (N)` when the folder holds unread mail + right pad. The counter
     // reads as part of the folder name, exactly as written: `Inbox (4)`.
+    // The name budget keeps one column free on the right, so the text
+    // carries a one-cell margin on both sides of the row.
     let suffix = match mailbox.unread_count {
         Some(n) if n > 0 => format!(" ({n})"),
         _ => String::new(),
     };
     let name_budget = width.saturating_sub(3 + suffix.width()).max(1);
     let name = text::clip(&mailbox.name, name_budget);
-    let right_pad = width.saturating_sub(3 + name.width() + suffix.width());
+    let right_pad = width.saturating_sub(2 + name.width() + suffix.width());
 
     let row_bg = if is_active {
         theme.accent_bg
@@ -173,7 +175,7 @@ fn render_folder_row(
     .bg(row_bg);
     let spans = vec![
         Span::styled(marker, marker_style),
-        Span::styled("  ", pad),
+        Span::styled(" ", pad),
         Span::styled(name, name_style),
         Span::styled(suffix, count_style),
         Span::styled(" ".repeat(right_pad), pad),

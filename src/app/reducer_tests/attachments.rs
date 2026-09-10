@@ -114,6 +114,36 @@ fn enter_on_the_reader_opens_the_selected_attachment() {
     assert!(matches!(open_kind, OperationKind::OpenPath { .. }));
 }
 
+/// Tab focuses a chip, Enter opens that exact chip: the focus cursor must
+/// choose the download target, not the default first chip (ticket 1fnh).
+#[test]
+fn enter_on_a_focused_attachment_opens_that_attachment() {
+    let mut s = reader_with_attachments();
+    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(1)));
+    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let OperationKind::SaveAttachment {
+        request,
+        open_after,
+    } = kind
+    else {
+        panic!("expected SaveAttachment, got {kind:?}");
+    };
+    assert!(open_after, "Enter arms the opener chain");
+    assert_eq!(request.part_id, 5, "the focused chip, not the first");
+    let final_path = PathBuf::from("/home/u/Downloads/attachment-5.bin");
+    let effects = reduce(
+        &mut s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::SavedPath(final_path.clone())),
+        }),
+    );
+    let (_, open_kind) = effect_parts(&effects);
+    assert_eq!(open_kind, OperationKind::OpenPath { path: final_path });
+}
+
 #[test]
 fn enter_reuses_a_session_saved_attachment_path() {
     let mut s = reader_with_attachments();

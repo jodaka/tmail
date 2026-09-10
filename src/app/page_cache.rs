@@ -25,7 +25,9 @@ use serde::{Deserialize, Serialize};
 use crate::domain::{Mailbox, MailboxId, Message, MessageSummary, Page};
 
 /// Version of the on-disk format; bumping it invalidates old caches.
-const CACHE_VERSION: u32 = 1;
+/// 2: attachment `part_id` became the 1-based id `attachment download`
+/// expects; v1 entries cache the old 0-based index and must not be served.
+const CACHE_VERSION: u32 = 2;
 
 /// The on-disk shape: the page payload plus the identity it must match.
 #[derive(Serialize, Deserialize)]

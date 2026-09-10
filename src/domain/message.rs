@@ -59,7 +59,8 @@ pub struct Attachment {
     pub mime_type: Option<String>,
     /// Decoded size in bytes when known.
     pub size: Option<u64>,
-    /// MIME part index, the id `attachment download` expects (ADR 0001).
+    /// 1-based MIME part id, the id `attachment list`/`attachment
+    /// download` expect (ADR 0001).
     pub part_id: usize,
 }
 

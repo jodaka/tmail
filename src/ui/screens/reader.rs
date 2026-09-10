@@ -270,8 +270,16 @@ fn reader_spans<'a>(
             };
             Line::from(Span::styled(text::clip(text, width), style))
         }
-        ReaderLine::Chip { text, selected } => {
-            let style = if *selected {
+        ReaderLine::Chip {
+            text,
+            selected,
+            focused,
+        } => {
+            let style = if *focused {
+                // Button fill (the composer's focused controls carry the
+                // same badge): accent text alone is not a visible cursor.
+                theme.mode_badge()
+            } else if *selected {
                 Style::new()
                     .fg(theme.accent)
                     .bg(theme.background)

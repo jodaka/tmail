@@ -786,6 +786,60 @@ fn reader_status_bar_advertises_attachment_actions_only_with_attachments() {
     assert_absent(&text, "o open", (152, 40));
 }
 
+/// The Tab-focused attachment chip carries the button fill (the composer's
+/// focused controls use the same badge): accent text alone is not a
+/// visible cursor. Unfocused chips, even the default target, stay on the
+/// page background.
+#[test]
+fn focused_attachment_chip_shows_the_button_fill() {
+    use tmail::app::state::ReaderFocus;
+    let mut state = reader_state(0);
+    if let Loadable::Loaded(message) = &mut state.open_message {
+        // Short body so the chips are on screen without scrolling.
+        message.plain_body = Some(String::from("short body\n"));
+        message.html_body = None;
+        message.attachments = vec![
+            tmail::domain::Attachment {
+                name: Some(String::from("first.pdf")),
+                mime_type: Some(String::from("application/pdf")),
+                size: Some(14),
+                part_id: 2,
+            },
+            tmail::domain::Attachment {
+                name: Some(String::from("second.png")),
+                mime_type: Some(String::from("image/png")),
+                size: Some(2048),
+                part_id: 3,
+            },
+        ];
+    }
+    let theme = state.active_theme();
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    let text = text_of(&buffer);
+    let (row, col) = position_of(&text, "first.pdf");
+    assert_ne!(
+        buffer[(col as u16, row as u16)].bg,
+        theme.accent,
+        "the default target is not focus:\n{text}"
+    );
+
+    state.reader_focus = Some(ReaderFocus::Attachment(1));
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    let text = text_of(&buffer);
+    let (row, col) = position_of(&text, "second.png");
+    assert_eq!(
+        buffer[(col as u16, row as u16)].bg,
+        theme.accent,
+        "focused chip carries the button fill:\n{text}"
+    );
+    let (row, col) = position_of(&text, "first.pdf");
+    assert_ne!(
+        buffer[(col as u16, row as u16)].bg,
+        theme.accent,
+        "focus moved off the first chip:\n{text}"
+    );
+}
+
 #[test]
 fn reader_loading_state_renders_placeholder() {
     let mut state = reader_state(0);
@@ -2527,6 +2581,52 @@ fn sidebar_shows_unread_counters_in_brackets() {
     assert_absent(&text, "Sent (", (152, 40));
     assert_absent(&text, "Drafts (", (152, 40));
     assert_absent(&text, "Trash (", (152, 40));
+}
+
+/// Folder text carries a one-cell margin on both sides: after the marker
+/// column and before the pane's right edge, even when a long name and its
+/// unread counter would otherwise fill the row.
+#[test]
+fn folder_rows_keep_one_space_on_both_sides_of_the_name() {
+    use tmail::app::state::Loadable;
+    use tmail::domain::{Mailbox, MailboxId};
+
+    let mut state = mock_initial_state();
+    state.session.size = (152, 40);
+    state.mailboxes = Loadable::Loaded(vec![Mailbox {
+        id: MailboxId(String::from("long")),
+        name: String::from("[Gmail]/Important"),
+        role: None,
+        unread_count: Some(1234),
+        total_count: None,
+    }]);
+    // Folder rows start at y=9; a single folder occupies the first one.
+    let row = |buffer: &ratatui::buffer::Buffer| {
+        (0..23u16)
+            .map(|x| buffer[(x, 9)].symbol())
+            .collect::<String>()
+    };
+    let (buffer, _) = draw_state_hits(&state, 152, 40);
+    let text = row(&buffer);
+    assert!(
+        text.starts_with("  [Gmail]/"),
+        "one pad space after the marker column: {text:?}"
+    );
+    assert!(
+        text.ends_with(" (1234) "),
+        "one pad space before the divider: {text:?}"
+    );
+
+    // The cursor row swaps the blank marker for the bar, not the padding.
+    state.session.focus = tmail::app::Focus::Sidebar;
+    state.mailbox_selection = 0;
+    let (buffer, _) = draw_state_hits(&state, 152, 40);
+    let text = row(&buffer);
+    assert!(text.starts_with("▎ ["), "bar + one pad: {text:?}");
+    assert!(
+        text.ends_with(" (1234) "),
+        "right margin survives focus: {text:?}"
+    );
 }
 
 #[test]
