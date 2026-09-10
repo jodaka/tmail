@@ -7,6 +7,7 @@ use std::panic;
 
 use crossterm::cursor::Show;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::style::Print;
 use crossterm::{execute, terminal as term};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -31,7 +32,24 @@ impl TerminalGuard {
 pub fn enable(mouse: bool) -> io::Result<TerminalGuard> {
     let guard = enter(mouse, "terminal entered (raw mode + alternate screen)")?;
     install_panic_hook();
+    save_title();
     Ok(guard)
+}
+
+/// Push the current window title onto the terminal's title stack
+/// (xterm `CSI 22;0 t`), so the session can hand the user's own title
+/// back on exit. Best-effort: terminals that do not implement the stack
+/// simply ignore the sequence.
+pub fn save_title() {
+    let _ = execute!(io::stdout(), Print("\x1b[22;0t"));
+}
+
+/// Pop the title stack (xterm `CSI 23;0 t`): undo [`save_title`], giving
+/// the original title back. Called at session end, never on suspend
+/// (during the external editor the terminal is the editor's; Tmail
+/// re-asserts its own title on the next frames afterwards).
+pub fn restore_title() {
+    let _ = execute!(io::stdout(), Print("\x1b[23;0t"));
 }
 
 /// The six shared setup lines of [`enable`] and [`reenter`]: raw mode,

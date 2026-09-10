@@ -385,6 +385,9 @@ no settings/help UI, and no offline sync.
 
 ## Development
 
+The module map — one page on the layers and data flow (reducer loop,
+backend trait, UI/input/config slices) — is [docs/architecture.md](docs/architecture.md).
+
 ```sh
 cargo build
 cargo test --all-targets --all-features

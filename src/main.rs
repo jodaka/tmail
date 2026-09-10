@@ -346,9 +346,15 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
         String::from("himalaya"),
         result_tx,
     );
-    // The capture mode the terminal is currently in; the reducer owns the
+    // Mouse capture starts in the configured mode; the reducer owns the
     // intent as `state.mouse_capture`, and the runtime applies any change.
     let mut capture_applied = config.mouse;
+    // The terminal window title (user request): mirrors the app mode —
+    // wizard, composer, or the displayed mailbox with its unread count.
+    // Applied only when it changes, so a burst of events costs no extra
+    // writes; the session's original title is saved by `enable` and
+    // restored after the sync loop. Empty = "unknown/never applied".
+    let mut applied_title = String::new();
 
     if wizard_needed {
         // The wizard replaces the first `Refresh`/`LoadDrafts` warmup
@@ -382,12 +388,39 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
         // listing; LoadDrafts restores any crash-safe draft from the
         // journal (plan §14).
         let effects = reducer::reduce(&mut state, &Action::Refresh);
-        handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
+        handle_effects(
+            &mut state,
+            &manager,
+            &mut guard,
+            &events_control,
+            &mut applied_title,
+            effects,
+        )
+        .await?;
         let effects = reducer::reduce(&mut state, &Action::LoadDrafts);
-        handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
+        handle_effects(
+            &mut state,
+            &manager,
+            &mut guard,
+            &events_control,
+            &mut applied_title,
+            effects,
+        )
+        .await?;
     }
 
     loop {
+        // Title sync ahead of the draw: the reducer may have changed the
+        // mode (open the composer/wizard, switch mailboxes, unread tick).
+        let title = state.terminal_title();
+        if title != applied_title {
+            if let Err(err) =
+                crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(&title))
+            {
+                tracing::warn!(%err, "could not set the terminal title");
+            }
+            applied_title = title;
+        }
         let now = Local::now().fixed_offset();
         // The top-right clock is config-gated and off by default (ticket
         // w7f5): an empty label renders nothing.
@@ -442,7 +475,7 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
                     for action in events::coalesce(batch, &hits, &state) {
                         tracing::debug!(?action, "dispatch");
                         let effects = reducer::reduce(&mut state, &action);
-                        handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
+                        handle_effects(&mut state, &manager, &mut guard, &events_control, &mut applied_title, effects).await?;
                         sync_mouse_capture(&state, &mut capture_applied);
                     }
                 }
@@ -457,7 +490,7 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
                         &mut state,
                         &Action::BackendCompleted(result),
                     );
-                    handle_effects(&mut state, &manager, &mut guard, &events_control, effects).await?;
+                    handle_effects(&mut state, &manager, &mut guard, &events_control, &mut applied_title, effects).await?;
                     sync_mouse_capture(&state, &mut capture_applied);
                 }
                 // The manager holds a sender for the whole session.
@@ -465,6 +498,11 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
             },
         }
     }
+
+    // Terminal restoration (guarded Drop) leaves the window title set;
+    // hand the session's original title back (best-effort, popped from
+    // the title stack pushed by `enable`).
+    terminal::restore_title();
 
     // Wizard exit semantics (ADR 0003 §3.1): `--configure` completion
     // prints the saved path and exits 0; an `Esc`-cancel exits 1 with
@@ -498,6 +536,7 @@ async fn handle_effects(
     manager: &OperationManager,
     guard: &mut Option<terminal::TerminalGuard>,
     events_control: &events::EventControl,
+    applied_title: &mut String,
     effects: Vec<Effect>,
 ) -> anyhow::Result<()> {
     for effect in effects {
@@ -516,6 +555,9 @@ async fn handle_effects(
             // repaints from scratch on the next draw.
             *guard = Some(terminal::reenter(mouse).context("terminal resume failed")?);
             events_control.resume();
+            // The title that is on screen is the editor's business: forget
+            // the applied one, so the next frame re-asserts Tmail's.
+            *applied_title = String::new();
             let effects = reducer::reduce(
                 state,
                 &Action::EditorFinished {

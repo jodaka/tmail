@@ -399,4 +399,97 @@ impl AppState {
             .map(|(_, theme)| *theme)
             .unwrap_or_else(Theme::default_dark)
     }
+
+    /// The terminal window title for the current mode: the wizard over
+    /// everything ("tmail setup"), the composer ("Mail to …", the first
+    /// recipient, raw text since it may still be mid-typed), else the
+    /// displayed mailbox with its unread count (search included: the
+    /// title names the folder being searched).
+    pub fn terminal_title(&self) -> String {
+        if self.wizard.is_some() {
+            return String::from("tmail setup");
+        }
+        if let Some(composer) = &self.composer {
+            let to = composer.draft.to.as_str();
+            let recipient = to
+                .split([',', ';'])
+                .map(str::trim)
+                .find(|entry| !entry.is_empty())
+                .unwrap_or("");
+            if recipient.is_empty() {
+                return String::from("Mail to —");
+            }
+            return format!("Mail to {recipient}");
+        }
+        let name = self.active_mailbox_name().unwrap_or("Mailbox");
+        match self.active_mailbox_unread() {
+            Some(unread) => format!("{name} ({unread} unread)"),
+            None => String::from(name),
+        }
+    }
+}
+
+#[cfg(test)]
+mod terminal_title_tests {
+    use super::*;
+    use crate::app::composer::ComposerState;
+    use crate::app::route::{MailboxRoute, Route};
+    use crate::app::state::Loadable;
+    use crate::app::wizard::WizardState;
+    use crate::domain::{Mailbox, MailboxId};
+
+    fn mailbox_state() -> AppState {
+        let mut state = AppState::initial(50);
+        state.mailboxes = Loadable::Loaded(vec![Mailbox {
+            id: MailboxId(String::from("INBOX")),
+            name: String::from("INBOX"),
+            role: Some(MailboxRole::Inbox),
+            unread_count: Some(4),
+            total_count: Some(20),
+        }]);
+        state.routes.push(Route::Mailbox(MailboxRoute {
+            mailbox_id: MailboxId(String::from("INBOX")),
+        }));
+        state
+    }
+
+    #[test]
+    fn normal_mode_names_the_mailbox_and_unread() {
+        let state = mailbox_state();
+        assert_eq!(state.terminal_title(), "INBOX (4 unread)");
+    }
+
+    #[test]
+    fn unknown_unread_count_falls_back_to_the_name() {
+        let mut state = mailbox_state();
+        state.mailboxes = Loadable::Failed(String::from("broken"));
+        assert_eq!(state.terminal_title(), "Mailbox");
+    }
+
+    #[test]
+    fn open_composer_names_the_recipient() {
+        let mut state = mailbox_state();
+        let mut composer = ComposerState::new();
+        composer.draft.to = String::from("Ada Example <ada@example.io>, ");
+        state.composer = Some(composer);
+        assert_eq!(
+            state.terminal_title(),
+            "Mail to Ada Example <ada@example.io>"
+        );
+    }
+
+    #[test]
+    fn composer_without_a_recipient_dashes() {
+        let mut state = mailbox_state();
+        state.composer = Some(ComposerState::new());
+        assert_eq!(state.terminal_title(), "Mail to —");
+    }
+
+    #[test]
+    fn the_wizard_owns_the_title() {
+        let mut state = mailbox_state();
+        state.composer = Some(ComposerState::new());
+        state.wizard = Some(WizardState::new(true, None, Vec::new(), None, false));
+        assert_eq!(state.terminal_title(), "tmail setup");
+    }
 }
