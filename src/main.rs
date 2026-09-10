@@ -35,15 +35,17 @@ use tmail::ui::{RenderContext, Theme};
 /// `--configure [path]` starts the wizard regardless of config state
 /// (ADR 0003 §3.1), `--theme <name>` overrides the configured palette,
 /// and the positional argument is the config path. Any other `-`
-/// argument is a hard usage error.
+/// argument is a hard usage error. `--version` short-circuits the run
+/// (packagers probe it), so it composes with any other flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Invocation {
     configure: bool,
     config: Option<PathBuf>,
     theme: Option<String>,
+    version: bool,
 }
 
-const USAGE: &str = "usage: tmail [--configure [path]] [--theme <name>] [config.toml]";
+const USAGE: &str = "usage: tmail [--version] [--configure [path]] [--theme <name>] [config.toml]";
 
 fn parse_invocation() -> Result<Invocation, String> {
     parse_args(std::env::args().skip(1))
@@ -57,10 +59,12 @@ where
         configure: false,
         config: None,
         theme: None,
+        version: false,
     };
     let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--version" => invocation.version = true,
             "--configure" => {
                 invocation.configure = true;
                 // The optional path value: only when it does not look
@@ -117,6 +121,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    // Version probe before any runtime or config work: packagers and
+    // users get a stable, side-effect-free answer even on a box with a
+    // broken config.
+    if invocation.version {
+        println!("tmail {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -636,6 +648,26 @@ mod cli_tests {
         let plain = invocation(&["--theme", "default"]);
         assert!(!plain.configure);
         assert_eq!(plain.theme.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn version_flag_is_recognized_alone_and_in_company() {
+        let bare = invocation(&["--version"]);
+        assert!(bare.version);
+
+        let composed = invocation(&["--version", "--configure", "cfg.toml"]);
+        assert!(composed.version, "--version composes with other flags");
+        assert!(composed.configure);
+        assert_eq!(composed.config, Some(PathBuf::from("cfg.toml")));
+
+        let trailing = invocation(&["--theme", "light", "--version"]);
+        assert!(trailing.version);
+    }
+
+    #[test]
+    fn version_defaults_to_false() {
+        assert!(!invocation(&[]).version);
+        assert!(!invocation(&["--configure"]).version);
     }
 
     #[test]

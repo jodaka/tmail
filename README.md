@@ -6,6 +6,18 @@ protocols, accounts, and credentials.
 
 ## Installation
 
+### Homebrew
+
+Tap and install (the tap formula is synced from `Formula/tmail.rb` on every
+release and pulls the prebuilt binaries from the GitHub releases):
+
+```sh
+brew tap jodaka/tap https://github.com/jodaka/homebrew-tap
+brew install jodaka/tap/tmail   # installs himalaya automatically
+```
+
+### From source
+
 1. Install the Himalaya CLI (v2.x, with the backend feature you need):
 
    ```sh

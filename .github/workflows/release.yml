@@ -8,7 +8,8 @@
 # The `bump` job edits Cargo.toml + Cargo.lock, commits, and tags v<X.Y.Z>.
 # The `build` job produces release binaries for every supported target, and
 # the `publish` job attaches tarballs plus SHA256 checksums to the GitHub
-# release for the new tag.
+# release for the new tag. The `homebrew-tap` job syncs Formula/tmail.rb
+# into the Homebrew tap so `brew install` picks up the new version.
 name: Release
 
 on:
@@ -200,3 +201,98 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: dist/*
+
+  homebrew-tap:
+    name: Update Homebrew tap
+    needs: publish
+    # Opt-in until the tap exists: create the tap repository (e.g.
+    # jodaka/homebrew-tap, public, with an empty Formula/ directory), then
+    # set the repository variable TAP_REPO=<owner>/<name> and the TAP_TOKEN
+    # secret (a fine-grained PAT with Contents: read/write on the tap).
+    if: ${{ vars.TAP_REPO != '' }}
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.bump.outputs.version }}
+      TAP_REPO: ${{ vars.TAP_REPO }}
+      GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.bump.outputs.tag }}
+
+      - name: Sync formula into tap
+        run: |
+          set -euo pipefail
+
+          # Fetch the checksums published by the `publish` job (one API
+          # round-trip; works while the repository is private too).
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}"
+          asset_id="$(curl -sf -H "Authorization: Bearer ${GH_TOKEN}" "$api" \
+            | python3 -c "import json, sys; print({a['name']: a['id'] for a in json.load(sys.stdin)['assets']}['SHA256SUMS-v${VERSION}.txt'])")"
+          curl -sfL -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            -o SHA256SUMS.txt "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git" tap
+          mkdir -p tap/Formula
+          cp Formula/tmail.rb tap/Formula/tmail.rb
+
+          # Patch the copied formula to the new release: rewrite the
+          # version line (release URLs interpolate it) and each sha256
+          # line, matched by the target triple in the preceding URL.
+          python3 - "$VERSION" <<'PY'
+          import re
+          import sys
+
+          version = sys.argv[1]
+          sums = {}
+          with open("SHA256SUMS.txt") as f:
+              for line in f:
+                  digest, name = line.split(maxsplit=1)
+                  sums[name.strip()] = digest
+
+          path = "tap/Formula/tmail.rb"
+          with open(path) as f:
+              text = f.read()
+          text, count = re.subn(
+              r'(?m)^  version "[^"]+"$', f'  version "{version}"', text
+          )
+          if count != 1:
+              sys.exit(f"expected exactly one version line, patched {count}")
+
+          triple = re.compile(
+              r'tmail-v[^"]*-(aarch64-apple-darwin|x86_64-apple-darwin'
+              r'|x86_64-unknown-linux-gnu)\.tar\.gz"'
+          )
+          sha = re.compile(r'^(\s*sha256 ")([0-9a-f]{64})(")$')
+          lines = text.split("\n")
+          pending = None
+          patched = 0
+          for i, line in enumerate(lines):
+              match = triple.search(line)
+              if match:
+                  pending = match.group(1)
+                  continue
+              match = sha.match(line)
+              if match and pending:
+                  asset = f"tmail-v{version}-{pending}.tar.gz"
+                  lines[i] = f'{match.group(1)}{sums[asset]}{match.group(3)}'
+                  patched += 1
+                  pending = None
+          if patched != 3:
+              sys.exit(f"expected 3 sha256 lines, patched {patched}")
+
+          with open(path, "w") as f:
+              f.write("\n".join(lines))
+          PY
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/tmail.rb
+          if git diff --cached --quiet; then
+            echo "formula already up to date"
+          else
+            git commit -m "tmail v${VERSION}"
+            git push
+          fi
