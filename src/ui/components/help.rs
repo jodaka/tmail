@@ -1,6 +1,7 @@
 //! The shortcuts help popup (user request): a centered modal listing the
 //! active bindings for the screen underneath — the keymap's translation
-//! tables rendered as data on the user's terminal.
+//! tables rendered as data on the user's terminal, one row per action
+//! with all of its keys joined (`Trash   d, Del, ⌫`).
 
 use ratatui::Frame;
 use ratatui::layout::Rect;

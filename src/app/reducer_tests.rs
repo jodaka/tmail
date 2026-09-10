@@ -6468,12 +6468,18 @@ fn help_lists_the_active_bindings_of_the_screen_underneath() {
         panic!("help overlay");
     };
     assert_eq!(dialog.previous_focus, Focus::MessageList);
-    // The default map's list view: global + list entries, rebound-free.
+    // The default map's list view: global + list entries, rebound-free,
+    // one row per action with its keys joined.
     let entries = s.keymap.help_entries(Focus::MessageList);
     assert!(
         entries
             .iter()
-            .any(|(label, key)| label == "Open help" && key == "?")
+            .any(|(label, keys)| label == "Open help" && keys.contains('?'))
     );
-    assert!(entries.iter().any(|(label, _)| label == "Trash"));
+    // Multiple keys of one action share a row ("d, Del").
+    assert!(
+        entries
+            .iter()
+            .any(|(label, keys)| label == "Trash" && keys == "d, Del")
+    );
 }

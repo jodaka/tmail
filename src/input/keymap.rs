@@ -395,10 +395,12 @@ impl KeyMap {
         Some(format!("{up}/{down}"))
     }
 
-    /// The active bindings for one focus: `(action label, key display)`
-    /// pairs, the focus's own context first (list/reader), then the
-    /// global table. Order follows the default tables, and only the keys
-    /// actually bound (possibly user-rebound) are listed, so a custom
+    /// The active bindings for one focus: `(action label, key displays)`
+    /// pairs with **one entry per action** — all of the action's bound
+    /// keys joined as `"d, Del, ⌫"` (user request, help popup), the
+    /// focus's own context first (list/reader), then the global table.
+    /// Order follows the default tables, and only the keys actually
+    /// bound (possibly user-rebound) are listed, so a custom
     /// `[tmail.keybindings]` can never make the help popup lie.
     pub fn help_entries(&self, focus: Focus) -> Vec<(String, String)> {
         let mut entries = Vec::new();
@@ -422,9 +424,12 @@ impl KeyMap {
                     continue;
                 };
                 let label = action_label(binding.name);
-                for key in keys {
-                    entries.push((label.clone(), key.display()));
-                }
+                let keys = keys
+                    .iter()
+                    .map(|spec| spec.display())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                entries.push((label, keys));
             }
         }
         entries
