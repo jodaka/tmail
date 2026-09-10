@@ -831,6 +831,55 @@ fn reader_scrolls_body_with_reducer_state() {
     );
 }
 
+/// A body link is accent+underline; the hit map addresses its drawn
+/// columns, and a click focuses it before a second click opens it (ticket
+/// hc9n) — the same two-step rhythm as rows and chips.
+#[test]
+fn reader_link_click_focuses_then_opens() {
+    use tmail::app::state::ReaderFocus;
+    let mut state = reader_state(0);
+    state.session.size = (152, 40);
+    if let Loadable::Loaded(message) = &mut state.open_message {
+        message.plain_body = None;
+        message.html_body = Some(String::from(
+            "<p>see <a href=\"https://example.org/x\">the docs</a></p>",
+        ));
+    }
+    let (buffer, hits) = draw_state_hits(&state, 152, 40);
+    let text = text_of(&buffer);
+    let (row, col) = position_of(&text, "the docs");
+    assert_eq!(
+        hits.hit_test((col + 2) as u16, row as u16, false),
+        Some(ClickTarget::ReaderLink(0)),
+        "the hit map must address the drawn link columns:\n{text}"
+    );
+    // First click focuses, exactly like Tab.
+    reducer::reduce(&mut state, &Action::Click(ClickTarget::ReaderLink(0)));
+    assert_eq!(state.reader_focus, Some(ReaderFocus::Link(0)));
+    // The focused link draws the cursor style.
+    let (focused, _) = draw_state_hits(&state, 152, 40);
+    let style = focused[(col as u16, row as u16)].style();
+    assert!(
+        style
+            .add_modifier
+            .contains(ratatui::style::Modifier::REVERSED),
+        "focused link must draw the cursor style"
+    );
+    // Second click opens it through the platform opener.
+    let effects = reducer::reduce(&mut state, &Action::Click(ClickTarget::ReaderLink(0)));
+    let [effect] = &effects[..] else {
+        panic!("expected one effect, got {effects:?}");
+    };
+    assert!(
+        matches!(
+            &effect.kind,
+            OperationKind::OpenUrl { url } if url == "https://example.org/x"
+        ),
+        "kind: {:?}",
+        effect.kind
+    );
+}
+
 #[test]
 fn reader_idle_message_never_panics() {
     let mut state = mock_initial_state();
@@ -850,7 +899,6 @@ fn reader_idle_message_never_panics() {
     );
     assert!(text.contains("(no message loaded)"), "idle note:\n{text}");
 }
-
 /// A message with missing subject/from/body headers renders explicit
 /// placeholders: acceptance "reader handles missing subject/from/body".
 #[test]

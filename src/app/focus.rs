@@ -14,7 +14,10 @@ pub enum Focus {
     Sidebar,
     MessageList,
     /// The message reader screen is open (plan §19 Phase 4): Up/Down scroll
-    /// the body; single-letter shortcuts act on the open message.
+    /// the body; single-letter shortcuts act on the open message. Tab is
+    /// handled by the reducer, which cycles the reader's own focus cursor
+    /// over links and attachment chips (tickets 1fnh/hc9n), so the screen
+    /// focus itself never leaves the reader.
     Reader,
     /// The composer screen is open (plan §19 Phase 6): the focused control
     /// lives in `AppState.session.composer`; single-letter shortcuts never fire
@@ -64,8 +67,9 @@ impl Focus {
             | Focus::ThemePicker
             | Focus::Help
             | Focus::Wizard => self,
-            // The reader screen has a single focusable area (the scrolling
-            // document); Tab is inert there in v1 (plan §10).
+            // The reader screen keeps its screen focus; the reducer's
+            // `focus_step` redirects Tab to the reader's internal cursor
+            // (`AppState.reader_focus`: links, then chips).
             Focus::Reader => self,
             // The composer cycles its own controls (plan §10); the reducer
             // drives that cycle through `ComposerState` and steps out to
@@ -171,7 +175,8 @@ mod tests {
 
     #[test]
     fn reader_focus_is_self_cycle_and_accepts_shortcuts() {
-        // Single focusable area: Tab is inert; shortcuts act on the message.
+        // The reducer drives the reader's internal link/chip cursor from
+        // Tab; at the screen-focus level the reader never cycles away.
         assert_eq!(Focus::Reader.next(), Focus::Reader);
         assert_eq!(Focus::Reader.previous(), Focus::Reader);
         assert!(Focus::Reader.accepts_shortcuts());

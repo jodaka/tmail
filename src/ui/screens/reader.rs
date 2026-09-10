@@ -19,10 +19,11 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, ScrollbarState};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::action::ClickTarget;
-use crate::app::reader::{ReaderLine, Tone, header_lines, scroll_document};
-use crate::app::state::{AppState, Loadable};
+use crate::app::reader::{LinkRuns, ReaderDoc, ReaderLine, Tone, header_lines, scroll_document};
+use crate::app::state::{AppState, Loadable, ReaderFocus};
 use crate::input::mouse::HitMap;
 use crate::ui::chrome;
 use crate::ui::theme::Theme;
@@ -51,7 +52,7 @@ pub fn render(
     }
     let width = crate::ui::layout::reader_width(state.session.size).max(10);
     let header = header_lines(state, width);
-    let body = scroll_document(state, width);
+    let doc = scroll_document(state, width);
 
     let body_area = render_header(frame, area, theme, &header);
     if body_area.height == 0 {
@@ -68,14 +69,16 @@ pub fn render(
         );
         return;
     }
-    render_body(frame, body_area, theme, &body, state.reader_scroll);
-    push_chip_targets(hits, &body, body_area, state);
+    render_body(frame, body_area, theme, &doc, state, hits);
 }
 
 /// The fixed header: subject, meta block, hairline, each field padded two
 /// symbols in from the panel edges (ticket 6864). It never scrolls.
 fn render_header(frame: &mut Frame<'_>, area: Rect, theme: &Theme, header: &[ReaderLine]) -> Rect {
     let header_h = header.len().min(area.height as usize) as u16;
+    // The fixed header carries no links and no focus cursor; the empty
+    // run map keeps the shared span builder total.
+    let no_links = LinkRuns::default();
     for (i, line) in header.iter().take(header_h as usize).enumerate() {
         let row = Rect {
             x: area.x,
@@ -84,7 +87,14 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, theme: &Theme, header: &[Rea
             height: 1,
         };
         frame.render_widget(
-            Paragraph::new(reader_spans(line, theme, area.width as usize)),
+            Paragraph::new(reader_spans(
+                line,
+                theme,
+                area.width as usize,
+                i,
+                &no_links,
+                None,
+            )),
             row,
         );
     }
@@ -97,17 +107,22 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, theme: &Theme, header: &[Rea
 }
 
 /// The scrollable body viewport with its scrollbar (appears only when the
-/// body overflows the viewport, ticket 6864).
+/// body overflows the viewport, ticket 6864). Drawing and hit-map
+/// recording happen together here: both walk the same [`LinkRuns`] map, so
+/// a click can never land on a different link than the one drawn (ticket
+/// hc9n).
 fn render_body(
     frame: &mut Frame<'_>,
     body_area: Rect,
     theme: &Theme,
-    body: &[ReaderLine],
-    reader_scroll: usize,
+    doc: &ReaderDoc,
+    state: &AppState,
+    hits: &mut HitMap,
 ) {
+    let body = &doc.lines;
     let viewport = body_area.height as usize;
     let total = body.len();
-    let start = reader_scroll.min(total.saturating_sub(1));
+    let start = state.reader_scroll.min(total.saturating_sub(1));
     let scrolling = total > viewport;
     // A visible scrollbar reserves its column: body text clips one column
     // short so text and scrollbar never overlap. When the message fits,
@@ -117,11 +132,14 @@ fn render_body(
     } else {
         body_area.width as usize
     };
+    let links = &doc.links;
+    let focus = state.reader_focus;
     let visible: Vec<Line<'_>> = body
         .iter()
+        .enumerate()
         .skip(start)
         .take(viewport)
-        .map(|line| reader_spans(line, theme, text_width))
+        .map(|(offset, line)| reader_spans(line, theme, text_width, offset, links, focus))
         .collect();
     let text_area = if scrolling {
         Rect {
@@ -136,39 +154,73 @@ fn render_body(
         let mut scrollbar_state = ScrollbarState::new(total).position(start);
         frame.render_stateful_widget(chrome::scrollbar(theme), body_area, &mut scrollbar_state);
     }
+    push_body_targets(hits, body, text_area, start, viewport, links);
 }
 
-/// Clickable attachment chips indexed across the whole body, so scrolling
-/// never shifts the identity of the visible chips; their rects follow the
-/// scroll offset.
-fn push_chip_targets(hits: &mut HitMap, body: &[ReaderLine], body_area: Rect, state: &AppState) {
-    let viewport = body_area.height as usize;
-    let start = state.reader_scroll.min(body.len().saturating_sub(1));
-    let width = body_area.width;
+/// Record the clickable rectangles of the body: link segments (ticket
+/// hc9n) and attachment chips (plan §15). Rectangles are indexed across
+/// the whole body, so scrolling never shifts the identity of the visible
+/// items; their rects follow the scroll offset.
+fn push_body_targets(
+    hits: &mut HitMap,
+    body: &[ReaderLine],
+    area: Rect,
+    start: usize,
+    viewport: usize,
+    links: &LinkRuns,
+) {
+    let width = area.width as usize;
     let mut chip_index = 0usize;
     for (offset, line) in body.iter().enumerate() {
-        if matches!(line, ReaderLine::Chip { .. }) {
-            let visible = offset >= start && offset < start + viewport;
-            if visible {
-                hits.push(
-                    Rect {
-                        x: body_area.x,
-                        y: body_area.y + (offset - start) as u16,
-                        width,
-                        height: 1,
-                    },
-                    ClickTarget::ReaderAttachment(chip_index),
-                );
+        let visible = offset >= start && offset < start + viewport;
+        match line {
+            ReaderLine::Chip { .. } => {
+                if visible {
+                    hits.push(
+                        Rect {
+                            x: area.x,
+                            y: area.y + (offset - start) as u16,
+                            width: area.width,
+                            height: 1,
+                        },
+                        ClickTarget::ReaderAttachment(chip_index),
+                    );
+                }
+                chip_index += 1;
             }
-            chip_index += 1;
+            // The body indent and every span travel through the same
+            // `text::clip` the renderer uses, so the recorded x offsets are
+            // exactly the drawn columns.
+            ReaderLine::Rich(rich) if visible => {
+                let mut x = area.x;
+                for (span_index, span) in rich.spans.iter().enumerate() {
+                    let span_width = text::clip(&span.text, width).width() as u16;
+                    if let Some(run) = links.run_of(offset, span_index)
+                        && span_width > 0
+                    {
+                        hits.push(
+                            Rect {
+                                x,
+                                y: area.y + (offset - start) as u16,
+                                width: span_width,
+                                height: 1,
+                            },
+                            ClickTarget::ReaderLink(run),
+                        );
+                    }
+                    x = x.saturating_add(span_width);
+                }
+            }
+            _ => {}
         }
     }
 }
 
 /// Style for one rich span (plan §13 semantic table → theme tokens; no
 /// literal colors here). Flags compose: a link inside a blockquote keeps
-/// its accent so it stays discoverable.
-fn rich_span_style(style: RichStyle, theme: &Theme) -> Style {
+/// its accent so it stays discoverable; the focused link (ticket hc9n)
+/// gets the stronger cursor style.
+fn rich_span_style(style: RichStyle, theme: &Theme, focused: bool) -> Style {
     let mut out = Style::new().fg(theme.text_soft).bg(theme.background);
     if style.blockquote {
         out = theme.blockquote();
@@ -186,15 +238,27 @@ fn rich_span_style(style: RichStyle, theme: &Theme) -> Style {
         out = out.add_modifier(Modifier::ITALIC);
     }
     if style.link {
-        out = theme.link();
+        out = if focused {
+            theme.link_focused()
+        } else {
+            theme.link()
+        };
     }
     out
 }
 
 /// Convert one document line into Ratatui spans, clipped to `width` as the
 /// final safety net (html2text and `ui::text` already wrap; code/pre lines
-/// keep their whitespace).
-fn reader_spans<'a>(line: &'a ReaderLine, theme: &'a Theme, width: usize) -> Line<'a> {
+/// keep their whitespace). `links` resolves which span carries the focused
+/// link run, so the cursor style is drawn without rebuilding the document.
+fn reader_spans<'a>(
+    line: &'a ReaderLine,
+    theme: &'a Theme,
+    width: usize,
+    line_index: usize,
+    links: &LinkRuns,
+    focus: Option<ReaderFocus>,
+) -> Line<'a> {
     match line {
         ReaderLine::Chrome { tone, text } => {
             let style = match tone {
@@ -220,10 +284,16 @@ fn reader_spans<'a>(line: &'a ReaderLine, theme: &'a Theme, width: usize) -> Lin
         ReaderLine::Rich(rich) => Line::from(
             rich.spans
                 .iter()
-                .map(|span| {
+                .enumerate()
+                .map(|(span_index, span)| {
+                    let focused = matches!(
+                        focus,
+                        Some(ReaderFocus::Link(run))
+                            if links.run_of(line_index, span_index) == Some(run)
+                    );
                     Span::styled(
                         text::clip(&span.text, width),
-                        rich_span_style(span.style, theme),
+                        rich_span_style(span.style, theme, focused),
                     )
                 })
                 .collect::<Vec<_>>(),

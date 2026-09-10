@@ -48,6 +48,8 @@ fn saving_targets_the_cursor_chip_by_part_id() {
     let mut s = reader_with_attachments();
     // Tab to the second chip (unnamed → part-id fallback naming).
     reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(1)));
     let effects = reduce(&mut s, &Action::SaveAttachment);
     let (_, kind) = effect_parts(&effects);
     let OperationKind::SaveAttachment {

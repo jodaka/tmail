@@ -172,11 +172,14 @@ survives moves; the Gmail-specific drafts API is provider-specific and forbidden
   detailed retryable `File` refusal — never a partial send. Same-path chips dedupe;
   same-basename files keep insertion order.
 - Reader chips are metadata (filename · MIME · human size, deterministic wire
-  order); Tab cycles the cursor; `d` saves via a frozen retryable request, `o`
+  order); Tab cycles the body's links first, then the chips, scrolling the
+  focused item into view; `d` saves via a frozen retryable request, `o`
   opens (save-then-open chain on the confirmed, possibly collision-renamed path;
-  same-session saves are reused without a duplicate download). `Enter` presses the
-  selected chip (the same open path), and the status bar advertises `S save` /
-  `o open` whenever the open message carries attachments (ticket 61qx).
+  same-session saves are reused without a duplicate download). `Enter` activates
+  the focused link (platform browser) or chip (the same open path; the first
+  chip is the default target when none is focused), and the status bar
+  advertises `S save` / `o open` whenever the open message carries attachments
+  (ticket 61qx).
 - Downloads dir resolution: explicit request dir → `[tmail.attachments].downloads_dir`
   → `$HOME/Downloads`; missing dirs are created. Destination names reduce to a
   single component (traversal-proof); existing downloads are never silently
@@ -203,7 +206,11 @@ survives moves; the Gmail-specific drafts API is provider-specific and forbidden
   `> ` prefix; code spans win over the blockquote style.
 - `content()` re-renders HTML per call (render + scroll clamp) — keypress-driven UI
   makes this cheap for v1; memoize per (message, width) if render latency shows up.
-- Link targets are carried per `RichSpan`; the mouse phase (10) can consume them.
+- Body links are focusable (Tab/Shift+Tab in document order, then the
+  attachment chips) and clickable (first click focuses, the second opens);
+  `Enter` opens the focused link in the platform browser. Only `http://` /
+  `https://` targets reach the OS opener — untrusted HTML can never dispatch
+  `file://`, `javascript:`, or custom schemes (ticket hc9n).
 - Terminal size initializes from crossterm; a 0×0 pty degrades to the too-small
   message correctly.
 

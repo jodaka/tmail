@@ -37,6 +37,20 @@ impl<T> Loadable<T> {
     }
 }
 
+/// What the reader's Tab cycle has focused inside one open message
+/// (tickets 1fnh/hc9n). The cycle walks the body's links in document
+/// order first, then the attachment chips; `None` on `AppState` means
+/// nothing is focused yet, and `Enter`/`S`/`o` fall back to the first
+/// chip as before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReaderFocus {
+    /// A link run of the scrollable body (index over link runs, not
+    /// spans: a wrapped anchor is one item).
+    Link(usize),
+    /// An attachment chip by index.
+    Attachment(usize),
+}
+
 /// The mailbox list context stashed while search results own the visible
 /// list (Phase 9.1). Restored when the search route is left, so returning
 /// is exact — page, selection, and scroll — with no reload (plan §9 route
@@ -228,10 +242,10 @@ pub struct AppState {
     pub open_message: Loadable<Message>,
     /// First content line currently visible in the reader document.
     pub reader_scroll: usize,
-    /// Cursor within the open message's attachment chips (plan §15): the
-    /// chip the save/open keys act on. `None` addresses the first chip;
-    /// the reducer clamps with the loaded message's chip count.
-    pub reader_attachment: Option<usize>,
+    /// What the reader's Tab cycle focuses (tickets 1fnh/hc9n): a link run
+    /// or an attachment chip. `None` until the user tabs or clicks; `d`/
+    /// `S`/`o` still act on the first chip when no attachment is focused.
+    pub reader_focus: Option<ReaderFocus>,
     /// Config-derived knobs, seeded once at startup.
     pub settings: Settings,
     /// Session-local caches.
@@ -254,7 +268,7 @@ impl AppState {
             list_scroll: 0,
             open_message: Loadable::Idle,
             reader_scroll: 0,
-            reader_attachment: None,
+            reader_focus: None,
             settings: Settings {
                 keymap: crate::input::keymap::KeyMap::defaults(),
                 account_email: None,

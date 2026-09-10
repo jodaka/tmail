@@ -7,7 +7,7 @@
 
 use std::rc::Rc;
 
-use crate::app::state::{AppState, Loadable};
+use crate::app::state::{AppState, Loadable, ReaderFocus};
 use crate::view::dates;
 use crate::view::rich::{RichLine, RichSpan, RichStyle};
 use crate::view::text;
@@ -57,6 +57,87 @@ impl ReaderLine {
             ReaderLine::Chip { text, .. } => text.clone(),
             ReaderLine::Rich(line) => line.text(),
         }
+    }
+}
+
+/// Link-run map of one reader body (tickets hc9n/1fnh): the document-
+/// ordered list of links the Tab cycle and mouse hit-testing address.
+///
+/// A run is a maximal sequence of link spans that share one target with
+/// only whitespace between them. That matters because html2text wraps an
+/// anchor across lines and the reader indents every body line, so raw
+/// spans alone would turn one wrapped link into several focus stops and
+/// split click rects from focus indices.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LinkRuns {
+    targets: Vec<String>,
+    /// Per document line, per span: the run index of each span (`None`
+    /// for non-link spans), parallel to the body lines.
+    run_of: Vec<Vec<Option<usize>>>,
+}
+
+impl LinkRuns {
+    /// Walk `body` and assign run indices in reading order.
+    pub(crate) fn build(body: &[ReaderLine]) -> Self {
+        let mut runs = LinkRuns::default();
+        let mut previous: Option<String> = None;
+        for line in body {
+            match line {
+                ReaderLine::Rich(rich) => {
+                    let mut spans = Vec::with_capacity(rich.spans.len());
+                    for span in &rich.spans {
+                        let run = match &span.link_target {
+                            Some(target) => {
+                                if previous.as_deref() != Some(target.as_str()) {
+                                    runs.targets.push(target.clone());
+                                    previous = Some(target.clone());
+                                }
+                                Some(runs.targets.len() - 1)
+                            }
+                            None => {
+                                // Whitespace-only spans (the body indent,
+                                // wrap spaces) keep a wrapped link whole;
+                                // real text ends the run.
+                                if !span.text.trim().is_empty() {
+                                    previous = None;
+                                }
+                                None
+                            }
+                        };
+                        spans.push(run);
+                    }
+                    runs.run_of.push(spans);
+                }
+                // Chips and chrome carry no links and break contiguity.
+                ReaderLine::Chip { .. } | ReaderLine::Chrome { .. } => {
+                    runs.run_of.push(Vec::new());
+                    previous = None;
+                }
+            }
+        }
+        runs
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.targets.len()
+    }
+
+    /// The target of run `index`, when it exists.
+    pub(crate) fn target(&self, index: usize) -> Option<&str> {
+        self.targets.get(index).map(String::as_str)
+    }
+
+    /// The run `(line, span)` belongs to, when it is a link span.
+    pub(crate) fn run_of(&self, line: usize, span: usize) -> Option<usize> {
+        self.run_of.get(line)?.get(span).copied().flatten()
+    }
+
+    /// The first body line of run `index` (scroll-follow, tickets
+    /// hc9n/1fnh).
+    pub(crate) fn first_line(&self, index: usize) -> Option<usize> {
+        self.run_of
+            .iter()
+            .position(|spans| spans.contains(&Some(index)))
     }
 }
 
@@ -187,8 +268,9 @@ pub(crate) fn scroll_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
     }
 
     // Attachments (mockup `.attachments`): metadata chips — filename, MIME
-    // type when known, and size. Tab cycles the cursor; `d`/`o` save/open
-    // the selected chip (plan §15).
+    // type when known, and size. Tab cycles the body's links first, then
+    // these chips; `d`/`o` save/open the focused chip (tickets 1fnh/hc9n,
+    // plan §15).
     if let Some(message) = state.open_message.as_loaded()
         && !message.attachments.is_empty()
     {
@@ -202,10 +284,10 @@ pub(crate) fn scroll_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
                 if count == 1 { "" } else { "s" }
             ),
         ));
-        let selected = state
-            .reader_attachment
-            .unwrap_or(0)
-            .min(message.attachments.len() - 1);
+        let selected = match state.reader_focus {
+            Some(ReaderFocus::Attachment(index)) => index.min(message.attachments.len() - 1),
+            _ => 0,
+        };
         for (index, attachment) in message.attachments.iter().enumerate() {
             let name = attachment.name.as_deref().unwrap_or("(unnamed attachment)");
             let size = attachment
@@ -228,7 +310,7 @@ pub(crate) fn scroll_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
 #[cfg(test)]
 pub(crate) fn content(state: &AppState, width: usize) -> Vec<ReaderLine> {
     let mut lines = header_lines(state, width);
-    lines.extend(scroll_document(state, width).iter().cloned());
+    lines.extend(scroll_document(state, width).lines.iter().cloned());
     lines
 }
 
@@ -252,8 +334,17 @@ pub(crate) struct CachedReaderDoc {
     /// Cheap content fingerprint — html/plain body lengths and attachment
     /// count — so a same-id body swap cannot serve stale lines.
     pub fingerprint: (usize, usize, usize),
-    /// The shared lines; a cache hit is one `Rc` clone.
-    pub lines: Rc<Vec<ReaderLine>>,
+    /// The shared document; a cache hit is one `Rc` clone.
+    pub doc: Rc<ReaderDoc>,
+}
+
+/// One scrollable reader document: the lines and the link-run map built
+/// from them, kept together so the reducer's cycle/activation and the
+/// frame's hit map always agree (tickets hc9n/1fnh).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ReaderDoc {
+    pub lines: Vec<ReaderLine>,
+    pub links: LinkRuns,
 }
 
 /// The scrollable reader document for `state`, served from the cache on
@@ -261,17 +352,24 @@ pub(crate) struct CachedReaderDoc {
 /// fingerprint are unchanged (see [`CachedReaderDoc`]). Misses rebuild
 /// through [`scroll_lines`]. Not cached while the message loads or fails:
 /// those documents are at most a placeholder line.
-pub(crate) fn scroll_document(state: &AppState, width: usize) -> Rc<Vec<ReaderLine>> {
+pub(crate) fn scroll_document(state: &AppState, width: usize) -> Rc<ReaderDoc> {
     let width = width.max(10);
     let Loadable::Loaded(message) = &state.open_message else {
-        return Rc::new(scroll_lines(state, width));
+        let lines = scroll_lines(state, width);
+        return Rc::new(ReaderDoc {
+            links: LinkRuns::build(&lines),
+            lines,
+        });
     };
     let fingerprint = (
         message.html_body.as_ref().map_or(0, String::len),
         message.plain_body.as_ref().map_or(0, String::len),
         message.attachments.len(),
     );
-    let selected_chip = state.reader_attachment;
+    let selected_chip = match state.reader_focus {
+        Some(ReaderFocus::Attachment(index)) => Some(index),
+        _ => None,
+    };
     let cached_hit = {
         let cache = state.caches.reader_doc.borrow();
         cache.as_ref().is_some_and(|cached| {
@@ -282,24 +380,28 @@ pub(crate) fn scroll_document(state: &AppState, width: usize) -> Rc<Vec<ReaderLi
         })
     };
     if cached_hit {
-        let lines = state
+        let doc = state
             .caches
             .reader_doc
             .borrow()
             .as_ref()
-            .map(|cached| Rc::clone(&cached.lines))
+            .map(|cached| Rc::clone(&cached.doc))
             .expect("cache present after a hit check");
-        return lines;
+        return doc;
     }
-    let lines = Rc::new(scroll_lines(state, width));
+    let lines = scroll_lines(state, width);
+    let doc = Rc::new(ReaderDoc {
+        links: LinkRuns::build(&lines),
+        lines,
+    });
     *state.caches.reader_doc.borrow_mut() = Some(CachedReaderDoc {
         message_id: message.id.clone(),
         width,
         selected_chip,
         fingerprint,
-        lines: Rc::clone(&lines),
+        doc: Rc::clone(&doc),
     });
-    lines
+    doc
 }
 
 /// Number of fixed header lines (ticket 6864): the reducer subtracts it
@@ -311,7 +413,39 @@ pub fn header_line_count(state: &AppState, width: usize) -> usize {
 /// Number of scrollable body lines — the length the reducer's scroll clamp
 /// clamps against (the fixed header never scrolls).
 pub fn scroll_line_count(state: &AppState, width: usize) -> usize {
-    scroll_document(state, width).len()
+    scroll_document(state, width).lines.len()
+}
+
+/// Number of link runs in the scrollable document — the length the Tab
+/// cycle and click bounds clamp against (tickets hc9n/1fnh).
+pub fn link_count(state: &AppState, width: usize) -> usize {
+    scroll_document(state, width).links.len()
+}
+
+/// The target URL of link run `index` in the scrollable document (tickets
+/// hc9n/1fnh).
+pub(crate) fn link_target(state: &AppState, width: usize, index: usize) -> Option<String> {
+    scroll_document(state, width)
+        .links
+        .target(index)
+        .map(str::to_string)
+}
+
+/// The scrollable body line of one focus item (tickets hc9n/1fnh): the
+/// first line of a link run, or the line of an attachment chip. Used to
+/// scroll the focused item into view.
+pub(crate) fn focus_line(state: &AppState, width: usize, focus: ReaderFocus) -> Option<usize> {
+    let doc = scroll_document(state, width);
+    match focus {
+        ReaderFocus::Link(index) => doc.links.first_line(index),
+        ReaderFocus::Attachment(index) => doc
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| matches!(line, ReaderLine::Chip { .. }))
+            .map(|(line, _)| line)
+            .nth(index),
+    }
 }
 
 fn push_meta(lines: &mut Vec<ReaderLine>, label: &str, value: &str, width: usize) {
@@ -667,7 +801,7 @@ mod tests {
         let first = scroll_document(&state, 100);
         let second = scroll_document(&state, 100);
         assert!(Rc::ptr_eq(&first, &second), "second call must hit cache");
-        assert_eq!(scroll_line_count(&state, 100), first.len());
+        assert_eq!(scroll_line_count(&state, 100), first.lines.len());
     }
 
     /// A width change reflows: the cache re-keys instead of serving stale
@@ -678,7 +812,10 @@ mod tests {
         let wide = scroll_document(&state, 100);
         let narrow = scroll_document(&state, 30);
         assert!(!Rc::ptr_eq(&wide, &narrow));
-        assert!(narrow.len() >= wide.len(), "narrower wrap adds lines");
+        assert!(
+            narrow.lines.len() >= wide.lines.len(),
+            "narrower wrap adds lines"
+        );
         // The new key sticks.
         assert!(Rc::ptr_eq(&narrow, &scroll_document(&state, 30)));
     }
@@ -689,10 +826,10 @@ mod tests {
     fn a_chip_cursor_change_rebuilds() {
         let mut state = loaded_state();
         let before = scroll_document(&state, 100);
-        state.reader_attachment = Some(0);
+        state.reader_focus = Some(ReaderFocus::Attachment(0));
         let after = scroll_document(&state, 100);
         assert!(!Rc::ptr_eq(&before, &after));
-        assert_eq!(before.len(), after.len());
+        assert_eq!(before.lines.len(), after.lines.len());
     }
 
     /// A same-id body swap (e.g. a refetch) must not serve stale lines:
@@ -707,7 +844,7 @@ mod tests {
             ));
         }
         let rebuilt = scroll_document(&state, 100);
-        let text: Vec<String> = rebuilt.iter().map(ReaderLine::text).collect();
+        let text: Vec<String> = rebuilt.lines.iter().map(ReaderLine::text).collect();
         assert!(text.iter().any(|t| t.contains("Third paragraph")));
     }
 
@@ -718,7 +855,7 @@ mod tests {
         scroll_document(&state, 100);
         state.open_message = Loadable::Loading;
         assert!(scroll_line_count(&state, 100) == 0);
-        assert!(scroll_document(&state, 100).is_empty());
+        assert!(scroll_document(&state, 100).lines.is_empty());
         state.open_message = Loadable::Idle;
         assert_eq!(scroll_line_count(&state, 100), 1);
     }
@@ -770,7 +907,7 @@ mod tests {
         assert!(chips[1].starts_with("    [ second.png"), "{:?}", chips);
 
         // The cursor moves to the second chip; both stay single lines.
-        state.reader_attachment = Some(1);
+        state.reader_focus = Some(ReaderFocus::Attachment(1));
         let lines = content(&state, 100);
         let chips: Vec<&str> = lines
             .iter()
@@ -781,6 +918,105 @@ mod tests {
             .collect();
         assert!(chips[0].starts_with("    [ report.pdf"), "{:?}", chips);
         assert!(chips[1].starts_with("  ▸ [ second.png"), "{:?}", chips);
+    }
+
+    // ── Link runs (tickets hc9n/1fnh) ────────────────────────────────────
+
+    fn link_line(target: Option<&str>, text: &str) -> ReaderLine {
+        ReaderLine::Rich(RichLine {
+            spans: vec![RichSpan {
+                text: String::from(text),
+                style: RichStyle {
+                    link: target.is_some(),
+                    ..RichStyle::default()
+                },
+                link_target: target.map(String::from),
+            }],
+        })
+    }
+
+    /// Links are numbered in document order; a non-link line between two
+    /// anchors with the same target keeps them distinct runs.
+    #[test]
+    fn link_runs_follow_document_order() {
+        let body = vec![
+            ReaderLine::chrome(Tone::Dim, "header"),
+            link_line(Some("https://a.example"), "first"),
+            link_line(Some("https://b.example"), "second"),
+            ReaderLine::chrome(Tone::Dim, ""),
+            link_line(Some("https://a.example"), "again"),
+        ];
+        let runs = LinkRuns::build(&body);
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs.target(0), Some("https://a.example"));
+        assert_eq!(runs.target(1), Some("https://b.example"));
+        assert_eq!(runs.target(2), Some("https://a.example"));
+        assert_eq!(runs.run_of(1, 0), Some(0));
+        assert_eq!(runs.run_of(2, 0), Some(1));
+        assert_eq!(runs.run_of(4, 0), Some(2));
+        assert_eq!(runs.run_of(0, 0), None, "chrome carries no runs");
+        assert_eq!(runs.target(3), None);
+    }
+
+    /// A wrapped anchor is one focus stop: the indent whitespace on the
+    /// continuation line must not split the run.
+    #[test]
+    fn a_wrapped_link_stays_one_run_across_lines() {
+        let link = |text: &str| {
+            ReaderLine::Rich(RichLine {
+                spans: vec![
+                    RichSpan {
+                        text: String::from("  "),
+                        style: RichStyle::default(),
+                        link_target: None,
+                    },
+                    RichSpan {
+                        text: String::from(text),
+                        style: RichStyle {
+                            link: true,
+                            ..RichStyle::default()
+                        },
+                        link_target: Some(String::from("https://long.example/path")),
+                    },
+                ],
+            })
+        };
+        let body = vec![link("part one"), link("part two")];
+        let runs = LinkRuns::build(&body);
+        assert_eq!(runs.len(), 1, "one anchor, one focus stop");
+        assert_eq!(runs.run_of(0, 1), Some(0));
+        assert_eq!(runs.run_of(1, 1), Some(0));
+    }
+
+    /// A real render of a long anchor wraps it across lines; the fragments
+    /// must still merge into one run (html2text repeats the target).
+    #[test]
+    fn a_real_wrapped_anchor_counts_once() {
+        let long = "x".repeat(80);
+        let html = format!("<p><a href=\"https://wrapped.example/path\">{long}</a></p>");
+        let lines = crate::view::rich::html_to_rich(&html, 20);
+        let runs = LinkRuns::build(&lines.into_iter().map(ReaderLine::Rich).collect::<Vec<_>>());
+        assert_eq!(runs.len(), 1, "one anchor, one run");
+    }
+
+    /// End to end from a message body: the reader exposes one run per
+    /// anchor, independent of the paragraph splitting.
+    #[test]
+    fn link_count_reads_the_rendered_body() {
+        let mut state = loaded_state();
+        if let Loadable::Loaded(message) = &mut state.open_message {
+            message.html_body = Some(String::from(
+                "<p>see <a href=\"https://a.example\">A</a> and \
+                 <a href=\"https://b.example\">B</a></p>\
+                 <p><a href=\"https://a.example\">A again</a></p>",
+            ));
+        }
+        assert_eq!(link_count(&state, 100), 3);
+        assert_eq!(
+            link_target(&state, 100, 1).as_deref(),
+            Some("https://b.example")
+        );
+        assert_eq!(link_target(&state, 100, 9), None);
     }
 
     /// The envelope fallback timestamp (missing/unparseable Date) renders

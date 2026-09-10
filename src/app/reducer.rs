@@ -21,7 +21,7 @@ use crate::app::overlay::{
 };
 use crate::app::route::{MailboxRoute, MessageRoute, Route, SearchRoute};
 use crate::app::sanitize::sanitize;
-use crate::app::state::{AppState, ListStash, Loadable};
+use crate::app::state::{AppState, ListStash, Loadable, ReaderFocus};
 use crate::app::wizard::wizard_reduce;
 use crate::domain::{
     DraftSaveState, Mailbox, MailboxId, MailboxRole, Message, MessageLocator, Page, PageRequest,
@@ -401,7 +401,7 @@ fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
                     OperationKind::LoadMessage(_) => {
                         state.open_message = Loadable::Loading;
                         state.reader_scroll = 0;
-                        state.reader_attachment = None;
+                        state.reader_focus = None;
                     }
                     OperationKind::SaveDraft { draft } => {
                         // A draft-save retry replays the *intent* ("save
@@ -713,6 +713,7 @@ fn click(state: &mut AppState, target: ClickTarget) -> Vec<Effect> {
         ClickTarget::Mailbox(index) => click_mailbox(state, index),
         ClickTarget::SearchField => reduce(state, &Action::OpenSearch),
         ClickTarget::MessageRow(index) => click_message_row(state, index),
+        ClickTarget::ReaderLink(index) => click_reader_link(state, index),
         ClickTarget::ReaderAttachment(index) => click_reader_attachment(state, index),
         ClickTarget::ComposerField(field) => click_composer_field(state, field),
         // Modal buttons outside a modal cannot happen (their regions are
@@ -799,8 +800,8 @@ fn click_message_row(state: &mut AppState, index: usize) -> Vec<Effect> {
     Vec::new()
 }
 
-/// Click an attachment chip in the reader (plan §15): select it; clicking
-/// the already-selected chip opens it (`o`'s job — reuse a saved path or
+/// Click an attachment chip in the reader (plan §15): focus it; clicking
+/// the already-focused chip opens it (`o`'s job — reuse a saved path or
 /// save first, then open).
 fn click_reader_attachment(state: &mut AppState, index: usize) -> Vec<Effect> {
     if !matches!(state.active_route(), Some(Route::Message(_))) {
@@ -815,10 +816,29 @@ fn click_reader_attachment(state: &mut AppState, index: usize) -> Vec<Effect> {
         return Vec::new();
     }
     state.session.focus = Focus::Reader;
-    if state.reader_attachment.unwrap_or(0) == index {
+    if state.reader_focus == Some(ReaderFocus::Attachment(index)) {
         return reduce(state, &Action::OpenAttachment);
     }
-    state.reader_attachment = Some(index);
+    state.reader_focus = Some(ReaderFocus::Attachment(index));
+    Vec::new()
+}
+
+/// Click a link in the reader body (ticket hc9n): focus it; clicking the
+/// already-focused link opens it in the platform browser (Enter's job,
+/// mirroring the attachment chips).
+fn click_reader_link(state: &mut AppState, index: usize) -> Vec<Effect> {
+    if !matches!(state.active_route(), Some(Route::Message(_))) {
+        return Vec::new();
+    }
+    let width = crate::view::layout::reader_width(state.session.size).max(10);
+    if index >= crate::app::reader::link_count(state, width) {
+        return Vec::new();
+    }
+    state.session.focus = Focus::Reader;
+    if state.reader_focus == Some(ReaderFocus::Link(index)) {
+        return open_reader_link(state, width, index);
+    }
+    state.reader_focus = Some(ReaderFocus::Link(index));
     Vec::new()
 }
 
@@ -1236,6 +1256,38 @@ fn open_selected_attachment(state: &mut AppState) -> Vec<Effect> {
     save_selected_attachment(state, true)
 }
 
+/// Enter on the reader's focused item (tickets 61qx, hc9n): a focused
+/// link opens in the platform browser; otherwise the selected attachment
+/// chip opens — the first chip by default, the v1 behavior.
+fn activate_reader_item(state: &mut AppState) -> Vec<Effect> {
+    if let Some(ReaderFocus::Link(index)) = state.reader_focus {
+        let width = crate::view::layout::reader_width(state.session.size).max(10);
+        return open_reader_link(state, width, index);
+    }
+    open_selected_attachment(state)
+}
+
+/// Open one link run with the platform opener (ticket hc9n). Email HTML
+/// is untrusted input: links outside the opener's web-scheme policy are
+/// refused with a status note, never handed to the OS dispatcher.
+fn open_reader_link(state: &mut AppState, width: usize, index: usize) -> Vec<Effect> {
+    let Some(url) = crate::app::reader::link_target(state, width, index) else {
+        return Vec::new();
+    };
+    if !crate::domain::url::is_openable_url(&url) {
+        state.set_status(format!("Cannot open link: {}", sanitize(&url)));
+        return Vec::new();
+    }
+    tracing::debug!(url = %url, "opening link in the platform browser");
+    state.set_status("Opening link…");
+    vec![
+        state
+            .session
+            .operations
+            .start(OperationKind::OpenUrl { url }),
+    ]
+}
+
 /// Apply a finished attachment save: record the path for `Open` reuse and
 /// tell the user where the file actually landed (the backend may have
 /// collision-renamed it — that path, never the requested one, is shown).
@@ -1472,6 +1524,7 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             complete_save_attachment(state, result, *open_after)
         }
         OperationKind::OpenPath { .. } => complete_open_path(state, result),
+        OperationKind::OpenUrl { .. } => complete_open_url(state, result),
         // The external editor completes through `Action::EditorFinished`,
         // not the result channel (Phase 11: it runs on the terminal owner,
         // not in the manager). A result arriving here would be a routing
@@ -1834,6 +1887,20 @@ fn complete_open_path(state: &mut AppState, result: &OperationResult) -> Vec<Eff
     }
 }
 
+/// Apply a finished link-open spawn (ticket hc9n). A failure (no browser
+/// handler, missing opener) surfaces in the Retry/Dismiss modal with the
+/// URL named, like every other open.
+fn complete_open_url(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
+    match &result.outcome {
+        Ok(OperationOutcome::Done) => {
+            state.set_status("Opened link");
+            Vec::new()
+        }
+        Ok(_) => unexpected_payload(result.id, "open link"),
+        Err(failure) => open_error_modal(state, failure),
+    }
+}
+
 /// Apply the journal restore (ADR 0002 §D.5): rebuild the newest draft
 /// into the composer so composing after a crash continues it. Never
 /// clobbers a live composer. A gap between the recorded and
@@ -2071,31 +2138,75 @@ enum FlagChange {
     Starred(bool),
 }
 
-/// Move the reader's attachment-chip cursor (Tab/Shift+Tab, plan §15).
-/// Wraps within the loaded message's chip count; inert without a loaded
-/// message or attachments.
-fn cycle_reader_attachment(state: &mut AppState, delta: i64) {
-    let len = state
+/// Move the reader's focus cursor (Tab/Shift+Tab, plan §15, tickets
+/// 1fnh/hc9n). The cycle walks the body's links in document order first,
+/// then the attachment chips, wrapping at both ends. With nothing focused,
+/// forward starts at the first item and backward at the last; with no
+/// focusable item at all the cursor stays put.
+fn cycle_reader_focus(state: &mut AppState, delta: i64) {
+    let width = crate::view::layout::reader_width(state.session.size).max(10);
+    let links = crate::app::reader::link_count(state, width);
+    let attachments = state
         .open_message
         .as_loaded()
         .map(|message| message.attachments.len())
         .unwrap_or(0);
-    if len == 0 {
+    let total = links + attachments;
+    if total == 0 {
         return;
     }
-    let current = state.reader_attachment.unwrap_or(0).min(len - 1);
-    let next = (current as i64 + delta).rem_euclid(len as i64) as usize;
-    state.reader_attachment = Some(next);
+    let current = match state.reader_focus {
+        Some(ReaderFocus::Link(index)) if index < links => Some(index),
+        Some(ReaderFocus::Attachment(index)) if index < attachments => Some(links + index),
+        // A stale index (the document reflowed or the message changed
+        // under it) restarts from the cycle's head.
+        Some(_) | None => None,
+    };
+    let next = match current {
+        Some(position) => (position as i64 + delta).rem_euclid(total as i64) as usize,
+        None if delta > 0 => 0,
+        None => total - 1,
+    };
+    state.reader_focus = Some(if next < links {
+        ReaderFocus::Link(next)
+    } else {
+        ReaderFocus::Attachment(next - links)
+    });
+    reveal_reader_focus(state);
+}
+
+/// Scroll the reader so the focused item is visible (tickets hc9n/1fnh):
+/// tabbing to a link or chip below the fold must bring it into view. The
+/// bounds come from the same document the renderer draws.
+fn reveal_reader_focus(state: &mut AppState) {
+    let Some(focus) = state.reader_focus else {
+        return;
+    };
+    let width = crate::view::layout::reader_width(state.session.size).max(10);
+    let Some(line) = crate::app::reader::focus_line(state, width, focus) else {
+        return;
+    };
+    let (viewport, total) = reader_scroll_bounds(state);
+    let viewport = viewport.max(1) as usize;
+    if line < state.reader_scroll {
+        state.reader_scroll = line;
+    } else if line >= state.reader_scroll + viewport {
+        state.reader_scroll = line + 1 - viewport;
+    }
+    let max = (total - viewport as i64).max(0);
+    state.reader_scroll = (state.reader_scroll as i64).clamp(0, max) as usize;
 }
 
 /// The attachment the reader's save/open keys act on, when the open
-/// message carries any (plan §15).
+/// message carries any (plan §15). With no attachment focused (or a link
+/// focused) the first chip is the target, as before.
 fn selected_attachment(state: &AppState) -> Option<(usize, &crate::domain::Attachment)> {
     let message = state.open_message.as_loaded()?;
-    let index = state
-        .reader_attachment
-        .unwrap_or(0)
-        .min(message.attachments.len().saturating_sub(1));
+    let index = match state.reader_focus {
+        Some(ReaderFocus::Attachment(index)) => index,
+        _ => 0,
+    }
+    .min(message.attachments.len().saturating_sub(1));
     let attachment = message.attachments.get(index)?;
     Some((index, attachment))
 }
@@ -2531,10 +2642,11 @@ fn focus_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
             }
             Vec::new()
         }
-        // In the reader Tab walks the attachment chips (plan §15): the
-        // selection the save/open keys act on.
+        // In the reader Tab walks the body's links and the attachment
+        // chips (plan §15, tickets 1fnh/hc9n): the selection the Enter and
+        // save/open keys act on.
         Focus::Reader => {
-            cycle_reader_attachment(state, delta);
+            cycle_reader_focus(state, delta);
             Vec::new()
         }
         _ => {
@@ -2847,11 +2959,12 @@ fn activate(state: &mut AppState) -> Vec<Effect> {
         },
         Focus::Composer => activate_composer(state),
         // The dialogs intercept Enter themselves; unreachable in practice.
-        // Enter on the reader presses the selected attachment chip (plan
-        // §15, ticket 61qx): `o`'s open path — a session save is reused,
-        // otherwise the chip is saved first and the opener chains on the
-        // confirmed path. Inert without a loaded message or attachments.
-        Focus::Reader => open_selected_attachment(state),
+        // Enter on the reader activates the focused item (tickets 61qx,
+        // hc9n): a focused link opens in the platform browser; otherwise
+        // the selected attachment chip opens (`o`'s path — a session save
+        // is reused, otherwise the chip is saved first and the opener
+        // chains on the confirmed path). Inert without a loaded message.
+        Focus::Reader => activate_reader_item(state),
         Focus::Dialog
         | Focus::ThemePicker
         | Focus::Help
@@ -3115,7 +3228,7 @@ fn open_message(state: &mut AppState, summary: crate::domain::MessageSummary) ->
     state.session.focus = Focus::Reader;
     state.open_message = Loadable::Loading;
     state.reader_scroll = 0;
-    state.reader_attachment = None;
+    state.reader_focus = None;
     // Ticket haeb: a previously viewed message renders instantly from the
     // cache; the fresh load still runs and replaces it (so read/unread
     // state and any remote changes converge).
@@ -3140,7 +3253,7 @@ fn close_reader(state: &mut AppState) {
         state.session.routes.pop();
         state.open_message = Loadable::Idle;
         state.reader_scroll = 0;
-        state.reader_attachment = None;
+        state.reader_focus = None;
         state.session.focus = Focus::MessageList;
     }
 }
@@ -3384,7 +3497,7 @@ fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Vec<Effect> {
         state.session.search_return = None;
         state.open_message = Loadable::Idle;
         state.reader_scroll = 0;
-        state.reader_attachment = None;
+        state.reader_focus = None;
     }
     state.session.routes.push(Route::Mailbox(MailboxRoute {
         mailbox_id: mailbox_id.clone(),
@@ -3451,7 +3564,7 @@ fn back_or_cancel(state: &mut AppState) -> Vec<Effect> {
         state.session.routes.pop();
         state.open_message = Loadable::Idle;
         state.reader_scroll = 0;
-        state.reader_attachment = None;
+        state.reader_focus = None;
         state.session.focus = Focus::MessageList;
         return Vec::new();
     }

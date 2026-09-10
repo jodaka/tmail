@@ -215,7 +215,7 @@ fn click_attachment_chip_selects_then_opens() {
         &mut s,
         &Action::Click(ClickTarget::ReaderAttachment(1)),
     ));
-    assert_eq!(s.reader_attachment, Some(1));
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(1)));
     assert_eq!(s.session.focus, Focus::Reader);
     // Clicking the selected chip opens it (the `o` path: save, then open).
     let effects = reduce(&mut s, &Action::Click(ClickTarget::ReaderAttachment(1)));
@@ -230,6 +230,26 @@ fn click_attachment_chip_selects_then_opens() {
     assert!(open_after);
     assert_eq!(request.part_id, 5);
     assert!(s.session.operations.get(id).is_some());
+}
+
+#[test]
+fn click_link_focuses_then_opens_it() {
+    let mut s = reader_with_links_and_attachment();
+    // The first click only focuses the link (ticket hc9n).
+    no_effects(&reduce(&mut s, &Action::Click(ClickTarget::ReaderLink(1))));
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Link(1)));
+    assert_eq!(s.session.focus, Focus::Reader);
+    // Clicking the focused link opens it in the browser.
+    let effects = reduce(&mut s, &Action::Click(ClickTarget::ReaderLink(1)));
+    let (_, kind) = effect_parts(&effects);
+    let OperationKind::OpenUrl { url } = kind else {
+        panic!("expected OpenUrl, got {kind:?}");
+    };
+    assert_eq!(url, "https://two.example/b");
+    // An out-of-range link index is inert.
+    let mut s = reader_with_links_and_attachment();
+    no_effects(&reduce(&mut s, &Action::Click(ClickTarget::ReaderLink(9))));
+    assert_eq!(s.reader_focus, None);
 }
 
 #[test]

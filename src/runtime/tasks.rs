@@ -261,6 +261,18 @@ async fn run_effect(
                 ))),
             }
         }
+        OperationKind::OpenUrl { url } => {
+            tracing::debug!(url = %url, "opening link with platform handler");
+            // Spawned directly (argv, no shell); the opener itself refuses
+            // non-web schemes before dispatching (ticket hc9n).
+            match opener.open_url(&url) {
+                Ok(()) => Some(Ok(OperationOutcome::Done)),
+                Err(err) => Some(Err(plain_failure(
+                    effect,
+                    &format!("`{url}` could not be opened: {err}"),
+                ))),
+            }
+        }
         // The external editor never reaches the manager: the main loop
         // runs it synchronously on the terminal owner (plan §14, Phase
         // 11). This arm keeps the match total; reaching it would mean the
@@ -630,10 +642,12 @@ mod tests {
         )
     }
 
-    /// A PathOpener double that records the paths it was asked to open.
+    /// A PathOpener double that records the paths and URLs it was asked to
+    /// open.
     #[derive(Default)]
     struct RecordingOpener {
         opened: std::sync::Mutex<Vec<std::path::PathBuf>>,
+        urls: std::sync::Mutex<Vec<String>>,
     }
 
     impl PathOpener for RecordingOpener {
@@ -644,11 +658,20 @@ mod tests {
                 .push(path.to_path_buf());
             Ok(())
         }
+
+        fn open_url(&self, url: &str) -> std::io::Result<()> {
+            self.urls.lock().expect("opener lock").push(url.to_string());
+            Ok(())
+        }
     }
 
     impl RecordingOpener {
         fn opened(&self) -> Vec<std::path::PathBuf> {
             self.opened.lock().expect("opener lock").clone()
+        }
+
+        fn urls(&self) -> Vec<String> {
+            self.urls.lock().expect("opener lock").clone()
         }
     }
 
@@ -771,6 +794,13 @@ mod tests {
                     "no opener",
                 ))
             }
+
+            fn open_url(&self, _url: &str) -> std::io::Result<()> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "no opener",
+                ))
+            }
         }
         let backend = Arc::new(FakeBackend::ok());
         let (manager, mut rx) = manager_with_opener(backend, Arc::new(RefusingOpener));
@@ -785,6 +815,52 @@ mod tests {
         };
         assert!(failure.detail.contains("/tmp/x.pdf"));
         assert!(failure.detail.contains("no opener"));
+        assert_eq!(failure.retry, Some(retry));
+    }
+
+    #[tokio::test]
+    async fn open_url_effects_spawn_the_platform_opener_directly() {
+        let backend = Arc::new(FakeBackend::ok());
+        let opener = Arc::new(RecordingOpener::default());
+        let (manager, mut rx) = manager_with_opener(backend, Arc::clone(&opener) as _);
+        let url = String::from("https://example.org/a?b=1&c=2#frag");
+        let (effect, token) = effect(OperationKind::OpenUrl { url: url.clone() });
+        assert!(!effect.kind.is_cancellable(), "opens are not cancellable");
+        manager.launch(effect, ctx(11, &token));
+        let result = rx.recv().await.expect("result");
+        assert_eq!(result.outcome, Ok(OperationOutcome::Done));
+        // The whole URL traveled — query and fragment intact, no shell.
+        assert_eq!(opener.urls(), vec![url]);
+    }
+
+    #[tokio::test]
+    async fn open_url_failures_name_the_link_and_stay_retryable() {
+        struct RefusingUrlOpener;
+        impl PathOpener for RefusingUrlOpener {
+            fn open(&self, _path: &std::path::Path) -> std::io::Result<()> {
+                Ok(())
+            }
+
+            fn open_url(&self, _url: &str) -> std::io::Result<()> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "no browser",
+                ))
+            }
+        }
+        let backend = Arc::new(FakeBackend::ok());
+        let (manager, mut rx) = manager_with_opener(backend, Arc::new(RefusingUrlOpener));
+        let (effect, token) = effect(OperationKind::OpenUrl {
+            url: String::from("https://example.org/x"),
+        });
+        let retry = effect.retry_spec();
+        manager.launch(effect, ctx(12, &token));
+        let result = rx.recv().await.expect("result");
+        let Err(failure) = result.outcome else {
+            panic!("expected failure");
+        };
+        assert!(failure.detail.contains("https://example.org/x"));
+        assert!(failure.detail.contains("no browser"));
         assert_eq!(failure.retry, Some(retry));
     }
 }

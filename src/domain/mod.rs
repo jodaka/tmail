@@ -10,6 +10,7 @@ pub mod page;
 pub mod paths;
 pub mod reply;
 pub mod send;
+pub mod url;
 
 pub use address::Address;
 pub use draft::{

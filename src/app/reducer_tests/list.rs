@@ -652,7 +652,7 @@ fn resize_while_a_modal_is_open_keeps_state_coherent() {
 #[test]
 fn resize_never_pushes_the_attachment_cursor_out_of_range() {
     let mut s = reader_with_attachments();
-    s.reader_attachment = Some(1);
+    s.reader_focus = Some(ReaderFocus::Attachment(1));
     for size in [(0, 0), (60, 15), (90, 25), (152, 40)] {
         reduce(
             &mut s,
@@ -667,7 +667,11 @@ fn resize_never_pushes_the_attachment_cursor_out_of_range() {
             .map(|m| m.attachments.len())
             .unwrap_or(0);
         // The cursor either stays None (unset) or within the chip count.
-        assert!(s.reader_attachment.unwrap_or(0) < count.max(1));
+        let focused = match s.reader_focus {
+            Some(ReaderFocus::Attachment(index)) => index,
+            _ => 0,
+        };
+        assert!(focused < count.max(1));
     }
 }
 

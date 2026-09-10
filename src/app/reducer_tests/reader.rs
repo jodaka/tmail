@@ -253,24 +253,154 @@ fn tab_cycles_the_reader_attachment_cursor_and_wraps() {
     s.open_message = Loadable::Loaded(message);
     s.session.focus = Focus::Reader;
 
-    assert_eq!(s.reader_attachment, None, "cursor starts at the first chip");
+    assert_eq!(s.reader_focus, None, "nothing focused before Tab");
     reduce(&mut s, &Action::FocusNext);
-    assert_eq!(s.reader_attachment, Some(1));
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(0)));
     reduce(&mut s, &Action::FocusNext);
-    assert_eq!(s.reader_attachment, Some(0), "wraps forward");
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(1)));
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(
+        s.reader_focus,
+        Some(ReaderFocus::Attachment(0)),
+        "wraps forward"
+    );
     reduce(&mut s, &Action::FocusPrevious);
-    assert_eq!(s.reader_attachment, Some(1), "wraps backward");
+    assert_eq!(
+        s.reader_focus,
+        Some(ReaderFocus::Attachment(1)),
+        "wraps backward"
+    );
     // Closing the reader resets the cursor.
     reduce(&mut s, &Action::BackOrCancel);
-    assert_eq!(s.reader_attachment, None);
+    assert_eq!(s.reader_focus, None);
 }
 
 #[test]
-fn tab_is_inert_without_attachments() {
+fn tab_is_inert_without_focusable_items() {
     let mut s = state();
     let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
     complete_message_ok(&mut s, id);
     assert_eq!(s.session.focus, Focus::Reader);
     reduce(&mut s, &Action::FocusNext);
-    assert_eq!(s.reader_attachment, None, "no chips: no cursor");
+    assert_eq!(s.reader_focus, None, "no links, no chips: no cursor");
+}
+
+/// Tab walks the body's links first, then the attachment chips, wrapping
+/// at both ends (tickets 1fnh/hc9n).
+#[test]
+fn tab_cycles_links_then_attachments() {
+    let mut s = reader_with_links_and_attachment();
+    assert_eq!(s.reader_focus, None);
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Link(0)));
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Link(1)));
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(0)));
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Link(0)), "wraps forward");
+    reduce(&mut s, &Action::FocusPrevious);
+    assert_eq!(
+        s.reader_focus,
+        Some(ReaderFocus::Attachment(0)),
+        "wraps backward"
+    );
+    // Shift+Tab from nothing starts at the last item.
+    s.reader_focus = None;
+    reduce(&mut s, &Action::FocusPrevious);
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(0)));
+}
+
+/// Enter on a focused link starts the platform opener for its target
+/// (ticket hc9n); the completion reports success like any other open.
+#[test]
+fn enter_on_a_focused_link_opens_the_url() {
+    let mut s = reader_with_links_and_attachment();
+    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Link(1)));
+    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let OperationKind::OpenUrl { url } = kind else {
+        panic!("expected OpenUrl, got {kind:?}");
+    };
+    assert_eq!(url, "https://two.example/b");
+    assert_eq!(s.session.status.message.as_deref(), Some("Opening link…"));
+    let effects = complete_done(&mut s, id);
+    no_effects(&effects);
+    assert_eq!(s.session.status.message.as_deref(), Some("Opened link"));
+}
+
+/// Tabbing to a link below the fold scrolls it into view (tickets
+/// hc9n/1fnh): focus that cannot be seen is not focus.
+#[test]
+fn tab_focus_scrolls_the_focused_link_into_view() {
+    let mut s = state();
+    let summary = s.messages.items[1].clone();
+    let mut message = mock::mock_message(&summary);
+    message.plain_body = None;
+    let mut html = String::new();
+    for index in 0..80 {
+        html.push_str(&format!("<p>filler paragraph {index}</p>"));
+    }
+    html.push_str("<p><a href=\"https://deep.example/x\">deep link</a></p>");
+    message.html_body = Some(html);
+    message.attachments = Vec::new();
+    s.session
+        .routes
+        .push(Route::Message(crate::app::route::MessageRoute {
+            mailbox_id: summary.mailbox_id.clone(),
+            summary,
+        }));
+    s.open_message = Loadable::Loaded(message);
+    s.session.focus = Focus::Reader;
+    s.session.size = (80, 25);
+
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Link(0)));
+    let width = crate::view::layout::reader_width(s.session.size).max(10);
+    let line = crate::app::reader::focus_line(&s, width, ReaderFocus::Link(0)).expect("link line");
+    let viewport = crate::view::layout::reader_rows_visible(s.session.size)
+        .saturating_sub(crate::app::reader::header_line_count(&s, width));
+    assert!(s.reader_scroll > 0, "the deep link needs a scroll");
+    assert!(
+        line >= s.reader_scroll && line < s.reader_scroll + viewport.max(1),
+        "focused line {line} outside viewport {}..{}",
+        s.reader_scroll,
+        s.reader_scroll + viewport.max(1)
+    );
+}
+
+/// Non-web schemes never reach the opener: a status note explains the
+/// refusal and no operation starts (ticket hc9n).
+#[test]
+fn enter_on_a_non_web_link_is_refused() {
+    let mut s = reader_with_non_web_link();
+    reduce(&mut s, &Action::FocusNext);
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Link(0)));
+    no_effects(&reduce(&mut s, &Action::Activate));
+    assert!(
+        s.session
+            .status
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("Cannot open link") && m.contains("file:///etc/passwd")),
+        "status: {:?}",
+        s.session.status.message
+    );
+    assert!(s.session.operations.is_empty());
+}
+
+/// The attachment keys keep their v1 target with a link focused or with
+/// nothing focused: the first chip (ticket 61qx behavior preserved).
+#[test]
+fn attachment_actions_fall_back_to_the_first_chip() {
+    let mut s = reader_with_links_and_attachment();
+    reduce(&mut s, &Action::FocusNext); // Link(0)
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Link(0)));
+    let effects = reduce(&mut s, &Action::SaveAttachment);
+    let (_, kind) = effect_parts(&effects);
+    let OperationKind::SaveAttachment { request, .. } = kind else {
+        panic!("expected SaveAttachment, got {kind:?}");
+    };
+    assert_eq!(request.part_id, 3, "the first chip is the default target");
 }

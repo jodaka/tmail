@@ -113,6 +113,9 @@ pub enum ClickTarget {
     SearchField,
     /// A message-list row (equivalent: arrows + Enter).
     MessageRow(usize),
+    /// A link in the reader body (ticket hc9n): the first click focuses it,
+    /// clicking the focused link opens it (equivalent: Tab + Enter).
+    ReaderLink(usize),
     /// An attachment chip in the reader (equivalent: Tab + `d`/`o`).
     ReaderAttachment(usize),
     /// A composer control (equivalent: Tab; Enter activates buttons).

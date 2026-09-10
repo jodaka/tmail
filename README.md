@@ -79,7 +79,7 @@ any other file are ignored.**
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `[tmail].account` | string | none | Name of the `[accounts.<name>]` table Tmail drives (forwarded to himalaya as `-a`). When absent, Tmail uses the account himalaya itself would pick: the one with `default = true`, else the sole account. **If set, the name must match an existing `[accounts.<name>]` table or startup fails.** |
-| `[tmail].mouse` | bool | `false` | **Mouse support (off by default).** When `true`, Tmail enables terminal mouse capture and you can click mailboxes, message rows, the search field, the Compose button, attachment chips, composer controls, and modal buttons, and scroll with the wheel. See [Mouse](#mouse) for exact behavior. Capture changes what terminal text selection does, so it is opt-in. |
+| `[tmail].mouse` | bool | `false` | **Mouse support (off by default).** When `true`, Tmail enables terminal mouse capture and you can click mailboxes, message rows, the search field, the Compose button, links and attachment chips in the reader, composer controls, and modal buttons, and scroll with the wheel. See [Mouse](#mouse) for exact behavior. Capture changes what terminal text selection does, so it is opt-in. |
 | `[tmail].view_mode` | string | `"compact"` | Message-list density. `"compact"` (default) draws one line per message; `"comfortable"` splits consecutive messages with a faint horizontal separator, so each message takes two lines — fewer messages fit on screen, with more negative space between rows. |
 | `[tmail].status_timeout` | integer | `0` | Seconds a status message stays up in the bottom-right corner before it fades into the background (over the last 0.3 s) and clears. `0` keeps a message until the next one replaces it. |
 | `[tmail.mail].page_size_auto` | bool | `true` | Size each page to the number of message rows the terminal can show (ticket kjfq): the whole page fits the list without scrolling, and resizing re-loads the page. When `true`, `page_size` is ignored. |
@@ -333,11 +333,10 @@ capture at any time. With it enabled:
   switches to it.
 - **Compose button** — opens the composer (same as `c`).
 - **Search field** — focuses it (same as `/`).
-- **Reader action row** — Reply / Forward / Archive / Star / Unread /
-  Delete / Save / Open are clickable and run exactly what their
-  advertised key runs.
-- **Attachment chips (reader)** — first click selects the chip; clicking
-  the selected chip opens it (same as `o`).
+- **Links (reader)** — first click focuses the link; clicking the focused
+  link opens it in the system browser (same as Tab + `Enter`).
+- **Attachment chips (reader)** — first click focuses the chip; clicking
+  the focused chip opens it (same as `o`).
 - **Composer** — clicking a field focuses it; clicking Cc/Bcc toggles,
   `+ attach`, a chip, Send, or Discard activates that control.
 - **Modal buttons** — Retry/Dismiss and Discard/Keep press like

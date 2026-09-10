@@ -332,6 +332,14 @@ impl Theme {
             .add_modifier(Modifier::UNDERLINED)
     }
 
+    /// The focused HTML link (ticket hc9n): the link style plus a reversed
+    /// fill so the Tab cursor is unmistakable on every palette, including
+    /// the monochrome theme where accent degrades to the terminal default.
+    pub fn link_focused(&self) -> Style {
+        self.link()
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    }
+
     /// `pre`/`code` runs (whitespace preservation is a layout property;
     /// the surface fill marks the code region).
     pub fn code(&self) -> Style {

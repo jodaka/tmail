@@ -27,7 +27,9 @@ hints always follow the configured bindings.
 | Reader | `⌫` (Backspace) | Trash |
 | List | `Space` | Toggle the focused message's selection mark |
 | List | `i` | Mark read (focused row, or the whole selection) |
-| Reader | `S` / `o` / `Enter`, `Tab` | Save / open the selected attachment, cycle chips |
+| Reader | `Tab` / `Shift+Tab` | Cycle the open message's links, then its attachments |
+| Reader | `Enter` | Open the focused link in the browser, or the focused attachment |
+| Reader | `S` / `o` | Save / open the focused attachment (first chip when none is focused) |
 | Search | printable, `Backspace`, `Enter`, `Esc` | Edit query, submit, leave |
 | Composer | `Enter` | Newline in body; activate focused control |
 | Composer | `Ctrl+Enter` | Send |

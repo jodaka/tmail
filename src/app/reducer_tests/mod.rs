@@ -239,7 +239,10 @@ fn reader_with_attachments() -> AppState {
 fn attachment_request(s: &AppState) -> crate::domain::AttachmentRequest {
     // Rebuild the request the reducer would issue for the selected chip.
     let message = s.open_message.as_loaded().unwrap();
-    let index = s.reader_attachment.unwrap_or(0);
+    let index = match s.reader_focus {
+        Some(ReaderFocus::Attachment(index)) => index,
+        _ => 0,
+    };
     let attachment = &message.attachments[index];
     crate::domain::AttachmentRequest {
         locator: crate::domain::MessageLocator {
@@ -253,6 +256,55 @@ fn attachment_request(s: &AppState) -> crate::domain::AttachmentRequest {
     }
 }
 
+/// Open the reader on an HTML message with two links and one attachment
+/// (tickets 1fnh/hc9n): the full Tab cycle in one fixture.
+fn reader_with_links_and_attachment() -> AppState {
+    let mut s = state();
+    let summary = s.messages.items[1].clone();
+    let mut message = mock::mock_message(&summary);
+    message.plain_body = None;
+    message.html_body = Some(String::from(
+        "<p>read <a href=\"https://one.example/a\">one</a> and \
+         <a href=\"https://two.example/b\">two</a></p>",
+    ));
+    message.attachments = vec![crate::domain::Attachment {
+        name: Some(String::from("report.pdf")),
+        mime_type: Some(String::from("application/pdf")),
+        size: Some(14),
+        part_id: 3,
+    }];
+    s.session
+        .routes
+        .push(Route::Message(crate::app::route::MessageRoute {
+            mailbox_id: summary.mailbox_id.clone(),
+            summary,
+        }));
+    s.open_message = Loadable::Loaded(message);
+    s.session.focus = Focus::Reader;
+    s
+}
+
+/// Open the reader on an HTML message whose only link uses a non-web
+/// scheme (ticket hc9n: the opener policy must refuse it).
+fn reader_with_non_web_link() -> AppState {
+    let mut s = state();
+    let summary = s.messages.items[1].clone();
+    let mut message = mock::mock_message(&summary);
+    message.plain_body = None;
+    message.html_body = Some(String::from(
+        "<p><a href=\"file:///etc/passwd\">local file</a></p>",
+    ));
+    message.attachments = Vec::new();
+    s.session
+        .routes
+        .push(Route::Message(crate::app::route::MessageRoute {
+            mailbox_id: summary.mailbox_id.clone(),
+            summary,
+        }));
+    s.open_message = Loadable::Loaded(message);
+    s.session.focus = Focus::Reader;
+    s
+}
 /// Open the composer and return the state (asserts the route/focus).
 fn compose(s: &mut AppState) -> &mut crate::app::composer::ComposerState {
     no_effects(&reduce(s, &Action::Compose));

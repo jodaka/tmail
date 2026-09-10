@@ -121,6 +121,10 @@ pub enum OperationKind {
     /// Open a saved file with the platform handler (`open`/`xdg-open`,
     /// plan §15, Phase 8.5): spawned directly, never through a shell.
     OpenPath { path: std::path::PathBuf },
+    /// Open a link from an HTML body in the platform browser (ticket
+    /// hc9n): spawned directly, never through a shell, and only for the
+    /// web schemes the opener policy accepts.
+    OpenUrl { url: String },
     /// Hand the draft body to the configured external editor (plan §14,
     /// Phase 11): the runtime suspends the TUI, spawns `program` (argv
     /// only, no shell) on a secure temporary file, and waits for exit.
@@ -202,6 +206,7 @@ impl OperationKind {
             OperationKind::ListAttachmentFiles { .. } => "Listing files",
             OperationKind::SaveAttachment { .. } => "Saving attachment",
             OperationKind::OpenPath { .. } => "Opening attachment",
+            OperationKind::OpenUrl { .. } => "Opening link",
             OperationKind::EditExternally { .. } => "Editing externally",
             OperationKind::DiscoverConfig { .. } => "Detecting settings",
             OperationKind::TestAccount { .. } => "Testing account",
@@ -300,16 +305,17 @@ impl OperationKind {
     /// never cancellable: killing himalaya mid-DATA leaves the delivery
     /// state unknown while the suppressed `Cancelled` result could claim
     /// neither failure nor success — exactly the ambiguity plan §12 forbids
-    /// hiding (an already-spawned handler app is likewise let alone). The
-    /// external editor is likewise untouchable: it owns the terminal and
-    /// the body file until it exits (plan §14 step 5). The user can still
-    /// leave the composer; the send completes (or is classified) in the
-    /// background.
+    /// hiding (an already-spawned handler app, or an already-launched
+    /// browser, is likewise let alone). The external editor is likewise
+    /// untouchable: it owns the terminal and the body file until it exits
+    /// (plan §14 step 5). The user can still leave the composer; the send
+    /// completes (or is classified) in the background.
     pub fn is_cancellable(&self) -> bool {
         !matches!(
             self,
             OperationKind::Send { .. }
                 | OperationKind::OpenPath { .. }
+                | OperationKind::OpenUrl { .. }
                 | OperationKind::EditExternally { .. }
         )
     }
