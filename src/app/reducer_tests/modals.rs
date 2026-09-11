@@ -32,19 +32,19 @@ fn esc_cancels_foreground_work_and_returns_to_stable_state() {
 }
 
 #[test]
-fn esc_during_startup_load_cancels_then_second_esc_quits() {
+fn esc_during_startup_load_leaves_it_running_then_esc_quits() {
     let mut s = AppState::initial(mock::PAGE_SIZE);
     let (id, _) = boot(&mut s);
     let token = s.session.operations.cancellation(id).unwrap();
+    // The startup listing is background consequence work: the user has
+    // no intent to cancel it, so Esc goes straight to quitting.
     reduce(&mut s, &Action::BackOrCancel);
-    assert!(token.is_cancelled());
     assert!(
-        !s.session.quit_requested,
-        "first Esc cancels, does not quit"
+        !token.is_cancelled(),
+        "the background listing must not be esc-cancellable"
     );
-    // Nothing left to cancel: the next Esc quits as before.
-    reduce(&mut s, &Action::BackOrCancel);
-    assert!(s.session.quit_requested);
+    assert!(s.session.operations.get(id).is_some());
+    assert!(s.session.quit_requested, "Esc quits");
 }
 
 #[test]

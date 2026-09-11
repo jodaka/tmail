@@ -385,19 +385,19 @@ fn mailboxes_loaded_empty_is_valid_not_an_error() {
 }
 
 #[test]
-fn mailboxes_failure_opens_modal_and_retry_reloads() {
+fn mailboxes_failure_keeps_a_failed_sidebar_and_refresh_reloads() {
     let mut s = AppState::initial(mock::PAGE_SIZE);
     let (id, kind) = boot(&mut s);
     reduce(&mut s, &failure(id, &kind, "no such account"));
+    // The startup listing is background work: the failure renders the
+    // dim sidebar note without a modal interrupt.
     assert!(matches!(s.mailboxes, Loadable::Failed(_)));
-    assert!(s.session.overlay.is_some());
-    // Retry replays the typed mailbox-load intent under a new id.
-    let effects = reduce(&mut s, &Action::RetryError);
+    assert!(s.session.overlay.is_none());
+    // `Ctrl+R` replays the typed mailbox-load intent under a new id.
+    let effects = reduce(&mut s, &Action::Refresh);
     let (retry_id, retry_kind) = effect_parts(&effects);
     assert_eq!(retry_kind, mailboxes_kind());
-    assert_ne!(retry_id, id, "retry gets a fresh operation id");
-    assert!(s.session.overlay.is_none(), "modal closed on retry");
-    assert!(matches!(s.mailboxes, Loadable::Loading));
+    assert_ne!(retry_id, id, "refresh gets a fresh operation id");
     assert!(s.session.operations.get(retry_id).is_some());
 }
 

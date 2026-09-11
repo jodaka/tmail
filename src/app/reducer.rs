@@ -1554,10 +1554,12 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
     // not count as in flight while its outcome is applied.
     state.session.operations.finish(result.id);
     match &kind {
-        OperationKind::LoadMailboxes => complete_load_mailboxes(state, result),
+        OperationKind::LoadMailboxes => complete_load_mailboxes(state, origin, result),
         OperationKind::LoadPage(request) => complete_load_page(state, request, origin, result),
         OperationKind::Search(request) => complete_search(state, request, origin, result),
-        OperationKind::LoadMessage(locator) => complete_load_message(state, locator, result),
+        OperationKind::LoadMessage(locator) => {
+            complete_load_message(state, locator, origin, result)
+        }
         OperationKind::OpenDraft(locator) => complete_open_draft(state, locator, result),
         OperationKind::Preview(_) => complete_preview(state, result),
         OperationKind::SeedComposer { kind, .. } => complete_seed_composer(state, result, *kind),
@@ -1609,8 +1611,14 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
 }
 
 /// Apply a finished mailbox listing: refresh the cached sidebar and hand
-/// the listing to `mailboxes_loaded`.
-fn complete_load_mailboxes(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
+/// the listing to `mailboxes_loaded`. A *background* refresh (the
+/// discard-sweep recount and friends) never erases a healthy sidebar: a
+/// hiccup just keeps what the user already sees, silently.
+fn complete_load_mailboxes(
+    state: &mut AppState,
+    origin: OperationOrigin,
+    result: &OperationResult,
+) -> Vec<Effect> {
     match &result.outcome {
         Ok(OperationOutcome::Mailboxes(mailboxes)) => {
             // Ticket haeb: every successful listing refreshes the cached
@@ -1626,9 +1634,27 @@ fn complete_load_mailboxes(state: &mut AppState, result: &OperationResult) -> Ve
         }
         Ok(_) => unexpected_payload(result.id, "mailbox"),
         Err(failure) => {
+            // A background refresh failure never erases a healthy sidebar:
+            // what the user sees is good, the hiccup is logged. When
+            // nothing was loaded yet (a cold start), the sidebar carries
+            // the failure note — the user's retry is `Ctrl+R`; no modal
+            // interrupts background work.
+            if origin == OperationOrigin::Background
+                && matches!(state.mailboxes, Loadable::Loaded(_))
+            {
+                tracing::debug!(
+                    id = %result.id,
+                    detail = %failure.detail,
+                    "background mailbox refresh failed; sidebar untouched"
+                );
+                return Vec::new();
+            }
             // The sidebar keeps a dim failed note; the modal carries the
             // full sanitized detail and the retry intent.
             state.mailboxes = Loadable::Failed(failure.detail.clone());
+            if origin == OperationOrigin::Background {
+                return Vec::new();
+            }
             open_error_modal(state, failure)
         }
     }
@@ -1740,6 +1766,7 @@ fn complete_search(
 fn complete_load_message(
     state: &mut AppState,
     locator: &MessageLocator,
+    origin: OperationOrigin,
     result: &OperationResult,
 ) -> Vec<Effect> {
     let current = matches!(
@@ -1759,6 +1786,18 @@ fn complete_load_message(
         Ok(OperationOutcome::Message(message)) => message_loaded(state, (**message).clone()),
         Ok(_) => unexpected_payload(result.id, "message"),
         Err(failure) => {
+            // A background convergence fetch of an already-cached message
+            // runs silently: the reader already shows good content, so a
+            // remote hiccup (or a stale maildir id drift) just keeps the
+            // cached copy instead of interrupting with a modal.
+            if origin == OperationOrigin::Background {
+                tracing::debug!(
+                    id = %result.id,
+                    detail = %failure.detail,
+                    "silent convergence fetch failed; cached copy stays"
+                );
+                return Vec::new();
+            }
             // The reader shows a failure placeholder; the modal carries
             // Retry/Dismiss (plan §12). Coherent state.
             state.open_message = Loadable::Failed(failure.detail.clone());
@@ -1895,8 +1934,16 @@ fn complete_delete_draft(
             // scoped backend delete awaits its sweep, so both listings
             // now see a clean Drafts mailbox.
             DraftRemovalReason::Discard => {
-                let mut effects =
-                    vec![state.session.operations.start(OperationKind::LoadMailboxes)];
+                // Both refreshes run in the background: the discard is
+                // done and its cleanup work must never sit in the
+                // foreground slot where `Esc` would cancel it into
+                // "loading mailboxes — cancelled".
+                let mut effects = vec![
+                    state
+                        .session
+                        .operations
+                        .start_background(OperationKind::LoadMailboxes),
+                ];
                 effects.extend(request_visible_page_background(
                     state,
                     state.messages.offset,
@@ -3026,20 +3073,31 @@ fn request_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
     };
     // Ticket haeb: in cold contexts (empty list — startup, mailbox switch)
     // the cached page renders instantly; the fresh load below still runs
-    // and its result overwrites the cache and the page.
+    // and its result overwrites the cache and the page. When the cache
+    // served the visible rows, the fresh load is *consequence* work: it
+    // runs in the background so `Esc` can never cancel it into "cancelled"
+    // noise, and its result converges read/unread state and remote drift.
     let mut effects = Vec::new();
+    let mut served_from_cache = false;
     if state.messages.items.is_empty()
         && let Some(cache) = &state.caches.page_cache
         && let Some(page) = cache.load(&request.mailbox_id, None, request.offset, request.limit)
     {
         effects.extend(apply_page(state, page));
+        served_from_cache = true;
     }
-    effects.push(
+    let load = if served_from_cache {
         state
             .session
             .operations
-            .start(OperationKind::LoadPage(request)),
-    );
+            .start_background(OperationKind::LoadPage(request))
+    } else {
+        state
+            .session
+            .operations
+            .start(OperationKind::LoadPage(request))
+    };
+    effects.push(load);
     effects
 }
 
@@ -3312,8 +3370,10 @@ fn draft_message_loaded(state: &mut AppState, message: crate::domain::Message) -
 }
 
 /// Open the selected message: push the reader route, snapshot the summary,
-/// and fetch the full message. The list page, selection, and scroll stay
-/// untouched so `Esc` restores them exactly (plan §19 Phase 4).
+/// and show the cached copy if one exists (with a silent background
+/// convergence fetch); otherwise fetch the full message in the foreground.
+/// The list page, selection, and scroll stay untouched so `Esc` restores
+/// them exactly (plan §19 Phase 4).
 fn open_message(state: &mut AppState, summary: crate::domain::MessageSummary) -> Vec<Effect> {
     let mailbox_id = summary.mailbox_id.clone();
     let locator = summary.into_locator();
@@ -3322,17 +3382,28 @@ fn open_message(state: &mut AppState, summary: crate::domain::MessageSummary) ->
         summary,
     }));
     state.session.focus = Focus::Reader;
-    state.open_message = Loadable::Loading;
     state.reader_scroll = 0;
     state.reader_focus = None;
-    // Ticket haeb: a previously viewed message renders instantly from the
-    // cache; the fresh load still runs and replaces it (so read/unread
-    // state and any remote changes converge).
-    if let Some(cache) = &state.caches.page_cache
-        && let Some(message) = cache.load_message(&locator.mailbox, &locator.id.0)
-    {
+    // The cached copy renders instantly and the convergence fetch runs
+    // silently in the background (never cancellable, no loader slot): its
+    // result converges read/unread state and any remote drift (ticket
+    // haeb). Missing from the cache is the ordinary path: a foreground
+    // load with the centered spinner.
+    let cached = state
+        .caches
+        .page_cache
+        .as_ref()
+        .and_then(|cache| cache.load_message(&locator.mailbox, &locator.id.0));
+    if let Some(message) = cached {
         state.open_message = Loadable::Loaded(message);
+        return vec![
+            state
+                .session
+                .operations
+                .start_background(OperationKind::LoadMessage(locator)),
+        ];
     }
+    state.open_message = Loadable::Loading;
     vec![
         state
             .session
@@ -3784,7 +3855,16 @@ fn refresh(state: &mut AppState) -> Vec<Effect> {
             state.mailboxes = Loadable::Loaded(mailboxes.clone());
             effects = apply_mailbox_listing(state, mailboxes);
         }
-        effects.push(state.session.operations.start(OperationKind::LoadMailboxes));
+        // The listing is background work (uncancellable): at startup the
+        // user has no intent to interrupt it — `Esc` must not turn the
+        // listing into "cancelled" noise, and a cached sidebar has
+        // already given them something interactive.
+        effects.push(
+            state
+                .session
+                .operations
+                .start_background(OperationKind::LoadMailboxes),
+        );
         return effects;
     }
     if state.active_route().is_none() {

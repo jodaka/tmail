@@ -167,11 +167,18 @@ fn opening_a_message_serves_the_cached_copy_instantly() {
         s.open_message,
         crate::app::state::Loadable::Loaded(_)
     ));
-    // …and the fresh load still runs.
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e.kind, OperationKind::LoadMessage(_)))
+    // …and a silent, uncancellable background convergence fetch runs (it
+    // reconciles read state and remote drift; it never takes the loader
+    // slot, so Esc cannot cancel it into "cancelled" noise).
+    let convergence = effects
+        .iter()
+        .find(|e| matches!(e.kind, OperationKind::LoadMessage(_)))
+        .expect("the convergence fetch still runs");
+    let op = s.session.operations.get(convergence.id).expect("in flight");
+    assert_eq!(op.origin, OperationOrigin::Background);
+    assert_ne!(
+        s.session.operations.foreground().map(|o| o.id),
+        Some(convergence.id)
     );
 }
 
