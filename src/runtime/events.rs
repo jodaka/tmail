@@ -13,9 +13,13 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::app::{Action, AppState};
 use crate::input::{keyboard, mouse};
 
-/// Tick cadence. The clock only shows minutes; 250 ms keeps future spinner
-/// animation smooth without busy-waiting.
-pub const TICK_INTERVAL: Duration = Duration::from_millis(250);
+/// Tick cadence while the app is idle (the clock only shows minutes; a
+/// slow heartbeat costs nothing).
+pub const SLOW_TICK_INTERVAL: Duration = Duration::from_millis(250);
+/// Tick cadence while foreground work animates the Knight Rider scanner:
+/// ~20 frames/second feeds the render loop fast enough for the 40 ms
+/// scanner frames.
+pub const FAST_TICK_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -42,10 +46,15 @@ enum Control {
     Pause,
     /// Resume normal event delivery.
     Resume,
+    /// Switch the tick cadence: fast (`true`) while foreground work keeps
+    /// the loader animating, slow otherwise, so idle sessions don't burn
+    /// the render loop at 20 Hz for nothing.
+    Pace(bool),
 }
 
 /// Handle over the running event loop's lifecycle (Phase 11.5): pause
-/// while the external editor owns the terminal, resume after it exits.
+/// while the external editor owns the terminal, resume after it exits,
+/// and match the tick pace to the loader's animation demands.
 #[derive(Clone)]
 pub struct EventControl {
     tx: UnboundedSender<Control>,
@@ -58,6 +67,12 @@ impl EventControl {
 
     pub fn resume(&self) {
         let _ = self.tx.send(Control::Resume);
+    }
+
+    /// `true`: ticks arrive at [`FAST_TICK_INTERVAL`] (the scanner is
+    /// animating); `false`: back to [`SLOW_TICK_INTERVAL`].
+    pub fn set_fast_ticks(&self, fast: bool) {
+        let _ = self.tx.send(Control::Pace(fast));
     }
 }
 
@@ -73,21 +88,35 @@ pub fn spawn() -> (UnboundedReceiver<Event>, EventControl) {
 
 async fn event_loop(tx: UnboundedSender<Event>, mut control: UnboundedReceiver<Control>) {
     let mut reader = crossterm::event::EventStream::new();
-    let mut tick = tokio::time::interval(TICK_INTERVAL);
+    let mut idle = tokio::time::interval(SLOW_TICK_INTERVAL);
+    let mut fast = tokio::time::interval(FAST_TICK_INTERVAL);
     // While paused (external editor owns the terminal) ticks are not
-    // consumed; delay mode prevents a burst firing on resume.
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // consumed; delay mode prevents a burst firing on resume. The first
+    // tick of a fresh interval fires immediately: consume both so the
+    // select below waits for real ticks.
+    idle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    fast.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    idle.tick().await;
+    fast.tick().await;
+    let mut fast_ticks = false;
     let mut paused = false;
     loop {
         tokio::select! {
             command = control.recv() => match command {
+                Some(Control::Pace(fast)) => fast_ticks = fast,
                 Some(Control::Pause) => paused = true,
                 Some(Control::Resume) => paused = false,
                 None => break,
             },
-            // Both input arms are disabled while paused: the child program
-            // owns stdin, and its keystrokes must reach it untouched.
-            _ = tick.tick(), if !paused => {
+            // Only the active pace's timer is awaited; a pace switch takes
+            // effect on the next loop turn (worst case one slow tick of
+            // lag).
+            _ = fast.tick(), if fast_ticks && !paused => {
+                if tx.send(Event::Tick).is_err() {
+                    break;
+                }
+            }
+            _ = idle.tick(), if !fast_ticks && !paused => {
                 if tx.send(Event::Tick).is_err() {
                     break;
                 }

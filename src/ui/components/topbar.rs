@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -12,51 +12,79 @@ use crate::app::action::ClickTarget;
 use crate::app::state::AppState;
 use crate::input::mouse::HitMap;
 use crate::ui::chrome::{self, HairlineSide};
+use crate::ui::text;
 use crate::ui::theme::Theme;
 
+/// Topbar fill, distinct from the page background (temporary experiment):
+/// rgb(21, 24, 32).
+const TOPBAR_BG: Color = Color::Rgb(0x15, 0x18, 0x20);
+/// Brand bullet: rgb(131, 189, 99).
+const BRAND_DOT: Color = Color::Rgb(0x83, 0xBD, 0x63);
+/// Brand "t" glyph and the version: rgb(87, 94, 113).
+const BRAND_DIM: Color = Color::Rgb(0x57, 0x5E, 0x71);
+/// Brand "mail" glyph: rgb(191, 189, 183).
+const BRAND_TEXT: Color = Color::Rgb(0xBF, 0xBD, 0xB7);
+/// Loader scanner color: rgb(117, 192, 249).
+const LOADER_COLOR: Color = Color::Rgb(0x75, 0xC0, 0xF9);
+
 /// Render the topbar into `area` (height 4: 3 content rows + hairline).
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &AppState,
     theme: &Theme,
     clock: &str,
+    loader_millis: u64,
     hits: &mut HitMap,
 ) {
     if area.height == 0 || area.width == 0 {
         return;
     }
+    // The topbar carries its own panel color: the whole strip (brand,
+    // search field, clock) sits on it, not on the page background.
+    frame.render_widget(Block::new().style(Style::new().bg(TOPBAR_BG)), area);
 
-    // Brand row: "tmail" bold + version dim — or, while foreground work is
-    // in flight, the loader in its place (ticket m3by: the status spinner
-    // lives on top of the program name; the brand returns when loading
-    // finishes). Animated from the tick counter (plan §20).
+    // Brand row: "• tmail" bold + version dim, always rendered (the loader
+    // no longer replaces it — it drops one row below instead). Animated
+    // from the tick counter (plan §20).
     let brand_area = Rect {
         x: area.x.saturating_add(2),
         y: area.y.saturating_add(1),
         width: area.width.min(22),
         height: 1,
     };
+    let brand = Line::from(vec![
+        Span::styled("•", Style::new().fg(BRAND_DOT)),
+        Span::raw(" "),
+        Span::styled("t", Style::new().fg(BRAND_DIM).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "mail",
+            Style::new().fg(BRAND_TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" v{}", env!("CARGO_PKG_VERSION")),
+            Style::new().fg(BRAND_DIM),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(brand), brand_area);
+
+    // Loader (opencode's TUI scanner, "blocks" style): a Knight Rider
+    // sweep rendered on the row right below the logo while foreground work
+    // is in flight.
     if state.session.operations.foreground().is_some() {
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                super::spinner::frame(state.session.ticks),
-                Style::new().fg(theme.accent),
-            )),
-            brand_area,
+        super::spinner::render_blocks(
+            frame,
+            Rect {
+                x: area.x.saturating_add(2),
+                y: area.y.saturating_add(2),
+                width: area.width,
+                height: 1,
+            },
+            LOADER_COLOR,
+            TOPBAR_BG,
+            loader_millis,
         );
-    } else {
-        let brand = Line::from(vec![
-            Span::styled(
-                "tmail",
-                Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" v{}", env!("CARGO_PKG_VERSION")),
-                Style::new().fg(theme.dim),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(brand), brand_area);
     }
 
     // Search field: bordered well, `/` prompt, query or placeholder.
@@ -75,13 +103,13 @@ pub fn render(
         } else {
             Style::new().fg(theme.border)
         };
-        // The well sits on the page background (ticket e6wn): focus shows
-        // through the accent border and the cursor, never a fill change.
+        // The well sits on the topbar panel color; focus shows through the
+        // accent border and the cursor, never a fill change.
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(symbols::border::ROUNDED)
             .border_style(border_style)
-            .style(Style::new().bg(theme.background));
+            .style(Style::new().bg(TOPBAR_BG));
         let query = &state.session.search_query;
         let prompt = Span::styled("/", Style::new().fg(theme.dim));
         let text = if query.is_empty() && !focused {
@@ -100,9 +128,35 @@ pub fn render(
         hits.push(search_area, ClickTarget::SearchField);
     }
 
-    // Clock, right-aligned on the middle row. Empty string = disabled
-    // (`[tmail.ui].clock`, ticket w7f5: off by default).
-    if !clock.is_empty() && clock.len() < area.width as usize {
+    // Top-right slot on the brand row: a status message when one is
+    // showing (faded color, one column of padding off the right edge),
+    // otherwise the clock (`[tmail.ui].clock`, ticket w7f5: off by
+    // default). Both would collide, so the message wins its row.
+    let status_message = state.session.status.message.as_deref();
+    // The search well may end deep into the row: the message clips in
+    // front of it, never over it.
+    let message_budget = area
+        .width
+        .saturating_sub(search_x - area.x + search_width + 4)
+        .max(10) as usize;
+    if let Some(message) = status_message {
+        let message = text::truncate(message, message_budget);
+        let width = message.width() as u16;
+        if width > 0 {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    message,
+                    Style::new().fg(theme.muted).bg(TOPBAR_BG),
+                )),
+                Rect {
+                    x: area.x + area.width - width - 1,
+                    y: area.y.saturating_add(1),
+                    width,
+                    height: 1,
+                },
+            );
+        }
+    } else if !clock.is_empty() && clock.width() < area.width as usize {
         let clock_area = Rect {
             x: area.x + area.width - clock.width() as u16 - 2,
             y: area.y.saturating_add(1),

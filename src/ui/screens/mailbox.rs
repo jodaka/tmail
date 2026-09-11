@@ -154,7 +154,12 @@ pub fn render(
     // is empty and a load is in flight, show the pane spinner instead
     // (ticket m3by: one loader look everywhere, centered in the panel).
     if !drew_any_row && list_load_in_flight(state) {
-        crate::ui::components::spinner::render_centered(frame, rows, theme, state.session.ticks);
+        crate::ui::components::spinner::render_centered(
+            frame,
+            rows,
+            theme,
+            crate::ui::components::spinner::pane_millis(state),
+        );
     } else if !drew_any_row
         && matches!(state.active_route(), Some(Route::Search(_)))
         && state.session.operations.foreground().is_none()

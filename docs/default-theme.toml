@@ -19,7 +19,7 @@
 [tmail.theme]
 name = "default"
 # Page background: fills everything no widget paints over.
-background = "#0a101e"
+background = "#0d1017"
 # Input wells, list rows, panels (e.g. the search field, code blocks).
 surface = "#0e182c"
 # Hairlines and control borders: the lines under the list header, the

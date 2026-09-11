@@ -17,8 +17,9 @@ pub const COMPACT_MIN_WIDTH: u16 = 90;
 /// Minimum heights (the 152×40 reference leaves ample list rows).
 pub const FULL_MIN_HEIGHT: u16 = 24;
 pub const COMPACT_MIN_HEIGHT: u16 = 20;
-/// Sidebar width (mockup: 232 px ≈ 24 terminal columns).
-pub const SIDEBAR_WIDTH: u16 = 24;
+/// Sidebar width (mockup: 232 px ≈ 24 terminal columns, plus one
+/// right-margin column the folder rows never draw into).
+pub const SIDEBAR_WIDTH: u16 = 25;
 
 /// Heights of the fixed chrome regions.
 pub const TOPBAR_HEIGHT: u16 = 4;

@@ -1,4 +1,5 @@
-//! Sidebar: Compose affordance + mailbox list (mockup `list.html`).
+//! Sidebar: mailbox list (mockup `list.html`, minus the Compose
+//! affordance).
 //!
 //! The listing splits into system folders, one blank row, then user
 //! labels (a blank separator instead of the mockup's `LABELS` caption —
@@ -6,10 +7,9 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::symbols;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::action::ClickTarget;
@@ -19,6 +19,15 @@ use crate::input::mouse::HitMap;
 use crate::ui::chrome;
 use crate::ui::text;
 use crate::ui::theme::Theme;
+
+/// Sidebar panel fill, distinct from the page background (temporary
+/// experiment): rgb(21, 24, 32).
+const SIDEBAR_BG: Color = Color::Rgb(0x15, 0x18, 0x20);
+/// Active folder row fill: rgb(20, 24, 33) — one shade apart from the
+/// panel.
+const ACTIVE_BG: Color = Color::Rgb(0x14, 0x18, 0x21);
+/// Active folder left border: rgb(89, 194, 254).
+const ACTIVE_BORDER: Color = Color::Rgb(0x59, 0xC2, 0xFE);
 
 /// Render the sidebar into `area` (width 24 in full mode).
 pub fn render(
@@ -31,32 +40,17 @@ pub fn render(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let rows = LayoutRows::new(area);
-
-    // Compose affordance: bordered well (mockup `new-mail.html` button
-    // shape: rounded, like the search field). No inline `c` hint — the
-    // status bar advertises the shortcut. The well sits on the page
-    // background (ticket e6wn).
-    let compose_style = Style::new().bg(theme.background);
-    let compose = Line::from(vec![
-        Span::styled("+ ", Style::new().fg(theme.accent)),
-        Span::styled(
-            "Compose",
-            Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
-        ),
-    ])
-    .style(compose_style);
-    frame.render_widget(
-        Paragraph::new(compose).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_set(symbols::border::ROUNDED)
-                .border_style(Style::new().fg(theme.border)),
-        ),
-        rows.compose,
-    );
-    // Clicking the affordance composes (`c`'s job, plan §10).
-    hits.push(rows.compose, ClickTarget::ComposeButton);
+    // Panel fill: covers the folder rows' color gaps (e.g. the blank
+    // separator row) and any folders-free expanse.
+    frame.render_widget(Block::new().style(Style::new().bg(SIDEBAR_BG)), area);
+    // The last sidebar column is a right margin (temporary experiment):
+    // folder rows and notes never draw into it, only the fill does.
+    let rows = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width.saturating_sub(1),
+        height: area.height,
+    };
 
     // Mailbox list: backend-driven since Phase 2, so all loadable states
     // render safely (plan §16: empty results are valid). The backend hands
@@ -69,12 +63,12 @@ pub fn render(
             // composer writes drafts there); otherwise the displayed
             // mailbox.
             let active_id = state.sidebar_active_mailbox_id();
-            let bottom = area.y + area.height;
+            let bottom = rows.y + rows.height;
             let first_label = mailboxes.iter().position(|m| m.is_label());
-            let mut y = rows.folders.y;
+            let mut y = rows.y;
             for (i, mailbox) in mailboxes.iter().enumerate() {
                 if Some(i) == first_label && i > 0 {
-                    // The blank separator row: the frame's background fill
+                    // The blank separator row: the sidebar's panel fill
                     // already covers it, so nothing is drawn — the row is
                     // simply skipped and stays unclickable.
                     if y >= bottom {
@@ -88,9 +82,9 @@ pub fn render(
                 let is_active = Some(&mailbox.id) == active_id;
                 let cursor = state.session.focus == Focus::Sidebar && i == state.mailbox_selection;
                 let row_area = Rect {
-                    x: area.x,
+                    x: rows.x,
                     y,
-                    width: area.width,
+                    width: rows.width,
                     height: 1,
                 };
                 render_folder_row(frame, row_area, theme, mailbox, is_active, cursor);
@@ -101,17 +95,30 @@ pub fn render(
             }
         }
         crate::app::state::Loadable::Loaded(_) => {
-            chrome::render_note(frame, rows.folders, theme, "(no mailboxes)")
+            chrome::render_note(frame, rows, theme, "(no mailboxes)")
         }
         // Loading: one centered spinner, like every other pane (ticket
         // m3by). `Idle` cannot occur for the sidebar slot, but the
         // fallback keeps the exhaustive match honest.
         crate::app::state::Loadable::Loading | crate::app::state::Loadable::Idle => {
-            super::spinner::render_centered(frame, rows.folders, theme, state.session.ticks);
+            super::spinner::render_centered(frame, rows, theme, super::spinner::pane_millis(state));
         }
         crate::app::state::Loadable::Failed(_) => {
-            chrome::render_note(frame, rows.folders, theme, "mailboxes unavailable")
+            chrome::render_note(frame, rows, theme, "mailboxes unavailable")
         }
+    }
+}
+
+/// View-only nicety (permanent): Gmail exposes its special folders as
+/// `[GMAIL]/Drafts` and friends; the sidebar shows the bare folder name.
+/// Purely cosmetic — storage, routing, and the reducer keep the full
+/// IMAP name everywhere else.
+fn display_name(imap_name: &str) -> &str {
+    match imap_name.get(..8) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("[GMAIL]/") => {
+            imap_name.get(8..).unwrap_or(imap_name)
+        }
+        _ => imap_name,
     }
 }
 
@@ -135,21 +142,34 @@ fn render_folder_row(
     // carries a one-cell margin on both sides of the row.
     let suffix = match mailbox.unread_count {
         Some(n) if n > 0 => format!(" ({n})"),
+        // Drafts are invisible to unread mail: the counter is the folder
+        // content — how many drafts there are (Gmail reports drafts as
+        // unread 0, so unread alone would leave the row counterless).
+        _ if mailbox.role == Some(crate::domain::MailboxRole::Drafts) => {
+            match mailbox.total_count {
+                Some(n) if n > 0 => format!(" ({n})"),
+                _ => String::new(),
+            }
+        }
         _ => String::new(),
     };
     let name_budget = width.saturating_sub(3 + suffix.width()).max(1);
-    let name = text::clip(&mailbox.name, name_budget);
+    let name = text::clip(display_name(&mailbox.name), name_budget);
     let right_pad = width.saturating_sub(2 + name.width() + suffix.width());
 
     let row_bg = if is_active {
-        theme.accent_bg
+        // Active folder fill: rgb(20, 24, 33) — one shade apart from the
+        // panel color (temporary experiment), replacing `accent_bg`.
+        ACTIVE_BG
     } else if cursor {
         // Focused-control selection fill: the sidebar cursor row is the
         // one place the `selection` token shows (ticket e6wn removed the
         // hover-only `surface2`).
         theme.selection
     } else {
-        theme.background
+        // Plain folder rows sit on the sidebar panel color (temporary
+        // experiment), no longer the page background.
+        SIDEBAR_BG
     };
     let pad = Style::new().bg(row_bg);
     let name_style = if is_active {
@@ -164,10 +184,13 @@ fn render_folder_row(
         Style::new().fg(theme.dim)
     }
     .bg(row_bg);
-    // Inset accent bar marking the focused row (mockup `.folder.active`):
-    // the cursor row while the sidebar holds focus.
-    let marker = if cursor { "▎" } else { " " };
-    let marker_style = if cursor {
+    // Inset left edge bar: rgb(89, 194, 254) on the active folder,
+    // the theme accent on the cursor row while the sidebar holds focus
+    // (mockup `.folder.active`).
+    let marker = if cursor || is_active { "▎" } else { " " };
+    let marker_style = if is_active {
+        Style::new().fg(ACTIVE_BORDER)
+    } else if cursor {
         Style::new().fg(theme.accent)
     } else {
         pad
@@ -181,30 +204,4 @@ fn render_folder_row(
         Span::styled(" ".repeat(right_pad), pad),
     ];
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
-/// Regions inside the sidebar.
-struct LayoutRows {
-    compose: Rect,
-    folders: Rect,
-}
-
-impl LayoutRows {
-    fn new(area: Rect) -> Self {
-        let compose_height = area.height.min(3);
-        let compose = Rect {
-            x: area.x.saturating_add(1),
-            y: area.y.saturating_add(1),
-            width: area.width.saturating_sub(2),
-            height: compose_height,
-        };
-        let folders_y = area.y.saturating_add(compose_height + 2);
-        let folders = Rect {
-            x: area.x,
-            y: folders_y,
-            width: area.width,
-            height: area.height.saturating_sub(folders_y - area.y),
-        };
-        Self { compose, folders }
-    }
 }

@@ -244,6 +244,10 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
         handle_effects(&mut state, &manager, &mut assets, effects).await?;
     }
 
+    // Loader pacing: the event loop's tick cadence flips only while a
+    // foreground operation keeps the scanner animating.
+    let events_pace = assets.events_control.clone();
+
     run_event_loop(
         &mut state,
         &manager,
@@ -251,6 +255,7 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
         &mut events,
         &mut result_rx,
         &config,
+        &events_pace,
     )
     .await?;
 
@@ -455,10 +460,12 @@ async fn run_event_loop(
     events: &mut mpsc::UnboundedReceiver<events::Event>,
     result_rx: &mut mpsc::UnboundedReceiver<OperationResult>,
     config: &tmail::config::Config,
+    events_pace: &events::EventControl,
 ) -> anyhow::Result<()> {
     // Mouse capture starts in the configured mode; the reducer owns the
     // intent as `state.settings.mouse_capture`, and the runtime applies any change.
     let mut capture_applied = config.mouse;
+    let mut fast_ticks = false;
     loop {
         // Title sync ahead of the draw: the reducer may have changed the
         // mode (open the composer/wizard, switch mailboxes, unread tick).
@@ -529,6 +536,7 @@ async fn run_event_loop(
                         handle_effects(state, manager, assets, effects).await?;
                         sync_mouse_capture(state, &mut capture_applied);
                     }
+                    pace_loader(state, events_pace, &mut fast_ticks);
                 }
                 None => {
                     tracing::warn!("event stream closed");
@@ -540,6 +548,7 @@ async fn run_event_loop(
                     let effects = reducer::reduce(state, &Action::BackendCompleted(result));
                     handle_effects(state, manager, assets, effects).await?;
                     sync_mouse_capture(state, &mut capture_applied);
+                    pace_loader(state, events_pace, &mut fast_ticks);
                 }
                 // The manager holds a sender for the whole session.
                 None => bail!("backend result channel closed unexpectedly"),
@@ -664,6 +673,18 @@ fn sync_mouse_capture(state: &AppState, applied: &mut bool) {
             mouse_capture = state.settings.mouse_capture,
             "mouse capture switched"
         );
+    }
+}
+
+/// Match the event loop's tick cadence to the loader: fast ticks only
+/// while a foreground operation keeps the scanner animating. `applied`
+/// mirrors the cadence the event loop currently runs, so a call is a
+/// no-op unless the pace actually changed.
+fn pace_loader(state: &AppState, control: &events::EventControl, applied: &mut bool) {
+    let fast = state.session.operations.foreground().is_some();
+    if fast != *applied {
+        control.set_fast_ticks(fast);
+        *applied = fast;
     }
 }
 

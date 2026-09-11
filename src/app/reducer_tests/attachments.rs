@@ -552,13 +552,18 @@ fn reader_scrolls_within_content_and_clamps() {
 fn focus_cycles_tab_shift_tab() {
     let mut s = state();
     assert_eq!(s.session.focus, Focus::MessageList);
-    reduce(&mut s, &Action::FocusNext);
-    assert_eq!(s.session.focus, Focus::SearchField);
+    // Tab never lands on the search field (mouse click and `/` only);
+    // it wraps list → sidebar.
     reduce(&mut s, &Action::FocusNext);
     assert_eq!(s.session.focus, Focus::Sidebar);
     reduce(&mut s, &Action::FocusNext);
     assert_eq!(s.session.focus, Focus::MessageList);
     reduce(&mut s, &Action::FocusPrevious);
+    assert_eq!(s.session.focus, Focus::Sidebar);
+    // Inside the search field Tab still steps out to the next control.
+    reduce(&mut s, &Action::OpenSearch);
+    assert_eq!(s.session.focus, Focus::SearchField);
+    reduce(&mut s, &Action::FocusNext);
     assert_eq!(s.session.focus, Focus::Sidebar);
 }
 

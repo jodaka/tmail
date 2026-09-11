@@ -182,7 +182,13 @@ fn render_step(
 ) {
     match wizard.step {
         WizardStep::Email => render_email(frame, body, wizard, theme),
-        WizardStep::Discovery => render_discovery(frame, body, wizard, theme),
+        WizardStep::Discovery => render_discovery(
+            frame,
+            body,
+            wizard,
+            theme,
+            crate::ui::components::spinner::pane_millis(state),
+        ),
         WizardStep::Identity => render_identity(frame, body, wizard, theme),
         WizardStep::Credentials => render_credentials(frame, body, wizard, theme),
         WizardStep::Testing => render_testing(frame, body, state, theme),
@@ -235,27 +241,41 @@ fn render_email(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme: 
     error_line(frame, column, y, wizard.last_error.as_deref(), theme);
 }
 
-fn render_discovery(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme: &Theme) {
+fn render_discovery(
+    frame: &mut Frame<'_>,
+    body: Rect,
+    wizard: &WizardState,
+    theme: &Theme,
+    now_millis: u64,
+) {
     let column = content_column(body);
 
     if wizard.discovery.discovering {
-        // Spinner row + message; the spinner animates from the tick
-        // counter (deterministic in tests).
+        // Scanner loader + message; the loader animates from the wall
+        // clock (deterministic in tests).
         let email = wizard.email.address.value.trim();
         let y = centered_y(column, 1);
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(spinner::frame(0), Style::new().fg(theme.accent)),
-                Span::styled(
-                    format!(" Detecting settings for {email}…"),
-                    Style::new().fg(theme.text),
-                ),
-            ]))
-            .centered(),
+        spinner::render_blocks(
+            frame,
             Rect {
                 x: column.x,
                 y,
-                width: column.width,
+                width: 8,
+                height: 1,
+            },
+            theme.accent,
+            theme.background,
+            now_millis,
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                format!("  Detecting settings for {email}…"),
+                Style::new().fg(theme.text),
+            )),
+            Rect {
+                x: column.x + 8,
+                y,
+                width: column.width.saturating_sub(8),
                 height: 1,
             },
         );
@@ -548,19 +568,27 @@ fn render_credentials(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, t
 fn render_testing(frame: &mut Frame<'_>, body: Rect, state: &AppState, theme: &Theme) {
     let column = content_column(body);
     let y = centered_y(column, 1);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                spinner::frame(state.session.ticks),
-                Style::new().fg(theme.accent),
-            ),
-            Span::styled(" Testing IMAP connection…", Style::new().fg(theme.text)),
-        ]))
-        .centered(),
+    spinner::render_blocks(
+        frame,
         Rect {
             x: column.x,
             y,
-            width: column.width,
+            width: 8,
+            height: 1,
+        },
+        theme.accent,
+        theme.background,
+        crate::ui::components::spinner::pane_millis(state),
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "  Testing IMAP connection…",
+            Style::new().fg(theme.text),
+        )),
+        Rect {
+            x: column.x + 8,
+            y,
+            width: column.width.saturating_sub(8),
             height: 1,
         },
     );

@@ -107,7 +107,7 @@ semantic color tokens right in the same file with hex colors:
 ```toml
 [tmail.theme]
 name = "default"
-background = "#0a101e"   # #rrggbb or the short #rgb form
+background = "#0d1017"   # #rrggbb or the short #rgb form
 accent = "#8ab4f8"
 error = "#ff6b5e"
 ```

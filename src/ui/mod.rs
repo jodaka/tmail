@@ -15,7 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::route::Route;
 use crate::app::state::AppState;
@@ -68,29 +68,24 @@ pub fn render(
         return;
     }
     let (topbar, body, statusbar) = layout::split_vertical(area);
-    components::topbar::render(frame, topbar, state, theme, &ctx.clock, hits);
+    // The loader animation reads elapsed wall clock (a
+    // `DateTime::timestamp_millis()`), so the scanner phase does not
+    // lag behind the tick cadence.
+    components::topbar::render(
+        frame,
+        topbar,
+        state,
+        theme,
+        &ctx.clock,
+        ctx.now.timestamp_millis().max(0) as u64,
+        hits,
+    );
     let (sidebar, list) = layout::split_body(mode, body);
     if let Some(sidebar) = sidebar {
-        // The mockup's `.sidebar` carries a `border-right` hairline (list,
-        // viewer, and new-mail alike). The divider column is shaved off the
-        // sidebar so folder rows never draw under it; the list area (and
-        // with it every width computation the reducer relies on) is
-        // untouched.
-        let divider = Rect {
-            x: sidebar.x + sidebar.width - 1,
-            y: sidebar.y,
-            width: 1,
-            height: sidebar.height,
-        };
-        let mut inset = sidebar;
-        inset.width -= 1;
-        components::sidebar::render(frame, inset, state, theme, hits);
-        frame.render_widget(
-            Block::default()
-                .borders(Borders::RIGHT)
-                .border_style(theme.hairline()),
-            divider,
-        );
+        // No hairline divider between the sidebar and the list (temporary
+        // experiment): the sidebar paints its full width, the arrowless
+        // border column included, and the list area is untouched.
+        components::sidebar::render(frame, sidebar, state, theme, hits);
     }
     // The reader screen replaces the message list; the sidebar and topbar
     // chrome stay (mockup `viewer.html`). The composer likewise replaces

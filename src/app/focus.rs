@@ -81,7 +81,14 @@ impl Focus {
                     .position(|f| *f == self)
                     .expect("focus in order");
                 let len = FOCUS_ORDER.len() as isize;
-                let n = (i as isize + dir).rem_euclid(len) as usize;
+                let mut n = (i as isize + dir).rem_euclid(len) as usize;
+                // Tab never *lands* on the search field (mouse click and
+                // the `/` hotkey are the only ways in); Tab inside the
+                // search field itself must still step out to the next
+                // control, so only arrivals are skipped.
+                while FOCUS_ORDER[n] == Focus::SearchField && self != Focus::SearchField {
+                    n = (n as isize + dir).rem_euclid(len) as usize;
+                }
                 FOCUS_ORDER[n]
             }
         }
@@ -127,22 +134,39 @@ mod tests {
 
     #[test]
     fn cycles_without_repeat() {
-        let mut f = Focus::SearchField;
-        let seen = (0..FOCUS_ORDER.len())
-            .map(|_| {
-                f = f.next();
-                f
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(seen.len(), 3);
-        assert!(seen.contains(&Focus::Sidebar));
-        assert!(seen.contains(&Focus::MessageList));
-        assert_eq!(f, Focus::SearchField);
+        // Tab never lands on the search field: the cycle goes
+        // sidebar → list and wraps into the sidebar.
+        let mut f = Focus::Sidebar;
+        for _ in 0..6 {
+            f = f.next();
+            assert_ne!(f, Focus::SearchField, "tab reaches the search field");
+        }
+        // Backward too: Shift+Tab from the sidebar wraps into the list.
+        for _ in 0..6 {
+            let prev = Focus::Sidebar.previous();
+            assert_ne!(prev, Focus::SearchField);
+        }
+        assert!(matches!(
+            Focus::SearchField.next(),
+            Focus::Sidebar | Focus::MessageList
+        ));
+    }
+
+    #[test]
+    fn tab_skips_the_search_field_when_arriving() {
+        assert_eq!(Focus::MessageList.next(), Focus::Sidebar);
+        assert_eq!(Focus::Sidebar.previous(), Focus::MessageList);
+        // Inside the search field Tab still moves on (click and `/` focus
+        // it; only tab arrivals are excluded).
+        assert_eq!(Focus::SearchField.next(), Focus::Sidebar);
     }
 
     #[test]
     fn previous_is_inverse_of_next() {
-        for f in FOCUS_ORDER {
+        // The cycle is an invariant ring over the tab-reachable controls
+        // (the search field is reachable only by click/`/`, and Tab inside
+        // it steps out into the ring).
+        for f in [Focus::Sidebar, Focus::MessageList] {
             assert_eq!(f.next().previous(), f);
             assert_eq!(f.previous().next(), f);
         }

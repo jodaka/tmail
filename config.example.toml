@@ -60,7 +60,7 @@ downloads_dir = "~/Downloads"
 [tmail.theme]
 name = "default"
 # Fine-tune any color token with a hex value (ticket wrs7):
-# background = "#0a101e"
+# background = "#0d1017"
 # accent = "#fca311"
 # name = "light"  # or switch to the built-in light theme
 

@@ -65,7 +65,7 @@ pub fn render(
             frame,
             body_area,
             theme,
-            state.session.ticks,
+            crate::ui::components::spinner::pane_millis(state),
         );
         return;
     }

@@ -459,10 +459,32 @@ impl MailBackend for HimalayaCliBackend {
         // crash is a lingering remote copy, never a resurrected draft).
         self.journal.remove(&draft.local_id.0)?;
         if let Some(drafts) = self.mailbox_for_role(MailboxRole::Drafts) {
+            // Unlike the save-path cleanup, the sweep runs *awaited* here:
+            // the operation may only report Done once the IMAP deletions
+            // landed, or the follow-up refresh races the cleanup and the
+            // deleted draft stays visible.
+            let cli = self.cli();
+            let trash = self.mailbox_for_role(MailboxRole::Trash);
             if let Some(old) = draft.remote_id.as_ref() {
-                self.delete_draft_copy(&ctx, &drafts, &old.0, &draft.message_id);
+                run_two_phase_delete(
+                    &cli,
+                    &drafts,
+                    trash.as_deref(),
+                    &old.0,
+                    draft.message_id.as_deref().unwrap_or_default(),
+                    &ctx.cancellation,
+                )
+                .await;
             }
-            self.delete_stray_draft_copies(&ctx, &drafts, None, &draft.message_id);
+            run_stray_draft_sweep(
+                cli,
+                drafts,
+                trash,
+                None,
+                draft.message_id.clone(),
+                ctx.clone(),
+            )
+            .await;
         }
         Ok(())
     }
@@ -733,45 +755,14 @@ impl HimalayaCliBackend {
         let Some(message_id) = message_id else {
             return;
         };
-        let cli = self.cli();
-        let trash = self.mailbox_for_role(MailboxRole::Trash);
-        let drafts_mailbox = drafts_mailbox.to_string();
-        let keep = keep.map(|id| id.0.clone());
-        let message_id = message_id.clone();
-        let ctx = ctx.clone();
-        tokio::spawn(async move {
-            let argv = command::envelope_list_argv(
-                cli.config.as_deref(),
-                cli.account.as_deref(),
-                &drafts_mailbox,
-                1,
-                100,
-            );
-            let Ok(output) = process::run(&cli.program, &argv, &ctx.cancellation).await else {
-                return;
-            };
-            let Ok(listed) = process::decode::<dto::EnvelopesDto>(output) else {
-                return;
-            };
-            let bare = crate::domain::message::bare_message_id(&message_id);
-            for envelope in listed.envelopes {
-                if envelope.message_id.as_deref() != Some(bare)
-                    || keep.as_deref() == Some(envelope.id.as_str())
-                {
-                    continue;
-                }
-                tracing::info!(id = %envelope.id, "deleting stray draft copy");
-                run_two_phase_delete(
-                    &cli,
-                    &drafts_mailbox,
-                    trash.as_deref(),
-                    &envelope.id,
-                    &message_id,
-                    &ctx.cancellation,
-                )
-                .await;
-            }
-        });
+        tokio::spawn(run_stray_draft_sweep(
+            self.cli(),
+            drafts_mailbox.to_string(),
+            self.mailbox_for_role(MailboxRole::Trash),
+            keep.map(|id| id.0.clone()),
+            Some(message_id.clone()),
+            ctx.clone(),
+        ));
     }
 
     /// Serialize one draft revision as a single-part `text/plain` RFC 5322
@@ -1210,6 +1201,54 @@ fn spawn_draft_cleanup(
         )
         .await;
     });
+}
+
+/// The awaited stray-sweep body (see the detached
+/// `delete_stray_draft_copies` wrapper): list the Drafts mailbox, then
+/// trash-first delete every envelope carrying the draft's `Message-ID`
+/// except `keep`. Best-effort — any failure just ends the sweep.
+async fn run_stray_draft_sweep(
+    cli: Cli,
+    drafts_mailbox: String,
+    trash: Option<String>,
+    keep: Option<String>,
+    message_id: Option<String>,
+    ctx: RequestContext,
+) {
+    let Some(message_id) = message_id else {
+        return;
+    };
+    let argv = command::envelope_list_argv(
+        cli.config.as_deref(),
+        cli.account.as_deref(),
+        &drafts_mailbox,
+        1,
+        100,
+    );
+    let Ok(output) = process::run(&cli.program, &argv, &ctx.cancellation).await else {
+        return;
+    };
+    let Ok(listed) = process::decode::<dto::EnvelopesDto>(output) else {
+        return;
+    };
+    let bare = crate::domain::message::bare_message_id(&message_id);
+    for envelope in listed.envelopes {
+        if envelope.message_id.as_deref() != Some(bare)
+            || keep.as_deref() == Some(envelope.id.as_str())
+        {
+            continue;
+        }
+        tracing::info!(id = %envelope.id, "deleting stray draft copy");
+        run_two_phase_delete(
+            &cli,
+            &drafts_mailbox,
+            trash.as_deref(),
+            &envelope.id,
+            &message_id,
+            &ctx.cancellation,
+        )
+        .await;
+    }
 }
 
 /// Grouped CLI identity for the detached cleanup helpers, so the delete

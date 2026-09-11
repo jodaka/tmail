@@ -1,7 +1,7 @@
 //! Semantic theme tokens (plan §18). No literal colors outside this module.
 //!
 //! The dark reference palette is the "Black & Gold Elegance" scheme
-//! (#0a101e #e5e5e5 #fca311 — derived from the trending Coolors palette,
+//! (#0d1017 #e5e5e5 #fca311 — derived from the trending Coolors palette,
 //! see `config.toml`'s theme derivations); they are RGB so the look does
 //! not depend on a 16-color palette and degrade gracefully in `no-color`
 //! terminals.
@@ -47,7 +47,7 @@ pub struct Theme {
 impl Theme {
     pub const fn default_dark() -> Self {
         Self {
-            background: Color::Rgb(0x0A, 0x10, 0x1E),
+            background: Color::Rgb(0x0D, 0x10, 0x17),
             surface: Color::Rgb(0x0E, 0x18, 0x2C),
             border: Color::Rgb(0x3A, 0x3F, 0x4A),
             text: Color::Rgb(0xE5, 0xE5, 0xE5),

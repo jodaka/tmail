@@ -1887,7 +1887,24 @@ fn complete_delete_draft(
     reason: &DraftRemovalReason,
 ) -> Vec<Effect> {
     match &result.outcome {
-        Ok(OperationOutcome::Done) => Vec::new(),
+        Ok(OperationOutcome::Done) => match reason {
+            // Confirmed discard: the sweep removed the draft from the
+            // backing store — refresh what the user sees: the visible
+            // page (the deleted draft's row leaves the list) and the
+            // mailbox listing (folder counts, e.g. `Drafts (6)`). The
+            // scoped backend delete awaits its sweep, so both listings
+            // now see a clean Drafts mailbox.
+            DraftRemovalReason::Discard => {
+                let mut effects =
+                    vec![state.session.operations.start(OperationKind::LoadMailboxes)];
+                effects.extend(request_visible_page_background(
+                    state,
+                    state.messages.offset,
+                ));
+                effects
+            }
+            DraftRemovalReason::Sent => Vec::new(),
+        },
         Ok(_) => unexpected_payload(result.id, "draft removal"),
         Err(failure) => match reason {
             DraftRemovalReason::Discard => open_error_modal(state, failure),

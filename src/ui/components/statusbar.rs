@@ -7,9 +7,9 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::action::{BulkOp, ClickTarget};
@@ -18,8 +18,15 @@ use crate::app::state::AppState;
 use crate::input::keymap::Context;
 use crate::input::mouse::HitMap;
 use crate::ui::chrome::{self, HairlineSide};
-use crate::ui::text;
 use crate::ui::theme::Theme;
+
+/// Status-bar fill, matching the sidebar panel color (temporary
+/// experiment): rgb(21, 24, 32).
+const STATUSBAR_BG: Color = Color::Rgb(0x15, 0x18, 0x20);
+/// Key glyphs on the hint row: rgb(192, 189, 183).
+const KEY_COLOR: Color = Color::Rgb(0xC0, 0xBD, 0xB7);
+/// Key labels on the hint row: rgb(87, 94, 113).
+const LABEL_COLOR: Color = Color::Rgb(0x57, 0x5E, 0x71);
 
 /// Render the status bar into `area` (height 3: hairline + content row).
 pub fn render(
@@ -32,6 +39,10 @@ pub fn render(
     if area.width == 0 || area.height == 0 {
         return;
     }
+
+    // Panel fill, same as the sidebar: hints, hairline, and the blank
+    // padding row all sit on it.
+    frame.render_widget(Block::new().style(Style::new().bg(STATUSBAR_BG)), area);
 
     let hairline = Rect {
         x: area.x,
@@ -66,7 +77,7 @@ pub fn render(
             count,
             Style::new()
                 .fg(theme.accent)
-                .bg(theme.background)
+                .bg(STATUSBAR_BG)
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ));
         for (op, label) in [
@@ -81,7 +92,7 @@ pub fn render(
             }
             spans.push(Span::styled(
                 format!(" {label}"),
-                Style::new().fg(theme.text_soft).bg(theme.background),
+                Style::new().fg(theme.text_soft).bg(STATUSBAR_BG),
             ));
             hits.push(
                 Rect {
@@ -99,7 +110,7 @@ pub fn render(
         if let Some(clear) = state.settings.keymap.hint(None, "cancel") {
             spans.push(Span::styled(
                 format!("  {clear} clear"),
-                Style::new().fg(theme.muted).bg(theme.background),
+                Style::new().fg(theme.muted).bg(STATUSBAR_BG),
             ));
         }
     } else if composer {
@@ -121,7 +132,7 @@ pub fn render(
             ),
             (Some(String::from("^↵")), "send"),
         ];
-        push_hints(theme, &mut spans, &hints);
+        push_hints(&mut spans, &hints);
     } else if reader {
         let context = Some(Context::Reader);
         let mut hints: Vec<(Option<String>, &str)> = vec![
@@ -208,7 +219,7 @@ pub fn render(
                 "open",
             ));
         }
-        push_hints(theme, &mut spans, &hints);
+        push_hints(&mut spans, &hints);
     } else {
         let context = Some(Context::List);
         let hints: Vec<(Option<String>, &str)> = vec![
@@ -278,40 +289,10 @@ pub fn render(
                 "shortcuts",
             ),
         ];
-        push_hints(theme, &mut spans, &hints);
+        push_hints(&mut spans, &hints);
     }
-    // Foreground work is announced by the loader in the top bar (in place
-    // of the program name, ticket m3by); the status bar keeps hints and
-    // the status message only.
-    // Status messages sit in the bottom-right corner (ticket en85): the
-    // encoding/size readout they replaced carried nothing the user could
-    // act on. Clipped to the space left of the hints so they never
-    // overlap, with one column of padding off the right border
-    // (ticket h1d7).
-    if let Some(message) = &state.session.status.message {
-        let left_used: usize = spans.iter().map(|s| s.content.width()).sum();
-        // 3 columns of existing slack plus the 1 padding column.
-        let budget = (area.width as usize)
-            .saturating_sub(left_used)
-            .saturating_sub(4)
-            .max(10);
-        let message = text::truncate(message, budget);
-        let width = message.width() as u16;
-        if width > 0 {
-            frame.render_widget(
-                Paragraph::new(Span::styled(message, status_message_style(theme, state))),
-                Rect {
-                    x: (area.x + area.width)
-                        .saturating_sub(width)
-                        .saturating_sub(1),
-                    y: row.y,
-                    width,
-                    height: 1,
-                },
-            );
-        }
-    }
-
+    // Foreground work is announced by the loader under the top-bar logo
+    // (ticket m3by); the status message sits top-right in the top bar.
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
 }
 
@@ -319,69 +300,20 @@ pub fn render(
 /// empty binding list in the config disappears from the row instead of
 /// lying about a key. Hint text is cloned into owned spans so nothing
 /// borrowed from `hints` flows into the frame's lifetime.
-fn push_hints(theme: &Theme, spans: &mut Vec<Span<'_>>, hints: &[(Option<String>, &str)]) {
+fn push_hints(spans: &mut Vec<Span<'_>>, hints: &[(Option<String>, &str)]) {
     for (key, label) in hints {
         let Some(key) = key else { continue };
         spans.push(Span::styled(
             String::from("  "),
-            Style::new().bg(theme.background),
+            Style::new().bg(STATUSBAR_BG),
         ));
         spans.push(Span::styled(
             key.clone(),
-            Style::new().fg(theme.text_soft).bg(theme.background),
+            Style::new().fg(KEY_COLOR).bg(STATUSBAR_BG),
         ));
         spans.push(Span::styled(
             format!(" {label}"),
-            Style::new().fg(theme.muted).bg(theme.background),
+            Style::new().fg(LABEL_COLOR).bg(STATUSBAR_BG),
         ));
     }
-}
-
-/// Closing seconds of the timeout window over which the status message
-/// fades into the background (ticket h1d7).
-const STATUS_FADE_SECONDS: f64 = 0.3;
-
-/// Status-message style (ticket h1d7): accent on the page background.
-/// With `[tmail].status_timeout > 0` the message fades into the background
-/// over the closing [`STATUS_FADE_SECONDS`] of its window; the reducer
-/// clears it when the window elapses. The fade interpolates the two
-/// colors, so the monochrome theme (terminal defaults) renders at full
-/// strength instead.
-fn status_message_style(theme: &Theme, state: &AppState) -> Style {
-    let Some(fg) = as_rgb(theme.accent) else {
-        return Style::new().fg(theme.accent).bg(theme.background);
-    };
-    let Some(bg) = as_rgb(theme.background) else {
-        return Style::new().fg(theme.accent).bg(theme.background);
-    };
-    let alpha = status_alpha(state);
-    Style::new().fg(lerp(fg, bg, alpha)).bg(theme.background)
-}
-
-/// Remaining visibility of the current status message as an opacity in
-/// `0.0..=1.0`: `1.0` until the fade window opens, then linearly to `0.0`
-/// as the timeout elapses.
-fn status_alpha(state: &AppState) -> f64 {
-    if state.settings.status_timeout_seconds == 0 {
-        return 1.0;
-    }
-    let (Some(now), Some(shown_at)) = (state.session.clock, state.session.status.shown_at) else {
-        return 1.0;
-    };
-    let elapsed = (now - shown_at).num_milliseconds().max(0) as f64 / 1000.0;
-    let remaining = state.settings.status_timeout_seconds as f64 - elapsed;
-    (remaining / STATUS_FADE_SECONDS).clamp(0.0, 1.0)
-}
-
-fn as_rgb(color: ratatui::style::Color) -> Option<(u8, u8, u8)> {
-    match color {
-        ratatui::style::Color::Rgb(r, g, b) => Some((r, g, b)),
-        _ => None,
-    }
-}
-
-/// Linear interpolation `from` → `to` at `alpha` (1.0 keeps `from`).
-fn lerp(from: (u8, u8, u8), to: (u8, u8, u8), alpha: f64) -> ratatui::style::Color {
-    let mix = |a: u8, b: u8| (a as f64 * alpha + b as f64 * (1.0 - alpha)).round() as u8;
-    ratatui::style::Color::Rgb(mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
 }
