@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -14,18 +14,6 @@ use crate::input::mouse::HitMap;
 use crate::ui::chrome::{self, HairlineSide};
 use crate::ui::text;
 use crate::ui::theme::Theme;
-
-/// Topbar fill, distinct from the page background (temporary experiment):
-/// rgb(21, 24, 32).
-const TOPBAR_BG: Color = Color::Rgb(0x15, 0x18, 0x20);
-/// Brand bullet: rgb(131, 189, 99).
-const BRAND_DOT: Color = Color::Rgb(0x83, 0xBD, 0x63);
-/// Brand "t" glyph and the version: rgb(87, 94, 113).
-const BRAND_DIM: Color = Color::Rgb(0x57, 0x5E, 0x71);
-/// Brand "mail" glyph: rgb(191, 189, 183).
-const BRAND_TEXT: Color = Color::Rgb(0xBF, 0xBD, 0xB7);
-/// Loader scanner color: rgb(117, 192, 249).
-const LOADER_COLOR: Color = Color::Rgb(0x75, 0xC0, 0xF9);
 
 /// Render the topbar into `area` (height 4: 3 content rows + hairline).
 #[allow(clippy::too_many_arguments)]
@@ -41,9 +29,10 @@ pub fn render(
     if area.height == 0 || area.width == 0 {
         return;
     }
-    // The topbar carries its own panel color: the whole strip (brand,
-    // search field, clock) sits on it, not on the page background.
-    frame.render_widget(Block::new().style(Style::new().bg(TOPBAR_BG)), area);
+    // The topbar carries the `sidebar_bg` panel color, like the sidebar
+    // and status bar: the whole strip (brand, search field, clock) sits
+    // on it, not on the page background.
+    frame.render_widget(Block::new().style(Style::new().bg(theme.sidebar_bg)), area);
 
     // Brand row: "• tmail" bold + version dim, always rendered (the loader
     // no longer replaces it — it drops one row below instead). Animated
@@ -55,16 +44,23 @@ pub fn render(
         height: 1,
     };
     let brand = Line::from(vec![
-        Span::styled("•", Style::new().fg(BRAND_DOT)),
+        Span::styled("•", Style::new().fg(theme.accent2)),
         Span::raw(" "),
-        Span::styled("t", Style::new().fg(BRAND_DIM).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "t",
+            Style::new()
+                .fg(theme.label_dim)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             "mail",
-            Style::new().fg(BRAND_TEXT).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(theme.text_soft)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" v{}", env!("CARGO_PKG_VERSION")),
-            Style::new().fg(BRAND_DIM),
+            Style::new().fg(theme.label_dim),
         ),
     ]);
     frame.render_widget(Paragraph::new(brand), brand_area);
@@ -81,8 +77,8 @@ pub fn render(
                 width: area.width,
                 height: 1,
             },
-            LOADER_COLOR,
-            TOPBAR_BG,
+            theme.accent3,
+            theme.sidebar_bg,
             loader_millis,
         );
     }
@@ -103,13 +99,13 @@ pub fn render(
         } else {
             Style::new().fg(theme.border)
         };
-        // The well sits on the topbar panel color; focus shows through the
+        // The search well sits on the panel color; focus shows through the
         // accent border and the cursor, never a fill change.
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(symbols::border::ROUNDED)
             .border_style(border_style)
-            .style(Style::new().bg(TOPBAR_BG));
+            .style(Style::new().bg(theme.sidebar_bg));
         let query = &state.session.search_query;
         let prompt = Span::styled("/", Style::new().fg(theme.dim));
         let text = if query.is_empty() && !focused {
@@ -146,7 +142,7 @@ pub fn render(
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     message,
-                    Style::new().fg(theme.muted).bg(TOPBAR_BG),
+                    Style::new().fg(theme.muted).bg(theme.sidebar_bg),
                 )),
                 Rect {
                     x: area.x + area.width - width - 1,

@@ -66,10 +66,13 @@ fn full_layout_renders_all_regions() {
     );
     // Search field with placeholder.
     assert!(text.contains("Search mail"), "search placeholder missing");
-    // Sidebar: compose + folders with unread counts. No labels, no storage.
-    assert!(text.contains("Compose"), "compose affordance missing");
+    // Sidebar: folders with unread counts (the Compose affordance was
+    // removed in the redesign; the composer opens via `c`). No labels,
+    // no storage.
     assert!(text.contains("Inbox"), "inbox folder missing");
     assert!(text.contains("Archive"), "folders missing");
+    // Brand: the accented bullet and the dim version ride the panel.
+    assert!(text.contains("• tmail"), "brand bullet missing");
     // List head: title, unread, range.
     assert!(text.contains("INBOX"), "pane title missing");
     assert!(text.contains("24 unread"), "unread sub missing");
@@ -176,47 +179,41 @@ fn drafts_rows_show_recipients_instead_of_senders() {
     assert_absent(&text, "(no recipients)", (152, 40));
 }
 
-/// The compose well uses rounded corners like the search field and no
-/// longer carries an inline `c` hint (the status bar advertises it).
-#[test]
-fn compose_well_is_rounded_without_an_inline_hint() {
-    let buffer = draw(152, 40);
-    let text = text_of(&buffer);
-    let row = text
-        .lines()
-        .position(|line| line.contains("Compose"))
-        .expect("compose well") as u16;
-    // Rounded corners above and below the content row.
-    assert_eq!(buffer[(1, row - 1)].symbol(), "╭", "top-left corner");
-    assert_eq!(buffer[(1, row + 1)].symbol(), "╰", "bottom-left corner");
-    // No inline `c` hint inside the well.
-    let line = text.lines().nth(row as usize).expect("compose row");
-    assert!(!line.contains(" c"), "inline hint must be gone: {line}");
-}
-
-/// The mockup's `.sidebar` border-right: a hairline divider column between
-/// the folders and the message list, spanning the full body height.
+/// The mockup's `.sidebar` border-right used to be a hairline divider
+/// column; the redesign lets the two fills do the separation: the
+/// `sidebar_bg` panel runs through the sidebar's last column even below
+/// (or above) the folder rows, while the message list sits on the page
+/// background.
 #[test]
 fn sidebar_divider_separates_folders_from_messages() {
+    let theme = Theme::default_dark();
     let buffer = draw(152, 40);
     let top = tmail::ui::layout::TOPBAR_HEIGHT;
     let bottom = 40 - tmail::ui::layout::STATUSBAR_HEIGHT;
-    let x = tmail::ui::layout::SIDEBAR_WIDTH - 1;
-    let divider_rows = (top..bottom)
-        .filter(|y| buffer[(x, *y)].symbol() == "│")
-        .count();
-    assert_eq!(
-        divider_rows,
-        (bottom - top) as usize,
-        "divider must span the body height"
-    );
+    let margin_x = tmail::ui::layout::SIDEBAR_WIDTH - 1;
+    // The empty region below the folder rows: the fill runs to the last
+    // sidebar column and the message list starts on the page background.
+    for y in top + 8..bottom {
+        assert_eq!(
+            buffer[(margin_x, y)].bg,
+            theme.sidebar_bg,
+            "sidebar fill at {margin_x},{y}"
+        );
+        assert_eq!(
+            buffer[(margin_x + 1, y)].bg,
+            theme.background,
+            "a gap between the fills at {margin_x},{y}"
+        );
+    }
 }
 
 /// The accent bar marks focus, not selection: whichever pane holds focus
 /// carries the bar on its cursor row, and the other pane carries none.
 #[test]
 fn focus_marker_follows_the_focused_pane() {
-    // Default state: the message list holds focus.
+    // Default state: the message list holds focus. The active folder row
+    // carries the bar permanently (mockup `.folder.active`), the list
+    // cursor row carries it while the list holds focus.
     let mut state = mock_initial_state();
     let buffer = buffer_after(&mut state, &[], 152, 40);
     let text = text_of(&buffer);
@@ -235,8 +232,8 @@ fn focus_marker_follows_the_focused_pane() {
     );
     assert_eq!(
         buffer[(0, folder_row)].symbol(),
-        " ",
-        "list focused: no folder shows the bar"
+        "▎",
+        "the active folder shows the bar in both focieres"
     );
 
     // Sidebar focused: the cursor folder (Inbox, selection 0) shows the
@@ -372,7 +369,7 @@ fn theme_picker_lists_previews_and_highlights() {
     assert!(highlighted, "cursor row lacks the accent fill:\n{text}");
 
     // Moving the cursor previews the highlighted palette behind the
-    // dialog: the screen background repaints at once (ticket k5ba).
+    // dialog: the message-list rows repaint at once (ticket k5ba).
     let mut state = mock_initial_state();
     let buffer = buffer_after(
         &mut state,
@@ -380,7 +377,8 @@ fn theme_picker_lists_previews_and_highlights() {
         152,
         40,
     );
-    let preview_bg = buffer[(buffer.area.width - 1, 0)].style().bg;
+    // A message row cell: the list sits on the palette's page background.
+    let preview_bg = buffer[(130, 15)].style().bg;
     assert_eq!(
         preview_bg,
         Some(light.background),
@@ -490,7 +488,9 @@ fn resize_through_actions_switches_modes() {
         },
     );
     let compact = draw_state(&state, 100, 30);
-    assert!(!compact.contains("Compose"));
+    // The sidebar hides in compact (the Compose affordance is gone with
+    // the redesign; the folder rows are the marker).
+    assert!(!compact.contains("Inbox"));
 
     reducer::reduce(
         &mut state,
@@ -510,7 +510,8 @@ fn resize_through_actions_switches_modes() {
         },
     );
     let full = draw_state(&state, 152, 40);
-    assert!(full.contains("Compose"));
+    assert!(full.contains("Inbox"), "the sidebar is back");
+    assert!(!full.contains("Compose"));
 }
 
 /// Drive the reducer like the runtime does and render; returns the text.
@@ -566,24 +567,25 @@ fn sanitized_failure(id: tmail::app::OperationId, kind: OperationKind, detail: &
 fn spinner_shows_foreground_work_without_blocking_the_frame() {
     let mut state = mock_initial_state();
     // An empty list with a page load in flight (startup / mailbox switch
-    // look): the loader replaces the program name/version in the top bar
-    // (ticket m3by) and the list pane shows its own centered spinner.
+    // look): the loader runs on the row under the brand (ticket m3by) and
+    // the list pane shows its own centered spinner.
     state.messages = Page::empty(20);
     let actions = vec![Action::Refresh];
     let buffer = buffer_after(&mut state, &actions, 152, 40);
     let text = text_of(&buffer);
-    assert!(text.contains("⠋"), "spinner frame missing:\n{text}");
+    assert!(text.contains("■⬝"), "spinner frame missing:\n{text}");
     assert!(
-        !text.contains(concat!("tmail v", env!("CARGO_PKG_VERSION"))),
-        "brand must yield to the loader:\n{text}"
+        text.contains(concat!("tmail v", env!("CARGO_PKG_VERSION"))),
+        "the brand stays; the loader sweeps below it:\n{text}"
     );
     // The list head and sidebar still render — work never blocks the frame.
     assert!(
         text.contains("INBOX"),
         "list head hidden behind spinner:\n{text}"
     );
-    // The list rows area spans y 6..37, x 24..152: the spinner is centered.
-    assert_eq!(buffer[(87, 21)].symbol(), "⠋", "list pane spinner:\n{text}");
+    // The list rows area spans y 6..37, x 24..152: the 8-wide scanner is
+    // centered with its head first.
+    assert_eq!(buffer[(84, 21)].symbol(), "■", "list pane spinner:\n{text}");
 }
 
 #[test]
@@ -754,8 +756,8 @@ fn reader_renders_exactly_one_message_document() {
     assert_absent(&text, "thread", (152, 40));
     assert_absent(&text, "READER", (152, 40));
     assert_absent(&text, "NORMAL", (152, 40));
-    // Sidebar chrome stays visible.
-    assert!(text.contains("Compose"), "sidebar hidden:\n{text}");
+    // Sidebar chrome stays visible (the Compose affordance is gone).
+    assert!(text.contains("Inbox"), "sidebar hidden:\n{text}");
 }
 
 /// Attachment chips must advertise their actions (ticket 61qx): the
@@ -855,8 +857,9 @@ fn reader_loading_state_renders_placeholder() {
         "body must not exist while loading:\n{text}"
     );
     // The spinner sits centered in the body area (header ends at row 9;
-    // the body spans 9..37 → center row 22, column 24+63=87).
-    assert_eq!(buffer[(87, 22)].symbol(), "⠋", "centered spinner:\n{text}");
+    // the body spans 9..37 → center row 22 column, the 8-wide scanner
+    // starts at x=24+((152-24)-8)/2=84).
+    assert_eq!(buffer[(84, 22)].symbol(), "■", "centered spinner:\n{text}");
 }
 
 #[test]
@@ -1042,13 +1045,13 @@ fn composer_sidebar_marks_drafts_and_stays_focusable() {
     let (inbox_y, _) = position_of(&text, "Inbox");
     assert_eq!(
         buffer[(2, inbox_y as u16)].bg,
-        theme.background,
+        theme.sidebar_bg,
         "the underlying mailbox is not marked:\n{text}"
     );
     // The To field holds the caret while the composer has focus.
     let (to_y, _) = position_of(&text, "      To");
     assert_eq!(
-        buffer[(36, to_y as u16)].bg,
+        buffer[(37, to_y as u16)].bg,
         theme.accent,
         "composer caret on the To value:\n{text}"
     );
@@ -1073,7 +1076,7 @@ fn composer_sidebar_marks_drafts_and_stays_focusable() {
     );
     let (to_y, _) = position_of(&text, "      To");
     assert_eq!(
-        buffer[(36, to_y as u16)].bg,
+        buffer[(37, to_y as u16)].bg,
         theme.background,
         "no composer caret while the sidebar holds focus:\n{text}"
     );
@@ -1381,7 +1384,12 @@ fn snapshot_at_full_floor_120x30() {
     let (buffer, _) = draw_with_hits(120, 30);
     let text = text_of(&buffer);
     assert!(text.contains("INBOX"), "pane title missing:\n{text}");
-    assert!(text.contains("Compose"), "full floor keeps the sidebar");
+    // The full floor keeps the sidebar (the Compose affordance is gone;
+    // the folder rows are its marker).
+    assert!(
+        text.contains("Inbox (24)"),
+        "full floor keeps the sidebar:\n{text}"
+    );
     assert_absent(&text, "UTF-8", (120, 30));
 }
 
@@ -1479,14 +1487,11 @@ fn hit_map_matches_the_drawn_mailbox_screen() {
     let (_, hits) = draw_with_hits(152, 40);
     let _ = hits_is_sane(&hits);
     // Chrome geometry: topbar 0..4, body 4..37, statusbar 37..40; list head
-    // 4..6, rows from y=6. Sidebar x=0..23, list x=24..152.
+    // 4..6, rows from y=6. Sidebar x=0..24, list x=25..152. The Compose
+    // affordance is gone (the composer opens via `c`).
     assert_eq!(hits.hit_test(40, 1, false), Some(ClickTarget::SearchField));
-    assert_eq!(
-        hits.hit_test(10, 6, false),
-        Some(ClickTarget::ComposeButton)
-    );
-    assert_eq!(hits.hit_test(10, 9, false), Some(ClickTarget::Mailbox(0)));
-    assert_eq!(hits.hit_test(10, 10, false), Some(ClickTarget::Mailbox(1)));
+    assert_eq!(hits.hit_test(10, 4, false), Some(ClickTarget::Mailbox(0)));
+    assert_eq!(hits.hit_test(10, 5, false), Some(ClickTarget::Mailbox(1)));
     assert_eq!(
         hits.hit_test(30, 6, false),
         Some(ClickTarget::MessageRow(0))
@@ -1564,7 +1569,7 @@ fn hit_map_records_composer_controls() {
         Some(Target::ComposerField(ComposerField::Send))
     );
     assert_eq!(
-        hits.hit_test(42, 36, false),
+        hits.hit_test(44, 36, false),
         Some(Target::ComposerField(ComposerField::Discard))
     );
     // The attach control is on the row above (y=35), after the chip area.
@@ -1750,7 +1755,7 @@ fn reader_matches_mockup_hierarchy() {
     assert!(from_y < to_y && to_y < date_y, "meta block in order");
     assert!(date_y < body_y, "body follows the meta");
     // The fixed fields sit two columns in from the list edge (ticket 3rt5).
-    assert_eq!(subject_x, 26, "subject padded 2 from the panel edge");
+    assert_eq!(subject_x, 27, "subject padded 2 from the panel edge");
     // A hairline separates the meta block from the body (mockup
     // `.msg-meta` border-bottom); no action row precedes it (ticket 3rt5).
     assert!(
@@ -1777,17 +1782,17 @@ fn composer_matches_mockup_hierarchy_and_density() {
     // Vertical order: To row, Subject row, attach row, actions.
     assert!(to_y < subject_y);
     assert!(subject_y < attach_y && attach_y < send_y);
-    // The label column is right-aligned within 8ch starting at x=26
+    // The label column is right-aligned within 8ch starting at x=27
     // (mockup `grid-template-columns: 8ch` + the 2ch body padding): on the
-    // To row "To" sits at 26+6, and the Cc/Bcc toggles ride the same row's
+    // To row "To" sits at 27+6, and the Cc/Bcc toggles ride the same row's
     // right edge (mockup `.field-extra`).
     let to_row = text.lines().nth(to_y).expect("To row");
     let to_x = to_row
         .find("To")
         .map(|byte| to_row[..byte].chars().count())
         .expect("To label on its row");
-    assert_eq!(to_x, 32, "To label right-aligned at 26+6");
-    assert_eq!(subject_x, 26, "Subject fills the 8ch label column");
+    assert_eq!(to_x, 33, "To label right-aligned at 27+6");
+    assert_eq!(subject_x, 27, "Subject fills the 8ch label column");
     let cc_x = to_row
         .find("[Cc]")
         .map(|byte| to_row[..byte].chars().count())
@@ -1823,24 +1828,24 @@ fn composer_body_well_is_inset_and_rule_separates_the_action_rows() {
     let buffer = buffer_after(&mut state, &actions, 152, 40);
     let text = text_of(&buffer);
     let (body_y, _) = position_of(&text, "Hi");
-    // The typed text starts at the subject value column: 26 + 8ch label
+    // The typed text starts at the subject value column: 27 + 8ch label
     // + 2-space gap.
     assert_eq!(
         find_text_col(&buffer, body_y as u16, "Hi"),
-        36,
+        37,
         "body content aligns with the subject value:\n{text}"
     );
     // The surface fill spans the full row — padding columns included —
     // while the field rows above stay on the page background.
-    assert_eq!(buffer[(26, body_y as u16)].bg, theme.surface);
+    assert_eq!(buffer[(27, body_y as u16)].bg, theme.surface);
     assert_eq!(buffer[(148, body_y as u16)].bg, theme.surface);
     // One text line of padding above the body text (ticket tz12): the
     // row directly above is well surface, the one above that is the
     // EMPTY separator line under the subject (ticket gdqm), and the
     // subject row sits above it — no hairline rule between them.
-    assert_eq!(buffer[(26, body_y as u16 - 1)].bg, theme.surface);
-    assert_eq!(buffer[(26, body_y as u16 - 2)].bg, theme.background);
-    assert_eq!(buffer[(26, body_y as u16 - 2)].symbol(), " ", "empty line");
+    assert_eq!(buffer[(27, body_y as u16 - 1)].bg, theme.surface);
+    assert_eq!(buffer[(27, body_y as u16 - 2)].bg, theme.background);
+    assert_eq!(buffer[(27, body_y as u16 - 2)].symbol(), " ", "empty line");
     assert!(
         text.lines()
             .nth(body_y - 3)
@@ -1853,11 +1858,11 @@ fn composer_body_well_is_inset_and_rule_separates_the_action_rows() {
     // y=34, the attach row at 35 and the actions at 36 (bottom = 37).
     let rule_y = 34u16;
     assert_eq!(
-        buffer[(26, rule_y)].symbol(),
+        buffer[(27, rule_y)].symbol(),
         "─",
         "the rule above the attach row:\n{text}"
     );
-    assert_eq!(buffer[(26, rule_y + 1)].bg, theme.background);
+    assert_eq!(buffer[(27, rule_y + 1)].bg, theme.background);
 }
 
 /// The body editor's caret matches the single-line fields' caret while
@@ -2005,7 +2010,7 @@ fn composer_body_selection_renders_with_the_selection_fill() {
     // "llo" is selected: the cells over cols 3..5 of the word carry the
     // selection fill. The first selected cell (col 2) doubles as the
     // caret cell — the caret style draws there instead.
-    for col in [39u16, 40] {
+    for col in [40u16, 41] {
         assert_eq!(
             buffer[(col, body_y as u16)].bg,
             theme.accent_bg,
@@ -2013,13 +2018,13 @@ fn composer_body_selection_renders_with_the_selection_fill() {
         );
     }
     assert_eq!(
-        buffer[(38, body_y as u16)].bg,
+        buffer[(39, body_y as u16)].bg,
         theme.accent,
         "the selection head is the caret cell:\n{text}"
     );
     // Outside the selection the fill is absent.
     assert_eq!(
-        buffer[(36, body_y as u16)].bg,
+        buffer[(37, body_y as u16)].bg,
         theme.surface,
         "the unselected 'h' keeps the well fill:\n{text}"
     );
@@ -2225,16 +2230,18 @@ fn select_all_marks_rows_and_the_header_stays_a_plain_label() {
         .expect("cursor row") as u16;
     let marked_row = text
         .lines()
-        .position(|line| line.contains("Weekly digest"))
+        .position(|line| line.contains("Maksim Orlov"))
         .expect("another marked row") as u16;
     assert_eq!(
         buffer[(tmail::ui::layout::SIDEBAR_WIDTH + 2, cursor_row)].bg,
         theme.accent_bg,
         "cursor row keeps the accent fill"
     );
+    // Marked rows share the sidebar's selected-mailbox fill
+    // (theme.selection) — visibly distinct from the cursor fill.
     assert_eq!(
         buffer[(tmail::ui::layout::SIDEBAR_WIDTH + 2, marked_row)].bg,
-        theme.bulk_selected_bg,
+        theme.selection,
         "marked rows carry the bulk highlight"
     );
 }
@@ -2300,8 +2307,8 @@ fn draw_with_hits_at(
 }
 
 #[test]
-fn selected_rows_show_the_checkbox_and_star_gets_a_trailing_space() {
-    // Bulk-marked rows render the checkbox in the icon column (ticket
+fn selected_rows_show_the_marked_dot_and_star_gets_a_trailing_space() {
+    // Bulk-marked rows render the filled dot in the icon column (ticket
     // cvc4), whatever their star state; every icon is followed by a space.
     let mut state = mock_initial_state();
     state.session.focus = tmail::app::Focus::MessageList;
@@ -2314,10 +2321,10 @@ fn selected_rows_show_the_checkbox_and_star_gets_a_trailing_space() {
     let line = text.lines().nth(cursor_row).unwrap();
     let cells: Vec<char> = line.chars().collect();
     // Columns past the list edge are marker (1) + icon (2): ▎/space, then
-    // ☑ or * followed by one space.
+    // ● or * followed by one space.
     let list_start = tmail::ui::layout::SIDEBAR_WIDTH as usize;
     let icon: String = cells[list_start + 1..list_start + 3].iter().collect();
-    assert_eq!(icon, "☑ ", "checkbox icon with trailing space");
+    assert_eq!(icon, "● ", "marked-dot icon with trailing space");
     // A starred row renders "* " in the same column when not marked.
     let mut state = mock_initial_state();
     state.messages.items[0].is_starred = true;
@@ -2411,61 +2418,73 @@ fn reader_without_overflow_draws_no_scrollbar() {
 }
 
 #[test]
-fn status_message_sits_in_the_bottom_right_corner() {
-    // Ticket en85: the status message replaces the encoding/size readout,
-    // right-aligned in the status bar's content row.
+fn status_message_sits_top_right_of_the_brand_row() {
+    // Ticket en85 (redesign): the status message lives in the TOP bar,
+    // right-aligned on the brand row in the panel's muted color — one
+    // column keeps it off the right border.
+    let theme = Theme::default_dark();
     let mut state = mock_initial_state();
     state.session.size = (152, 40);
     state.set_status("Mailboxes loaded");
     let buffer = buffer_after(&mut state, &[], 152, 40);
-    // The status bar content row is the one under its top hairline.
-    let row: String = (0..152).map(|x| buffer[(x, 38)].symbol()).collect();
+    // The status message rides the topbar's brand row (y=1).
+    let row: String = (0..152).map(|x| buffer[(x, 1)].symbol()).collect();
     let trimmed = row.trim_end();
     assert!(
         trimmed.ends_with("Mailboxes loaded"),
         "status message flush right: {trimmed:?}"
     );
     assert_absent(&text_of(&buffer), "UTF-8", (152, 40));
-    // Ticket h1d7: one column of padding keeps it off the right border.
-    assert_eq!(buffer[(151, 38)].symbol(), " ", "padding column");
+    // One column of padding keeps it off the right border.
+    assert_eq!(buffer[(151, 1)].symbol(), " ", "padding column");
     let message = "Mailboxes loaded";
     let start = 152 - message.len() as u16 - 1;
-    assert_eq!(buffer[(start, 38)].symbol(), "M", "first message glyph");
+    assert_eq!(buffer[(start, 1)].symbol(), "M", "first message glyph");
+    // The faded color: the muted token, on the panel fill.
+    assert_eq!(buffer[(start, 1)].fg, theme.muted);
+    assert_eq!(buffer[(start, 1)].bg, theme.sidebar_bg);
+    // The bottom status bar carries no message anymore.
+    let bottom: String = (0..152).map(|x| buffer[(x, 38)].symbol()).collect();
+    assert!(!bottom.contains("Mailboxes loaded"), "{bottom:?}");
 }
 
 #[test]
 fn search_compose_and_sidebar_cursor_sit_on_plain_backgrounds() {
-    // Ticket e6wn: the search well and the Compose button sit on the page
-    // background (no surface fill; focus shows via the accent border), and
-    // the sidebar cursor row shows the `selection` fill.
+    // The redesign: the search well sits on the sidebar's panel fill
+    // (`sidebar_bg`; no surface fill; focus shows via the accent border),
+    // and the sidebar cursor row shows the `selection` fill.
     let theme = Theme::default_dark();
     let mut state = mock_initial_state();
     state.session.size = (152, 40);
     let idle = buffer_after(&mut state, &[], 152, 40);
     // Search field interior (x=24..84, y=0..3), past the placeholder text.
-    assert_eq!(idle[(70, 1)].bg, theme.background, "search well (idle)");
-    // Compose well interior, past the label.
-    assert_eq!(idle[(16, 6)].bg, theme.background, "compose well");
+    assert_eq!(idle[(70, 1)].bg, theme.sidebar_bg, "search well (idle)");
+    // The plain status-bar hints sit on the same panel fill.
+    assert_eq!(
+        idle[(30, 38)].bg,
+        theme.sidebar_bg,
+        "status hints on the panel"
+    );
 
-    // The focused search field keeps the page background; the accent
+    // The focused search field keeps the panel fill; the accent
     // border marks focus.
     state.session.focus = tmail::app::focus::Focus::SearchField;
     let focused = buffer_after(&mut state, &[], 152, 40);
     assert_eq!(
         focused[(70, 1)].bg,
-        theme.background,
+        theme.sidebar_bg,
         "search well (focused)"
     );
     assert_eq!(focused[(24, 0)].fg, theme.accent, "focused border");
 
     // Sidebar cursor row: the selection fill under the second folder;
-    // other rows stay on the page background (folder 0 is the active one).
+    // other rows stay on the panel fill (folder 0 is the active one).
     state.session.focus = tmail::app::focus::Focus::Sidebar;
     state.mailbox_selection = 1;
     let sidebar = buffer_after(&mut state, &[], 152, 40);
-    assert_eq!(sidebar[(5, 10)].bg, theme.selection, "sidebar cursor row");
-    assert_eq!(sidebar[(5, 11)].bg, theme.background, "plain folder row");
-    assert_eq!(sidebar[(5, 9)].bg, theme.accent_bg, "active folder row");
+    assert_eq!(sidebar[(5, 5)].bg, theme.selection, "sidebar cursor row");
+    assert_eq!(sidebar[(5, 6)].bg, theme.sidebar_bg, "plain folder row");
+    assert_eq!(sidebar[(5, 4)].bg, theme.accent_bg, "active folder row");
 }
 
 /// The header's pagination label right-aligns with the date/time column
@@ -2530,9 +2549,10 @@ fn find_text_col(buffer: &ratatui::buffer::Buffer, y: u16, needle: &str) -> usiz
 }
 
 #[test]
-fn status_message_fades_over_the_closing_timeout_window() {
-    // Ticket h1d7: with `[tmail].status_timeout > 0` the message holds its
-    // accent color until the last 0.3 s, then fades into the background.
+fn status_message_clears_after_the_configured_timeout() {
+    // Ticket h1d7: with `[tmail].status_timeout > 0` the message clears
+    // when the window elapses (the reducer owns the timer; the renderer
+    // shows the message in the muted color until then).
     let theme = Theme::default_dark();
     let mut state = mock_initial_state();
     state.session.size = (152, 40);
@@ -2544,7 +2564,8 @@ fn status_message_fades_over_the_closing_timeout_window() {
         },
     );
     state.set_status("Mailboxes loaded");
-    // A second into the window the message is still at full strength.
+    // A second into the window the message is still up, in the muted
+    // color on the panel fill.
     let buffer = buffer_after(
         &mut state,
         &[Action::Tick {
@@ -2553,33 +2574,39 @@ fn status_message_fades_over_the_closing_timeout_window() {
         152,
         40,
     );
-    assert_eq!(buffer[(140, 38)].fg, theme.accent, "full strength early");
+    let fg = buffer[(140, 1)].fg;
+    assert_eq!(fg, theme.muted, "message rides the muted color");
+    assert_eq!(buffer[(140, 1)].bg, theme.sidebar_bg);
 
-    // 4.85 s in: 0.15 s remain, so the fade is exactly halfway to the
-    // background color — visibly dimmer, not yet gone.
+    // Five-and-a-quarter seconds in: the window elapsed, the message and
+    // its column are gone from the brand row.
     let buffer = buffer_after(
         &mut state,
         &[Action::Tick {
-            now: Box::new(mock::now() + chrono::Duration::milliseconds(4850)),
+            now: Box::new(mock::now() + chrono::Duration::milliseconds(5250)),
         }],
         152,
         40,
     );
-    let fg = buffer[(140, 38)].fg;
-    assert_ne!(fg, theme.accent, "mid-fade is no longer the accent");
-    assert_ne!(fg, theme.background, "mid-fade is not invisible yet");
+    let fg = buffer[(140, 1)].fg;
+    assert_ne!(fg, theme.muted, "the message cleared past the window");
 }
 
 #[test]
 fn sidebar_shows_unread_counters_in_brackets() {
-    // Ticket ye28: `Inbox (4)`-style counters right after the name;
-    // folders without unread mail show none.
+    // `Inbox (4)`-style counters right after the name; the drafts
+    // counter is the folder content (Gmail reports drafts as unread 0),
+    // and folders without unread mail show none.
     let (buffer, _) = draw_with_hits(152, 40);
     let text = text_of(&buffer);
     assert!(text.contains("Inbox (24)"), "{text}");
     assert!(text.contains("Spam (5)"), "{text}");
+    assert!(
+        text.contains("Drafts (3)"),
+        "drafts carry their count: {text}"
+    );
     assert_absent(&text, "Sent (", (152, 40));
-    assert_absent(&text, "Drafts (", (152, 40));
+    assert_absent(&text, "Starred (", (152, 40));
     assert_absent(&text, "Trash (", (152, 40));
 }
 
@@ -2600,21 +2627,24 @@ fn folder_rows_keep_one_space_on_both_sides_of_the_name() {
         unread_count: Some(1234),
         total_count: None,
     }]);
-    // Folder rows start at y=9; a single folder occupies the first one.
+    // Folder rows start at y=4 with a single folder; collect through the
+    // sidebar's margin column (x 0..24).
     let row = |buffer: &ratatui::buffer::Buffer| {
-        (0..23u16)
-            .map(|x| buffer[(x, 9)].symbol())
+        (0..24u16)
+            .map(|x| buffer[(x, 4)].symbol())
             .collect::<String>()
     };
     let (buffer, _) = draw_state_hits(&state, 152, 40);
     let text = row(&buffer);
+    // The `[Gmail]/` display prefix is cosmetic-only: the sidebar shows
+    // the bare folder name. The margins still hold.
     assert!(
-        text.starts_with("  [Gmail]/"),
+        text.starts_with("  Important (1234)"),
         "one pad space after the marker column: {text:?}"
     );
     assert!(
-        text.ends_with(" (1234) "),
-        "one pad space before the divider: {text:?}"
+        text.ends_with(" "),
+        "one pad space before the margin: {text:?}"
     );
 
     // The cursor row swaps the blank marker for the bar, not the padding.
@@ -2622,21 +2652,23 @@ fn folder_rows_keep_one_space_on_both_sides_of_the_name() {
     state.mailbox_selection = 0;
     let (buffer, _) = draw_state_hits(&state, 152, 40);
     let text = row(&buffer);
-    assert!(text.starts_with("▎ ["), "bar + one pad: {text:?}");
     assert!(
-        text.ends_with(" (1234) "),
-        "right margin survives focus: {text:?}"
+        text.starts_with("▎ Important (1234)"),
+        "bar + one pad: {text:?}"
     );
+    assert!(text.ends_with(" "), "right margin survives focus: {text:?}");
 }
 
 #[test]
 fn sidebar_loading_shows_a_centered_spinner() {
-    // Ticket m3by: the mailboxes pane spinner is the same centered glyph.
+    // Ticket m3by: the mailboxes pane spinner is the centered scanner
+    // glyph (the head block of frame 0 leads from the left).
     let mut state = mock_initial_state();
     state.mailboxes = Loadable::Loading;
     let buffer = buffer_after(&mut state, &[], 152, 40);
-    // The sidebar's folder area (inset pane) spans x 0..23, y 9..37.
-    assert_eq!(buffer[(11, 22)].symbol(), "⠋", "sidebar spinner");
+    // The sidebar's pane spans x 0..24, y 4..37; the width-8 scanner
+    // centers at x=8, its row at y=20.
+    assert_eq!(buffer[(8, 20)].symbol(), "■", "sidebar spinner head");
     assert!(
         !text_of(&buffer).contains("loading mailboxes"),
         "text placeholder replaced by the spinner"
@@ -2691,33 +2723,30 @@ fn sidebar_splits_folders_and_labels_with_a_blank_row() {
     state.session.size = (152, 40);
     state.mailboxes = Loadable::Loaded(mailboxes);
     let (buffer, hits) = draw_state_hits(&state, 152, 40);
-    // Folder rows start at y=9; six folders end at y=14, the blank row is
-    // y=15, labels follow. Read only the sidebar's own columns.
+    // Folder rows start at y=4; six folders end at y=9, the blank row is
+    // y=10, labels follow. Read only the sidebar's own columns.
     let row = |y: u16| {
         (0..23u16)
             .map(|x| buffer[(x, y)].symbol())
             .collect::<String>()
     };
-    assert!(
-        row(14).contains("[Gmail]/Trash"),
-        "last folder above the blank row"
-    );
-    assert!(row(15).trim().is_empty(), "blank separator row");
-    assert!(row(16).contains("Notes"), "first label below the blank row");
-    assert!(row(17).contains("social"));
-    assert!(row(18).contains("пароли"), "unicode label");
+    assert!(row(9).contains("Trash"), "last folder above the blank row");
+    assert!(row(10).trim().is_empty(), "blank separator row");
+    assert!(row(11).contains("Notes"), "first label below the blank row");
+    assert!(row(12).contains("social"));
+    assert!(row(13).contains("пароли"), "unicode label");
     assert_eq!(
-        hits.hit_test(10, 14, false),
+        hits.hit_test(10, 9, false),
         Some(ClickTarget::Mailbox(5)),
         "folder click target above the blank row"
     );
     assert_eq!(
-        hits.hit_test(10, 15, false),
+        hits.hit_test(10, 10, false),
         None,
         "the blank row is not clickable"
     );
     assert_eq!(
-        hits.hit_test(10, 16, false),
+        hits.hit_test(10, 11, false),
         Some(ClickTarget::Mailbox(6)),
         "label click target keeps its state index"
     );

@@ -7,7 +7,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use unicode_width::UnicodeWidthStr;
@@ -19,15 +19,6 @@ use crate::input::mouse::HitMap;
 use crate::ui::chrome;
 use crate::ui::text;
 use crate::ui::theme::Theme;
-
-/// Sidebar panel fill, distinct from the page background (temporary
-/// experiment): rgb(21, 24, 32).
-const SIDEBAR_BG: Color = Color::Rgb(0x15, 0x18, 0x20);
-/// Active folder row fill: rgb(20, 24, 33) — one shade apart from the
-/// panel.
-const ACTIVE_BG: Color = Color::Rgb(0x14, 0x18, 0x21);
-/// Active folder left border: rgb(89, 194, 254).
-const ACTIVE_BORDER: Color = Color::Rgb(0x59, 0xC2, 0xFE);
 
 /// Render the sidebar into `area` (width 24 in full mode).
 pub fn render(
@@ -42,7 +33,7 @@ pub fn render(
     }
     // Panel fill: covers the folder rows' color gaps (e.g. the blank
     // separator row) and any folders-free expanse.
-    frame.render_widget(Block::new().style(Style::new().bg(SIDEBAR_BG)), area);
+    frame.render_widget(Block::new().style(Style::new().bg(theme.sidebar_bg)), area);
     // The last sidebar column is a right margin (temporary experiment):
     // folder rows and notes never draw into it, only the fill does.
     let rows = Rect {
@@ -158,18 +149,18 @@ fn render_folder_row(
     let right_pad = width.saturating_sub(2 + name.width() + suffix.width());
 
     let row_bg = if is_active {
-        // Active folder fill: rgb(20, 24, 33) — one shade apart from the
-        // panel color (temporary experiment), replacing `accent_bg`.
-        ACTIVE_BG
+        // Active folder fill: one shade apart from the sidebar panel
+        // (it is `accent_bg` in the dark palette).
+        theme.accent_bg
     } else if cursor {
         // Focused-control selection fill: the sidebar cursor row is the
         // one place the `selection` token shows (ticket e6wn removed the
         // hover-only `surface2`).
         theme.selection
     } else {
-        // Plain folder rows sit on the sidebar panel color (temporary
-        // experiment), no longer the page background.
-        SIDEBAR_BG
+        // Plain folder rows sit on the sidebar panel color, no longer
+        // the page background.
+        theme.sidebar_bg
     };
     let pad = Style::new().bg(row_bg);
     let name_style = if is_active {
@@ -184,13 +175,11 @@ fn render_folder_row(
         Style::new().fg(theme.dim)
     }
     .bg(row_bg);
-    // Inset left edge bar: rgb(89, 194, 254) on the active folder,
-    // the theme accent on the cursor row while the sidebar holds focus
-    // (mockup `.folder.active`).
+    // Inset left edge bar: the theme accent on the active folder and on
+    // the cursor row while the sidebar holds focus (mockup
+    // `.folder.active`).
     let marker = if cursor || is_active { "▎" } else { " " };
-    let marker_style = if is_active {
-        Style::new().fg(ACTIVE_BORDER)
-    } else if cursor {
+    let marker_style = if cursor || is_active {
         Style::new().fg(theme.accent)
     } else {
         pad

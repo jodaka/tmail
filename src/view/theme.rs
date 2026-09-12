@@ -27,6 +27,18 @@ pub struct Theme {
     /// Faded message-body preview in the list rows (ticket wxtx): dimmer
     /// than `dim`, so the preview reads as context, never as content.
     pub snippet: Color,
+    /// Sidebar/topbar/statusbar panel fill: a touch lighter than the page
+    /// background so the chrome reads as one raised strip.
+    pub sidebar_bg: Color,
+    /// Hint labels and version text: dimmer than `dim`, barely-there copy
+    /// that must stay legible on `sidebar_bg`.
+    pub label_dim: Color,
+    /// Secondary accent (the brand bullet): a supporting hue that must
+    /// never compete with `accent` for attention.
+    pub accent2: Color,
+    /// Tertiary accent (the loader scanner): a second interactive hue for
+    /// in-flight work.
+    pub accent3: Color,
     /// Interactive highlight (`--accent`).
     pub accent: Color,
     /// Selected row / active folder fill (`--accent-bg`).
@@ -51,12 +63,16 @@ impl Theme {
             surface: Color::Rgb(0x0E, 0x18, 0x2C),
             border: Color::Rgb(0x3A, 0x3F, 0x4A),
             text: Color::Rgb(0xE5, 0xE5, 0xE5),
-            text_soft: Color::Rgb(0xBE, 0xBF, 0xC1),
+            text_soft: Color::Rgb(0xBF, 0xBD, 0xB7),
             muted: Color::Rgb(0x92, 0x94, 0x99),
             dim: Color::Rgb(0x78, 0x7A, 0x82),
             snippet: Color::Rgb(0x5D, 0x61, 0x6A),
-            accent: Color::Rgb(0xFC, 0xA3, 0x11),
-            accent_bg: Color::Rgb(0x2E, 0x26, 0x1C),
+            sidebar_bg: Color::Rgb(0x15, 0x18, 0x20),
+            label_dim: Color::Rgb(0x57, 0x5E, 0x71),
+            accent2: Color::Rgb(0x83, 0xBD, 0x63),
+            accent3: Color::Rgb(0x75, 0xC0, 0xF9),
+            accent: Color::Rgb(0x75, 0xC0, 0xF9),
+            accent_bg: Color::Rgb(0x14, 0x18, 0x21),
             bulk_selected_bg: Color::Rgb(0x46, 0x35, 0x1B),
             warning: Color::Rgb(0xFC, 0xA3, 0x11),
             error: Color::Rgb(0xE5, 0x48, 0x4D),
@@ -156,6 +172,10 @@ impl Theme {
             "muted" => self.muted = color,
             "dim" => self.dim = color,
             "snippet" => self.snippet = color,
+            "sidebar_bg" => self.sidebar_bg = color,
+            "label_dim" => self.label_dim = color,
+            "accent2" => self.accent2 = color,
+            "accent3" => self.accent3 = color,
             "accent" => self.accent = color,
             "accent_bg" => self.accent_bg = color,
             "bulk_selected_bg" => self.bulk_selected_bg = color,
@@ -180,6 +200,11 @@ impl Theme {
             muted: Color::Rgb(0x5C, 0x5F, 0x6A),
             dim: Color::Rgb(0x74, 0x77, 0x82),
             snippet: Color::Rgb(0x94, 0x97, 0xA1),
+            // The paper chrome: a slightly darker panel against the page.
+            sidebar_bg: Color::Rgb(0xE9, 0xE7, 0xE0),
+            label_dim: Color::Rgb(0x9B, 0x9E, 0xA7),
+            accent2: Color::Rgb(0x55, 0x7F, 0x36),
+            accent3: Color::Rgb(0x2F, 0x7F, 0xD0),
             accent: Color::Rgb(0x2D, 0x63, 0xB8),
             accent_bg: Color::Rgb(0xDC, 0xE6, 0xF7),
             bulk_selected_bg: Color::Rgb(0xF7, 0xE8, 0xC8),
@@ -204,6 +229,10 @@ impl Theme {
             muted: Color::Reset,
             dim: Color::Reset,
             snippet: Color::Reset,
+            sidebar_bg: Color::Reset,
+            label_dim: Color::Reset,
+            accent2: Color::Reset,
+            accent3: Color::Reset,
             accent: Color::Reset,
             accent_bg: Color::Reset,
             bulk_selected_bg: Color::Reset,
@@ -251,14 +280,15 @@ impl Theme {
         Style::new().bg(self.accent_bg)
     }
 
-    /// Style for a bulk-selected row (ticket p0s3): the amber-tinted
-    /// highlight fill. In the monochrome theme the terminal default stays,
-    /// so a dim modifier marks the rows instead.
+    /// Style for a bulk-selected row (ticket p0s3): the same selection
+    /// fill selected mailboxes get in the sidebar. In the monochrome
+    /// theme the terminal default stays, so a dim modifier marks the rows
+    /// instead.
     pub fn row_bulk_selected(&self) -> Style {
-        if self.bulk_selected_bg == Color::Reset {
+        if self.selection == Color::Reset {
             Style::new().add_modifier(Modifier::DIM)
         } else {
-            Style::new().bg(self.bulk_selected_bg)
+            Style::new().bg(self.selection)
         }
     }
 
@@ -522,20 +552,25 @@ mod token_tests {
         for (token, color) in THEME_TOKENS.iter().zip(&colors) {
             assert!(theme.set_token(token, *color));
         }
-        assert_eq!(theme.background, colors[0]);
-        assert_eq!(theme.surface, colors[1]);
-        assert_eq!(theme.border, colors[2]);
-        assert_eq!(theme.text, colors[3]);
-        assert_eq!(theme.text_soft, colors[4]);
-        assert_eq!(theme.muted, colors[5]);
-        assert_eq!(theme.dim, colors[6]);
-        assert_eq!(theme.snippet, colors[7]);
-        assert_eq!(theme.accent, colors[8]);
-        assert_eq!(theme.accent_bg, colors[9]);
-        assert_eq!(theme.bulk_selected_bg, colors[10]);
-        assert_eq!(theme.warning, colors[11]);
-        assert_eq!(theme.error, colors[12]);
-        assert_eq!(theme.selection, colors[13]);
+        let by_index = |name: &str| colors[THEME_TOKENS.iter().position(|t| *t == name).unwrap()];
+        assert_eq!(theme.background, by_index("background"));
+        assert_eq!(theme.surface, by_index("surface"));
+        assert_eq!(theme.border, by_index("border"));
+        assert_eq!(theme.text, by_index("text"));
+        assert_eq!(theme.text_soft, by_index("text_soft"));
+        assert_eq!(theme.muted, by_index("muted"));
+        assert_eq!(theme.dim, by_index("dim"));
+        assert_eq!(theme.snippet, by_index("snippet"));
+        assert_eq!(theme.sidebar_bg, by_index("sidebar_bg"));
+        assert_eq!(theme.label_dim, by_index("label_dim"));
+        assert_eq!(theme.accent2, by_index("accent2"));
+        assert_eq!(theme.accent3, by_index("accent3"));
+        assert_eq!(theme.accent, by_index("accent"));
+        assert_eq!(theme.accent_bg, by_index("accent_bg"));
+        assert_eq!(theme.bulk_selected_bg, by_index("bulk_selected_bg"));
+        assert_eq!(theme.warning, by_index("warning"));
+        assert_eq!(theme.error, by_index("error"));
+        assert_eq!(theme.selection, by_index("selection"));
     }
 
     #[test]

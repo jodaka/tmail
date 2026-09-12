@@ -7,7 +7,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use unicode_width::UnicodeWidthStr;
@@ -19,14 +19,6 @@ use crate::input::keymap::Context;
 use crate::input::mouse::HitMap;
 use crate::ui::chrome::{self, HairlineSide};
 use crate::ui::theme::Theme;
-
-/// Status-bar fill, matching the sidebar panel color (temporary
-/// experiment): rgb(21, 24, 32).
-const STATUSBAR_BG: Color = Color::Rgb(0x15, 0x18, 0x20);
-/// Key glyphs on the hint row: rgb(192, 189, 183).
-const KEY_COLOR: Color = Color::Rgb(0xC0, 0xBD, 0xB7);
-/// Key labels on the hint row: rgb(87, 94, 113).
-const LABEL_COLOR: Color = Color::Rgb(0x57, 0x5E, 0x71);
 
 /// Render the status bar into `area` (height 3: hairline + content row).
 pub fn render(
@@ -42,7 +34,7 @@ pub fn render(
 
     // Panel fill, same as the sidebar: hints, hairline, and the blank
     // padding row all sit on it.
-    frame.render_widget(Block::new().style(Style::new().bg(STATUSBAR_BG)), area);
+    frame.render_widget(Block::new().style(Style::new().bg(theme.sidebar_bg)), area);
 
     let hairline = Rect {
         x: area.x,
@@ -77,7 +69,7 @@ pub fn render(
             count,
             Style::new()
                 .fg(theme.accent)
-                .bg(STATUSBAR_BG)
+                .bg(theme.sidebar_bg)
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ));
         for (op, label) in [
@@ -92,7 +84,7 @@ pub fn render(
             }
             spans.push(Span::styled(
                 format!(" {label}"),
-                Style::new().fg(theme.text_soft).bg(STATUSBAR_BG),
+                Style::new().fg(theme.text_soft).bg(theme.sidebar_bg),
             ));
             hits.push(
                 Rect {
@@ -110,7 +102,7 @@ pub fn render(
         if let Some(clear) = state.settings.keymap.hint(None, "cancel") {
             spans.push(Span::styled(
                 format!("  {clear} clear"),
-                Style::new().fg(theme.muted).bg(STATUSBAR_BG),
+                Style::new().fg(theme.muted).bg(theme.sidebar_bg),
             ));
         }
     } else if composer {
@@ -132,7 +124,7 @@ pub fn render(
             ),
             (Some(String::from("^↵")), "send"),
         ];
-        push_hints(&mut spans, &hints);
+        push_hints(theme, &mut spans, &hints);
     } else if reader {
         let context = Some(Context::Reader);
         let mut hints: Vec<(Option<String>, &str)> = vec![
@@ -219,7 +211,7 @@ pub fn render(
                 "open",
             ));
         }
-        push_hints(&mut spans, &hints);
+        push_hints(theme, &mut spans, &hints);
     } else {
         let context = Some(Context::List);
         let hints: Vec<(Option<String>, &str)> = vec![
@@ -289,7 +281,7 @@ pub fn render(
                 "shortcuts",
             ),
         ];
-        push_hints(&mut spans, &hints);
+        push_hints(theme, &mut spans, &hints);
     }
     // Foreground work is announced by the loader under the top-bar logo
     // (ticket m3by); the status message sits top-right in the top bar.
@@ -300,20 +292,20 @@ pub fn render(
 /// empty binding list in the config disappears from the row instead of
 /// lying about a key. Hint text is cloned into owned spans so nothing
 /// borrowed from `hints` flows into the frame's lifetime.
-fn push_hints(spans: &mut Vec<Span<'_>>, hints: &[(Option<String>, &str)]) {
+fn push_hints(theme: &Theme, spans: &mut Vec<Span<'_>>, hints: &[(Option<String>, &str)]) {
     for (key, label) in hints {
         let Some(key) = key else { continue };
         spans.push(Span::styled(
             String::from("  "),
-            Style::new().bg(STATUSBAR_BG),
+            Style::new().bg(theme.sidebar_bg),
         ));
         spans.push(Span::styled(
             key.clone(),
-            Style::new().fg(KEY_COLOR).bg(STATUSBAR_BG),
+            Style::new().fg(theme.text_soft).bg(theme.sidebar_bg),
         ));
         spans.push(Span::styled(
             format!(" {label}"),
-            Style::new().fg(LABEL_COLOR).bg(STATUSBAR_BG),
+            Style::new().fg(theme.label_dim).bg(theme.sidebar_bg),
         ));
     }
 }

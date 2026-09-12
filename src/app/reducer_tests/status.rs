@@ -39,6 +39,41 @@ fn status_timeout_zero_keeps_the_message_indefinitely() {
 }
 
 #[test]
+fn a_status_set_before_the_first_tick_arms_on_the_first_tick() {
+    // Real-world finding: the warmup status "Mailboxes loaded" lands on
+    // the very first backend completion — which the cached listing
+    // (ticket haeb) delivers inside the first event batch, before the
+    // 250 ms heartbeat ever injected a clock. `shown_at` used to stay
+    // None and the message stuck on-screen forever.
+    let mut s = state();
+    s.settings.status_timeout_seconds = 5;
+    s.set_status("Mailboxes loaded");
+    assert_eq!(s.session.status.shown_at, None, "no timer yet");
+    assert_eq!(
+        s.session.status.message.as_deref(),
+        Some("Mailboxes loaded")
+    );
+    // The first tick arms the window.
+    tick(&mut s, 0);
+    assert!(
+        s.session.status.shown_at.is_some(),
+        "the first tick arms the timer"
+    );
+    assert_eq!(
+        s.session.status.message.as_deref(),
+        Some("Mailboxes loaded")
+    );
+    // ...and the window elapses on schedule from there.
+    tick(&mut s, 4);
+    assert_eq!(
+        s.session.status.message.as_deref(),
+        Some("Mailboxes loaded")
+    );
+    tick(&mut s, 5);
+    assert_eq!(s.session.status.message, None, "cleared one window later");
+}
+
+#[test]
 fn a_new_status_rearms_the_timeout() {
     let mut s = state();
     s.settings.status_timeout_seconds = 5;

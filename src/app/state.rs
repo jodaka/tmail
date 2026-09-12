@@ -483,8 +483,8 @@ impl AppState {
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.session.status.message = Some(message.into());
         // The timeout timer (ticket h1d7) arms from the last injected
-        // tick. A message set before the first tick simply has no timer
-        // yet — with the 250 ms tick cadence that is startup only.
+        // tick. A message set before the first tick has no timer yet;
+        // the first tick arms it (see the reducer's status clearing).
         self.session.status.shown_at = self.session.clock;
     }
 

@@ -7,7 +7,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -168,17 +168,27 @@ const KR_FRAME_MS: u64 = 80;
 /// wall-clock driven: `now_millis` (a `DateTime::timestamp_millis()`) is
 /// divided by the frame duration, so the animation runs at opencode's
 /// tempo regardless of the tick counter's cadence.
+///
+/// The trail is blended toward `bg`, so the caller passes the fill that
+/// actually sits behind the scanner (`sidebar_bg` under the logo, the
+/// page background in the panes). Palettes that cannot name a color (the
+/// no-color theme's `Color::Reset`) skip the blending entirely and render
+/// plain glyphs — the terminal default foreground, dimmed — so the
+/// animation survives without inventing colors.
 pub fn render_blocks(frame: &mut Frame<'_>, area: Rect, base: Color, bg: Color, now_millis: u64) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let as_rgb = |color: Color, fallback: (u8, u8, u8)| match color {
-        Color::Rgb(r, g, b) => (r, g, b),
-        _ => fallback,
+    let as_rgb = |color: Color| match color {
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        _ => None,
     };
-    let base = as_rgb(base, (0xFC, 0xA3, 0x11));
-    let bg = as_rgb(bg, (0x15, 0x18, 0x20));
-    let trail = trail_colors(base, bg);
+    // The trail math needs real RGB on both ends; anything else (the
+    // no-color theme) renders fg-only instead.
+    let palette = match (as_rgb(base), as_rgb(bg)) {
+        (Some(base), Some(bg)) => Some((base, bg, trail_colors(base, bg))),
+        _ => None,
+    };
     // Wall-clock phase: the tick counter only drives how often the frame
     // redraws, the elapsed milliseconds pick the scanner frame.
     let state = scanner_state((now_millis / KR_FRAME_MS % KR_FRAMES) as i32);
@@ -186,12 +196,33 @@ pub fn render_blocks(frame: &mut Frame<'_>, area: Rect, base: Color, bg: Color, 
     let mut spans: Vec<Span<'_>> = Vec::with_capacity(KR_WIDTH as usize);
     for cell in 0..KR_WIDTH {
         let index = color_index(cell, &state);
-        let (glyph, color) = if index >= 0 && (index as usize) < KR_TRAIL_STEPS {
-            ("■", trail[index as usize])
-        } else {
-            ("⬝", blend(base, inactive_alpha, bg))
+        let (glyph, style) = match &palette {
+            // Colored trail: full composite colors, painted over the
+            // caller's background.
+            Some((base, bg, trail)) if index >= 0 && (index as usize) < KR_TRAIL_STEPS => (
+                "■",
+                Style::new()
+                    .fg(trail[index as usize])
+                    .bg(Color::Rgb(bg.0, bg.1, bg.2)),
+            ),
+            Some((base, bg, _)) => (
+                "⬝",
+                Style::new()
+                    .fg(blend(*base, inactive_alpha, *bg))
+                    .bg(Color::Rgb(bg.0, bg.1, bg.2)),
+            ),
+            // No-color palette: plain glyphs, dimmed trail and dots —
+            // default foreground carries the animation by shape.
+            None if index >= 0 => {
+                if index == 0 {
+                    ("■", Style::new())
+                } else {
+                    ("▪", Style::new().add_modifier(Modifier::DIM))
+                }
+            }
+            None => ("⬝", Style::new().add_modifier(Modifier::DIM)),
         };
-        spans.push(Span::styled(glyph, Style::new().fg(color).bg(bg.into())));
+        spans.push(Span::styled(glyph, style));
     }
     let loader_area = Rect {
         y: area.y,

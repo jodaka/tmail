@@ -273,6 +273,12 @@ fn clear_expired_status(state: &mut AppState, now: chrono::DateTime<chrono::Fixe
         return;
     }
     let Some(shown_at) = state.session.status.shown_at else {
+        // A message armed before the first tick (example: the cached
+        // mailbox listing completes inside the first batch, before the
+        // 250 ms heartbeat ever injected a clock) has no timer yet. The
+        // first tick to see it starts the window; the message can only
+        // stay ~250 ms longer than the configured timeout.
+        state.session.status.shown_at = Some(now);
         return;
     };
     let elapsed = (now - shown_at).num_seconds().max(0) as u64;

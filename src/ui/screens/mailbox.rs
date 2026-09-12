@@ -332,7 +332,8 @@ fn message_spans<'a>(
     let bg = if selected {
         theme.accent_bg
     } else if bulk_selected {
-        theme.bulk_selected_bg
+        // Same fill as selected mailboxes in the sidebar (theme.selection).
+        theme.selection
     } else {
         theme.background
     };
@@ -344,11 +345,11 @@ fn message_spans<'a>(
         Style::new().bg(theme.background)
     };
 
-    // Icon column (ticket cvc4): a bulk-selected row shows the checkbox
+    // Icon column (ticket cvc4): a bulk-selected row shows the filled dot
     // whatever its star state; otherwise the star, or a blank. The cell is
     // always two columns — symbol + trailing space.
     let (symbol, style) = if bulk_selected {
-        ("☑", theme.accent_fg().bg(bg))
+        ("●", theme.accent_fg().bg(bg))
     } else if message.is_starred {
         ("*", theme.star().bg(bg))
     } else {
