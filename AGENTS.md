@@ -15,6 +15,11 @@ All checks must pass before considering a task complete.
 
 Do not ignore compiler, rust-analyzer, Clippy, formatting, or test errors. Fix the underlying problem rather than suppressing warnings unless suppression is explicitly justified.
 
+Do not git commit anything unless EXPLICITLY asked to do so. 
+Do not push anything anywhere unless EXPLICITLY asked to do so. 
+
+When in doubt about anything stop and ask human, do not guess, unless EXPLICITLY asked. 
+
 <!-- BEGIN KATA (managed by `kata init --with-agents`) -->
 ## Kata is the system of record for intent.
 
