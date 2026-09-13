@@ -112,7 +112,7 @@ pub fn render(
         .iter()
         .skip(scroll)
         .take(layout.viewport_lines)
-        .map(|line| Line::from(Span::styled(line.clone(), Style::new().fg(theme.text_soft))))
+        .map(|line| Line::from(Span::styled(line, Style::new().fg(theme.text_soft))))
         .collect();
     frame.render_widget(
         Paragraph::new(visible),

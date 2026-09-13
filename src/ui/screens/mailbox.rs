@@ -74,7 +74,7 @@ pub fn render(
     // a draft's sender is always the user's own address, which reads as
     // noise. Matched on the row's mailbox id, so search results over the
     // Drafts mailbox follow the same rule.
-    let drafts_mailbox = state.drafts_mailbox().map(|m| m.id.clone());
+    let drafts_mailbox = state.drafts_mailbox().map(|m| &m.id);
     let bottom = area.y + area.height;
     let mut drew_any_row = false;
     let mut y = rows.y;
@@ -102,7 +102,7 @@ pub fn render(
         };
         let shows_recipient = drafts_mailbox
             .as_ref()
-            .is_some_and(|id| *id == message.mailbox_id);
+            .is_some_and(|id| **id == message.mailbox_id);
         let spans = message_spans(
             message,
             row_width as usize,

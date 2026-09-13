@@ -73,7 +73,7 @@ pub fn modal_frame(
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
-            title.content.clone(),
+            title.content.as_ref(),
             Style::new()
                 .fg(theme.background)
                 .bg(fill)
