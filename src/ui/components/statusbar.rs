@@ -5,11 +5,11 @@
 //! mockup's mode badge was dropped: it named the screen the user is already
 //! looking at, so it carried no information.
 
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
+use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::action::{BulkOp, ClickTarget};
@@ -18,18 +18,20 @@ use crate::app::state::AppState;
 use crate::input::keymap::Context;
 use crate::input::mouse::HitMap;
 use crate::ui::chrome::{self, HairlineSide};
-use crate::ui::layout::SIDEBAR_WIDTH;
+use crate::ui::layout::{LayoutMode, SIDEBAR_WIDTH};
 use crate::ui::theme::Theme;
 
 /// Render the status bar into `area` (height 3: hairline + content row).
 /// The foreground-work loader sits in the left corner (two spaces in from
 /// the border, ticket m3by's scanner moved here from under the top-bar
 /// logo); the hints start where the sidebar ends, lining the panel up
-/// with the message list pane.
+/// with the message list pane — full mode only (ticket c1d7: compact has
+/// no sidebar, so there the hints start at the pane's left edge).
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
+    mode: LayoutMode,
     state: &AppState,
     theme: &Theme,
     loader_millis: u64,
@@ -82,8 +84,12 @@ pub fn render(
     // Selection mode replaces the hint row with the bulk-operation buttons
     // (ticket p0s3): the count and the four actions, each clickable.
     // Everything starts at the sidebar's right edge (aligned with the
-    // message list pane).
-    let hints_x = area.x.saturating_add(SIDEBAR_WIDTH);
+    // message list pane); compact mode has no sidebar, so the offset
+    // applies only in full mode (ticket c1d7).
+    let hints_x = match mode {
+        LayoutMode::Full => area.x.saturating_add(SIDEBAR_WIDTH),
+        _ => area.x,
+    };
     let row = Rect {
         x: hints_x,
         width: area.x + area.width.saturating_sub(hints_x),

@@ -90,7 +90,7 @@ pub fn render(
     } else {
         screens::mailbox::render(frame, list, state, mode, theme, ctx.now, hits);
     }
-    components::statusbar::render(frame, statusbar, state, theme, loader_millis, hits);
+    components::statusbar::render(frame, statusbar, mode, state, theme, loader_millis, hits);
     render_modals(frame, state, theme, hits);
     components::help::render(frame, state, theme);
 }
