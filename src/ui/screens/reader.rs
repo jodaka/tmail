@@ -18,7 +18,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, ScrollbarState};
+use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::action::ClickTarget;
@@ -50,7 +50,7 @@ pub fn render(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let width = crate::ui::layout::reader_width(state.session.size).max(10);
+    let width = crate::ui::layout::reader_width(state.session.size);
     let header = header_lines(state, width);
     let doc = scroll_document(state, width);
 
@@ -127,11 +127,7 @@ fn render_body(
     // A visible scrollbar reserves its column: body text clips one column
     // short so text and scrollbar never overlap. When the message fits,
     // the full width is used and no scrollbar is drawn.
-    let text_width = if scrolling {
-        (body_area.width as usize).saturating_sub(1)
-    } else {
-        body_area.width as usize
-    };
+    let text_width = chrome::scrollbar_content_width(body_area.width, total, viewport) as usize;
     let links = &doc.links;
     let focus = state.reader_focus;
     let visible: Vec<Line<'_>> = body
@@ -151,8 +147,7 @@ fn render_body(
     };
     frame.render_widget(Paragraph::new(visible), text_area);
     if scrolling {
-        let mut scrollbar_state = ScrollbarState::new(total).position(start);
-        frame.render_stateful_widget(chrome::scrollbar(theme), body_area, &mut scrollbar_state);
+        chrome::render_scrollbar(frame, body_area, theme, total, start);
     }
     push_body_targets(hits, body, text_area, start, viewport, links);
 }

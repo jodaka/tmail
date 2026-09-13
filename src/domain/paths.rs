@@ -49,6 +49,23 @@ pub fn media_type_for(filename: &str) -> &'static str {
     }
 }
 
+/// Whether `program` resolves as an executable: a direct path (anything
+/// with a separator) must exist as a file; otherwise each `PATH` entry
+/// is searched. Shared by the config and backend layers, which both
+/// report a missing external program up front instead of on first use.
+pub fn program_on_path_exists(program: &str) -> bool {
+    if program.contains('/') {
+        return Path::new(program).is_file();
+    }
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join(program))
+                .any(|candidate| candidate.is_file())
+        })
+        .unwrap_or(false)
+}
+
 /// Expand a leading `~` or `~/…` against `home` (plan §15: expansion
 /// happens in Tmail, not through a shell). `~user` forms are left literal —
 /// resolving other users' homes is out of scope and would need a shell or

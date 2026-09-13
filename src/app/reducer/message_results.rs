@@ -14,14 +14,24 @@ use crate::domain::{Mailbox, MailboxId, MailboxRole, Message, MessageLocator, Pa
 /// Local flag application after a confirmed flag operation. The list row
 /// and the reader's summary snapshot update together so the next `Esc` does
 /// not resurrect stale metadata.
+/// Whether a summary is the message a locator points at: id equality, or
+/// the stable `Message-ID` when the backend id has already changed under
+/// us (moves reassign maildir ids, ADR 0001 finding 4). Shared by flag
+/// application and move reconciliation.
+pub(crate) fn locator_matches_summary(
+    locator: &MessageLocator,
+    summary: &crate::domain::MessageSummary,
+) -> bool {
+    summary.id == locator.id
+        || locator
+            .message_id
+            .as_ref()
+            .is_some_and(|mid| summary.message_id.as_ref() == Some(mid))
+}
+
 pub(crate) fn apply_flag(state: &mut AppState, locator: &MessageLocator, change: FlagChange) {
-    let matches = |summary: &crate::domain::MessageSummary| {
-        summary.id == locator.id
-            || locator
-                .message_id
-                .as_ref()
-                .is_some_and(|mid| summary.message_id.as_ref() == Some(mid))
-    };
+    let matches =
+        |summary: &crate::domain::MessageSummary| locator_matches_summary(locator, summary);
     if let Some(Route::Message(route)) = state.session.routes.last_mut()
         && matches(&route.summary)
     {
@@ -49,7 +59,7 @@ pub(crate) enum FlagChange {
 /// forward starts at the first item and backward at the last; with no
 /// focusable item at all the cursor stays put.
 pub(crate) fn cycle_reader_focus(state: &mut AppState, delta: i64) {
-    let width = crate::view::layout::reader_width(state.session.size).max(10);
+    let width = crate::view::layout::reader_width(state.session.size);
     let links = crate::app::reader::link_count(state, width);
     let attachments = state
         .open_message
@@ -87,7 +97,7 @@ pub(crate) fn reveal_reader_focus(state: &mut AppState) {
     let Some(focus) = state.reader_focus else {
         return;
     };
-    let width = crate::view::layout::reader_width(state.session.size).max(10);
+    let width = crate::view::layout::reader_width(state.session.size);
     let Some(line) = crate::app::reader::focus_line(state, width, focus) else {
         return;
     };
@@ -191,13 +201,8 @@ pub(crate) fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effe
 /// pagination stays truthful (maildir ids change on move, ADR 0001 finding
 /// 4; the reload re-resolves the selection by identity).
 pub(crate) fn message_moved(state: &mut AppState, locator: &MessageLocator) -> Vec<Effect> {
-    let matches = |summary: &crate::domain::MessageSummary| {
-        summary.id == locator.id
-            || locator
-                .message_id
-                .as_ref()
-                .is_some_and(|mid| summary.message_id.as_ref() == Some(mid))
-    };
+    let matches =
+        |summary: &crate::domain::MessageSummary| locator_matches_summary(locator, summary);
     // Close the reader when it was showing the moved message.
     if matches!(state.active_route(), Some(Route::Message(route)) if matches(&route.summary)) {
         close_reader(state);

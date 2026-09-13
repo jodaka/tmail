@@ -11,56 +11,98 @@ use crate::app::state::AppState;
 
 // ── Reply / forward seeding (plan §14, Phase 7.3) ────────────────────────
 
+/// The one-composer-rule status issued wherever seeding (or a draft
+/// install) would clobber a composer already in progress.
+const DRAFT_ALREADY_OPEN: &str = "A draft is already open — send or discard it first";
+
+/// Enforce the one-composer rule at a seeding site: reports the shared
+/// status and returns true when a composer is already open.
+fn refuse_open_composer(state: &mut AppState) -> bool {
+    if !composer_open(state) {
+        return false;
+    }
+    state.set_status(DRAFT_ALREADY_OPEN);
+    true
+}
+
+/// Turn a fetched message into its seeded draft plus the completion
+/// status — the single kind→seed table shared by the reader path and the
+/// list path (plan §14: one behavior, two entry points).
+fn seed_for(
+    message: &crate::domain::Message,
+    kind: crate::app::operation::SeedKind,
+    own_account: Option<&str>,
+) -> (crate::domain::reply::Seed, &'static str) {
+    use crate::app::operation::SeedKind;
+    use crate::domain::ReplyKind;
+    match kind {
+        SeedKind::Reply => (
+            crate::domain::reply::seed_reply(message, ReplyKind::Reply, None),
+            "Reply draft ready",
+        ),
+        SeedKind::ReplyAll => (
+            crate::domain::reply::seed_reply(message, ReplyKind::ReplyAll, own_account),
+            "Reply-all draft ready",
+        ),
+        SeedKind::Forward => (
+            crate::domain::reply::seed_forward(message),
+            "Forward draft ready",
+        ),
+    }
+}
+
 /// Seed a reply draft from the open message (reader). Reply acts on full
 /// message data — headers, threading ids, and the quotable body — so it
 /// requires a loaded reader; a draft already in the composer is never
 /// clobbered (plan §14: one composer at a time).
 pub(crate) fn open_reply(state: &mut AppState) -> Vec<Effect> {
-    if let Some(message) = state.open_message.as_loaded() {
-        if composer_open(state) {
-            state.set_status("A draft is already open — send or discard it first");
-            return Vec::new();
+    match state.open_message.as_loaded() {
+        Some(message) => {
+            let (seed, status) = seed_for(message, crate::app::operation::SeedKind::Reply, None);
+            if refuse_open_composer(state) {
+                return Vec::new();
+            }
+            open_seeded_composer(state, seed, status)
         }
-        let seed = crate::domain::reply::seed_reply(message, crate::domain::ReplyKind::Reply, None);
-        return open_seeded_composer(state, seed, "Reply draft ready");
+        // Per user request: reply works from the list too — fetch the
+        // selected message, then seed on arrival (`SeedComposer` result arm).
+        None => seed_from_list(state, crate::app::operation::SeedKind::Reply),
     }
-    // Per user request: reply works from the list too — fetch the selected
-    // message, then seed on arrival (`SeedComposer` result arm).
-    seed_from_list(state, crate::app::operation::SeedKind::Reply)
 }
 
 /// Seed a reply-all draft (Phase 7.5): recipients merged, deduplicated,
 /// and the configured account address excluded.
 pub(crate) fn open_reply_all(state: &mut AppState) -> Vec<Effect> {
-    if let Some(message) = state.open_message.as_loaded() {
-        if composer_open(state) {
-            state.set_status("A draft is already open — send or discard it first");
-            return Vec::new();
+    match state.open_message.as_loaded() {
+        Some(message) => {
+            let own = state.settings.account_email.clone();
+            let (seed, status) = seed_for(
+                message,
+                crate::app::operation::SeedKind::ReplyAll,
+                own.as_deref(),
+            );
+            if refuse_open_composer(state) {
+                return Vec::new();
+            }
+            open_seeded_composer(state, seed, status)
         }
-        let own = state.settings.account_email.clone();
-        let seed = crate::domain::reply::seed_reply(
-            message,
-            crate::domain::ReplyKind::ReplyAll,
-            own.as_deref(),
-        );
-        return open_seeded_composer(state, seed, "Reply-all draft ready");
+        None => seed_from_list(state, crate::app::operation::SeedKind::ReplyAll),
     }
-    seed_from_list(state, crate::app::operation::SeedKind::ReplyAll)
 }
 
 /// Seed a forward draft from the open message (reader).
 pub(crate) fn open_forward(state: &mut AppState) -> Vec<Effect> {
-    if let Some(message) = state.open_message.as_loaded() {
-        if composer_open(state) {
-            state.set_status("A draft is already open — send or discard it first");
-            return Vec::new();
+    match state.open_message.as_loaded() {
+        Some(message) => {
+            let (seed, status) = seed_for(message, crate::app::operation::SeedKind::Forward, None);
+            if refuse_open_composer(state) {
+                return Vec::new();
+            }
+            open_seeded_composer(state, seed, status)
         }
-        let seed = crate::domain::reply::seed_forward(message);
-        return open_seeded_composer(state, seed, "Forward draft ready");
+        None => seed_from_list(state, crate::app::operation::SeedKind::Forward),
     }
-    seed_from_list(state, crate::app::operation::SeedKind::Forward)
 }
-
 /// List-initiated reply/forward (user request): the summaries do not carry
 /// a body, so fetch the message first (`SeedComposer`) and seed the
 /// composer when the result lands. Requires a list/reader-targeted
@@ -77,8 +119,7 @@ pub(crate) fn seed_from_list(
     let Some(locator) = locator else {
         return Vec::new();
     };
-    if composer_open(state) {
-        state.set_status("A draft is already open — send or discard it first");
+    if refuse_open_composer(state) {
         return Vec::new();
     }
     state.set_status(match kind {
@@ -103,28 +144,10 @@ pub(crate) fn install_seed(
     message: crate::domain::Message,
     kind: crate::app::operation::SeedKind,
 ) -> Vec<Effect> {
-    if composer_open(state) {
-        state.set_status("A draft is already open — send or discard it first");
+    if refuse_open_composer(state) {
         return Vec::new();
     }
-    let (seed, status) = match kind {
-        crate::app::operation::SeedKind::Reply => (
-            crate::domain::reply::seed_reply(&message, crate::domain::ReplyKind::Reply, None),
-            "Reply draft ready",
-        ),
-        crate::app::operation::SeedKind::ReplyAll => (
-            crate::domain::reply::seed_reply(
-                &message,
-                crate::domain::ReplyKind::ReplyAll,
-                state.settings.account_email.as_deref(),
-            ),
-            "Reply-all draft ready",
-        ),
-        crate::app::operation::SeedKind::Forward => (
-            crate::domain::reply::seed_forward(&message),
-            "Forward draft ready",
-        ),
-    };
+    let (seed, status) = seed_for(&message, kind, state.settings.account_email.as_deref());
     open_seeded_composer(state, seed, status)
 }
 

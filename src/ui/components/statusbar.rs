@@ -149,82 +149,26 @@ pub fn render(
         // The composer's editing keys are not configurable (typing must
         // type); Tab and Esc are the keymap's focus/cancel bindings, so
         // their hints read from it. Send stays the fixed Ctrl+Enter chord.
-        let hints: Vec<(Option<String>, &str)> = vec![
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(None, "focus_next")
-                    .map(String::from),
-                "next field",
-            ),
-            (
-                state.settings.keymap.hint(None, "cancel").map(String::from),
-                "save & leave",
-            ),
-            (Some(String::from("^↵")), "send"),
+        let keymap = &state.settings.keymap;
+        let hints = vec![
+            hint_row(keymap, None, "focus_next", "next field"),
+            hint_row(keymap, None, "cancel", "save & leave"),
+            (Some("^↵"), "send"),
         ];
         push_hints(theme, &mut spans, &hints);
     } else if reader {
         let context = Some(Context::Reader);
-        let mut hints: Vec<(Option<String>, &str)> = vec![
-            (state.settings.keymap.move_hint(context), "scroll"),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "cancel")
-                    .map(String::from),
-                "back",
-            ),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "reply")
-                    .map(String::from),
-                "reply",
-            ),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "forward")
-                    .map(String::from),
-                "forward",
-            ),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "archive")
-                    .map(String::from),
-                "archive",
-            ),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "star")
-                    .map(String::from),
-                "star",
-            ),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "trash")
-                    .map(String::from),
-                "delete",
-            ),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "open_help")
-                    .map(String::from),
-                "shortcuts",
-            ),
+        let keymap = &state.settings.keymap;
+        let move_hint = keymap.move_hint(context);
+        let mut hints = vec![
+            (move_hint.as_deref(), "scroll"),
+            hint_row(keymap, context, "cancel", "back"),
+            hint_row(keymap, context, "reply", "reply"),
+            hint_row(keymap, context, "forward", "forward"),
+            hint_row(keymap, context, "archive", "archive"),
+            hint_row(keymap, context, "star", "star"),
+            hint_row(keymap, context, "trash", "delete"),
+            hint_row(keymap, context, "open_help", "shortcuts"),
         ];
         // Attachment actions advertise only when the open message carries
         // attachments (plan §15, ticket 61qx): the chips are the target of
@@ -234,92 +178,24 @@ pub fn render(
             .as_loaded()
             .is_some_and(|message| !message.attachments.is_empty())
         {
-            hints.push((
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "save_attachment")
-                    .map(String::from),
-                "save",
-            ));
-            hints.push((
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "open_attachment")
-                    .map(String::from),
-                "open",
-            ));
+            hints.push(hint_row(keymap, context, "save_attachment", "save"));
+            hints.push(hint_row(keymap, context, "open_attachment", "open"));
         }
         push_hints(theme, &mut spans, &hints);
     } else {
         let context = Some(Context::List);
-        let hints: Vec<(Option<String>, &str)> = vec![
-            (state.settings.keymap.move_hint(context), "move"),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "activate")
-                    .map(String::from),
-                "open",
-            ),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "toggle_selected")
-                    .map(String::from),
-                "select",
-            ),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "star")
-                    .map(String::from),
-                "star",
-            ),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "archive")
-                    .map(String::from),
-                "archive",
-            ),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "trash")
-                    .map(String::from),
-                "delete",
-            ),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "compose")
-                    .map(String::from),
-                "compose",
-            ),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "open_search")
-                    .map(String::from),
-                "search",
-            ),
-            (
-                state
-                    .settings
-                    .keymap
-                    .hint(context, "open_help")
-                    .map(String::from),
-                "shortcuts",
-            ),
+        let keymap = &state.settings.keymap;
+        let move_hint = keymap.move_hint(context);
+        let hints = vec![
+            (move_hint.as_deref(), "move"),
+            hint_row(keymap, context, "activate", "open"),
+            hint_row(keymap, context, "toggle_selected", "select"),
+            hint_row(keymap, context, "star", "star"),
+            hint_row(keymap, context, "archive", "archive"),
+            hint_row(keymap, context, "trash", "delete"),
+            hint_row(keymap, context, "compose", "compose"),
+            hint_row(keymap, context, "open_search", "search"),
+            hint_row(keymap, context, "open_help", "shortcuts"),
         ];
         push_hints(theme, &mut spans, &hints);
     }
@@ -332,7 +208,18 @@ pub fn render(
 /// empty binding list in the config disappears from the row instead of
 /// lying about a key. Hint text is cloned into owned spans so nothing
 /// borrowed from `hints` flows into the frame's lifetime.
-fn push_hints(theme: &Theme, spans: &mut Vec<Span<'_>>, hints: &[(Option<String>, &str)]) {
+/// A hint row for [`push_hints`]: the keymap binding for `action` in
+/// `context`, never owned — no `String::from` ladders.
+fn hint_row<'a>(
+    keymap: &'a crate::input::keymap::KeyMap,
+    context: Option<Context>,
+    action: &str,
+    label: &'a str,
+) -> (Option<&'a str>, &'a str) {
+    (keymap.hint(context, action), label)
+}
+
+fn push_hints(theme: &Theme, spans: &mut Vec<Span<'_>>, hints: &[(Option<&str>, &str)]) {
     for (key, label) in hints {
         let Some(key) = key else { continue };
         spans.push(Span::styled(
@@ -340,7 +227,7 @@ fn push_hints(theme: &Theme, spans: &mut Vec<Span<'_>>, hints: &[(Option<String>
             Style::new().bg(theme.sidebar_bg),
         ));
         spans.push(Span::styled(
-            key.clone(),
+            (*key).to_string(),
             Style::new().fg(theme.text_soft).bg(theme.sidebar_bg),
         ));
         spans.push(Span::styled(

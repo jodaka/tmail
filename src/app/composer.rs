@@ -148,18 +148,21 @@ impl ComposerState {
 
     /// Step to the next control (Tab, plan §10), placing the caret.
     pub fn focus_next(&mut self) {
-        let cycle = self.cycle();
-        let index = cycle.iter().position(|f| *f == self.field).unwrap_or(0);
-        let next = cycle[(index + 1) % cycle.len()];
-        self.enter_field(next);
+        self.step_focus(1);
     }
 
     /// Step to the previous control (Shift+Tab), placing the caret.
     pub fn focus_previous(&mut self) {
+        self.step_focus(-1);
+    }
+
+    /// Cycle the control list by `delta` steps (wrapping both ways); the
+    /// Tab / Shift+Tab pair above differ only in the direction.
+    fn step_focus(&mut self, delta: i64) {
         let cycle = self.cycle();
-        let index = cycle.iter().position(|f| *f == self.field).unwrap_or(0);
-        let previous = cycle[(index + cycle.len() - 1) % cycle.len()];
-        self.enter_field(previous);
+        let index = cycle.iter().position(|f| *f == self.field).unwrap_or(0) as i64;
+        let next = cycle[(index + delta).rem_euclid(cycle.len() as i64) as usize];
+        self.enter_field(next);
     }
 
     /// Focus `field` and put the caret where editing would continue: at the

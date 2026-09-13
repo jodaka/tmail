@@ -751,7 +751,7 @@ fn resize_clamps_reader_scroll_after_reflow() {
             height: 20,
         },
     );
-    let width = crate::view::layout::reader_width(s.session.size).max(10);
+    let width = crate::view::layout::reader_width(s.session.size);
     let viewport = crate::view::layout::reader_rows_visible(s.session.size)
         .saturating_sub(crate::app::reader::header_line_count(&s, width))
         .max(1) as i64;
@@ -770,7 +770,7 @@ fn resize_clamps_reader_scroll_after_reflow() {
             height: 40,
         },
     );
-    let width = crate::view::layout::reader_width(s.session.size).max(10);
+    let width = crate::view::layout::reader_width(s.session.size);
     let viewport = crate::view::layout::reader_rows_visible(s.session.size)
         .saturating_sub(crate::app::reader::header_line_count(&s, width))
         .max(1) as i64;

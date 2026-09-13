@@ -1,6 +1,6 @@
 //! External editor (plan §14, Phase 11) and composer lifecycle: open,
 //! park, secure, leave, autosave, and the crash-safe draft plumbing.
-use super::navigation::request_page;
+use super::navigation::{close_reader, request_page};
 use super::search_refresh::leave_search;
 use crate::app::action::SearchEdit;
 use crate::app::composer::ComposerState;
@@ -13,6 +13,16 @@ use crate::app::state::{AppState, Loadable};
 use crate::domain::{DraftSaveState, MailboxId, Page};
 
 // ── External editor (plan §14, Phase 11) ─────────────────────────────────
+
+/// Pop the composer route and hand focus back to the message list
+/// (the shared tail of send, discard, and leave — one composer rule:
+/// the screen always leaves the same way).
+pub(crate) fn close_composer_route(state: &mut AppState) {
+    if matches!(state.active_route(), Some(Route::Composer)) {
+        state.session.routes.pop();
+        state.session.focus = Focus::MessageList;
+    }
+}
 
 /// Ctrl+E in the composer: save the draft first (plan §14 step 1), mark
 /// the composer as externally edited so background autosave stays quiet
@@ -317,12 +327,8 @@ pub(crate) fn back_or_cancel(state: &mut AppState) -> Vec<Effect> {
             return Vec::new();
         }
         // Pop the reader: the mailbox route underneath still holds the
-        // exact page, selection, and scroll.
-        state.session.routes.pop();
-        state.open_message = Loadable::Idle;
-        state.reader_scroll = 0;
-        state.reader_focus = None;
-        state.session.focus = Focus::MessageList;
+        // exact page, selection, and scroll (same teardown as close_reader).
+        close_reader(state);
         return Vec::new();
     }
     // Root route with nothing to cancel or close: exit cleanly (plan §19

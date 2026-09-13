@@ -104,10 +104,11 @@ pub fn render(
     }
 
     // Detail viewport: skip `scroll` wrapped lines, draw at most
-    // `viewport_lines`, with a subtle continuation marker.
+    // `viewport_lines`, with a subtle continuation marker. The clamp is
+    // the shared `max_scroll` — the same offset the reducer clamps
+    // against — not an inline recomputation of the formula.
     let lines = detail_lines(&dialog.detail, size, dialog.code, dialog.ambiguous);
-    let max_scroll = lines.len().saturating_sub(layout.viewport_lines);
-    let scroll = dialog.scroll.min(max_scroll);
+    let scroll = dialog.scroll.min(max_scroll(dialog, size));
     let visible: Vec<Line<'_>> = lines
         .iter()
         .skip(scroll)

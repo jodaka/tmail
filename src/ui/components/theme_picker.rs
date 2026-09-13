@@ -9,7 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{Paragraph, ScrollbarState};
+use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::overlay::Overlay;
@@ -43,15 +43,14 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
     // windowed by the reducer-maintained scroll offset. When the theme
     // list outgrows the window, a scrollbar takes the last inner column —
     // the same anatomy (and look) as the message list's scrollbar — so
-    // row text and fills end one column short of it.
-    let rows_height = inner.height.saturating_sub(1);
+    // row text and fills end one column short of it. The visible-row
+    // count comes from the shared `picker_layout`, so the drawn window
+    // and the reducer's clamp cannot drift apart.
+    let rows_height = layout.visible_rows as u16;
     let visible = rows_height as usize;
     let scrolling = state.settings.themes.len() > visible;
-    let row_width = if scrolling {
-        inner.width.saturating_sub(1)
-    } else {
-        inner.width
-    };
+    let row_width =
+        chrome::scrollbar_content_width(inner.width, state.settings.themes.len(), visible);
     for (drawn, (index, (name, _))) in state
         .settings
         .themes
@@ -90,17 +89,17 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
     if scrolling {
         // The thumb tracks the scroll window the reducer keeps centered on
         // the cursor (position = first visible row, like the message list).
-        let mut scrollbar_state =
-            ScrollbarState::new(state.settings.themes.len()).position(dialog.scroll);
-        frame.render_stateful_widget(
-            chrome::scrollbar(theme),
+        chrome::render_scrollbar(
+            frame,
             Rect {
                 x: inner.x,
                 y: inner.y,
                 width: inner.width,
                 height: rows_height,
             },
-            &mut scrollbar_state,
+            theme,
+            state.settings.themes.len(),
+            dialog.scroll,
         );
     }
     let hint = Rect {

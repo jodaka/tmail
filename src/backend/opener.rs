@@ -28,14 +28,20 @@ pub trait PathOpener: Send + Sync {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemOpener;
 
+/// No opener on the platform: v1 refuses rather than guessing (macOS
+/// `open` and Linux `xdg-open` are the only supported handlers).
+fn no_opener() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "no platform opener is configured for this OS (v1 supports \
+         macOS `open` and Linux `xdg-open`)",
+    )
+}
+
 impl PathOpener for SystemOpener {
     fn open(&self, path: &Path) -> io::Result<()> {
         let Some(program) = opener_program() else {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "no platform opener is configured for this OS (v1 supports \
-                 macOS `open` and Linux `xdg-open`)",
-            ));
+            return Err(no_opener());
         };
         // tokio's child is reaped by the runtime's orphan reaper when the
         // handle drops, so a quickly-exiting `open`/`xdg-open` leaves no
@@ -54,11 +60,7 @@ impl PathOpener for SystemOpener {
             ));
         }
         let Some(program) = opener_program() else {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "no platform opener is configured for this OS (v1 supports \
-                 macOS `open` and Linux `xdg-open`)",
-            ));
+            return Err(no_opener());
         };
         // The URL travels as a single argv entry (no shell), so query
         // strings and fragments reach the browser byte-for-byte.

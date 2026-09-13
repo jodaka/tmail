@@ -13,9 +13,6 @@ pub use theme::Theme;
 use chrono::{DateTime, FixedOffset};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
 
 use crate::app::route::Route;
 use crate::app::state::AppState;
@@ -107,21 +104,16 @@ fn render_modals(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, hits: &
 
 /// Too-small mode: a clear centered message, nothing overlapping (plan §18).
 fn render_too_small(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
-    let message = format!(
-        "Terminal too small ({}×{})\ntmail needs at least {}×{} columns/rows.\nEnlarge the window or press Esc to quit.",
-        state.session.size.0,
-        state.session.size.1,
-        layout::COMPACT_MIN_WIDTH,
-        layout::COMPACT_MIN_HEIGHT,
+    chrome::render_too_small(
+        frame,
+        area,
+        state.session.size,
+        &format!(
+            "tmail needs at least {}×{} columns/rows.",
+            layout::COMPACT_MIN_WIDTH,
+            layout::COMPACT_MIN_HEIGHT
+        ),
+        "Enlarge the window or press Esc to quit.",
+        theme,
     );
-    let lines: Vec<Line<'_>> = message
-        .lines()
-        .map(|l| {
-            Line::from(Span::styled(
-                l,
-                Style::new().fg(theme.text).bg(theme.background),
-            ))
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines).centered(), area);
 }

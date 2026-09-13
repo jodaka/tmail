@@ -739,19 +739,24 @@ fn submit_override(wizard: &mut WizardState) -> Vec<Effect> {
         return Vec::new();
     }
     let [imap, smtp, username] = &wizard.discovery.override_fields;
-    let (imap_url, imap_security) = match parse_server_url(&imap.value) {
-        Ok(parsed) => parsed,
-        Err(message) => {
-            wizard.last_error = Some(message);
-            return Vec::new();
+    // One parse-error handling per server: the two fields go through the
+    // same parse-or-report walk, the first failing field wins.
+    let mut parsed_servers = Vec::with_capacity(2);
+    for value in [&imap.value, &smtp.value] {
+        match parse_server_url(value) {
+            Ok(parsed) => parsed_servers.push(parsed),
+            Err(message) => {
+                wizard.last_error = Some(message);
+                return Vec::new();
+            }
         }
+    }
+    let mut servers = parsed_servers.into_iter();
+    let Some((imap_url, imap_security)) = servers.next() else {
+        unreachable!("two server fields always yield two (url, security) pairs");
     };
-    let (smtp_url, smtp_security) = match parse_server_url(&smtp.value) {
-        Ok(parsed) => parsed,
-        Err(message) => {
-            wizard.last_error = Some(message);
-            return Vec::new();
-        }
+    let Some((smtp_url, smtp_security)) = servers.next() else {
+        unreachable!("two server fields always yield two (url, security) pairs");
     };
     if username.value.trim().is_empty() {
         wizard.last_error = Some(String::from("enter the login username"));

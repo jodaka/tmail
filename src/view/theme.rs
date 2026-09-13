@@ -347,12 +347,11 @@ impl Theme {
         }
     }
 
-    /// Mode badge in the status bar (mockup `.mode`): accent fill, dark text.
+    /// Mode badge in the status bar (mockup `.mode`): accent fill, dark
+    /// text. Visually the focused-button look over the accent fill — it
+    /// delegates, so the two can never drift apart.
     pub fn mode_badge(&self) -> Style {
-        Style::new()
-            .bg(self.accent)
-            .fg(self.background)
-            .add_modifier(Modifier::BOLD)
+        self.button_style(true, self.accent)
     }
 
     /// The caret of a focused text input — the single-line field spans

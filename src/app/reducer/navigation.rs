@@ -147,7 +147,7 @@ pub(crate) fn scroll_reader(state: &mut AppState, delta: i64) {
 /// the scrollable body length, from the same pure functions the renderer
 /// draws — reducer and frame can never disagree (ticket 6864).
 pub(crate) fn reader_scroll_bounds(state: &AppState) -> (i64, i64) {
-    let width = crate::view::layout::reader_width(state.session.size).max(10);
+    let width = crate::view::layout::reader_width(state.session.size);
     let viewport = crate::view::layout::reader_rows_visible(state.session.size)
         .saturating_sub(crate::app::reader::header_line_count(state, width))
         .max(1) as i64;
@@ -231,80 +231,80 @@ pub(crate) fn change_page(state: &mut AppState, delta: i64) -> Vec<Effect> {
     request_visible_page(state, target as usize)
 }
 
+/// The list request the active route needs: an open search queries, any
+/// other route pages its mailbox. Shared by the foreground, background,
+/// and mailbox-only request entry points (Phase 9).
+fn visible_list_request(state: &AppState, offset: usize) -> Option<OperationKind> {
+    match state.active_route() {
+        Some(Route::Search(route)) => Some(OperationKind::Search(SearchRequest {
+            mailbox_id: route.mailbox_id.clone(),
+            query: route.query.clone(),
+            offset,
+            limit: state.messages.limit.max(1),
+        })),
+        Some(route) => route.mailbox_id().cloned().map(|mailbox_id| {
+            OperationKind::LoadPage(PageRequest {
+                mailbox_id,
+                offset,
+                limit: state.messages.limit.max(1),
+            })
+        }),
+        None => None,
+    }
+}
+
+/// The cold-context cache serve for a list request (ticket haeb): read the
+/// stored page for this exact mailbox (+query) off-thread. The read runs
+/// off-thread; its completion applies the page and starts the fresh load
+/// (`fresh_background_on_hit`) or just the fresh load.
+fn cache_list_load(operation: &OperationKind, fresh_background_on_hit: bool) -> OperationKind {
+    match operation {
+        OperationKind::Search(SearchRequest {
+            mailbox_id,
+            query,
+            offset,
+            limit,
+        }) => OperationKind::CacheListLoad {
+            mailbox: mailbox_id.clone(),
+            query: Some(query.clone()),
+            offset: *offset,
+            limit: *limit,
+            fresh_background_on_hit,
+        },
+        OperationKind::LoadPage(PageRequest {
+            mailbox_id,
+            offset,
+            limit,
+        }) => OperationKind::CacheListLoad {
+            mailbox: mailbox_id.clone(),
+            query: None,
+            offset: *offset,
+            limit: *limit,
+            fresh_background_on_hit,
+        },
+        _ => unreachable!("visible list requests are searches or page loads"),
+    }
+}
+
 /// Request one page of whatever list the active route shows (Phase 9): the
 /// active mailbox's page, or the open search's results. Both share the
 /// list state, selection, and scroll machinery (Phase 9.1).
 pub(crate) fn request_visible_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
-    match state.active_route() {
-        Some(Route::Search(route)) => {
-            let request = SearchRequest {
-                mailbox_id: route.mailbox_id.clone(),
-                query: route.query.clone(),
-                offset,
-                limit: state.messages.limit.max(1),
-            };
-            // Ticket haeb: in cold contexts (empty list) the cached page
-            // for this exact query renders immediately — a move re-sync
-            // has a non-empty list, so it can never resurrect moved rows
-            // from the cache. The read runs off-thread; its completion
-            // applies the page and starts the fresh load.
-            let mut effects = Vec::new();
-            if state.messages.items.is_empty() {
-                effects.push(state.session.operations.start_background(
-                    OperationKind::CacheListLoad {
-                        mailbox: request.mailbox_id.clone(),
-                        query: Some(request.query.clone()),
-                        offset: request.offset,
-                        limit: request.limit,
-                        fresh_background_on_hit: false,
-                    },
-                ));
-            } else {
-                effects.push(
-                    state
-                        .session
-                        .operations
-                        .start(OperationKind::Search(request)),
-                );
-            }
-            effects
-        }
-        Some(route) => match route.mailbox_id().cloned() {
-            Some(mailbox_id) => {
-                let request = PageRequest {
-                    mailbox_id,
-                    offset,
-                    limit: state.messages.limit.max(1),
-                };
-                // Ticket haeb: cached summaries render instantly in cold
-                // contexts (empty list: startup, mailbox switch) — a move
-                // re-sync has a non-empty list, so it can never resurrect
-                // moved rows from the cache. The read runs off-thread; its
-                // completion applies the page and starts the fresh load.
-                let mut effects = Vec::new();
-                if state.messages.items.is_empty() {
-                    effects.push(state.session.operations.start_background(
-                        OperationKind::CacheListLoad {
-                            mailbox: request.mailbox_id.clone(),
-                            query: None,
-                            offset: request.offset,
-                            limit: request.limit,
-                            fresh_background_on_hit: false,
-                        },
-                    ));
-                } else {
-                    effects.push(
-                        state
-                            .session
-                            .operations
-                            .start(OperationKind::LoadPage(request)),
-                    );
-                }
-                effects
-            }
-            None => Vec::new(),
-        },
-        None => Vec::new(),
+    let Some(operation) = visible_list_request(state, offset) else {
+        return Vec::new();
+    };
+    // Ticket haeb: in cold contexts (empty list) the cached page for this
+    // exact query renders immediately — a move re-sync has a non-empty
+    // list, so it can never resurrect moved rows from the cache.
+    if state.messages.items.is_empty() {
+        vec![
+            state
+                .session
+                .operations
+                .start_background(cache_list_load(&operation, false)),
+        ]
+    } else {
+        vec![state.session.operations.start(operation)]
     }
 }
 
@@ -316,39 +316,10 @@ pub(crate) fn request_visible_page(state: &mut AppState, offset: usize) -> Vec<E
 /// timer firings is already counted clean).
 pub(crate) fn request_visible_page_background(state: &mut AppState, offset: usize) -> Vec<Effect> {
     state.session.notifications.mark_clean(&state.messages);
-    match state.active_route() {
-        Some(Route::Search(route)) => {
-            let request = SearchRequest {
-                mailbox_id: route.mailbox_id.clone(),
-                query: route.query.clone(),
-                offset,
-                limit: state.messages.limit.max(1),
-            };
-            vec![
-                state
-                    .session
-                    .operations
-                    .start_background(OperationKind::Search(request)),
-            ]
-        }
-        Some(route) => match route.mailbox_id().cloned() {
-            Some(mailbox_id) => {
-                let request = PageRequest {
-                    mailbox_id,
-                    offset,
-                    limit: state.messages.limit.max(1),
-                };
-                vec![
-                    state
-                        .session
-                        .operations
-                        .start_background(OperationKind::LoadPage(request)),
-                ]
-            }
-            None => Vec::new(),
-        },
-        None => Vec::new(),
-    }
+    let Some(operation) = visible_list_request(state, offset) else {
+        return Vec::new();
+    };
+    vec![state.session.operations.start_background(operation)]
 }
 
 /// Start a page load for the active route's mailbox and return its effect.
@@ -358,39 +329,26 @@ pub(crate) fn request_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
     let Some(mailbox_id) = state.active_route().and_then(Route::mailbox_id).cloned() else {
         return Vec::new();
     };
-    let request = PageRequest {
+    let operation = OperationKind::LoadPage(PageRequest {
         mailbox_id,
         offset,
         limit: state.messages.limit.max(1),
-    };
+    });
     // Ticket haeb: in cold contexts (empty list — startup, mailbox switch)
     // the cached page renders instantly; the fresh load below still runs
     // and its result overwrites the cache and the page. When the cache
     // served the visible rows, the fresh load is *consequence* work: it
     // runs in the background so `Esc` can never cancel it into "cancelled"
     // noise, and its result converges read/unread state and remote drift.
-    // The read itself runs off-thread (the manager owns the cache); the
-    // completion decides the fresh load's origin.
     if state.messages.items.is_empty() {
         vec![
             state
                 .session
                 .operations
-                .start_background(OperationKind::CacheListLoad {
-                    mailbox: request.mailbox_id.clone(),
-                    query: None,
-                    offset: request.offset,
-                    limit: request.limit,
-                    fresh_background_on_hit: true,
-                }),
+                .start_background(cache_list_load(&operation, true)),
         ]
     } else {
-        vec![
-            state
-                .session
-                .operations
-                .start(OperationKind::LoadPage(request)),
-        ]
+        vec![state.session.operations.start(operation)]
     }
 }
 

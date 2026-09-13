@@ -1,8 +1,8 @@
 //! Send (plan §14, Phase 7.6/7.7): confirming the composer, the
 //! in-flight state, and the classified outcome handling.
+use super::composer_flow::close_composer_route;
 use super::modals::open_error_modal;
 use crate::app::effect::Effect;
-use crate::app::focus::Focus;
 use crate::app::operation::{DraftRemovalReason, OperationFailure, OperationKind};
 use crate::app::route::Route;
 use crate::app::sanitize::sanitize;
@@ -131,10 +131,7 @@ pub(crate) fn confirm_send(state: &mut AppState) -> Vec<Effect> {
         .composer
         .take()
         .map(|composer| composer.draft.snapshot());
-    if matches!(state.active_route(), Some(Route::Composer)) {
-        state.session.routes.pop();
-        state.session.focus = Focus::MessageList;
-    }
+    close_composer_route(state);
     match snapshot {
         Some(snapshot) => vec![state.session.operations.start(OperationKind::DeleteDraft {
             draft: Box::new(snapshot),

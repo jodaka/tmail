@@ -772,7 +772,7 @@ fn save_draft_adds_with_draft_flag_and_pipes_the_message() {
 }
 
 #[test]
-fn save_draft_replaces_the_old_remote_only_after_confirm() {
+fn save_draft_runs_the_replacement_sweep_only_after_confirm() {
     let fake = FakeHimalaya::spawn_ok();
     let (backend, _dir) = backend_with_journal(&fake);
     block_quiet(
@@ -780,25 +780,18 @@ fn save_draft_replaces_the_old_remote_only_after_confirm() {
         300,
     )
     .expect("save succeeds");
-    // `add` is awaited by the save; the old-copy delete and the stray
-    // sweep run detached (two tasks, order between them unspecified).
-    let argv = fake.wait_for_invocations(4).expect("cleanup recorded");
+    // `add` is awaited by the save; every cleanup runs detached as ONE
+    // Message-ID sweep: list the Drafts mailbox, then delete every copy
+    // carrying the draft's stable Message-ID except the new id (the
+    // previous copy included — no explicit pre-delete on top).
+    let argv = fake.wait_for_invocations(2).expect("cleanup recorded");
     assert_eq!(
         &argv[0][5..],
         ["add", "-m", "Drafts", "--flag", "draft", "--json"]
     );
-    let mut rest = argv[1..]
-        .iter()
-        .map(|inv| inv[5..].to_vec())
-        .collect::<Vec<_>>();
-    rest.sort();
     assert_eq!(
-        rest,
-        vec![
-            vec!["delete", "-m", "Drafts", "old-1", "--json"],
-            vec!["list", "-m", "Archive", "-p", "1", "-s", "100", "--json"],
-            vec!["list", "-m", "Drafts", "-p", "1", "-s", "100", "--json"],
-        ]
+        &argv[1][5..],
+        ["list", "-m", "Drafts", "-p", "1", "-s", "100", "--json"]
     );
 }
 

@@ -368,7 +368,7 @@ fn tab_focus_scrolls_the_focused_link_into_view() {
 
     reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Link(0)));
-    let width = crate::view::layout::reader_width(s.session.size).max(10);
+    let width = crate::view::layout::reader_width(s.session.size);
     let line = crate::app::reader::focus_line(&s, width, ReaderFocus::Link(0)).expect("link line");
     let viewport = crate::view::layout::reader_rows_visible(s.session.size)
         .saturating_sub(crate::app::reader::header_line_count(&s, width));

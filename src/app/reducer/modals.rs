@@ -2,6 +2,7 @@
 //! Retry/Dismiss modal, the discard and send confirmations, the attachment
 //! dialog, and the theme picker — every overlay intercepts all input while
 //! open.
+use super::composer_flow::close_composer_route;
 use crate::app::action::{Action, AttachmentBrowse};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
@@ -9,7 +10,6 @@ use crate::app::operation::{DraftRemovalReason, OperationFailure, OperationKind}
 use crate::app::overlay::{
     ConfirmButton, ErrorDialog, HelpDialog, ModalButton, Overlay, ThemePickerDialog,
 };
-use crate::app::route::Route;
 use crate::app::state::{AppState, Loadable};
 
 // ── Modal overlays (plan §9/§12) ─────────────────────────────────────────
@@ -257,10 +257,7 @@ pub(crate) fn confirm_discard(
     draft: crate::domain::DraftSnapshot,
 ) -> Vec<Effect> {
     state.session.composer = None;
-    if let Some(Route::Composer) = state.active_route() {
-        state.session.routes.pop();
-        state.session.focus = Focus::MessageList;
-    }
+    close_composer_route(state);
     state.session.operations.cancel_draft_saves(&draft.local_id);
     state.set_status("Draft discarded");
     vec![state.session.operations.start(OperationKind::DeleteDraft {

@@ -256,7 +256,7 @@ pub(crate) fn open_selected_attachment(state: &mut AppState) -> Vec<Effect> {
 /// chip opens — the first chip by default, the v1 behavior.
 pub(crate) fn activate_reader_item(state: &mut AppState) -> Vec<Effect> {
     if let Some(ReaderFocus::Link(index)) = state.reader_focus {
-        let width = crate::view::layout::reader_width(state.session.size).max(10);
+        let width = crate::view::layout::reader_width(state.session.size);
         return open_reader_link(state, width, index);
     }
     open_selected_attachment(state)

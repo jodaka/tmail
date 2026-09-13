@@ -25,7 +25,7 @@ use crate::app::route::Route;
 use crate::app::state::{AppState, Loadable};
 use crate::config::Notifications;
 use crate::domain::{
-    MessageLocator, MessageSummary, Page, PageRequest, RestoredDraft, SearchRequest,
+    MailboxId, MessageLocator, MessageSummary, Page, PageRequest, RestoredDraft, SearchRequest,
 };
 
 // ── Backend results (plan §11) ───────────────────────────────────────────
@@ -284,6 +284,37 @@ pub(crate) fn complete_load_mailboxes(
     }
 }
 
+/// The shared tail of finishing a visible-list page (mailbox load or
+/// search, ticket haeb): clear a stale background error, report new mail
+/// on timer refreshes (ticket b28p), apply the page, and store the applied
+/// list — previews included (ticket wxtx) — in the on-disk cache. The
+/// write travels as an effect: the manager owns the cache and the disk.
+fn apply_visible_page(
+    state: &mut AppState,
+    page: Page<MessageSummary>,
+    mailbox: &MailboxId,
+    query: Option<String>,
+    origin: OperationOrigin,
+) -> Vec<Effect> {
+    state.session.last_background_error = None;
+    let mut effects = Vec::new();
+    if origin == OperationOrigin::Background {
+        effects.extend(notify_new_messages(state, &page));
+    }
+    effects.extend(apply_page(state, page));
+    effects.push(
+        state
+            .session
+            .operations
+            .start_background(OperationKind::CacheListStore {
+                mailbox: mailbox.clone(),
+                query,
+                page: Box::new(state.messages.clone()),
+            }),
+    );
+    effects
+}
+
 /// Apply a finished mailbox page. Currency check: the request must still
 /// target the mailbox whose page the visible list shows. A newer request
 /// for the same mailbox superseded this operation, so its id would already
@@ -309,26 +340,7 @@ pub(crate) fn complete_load_page(
     let id = result.id;
     match result.outcome {
         Ok(OperationOutcome::Page(page)) => {
-            state.session.last_background_error = None;
-            let mut effects = Vec::new();
-            // Timer refreshes report new mail (ticket b28p); foreground
-            // loads are user-driven and stay silent.
-            if origin == OperationOrigin::Background {
-                effects.extend(notify_new_messages(state, &page));
-            }
-            effects.extend(apply_page(state, page));
-            // Ticket haeb: every successful load refreshes the cached page —
-            // with the previews applied (ticket wxtx), so the next cold
-            // start renders rows without re-fetching anything. The write
-            // travels as an effect: the manager owns the cache and the disk.
-            effects.push(state.session.operations.start_background(
-                OperationKind::CacheListStore {
-                    mailbox: request.mailbox_id.clone(),
-                    query: None,
-                    page: Box::new(state.messages.clone()),
-                },
-            ));
-            effects
+            apply_visible_page(state, page, &request.mailbox_id, None, origin)
         }
         Ok(OperationOutcome::Mailboxes(_)) => {
             tracing::warn!(id = %id, "mailbox payload for a page operation");
@@ -368,27 +380,13 @@ pub(crate) fn complete_search(
     }
     let id = result.id;
     match result.outcome {
-        Ok(OperationOutcome::Page(page)) => {
-            state.session.last_background_error = None;
-            let mut effects = Vec::new();
-            // A timer refresh of an open search reports matching new mail
-            // like a mailbox refresh does (ticket b28p).
-            if origin == OperationOrigin::Background {
-                effects.extend(notify_new_messages(state, &page));
-            }
-            effects.extend(apply_page(state, page));
-            // Ticket haeb: search results cache under their query — with
-            // the previews applied (ticket wxtx). The write travels as an
-            // effect: the manager owns the cache and the disk.
-            effects.push(state.session.operations.start_background(
-                OperationKind::CacheListStore {
-                    mailbox: request.mailbox_id.clone(),
-                    query: Some(request.query.clone()),
-                    page: Box::new(state.messages.clone()),
-                },
-            ));
-            effects
-        }
+        Ok(OperationOutcome::Page(page)) => apply_visible_page(
+            state,
+            page,
+            &request.mailbox_id,
+            Some(request.query.clone()),
+            origin,
+        ),
         Ok(_) => unexpected_payload(id, "search"),
         Err(failure) => {
             list_failure(state, failure, origin);

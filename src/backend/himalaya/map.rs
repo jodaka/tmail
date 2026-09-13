@@ -354,6 +354,21 @@ fn alias_role(key: &str) -> Option<MailboxRole> {
     }
 }
 
+/// The reverse of [`alias_role`]: the canonical `mailbox.alias` key for
+/// each semantic role. One table here keeps the role↔key mapping in a
+/// single place — adding a role or key only edits this file. (`junk` is
+/// Himalaya's config key for `Spam`, so it is the canonical direction.)
+pub(crate) fn alias_key_for_role(role: MailboxRole) -> &'static str {
+    match role {
+        MailboxRole::Archive => "archive",
+        MailboxRole::Trash => "trash",
+        MailboxRole::Inbox => "inbox",
+        MailboxRole::Sent => "sent",
+        MailboxRole::Drafts => "drafts",
+        MailboxRole::Spam => "junk",
+    }
+}
+
 /// Well-known folder names, matched exactly (case-insensitive) so lookalike
 /// names never silently inherit a role.
 fn name_role(name: &str) -> Option<MailboxRole> {

@@ -21,6 +21,7 @@ pub mod write;
 
 use crate::app::sanitize::sanitize;
 use crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS;
+use crate::domain::paths::{expand_tilde, home_dir};
 
 /// Default page size when the config does not provide a usable one
 /// (plan §16/§17: explicit pagination, default 20).
@@ -969,16 +970,7 @@ pub fn validate_plain_command(command: &str, subject: &str) -> Result<(), String
 /// Whether `program` resolves as an executable: a direct path (anything
 /// with a separator) must exist; otherwise each `PATH` entry is searched.
 pub fn program_exists(program: &str) -> bool {
-    if program.contains('/') {
-        return std::path::Path::new(program).is_file();
-    }
-    std::env::var_os("PATH")
-        .map(|path| {
-            std::env::split_paths(&path)
-                .map(|dir| dir.join(program))
-                .any(|candidate| candidate.is_file())
-        })
-        .unwrap_or(false)
+    crate::domain::paths::program_on_path_exists(program)
 }
 
 fn parse_theme(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
@@ -1063,13 +1055,10 @@ fn validate_downloads_dir(dir: &Path) -> Result<(), String> {
 /// through a shell). `None` when `~` is used but `$HOME` is missing.
 fn expand_home(path: &Path) -> Option<PathBuf> {
     let text = path.to_string_lossy();
-    if let Some(rest) = text.strip_prefix("~/") {
-        return std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest));
+    if !text.starts_with('~') {
+        return Some(path.to_path_buf());
     }
-    if text == "~" {
-        return std::env::var_os("HOME").map(PathBuf::from);
-    }
-    Some(path.to_path_buf())
+    home_dir().map(|home| expand_tilde(path, Some(&home)))
 }
 
 /// The account himalaya would pick without an explicit selection: the

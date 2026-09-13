@@ -36,16 +36,7 @@ use crate::domain::{
 /// reported up front, not as the first operation's failure). A name with a
 /// path separator must exist as a file; otherwise the `PATH` is searched.
 pub fn executable_available(program: &str) -> bool {
-    if program.contains('/') {
-        return Path::new(program).is_file();
-    }
-    std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths)
-                .map(|dir| dir.join(program))
-                .any(|candidate| candidate.is_file())
-        })
-        .unwrap_or(false)
+    crate::domain::paths::program_on_path_exists(program)
 }
 
 /// How long the wizard's credential test may run before it fails
@@ -423,14 +414,9 @@ impl MailBackend for HimalayaCliBackend {
 
         // 4. Only after the new copy is confirmed: best-effort deletion of
         //    every previous remote copy (ADR 0002 §D.3/§D.4 — failure here
-        //    leaves a duplicate, never data loss). The known previous id
-        //    is deleted explicitly; a sweep by the stable Message-ID then
-        //    removes any stray copies (e.g. from a crash mid-replacement).
-        if let Some(old) = draft.remote_id.as_ref()
-            && old != &new_id
-        {
-            self.delete_draft_copy(&ctx, &drafts, &old.0, &draft.message_id);
-        }
+        //    leaves a duplicate, never data loss). The Message-ID sweep
+        //    covers both the known previous id and any stray copies from a
+        //    crash mid-replacement, so one pass handles all cleanup.
         self.delete_stray_draft_copies(&ctx, &drafts, Some(&new_id), &draft.message_id);
 
         // 5. Confirm the revision in the journal (newest pushed), on the
@@ -479,17 +465,25 @@ impl MailBackend for HimalayaCliBackend {
             // deleted draft stays visible.
             let cli = self.cli();
             let trash = self.mailbox_for_role(MailboxRole::Trash);
-            if let Some(old) = draft.remote_id.as_ref() {
-                run_two_phase_delete(
-                    &cli,
-                    &drafts,
-                    trash.as_deref(),
-                    &old.0,
-                    draft.message_id.as_deref().unwrap_or_default(),
-                    &ctx.cancellation,
-                )
-                .await;
+            if draft.message_id.is_none() {
+                // Without the stable Message-ID the sweep cannot match
+                // envelopes, so delete the known copy directly.
+                if let Some(old) = draft.remote_id.as_ref() {
+                    run_two_phase_delete(
+                        &cli,
+                        &drafts,
+                        trash.as_deref(),
+                        &old.0,
+                        "",
+                        &ctx.cancellation,
+                    )
+                    .await;
+                }
+                return Ok(());
             }
+            // The Message-ID sweep (keep=None) deletes the known copy and
+            // any strays alike — running an explicit two-phase delete of
+            // `old` on top would just repeat the same work.
             run_stray_draft_sweep(
                 cli,
                 drafts,
@@ -685,14 +679,7 @@ impl HimalayaCliBackend {
         {
             return Some(mailbox.id.0.clone());
         }
-        let alias_key = match role {
-            MailboxRole::Archive => "archive",
-            MailboxRole::Trash => "trash",
-            MailboxRole::Inbox => "inbox",
-            MailboxRole::Sent => "sent",
-            MailboxRole::Drafts => "drafts",
-            MailboxRole::Spam => "junk",
-        };
+        let alias_key = map::alias_key_for_role(role);
         self.aliases.get(alias_key).cloned()
     }
 
@@ -741,38 +728,12 @@ impl HimalayaCliBackend {
         })
     }
 
-    /// Best-effort deletion of one remote copy from `mailbox` (ADR 0002
-    /// §D.4): `message delete` is trash-first, so a copy deleted elsewhere
-    /// lands in the trash mailbox under a NEW backend id; locate it there
-    /// by the stable `Message-ID` and delete again for permanent removal.
-    /// Spawned detached so cleanup never delays the save result; every
-    /// failure is logged and swallowed — a leftover copy is always
-    /// preferable to risking data loss.
-    fn delete_draft_copy(
-        &self,
-        ctx: &RequestContext,
-        mailbox: &str,
-        id: &str,
-        message_id: &Option<String>,
-    ) {
-        let trash = self.mailbox_for_role(MailboxRole::Trash);
-        spawn_draft_cleanup(
-            self.cli(),
-            CleanupTarget {
-                mailbox: mailbox.to_string(),
-                id: id.to_string(),
-                message_id: message_id.clone(),
-            },
-            trash,
-            ctx.clone(),
-        );
-    }
-
     /// Remove every remote copy of a draft (matched by its stable
     /// `Message-ID`) from the Drafts mailbox except `keep` — the
-    /// reconciliation sweep for copies orphaned by a crash mid-replacement
-    /// (ADR 0002 §D.5). Best-effort; `envelope list` is requested with a
-    /// generous page (v1 drafts are few).
+    /// reconciliation sweep that also cleans up the known previous copy
+    /// on save (ADR 0002 §D.4/§D.5). Spawned detached so cleanup never
+    /// delays the save result; every failure is logged and swallowed — a
+    /// leftover copy is always preferable to risking data loss.
     fn delete_stray_draft_copies(
         &self,
         ctx: &RequestContext,
@@ -1276,35 +1237,6 @@ fn pre_delivery_failure(detail: &str) -> bool {
     PRE_DATA_MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
-/// One remote draft copy to clean up.
-struct CleanupTarget {
-    mailbox: String,
-    id: String,
-    message_id: Option<String>,
-}
-
-/// Spawn a detached best-effort cleanup: delete one copy from its mailbox,
-/// then purge the copy the trash-first delete parked in the trash mailbox
-/// (ADR 0002 §D.4). Failures are logged, never propagated.
-fn spawn_draft_cleanup(
-    cli: Cli,
-    target: CleanupTarget,
-    trash: Option<String>,
-    ctx: RequestContext,
-) {
-    tokio::spawn(async move {
-        run_two_phase_delete(
-            &cli,
-            &target.mailbox,
-            trash.as_deref(),
-            &target.id,
-            target.message_id.as_deref().unwrap_or_default(),
-            &ctx.cancellation,
-        )
-        .await;
-    });
-}
-
 /// The awaited stray-sweep body (see the detached
 /// `delete_stray_draft_copies` wrapper): list the Drafts mailbox, then
 /// trash-first delete every envelope carrying the draft's `Message-ID`
@@ -1320,37 +1252,55 @@ async fn run_stray_draft_sweep(
     let Some(message_id) = message_id else {
         return;
     };
-    let argv = command::envelope_list_argv(
-        cli.config.as_deref(),
-        cli.account.as_deref(),
-        &drafts_mailbox,
-        1,
-        100,
-    );
-    let Ok(output) = process::run(&cli.program, &argv, &ctx.cancellation).await else {
-        return;
-    };
-    let Ok(listed) = process::decode::<dto::EnvelopesDto>(output) else {
-        return;
-    };
-    let bare = crate::domain::message::bare_message_id(&message_id);
-    for envelope in listed.envelopes {
-        if envelope.message_id.as_deref() != Some(bare)
-            || keep.as_deref() == Some(envelope.id.as_str())
-        {
+    let bare = bare_message_id(&message_id);
+    let ids =
+        list_envelope_ids_with_message_id(&cli, &drafts_mailbox, &bare, &ctx.cancellation).await;
+    for id in ids {
+        if keep.as_deref() == Some(id.as_str()) {
             continue;
         }
-        tracing::info!(id = %envelope.id, "deleting stray draft copy");
+        tracing::info!(id = %id, "deleting stray draft copy");
         run_two_phase_delete(
             &cli,
             &drafts_mailbox,
             trash.as_deref(),
-            &envelope.id,
+            &id,
             &message_id,
             &ctx.cancellation,
         )
         .await;
     }
+}
+
+/// List a mailbox and return the ids of the envelopes that carry
+/// `message_id` (ADR 0002 §D.6: only the Message-ID survives maildir
+/// renames). Best-effort: a failed listing yields no matches.
+async fn list_envelope_ids_with_message_id(
+    cli: &Cli,
+    mailbox: &str,
+    message_id: &str,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Vec<String> {
+    let argv = command::envelope_list_argv(
+        cli.config.as_deref(),
+        cli.account.as_deref(),
+        mailbox,
+        1,
+        100,
+    );
+    let Ok(output) = process::run(&cli.program, &argv, cancellation).await else {
+        return Vec::new();
+    };
+    let Ok(listed) = process::decode::<dto::EnvelopesDto>(output) else {
+        return Vec::new();
+    };
+    let bare = crate::domain::message::bare_message_id(message_id);
+    listed
+        .envelopes
+        .into_iter()
+        .filter(|envelope| envelope.message_id.as_deref() == Some(bare))
+        .map(|envelope| envelope.id)
+        .collect()
 }
 
 /// Grouped CLI identity for the detached cleanup helpers, so the delete
@@ -1389,29 +1339,15 @@ async fn run_two_phase_delete(
         tracing::warn!(old = %id, "no Message-ID; trashed draft copy cannot be located");
         return;
     }
-    let argv =
-        command::envelope_list_argv(cli.config.as_deref(), cli.account.as_deref(), trash, 1, 100);
-    let Ok(output) = process::run(&cli.program, &argv, cancellation).await else {
-        return;
-    };
-    let Ok(listed) = process::decode::<dto::EnvelopesDto>(output) else {
-        return;
-    };
-    let bare = crate::domain::message::bare_message_id(message_id);
-    for envelope in listed.envelopes {
-        if envelope.message_id.as_deref() != Some(bare) {
-            continue;
-        }
-        let argv = command::message_delete_argv(
-            cli.config.as_deref(),
-            cli.account.as_deref(),
-            trash,
-            &envelope.id,
-        );
+    let bare = bare_message_id(message_id);
+    let ids = list_envelope_ids_with_message_id(cli, trash, &bare, cancellation).await;
+    for id in ids {
+        let argv =
+            command::message_delete_argv(cli.config.as_deref(), cli.account.as_deref(), trash, &id);
         match process::run(&cli.program, &argv, cancellation).await {
-            Ok(_) => tracing::debug!(id = %envelope.id, "trashed draft copy purged"),
+            Ok(_) => tracing::debug!(id = %id, "trashed draft copy purged"),
             Err(err) if !matches!(err, BackendError::Cancelled) => {
-                tracing::warn!(id = %envelope.id, %err, "trashed draft copy could not be purged");
+                tracing::warn!(id = %id, %err, "trashed draft copy could not be purged");
             }
             Err(_) => {}
         }

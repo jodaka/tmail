@@ -145,7 +145,7 @@ pub(crate) fn click_reader_link(state: &mut AppState, index: usize) -> Vec<Effec
     if !matches!(state.active_route(), Some(Route::Message(_))) {
         return Vec::new();
     }
-    let width = crate::view::layout::reader_width(state.session.size).max(10);
+    let width = crate::view::layout::reader_width(state.session.size);
     if index >= crate::app::reader::link_count(state, width) {
         return Vec::new();
     }

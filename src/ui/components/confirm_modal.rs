@@ -88,8 +88,8 @@ pub fn render(
     // §10/§14): Tab + Enter reaches the same states. `Keep` stays the safe
     // default — clicking outside the buttons does nothing.
     if inner.height > 4 {
-        let discard_w = " [ Discard ] ".width() as u16;
-        let keep_w = " [ Keep editing ] ".width() as u16;
+        let discard_w = chrome::labeled_button_label("Discard").width() as u16;
+        let keep_w = chrome::labeled_button_label("Keep editing").width() as u16;
         hits.push(
             Rect {
                 x: inner.x,
@@ -112,20 +112,22 @@ pub fn render(
 }
 
 /// [ Discard ] (warning fill when focused) / [ Keep editing ] (accent fill
-/// when focused); the unfocused buttons stay quiet.
+/// when focused); the unfocused buttons stay quiet. Both labels go through
+/// [`chrome::labeled_button`], which the click-target widths share.
 fn button_spans<'a>(button: ConfirmButton, theme: &'a Theme) -> Vec<Span<'a>> {
-    let discard = if button == ConfirmButton::Discard {
-        Span::styled(" [ Discard ] ", theme.button_style(true, theme.error))
-    } else {
-        Span::styled(" [ Discard ] ", theme.button_style(false, theme.error))
-    };
-    let keep = if button == ConfirmButton::Keep {
-        Span::styled(" [ Keep editing ] ", theme.button_style(true, theme.accent))
-    } else {
-        Span::styled(
-            " [ Keep editing ] ",
-            theme.button_style(false, theme.accent),
-        )
-    };
-    vec![discard, Span::raw(" "), keep]
+    vec![
+        chrome::labeled_button(
+            "Discard",
+            button == ConfirmButton::Discard,
+            theme.error,
+            theme,
+        ),
+        Span::raw(" "),
+        chrome::labeled_button(
+            "Keep editing",
+            button == ConfirmButton::Keep,
+            theme.accent,
+            theme,
+        ),
+    ]
 }

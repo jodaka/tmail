@@ -12,7 +12,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, ScrollbarState};
+use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::action::ClickTarget;
@@ -145,9 +145,13 @@ pub fn render(
         y += row_height as u16;
     }
     if scrolling {
-        let mut scrollbar_state =
-            ScrollbarState::new(state.messages.items.len()).position(state.list_scroll);
-        frame.render_stateful_widget(chrome::scrollbar(theme), rows, &mut scrollbar_state);
+        chrome::render_scrollbar(
+            frame,
+            rows,
+            theme,
+            state.messages.items.len(),
+            state.list_scroll,
+        );
     }
     // An empty search result set is a valid state, not an error — say so
     // once the request is no longer in flight (Phase 9.3). While the list

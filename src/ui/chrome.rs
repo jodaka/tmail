@@ -5,9 +5,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::Span;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{
+    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
+use unicode_width::UnicodeWidthStr;
 
 use crate::ui::text;
 use crate::ui::theme::Theme;
@@ -46,6 +49,10 @@ pub fn hairline(frame: &mut Frame<'_>, area: Rect, side: HairlineSide, theme: &T
 /// The dimensionless part of the shared scrollbar look (full-height
 /// vertical right rail, no end symbols, `│` track); styles ride the active
 /// palette. Callers keep their stateful position math.
+///
+/// Two plumbing helpers wrap the copy-pasted wiring the three scroll
+/// surfaces (theme picker, mail list, reader body) repeat: width
+/// reservation and render. One anatomy — a change lands everywhere.
 pub fn scrollbar(theme: &Theme) -> Scrollbar<'_> {
     Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .begin_symbol(None)
@@ -53,6 +60,31 @@ pub fn scrollbar(theme: &Theme) -> Scrollbar<'_> {
         .track_symbol(Some("│"))
         .track_style(Style::new().fg(theme.border).bg(theme.background))
         .thumb_style(Style::new().fg(theme.dim).bg(theme.background))
+}
+
+/// The width the content may occupy next to a scrollbar: when `total`
+/// exceeds `visible`, the last column of the rail area is reserved for the
+/// rail (text and scrollbar never overlap); when everything fits, the
+/// full width is used at no scrollbar.
+pub fn scrollbar_content_width(rail_width: u16, total: usize, visible: usize) -> u16 {
+    if total > visible {
+        rail_width.saturating_sub(1)
+    } else {
+        rail_width
+    }
+}
+
+/// Render the shared scrollbar over `area` for a `total` list whose
+/// scroll window starts at `position` (first visible row/line).
+pub fn render_scrollbar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    total: usize,
+    position: usize,
+) {
+    let mut scrollbar_state = ScrollbarState::new(total).position(position);
+    frame.render_stateful_widget(scrollbar(theme), area, &mut scrollbar_state);
 }
 
 /// The shared modal scaffold: clear the area, draw the bordered block with
@@ -107,6 +139,107 @@ pub fn render_note(frame: &mut Frame<'_>, area: Rect, theme: &Theme, note: &str)
             height: 1,
         },
     );
+}
+
+/// The wrapped label of a bracketed action button: ` [ label ] `.
+/// Render spans and click-target hit rects both derive their width from
+/// this, so they can never spell the padding twice.
+pub fn labeled_button_label(label: &str) -> String {
+    format!(" [ {label} ] ")
+}
+
+/// One bracketed action button span: ` [ label ] ` with the focused-
+/// button look (`Theme::button_style`: page-background text on `fill` and
+/// bold when focused, quiet muted otherwise). The single look behind the
+/// confirm modal, the composer's actions, and the wizard's selected rows.
+pub fn labeled_button<'a>(label: &str, focused: bool, fill: Color, theme: &'a Theme) -> Span<'a> {
+    Span::styled(
+        labeled_button_label(label),
+        theme.button_style(focused, fill),
+    )
+}
+
+/// Value spans of one single-line input field with an inline caret (the
+/// composer's convention: the focused field draws the reversed-cell caret;
+/// the terminal cursor stays hidden app-wide). Characters clip to
+/// `value_w`; address fields (To/Cc/Bcc) color invalid entries in the
+/// warning color (plan §14 validation-on-type); masked fields never
+/// render the real character (ADR 0003 §3.2 W4 keystrokes render as •).
+/// One implementation for the composer screen and the wizard.
+pub fn field_value_spans<'a>(
+    text: &'a str,
+    cursor: usize,
+    focused: bool,
+    masked: bool,
+    address_field: bool,
+    value_w: usize,
+    theme: &'a Theme,
+) -> Vec<Span<'a>> {
+    // The same accent caret block the body editor draws while focused
+    // (ticket tz12); `Theme::caret` keeps the two in step.
+    let caret_style = theme.caret();
+    let normal = Style::new().fg(theme.text);
+    let invalid = Style::new().fg(theme.warning);
+    let entries = if address_field {
+        crate::domain::address::address_entries(text)
+    } else {
+        Vec::new()
+    };
+    let char_count = text.chars().count();
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+    for (index, (byte, ch)) in text.char_indices().enumerate() {
+        let width = ch.to_string().width();
+        if used + width > value_w {
+            break;
+        }
+        let style = if focused && index == cursor {
+            caret_style
+        } else if entries.iter().any(|e| e.range.contains(&byte) && !e.valid) {
+            invalid
+        } else {
+            normal
+        };
+        let shown = if masked {
+            String::from("•")
+        } else {
+            ch.to_string()
+        };
+        spans.push(Span::styled(shown, style));
+        used += width;
+    }
+    // Caret past the end of the text: a reversed space.
+    if focused && cursor >= char_count && used < value_w {
+        spans.push(Span::styled(" ", caret_style));
+    }
+    spans
+}
+
+/// The centered "Terminal too small" screen (plan §18: one look, two
+/// callers). `requirement` names what minimum is missing; `quit` names
+/// the key that exits.
+pub fn render_too_small(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    current: (u16, u16),
+    requirement: &str,
+    quit: &str,
+    theme: &Theme,
+) {
+    let message = format!(
+        "Terminal too small ({}×{})\n{}\n{}",
+        current.0, current.1, requirement, quit
+    );
+    let lines: Vec<Line<'_>> = message
+        .lines()
+        .map(|line| {
+            Line::from(Span::styled(
+                line,
+                Style::new().fg(theme.text).bg(theme.background),
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines).centered(), area);
 }
 
 #[cfg(test)]

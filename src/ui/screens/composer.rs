@@ -441,58 +441,9 @@ fn field_row<'a>(
         field,
         ComposerField::To | ComposerField::Cc | ComposerField::Bcc
     );
-    let value_spans = value_spans(text, cursor, is_focused, is_address, value_w, theme);
+    let value_spans =
+        chrome::field_value_spans(text, cursor, is_focused, false, is_address, value_w, theme);
     (label_spans, value_spans)
-}
-
-/// Value spans of one field. Address fields (To/Cc/Bcc) validate on the
-/// fly (plan §14): invalid entries render in the warning color, valid ones
-/// in the normal text color. The focused field additionally draws an
-/// inline caret (reversed cell); the terminal cursor stays hidden
-/// app-wide.
-fn value_spans<'a>(
-    text: &'a str,
-    cursor: usize,
-    focused: bool,
-    address_field: bool,
-    value_w: usize,
-    theme: &'a Theme,
-) -> Vec<Span<'a>> {
-    // The same accent caret block the body editor draws while focused
-    // (ticket tz12); `Theme::caret` keeps the two in step.
-    let caret_style = theme.caret();
-    let normal = Style::new().fg(theme.text);
-    let invalid = Style::new().fg(theme.warning);
-    let entries = if address_field {
-        crate::domain::address::address_entries(text)
-    } else {
-        Vec::new()
-    };
-    let char_count = text.chars().count();
-    let mut spans = Vec::new();
-    let mut used = 0usize;
-    for (index, (byte, ch)) in text.char_indices().enumerate() {
-        let width = ch.to_string().width();
-        if used + width > value_w {
-            break;
-        }
-        let style = if entries.iter().any(|e| e.range.contains(&byte) && !e.valid) {
-            invalid
-        } else {
-            normal
-        };
-        if focused && index == cursor {
-            spans.push(Span::styled(ch.to_string(), caret_style));
-        } else {
-            spans.push(Span::styled(ch.to_string(), style));
-        }
-        used += width;
-    }
-    if focused && cursor >= char_count && used < value_w {
-        // Caret past the end of the text: a reversed space.
-        spans.push(Span::styled(" ", caret_style));
-    }
-    spans
 }
 
 /// `Cc`/`Bcc` buttons on the To row; hidden while their field is revealed.
@@ -555,17 +506,10 @@ fn action_spans<'a>(composer: &'a ComposerState, focused: bool, theme: &'a Theme
             Style::new().fg(theme.text_soft).bg(theme.surface),
         )
     };
-    let discard = if discard_focused {
-        Span::styled(
-            " Discard ",
-            Style::new()
-                .fg(theme.background)
-                .bg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled(" Discard ", Style::new().fg(theme.muted))
-    };
+    let discard = Span::styled(
+        " Discard ",
+        theme.button_style(discard_focused, theme.warning),
+    );
     vec![send, Span::raw("   "), discard]
 }
 

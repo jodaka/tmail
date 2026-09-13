@@ -132,9 +132,15 @@ pub fn reader_rows_visible(size: (u16, u16)) -> usize {
 }
 
 /// Width of the reader viewport (body area minus the sidebar in full mode).
-/// The reader's content function and renderer must agree on this.
+/// The reader's content function and renderer must agree on this. Clamped
+/// to at least 10 columns so a degenerate-width terminal still yields a
+/// usable document wrap width — the single policy (was spread as a
+/// `.max(10)` over every call site).
 pub fn reader_width(size: (u16, u16)) -> usize {
-    list_rect(size).map_or(0, |(list, _)| list.width as usize)
+    const MIN_READER_WIDTH: usize = 10;
+    list_rect(size)
+        .map_or(0, |(list, _)| list.width as usize)
+        .max(MIN_READER_WIDTH)
 }
 
 #[cfg(test)]

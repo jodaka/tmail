@@ -18,7 +18,6 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
-use unicode_width::UnicodeWidthStr;
 
 use crate::app::state::AppState;
 use crate::app::wizard::{NameChoice, StorageMode, WizardState, WizardStep};
@@ -407,14 +406,27 @@ fn render_discovery(
     error_line(frame, column, y, wizard.last_error.as_deref(), theme);
 }
 
+/// The endpoint summary of the selected service: `(imap, smtp)` with the
+/// fallbacks — IMAP `-` and SMTP "smtp: not found" (ADR 0003) when absent.
+/// The identity step and the recap table share it, so the two views can
+/// never disagree about what was configured.
+fn service_endpoint_summary(wizard: &WizardState) -> (&str, &str) {
+    match wizard.selected_service() {
+        Some(service) => (
+            service.imap.url.as_str(),
+            service
+                .smtp
+                .as_ref()
+                .map(|smtp| smtp.url.as_str())
+                .unwrap_or("smtp: not found"),
+        ),
+        None => ("-", "smtp: not found"),
+    }
+}
+
 fn render_identity(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme: &Theme) {
     let column = content_column(body);
-    let service = wizard.selected_service();
-    let imap = service.map(|s| s.imap.url.as_str()).unwrap_or("-");
-    let smtp = service
-        .and_then(|s| s.smtp.as_ref())
-        .map(|smtp| smtp.url.as_str())
-        .unwrap_or("smtp: not found");
+    let (imap, smtp) = service_endpoint_summary(wizard);
     let content_height = INPUT_HEIGHT + 1 + 3;
     let mut y = centered_y(column, content_height);
 
@@ -598,12 +610,7 @@ fn render_testing(frame: &mut Frame<'_>, body: Rect, state: &AppState, theme: &T
 
 fn render_confirm(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme: &Theme) {
     let column = content_column(body);
-    let service = wizard.selected_service();
-    let imap = service.map(|s| s.imap.url.as_str()).unwrap_or("-");
-    let smtp = service
-        .and_then(|s| s.smtp.as_ref())
-        .map(|smtp| smtp.url.as_str())
-        .unwrap_or("smtp: not found");
+    let (imap, smtp) = service_endpoint_summary(wizard);
     let secret = match wizard.credentials.storage_mode {
         StorageMode::Raw => String::from("stored in config (****)"),
         StorageMode::Command => format!("via command: {}", wizard.credentials.command.value),
@@ -793,9 +800,9 @@ fn input_box(
     frame.render_widget(Paragraph::new(Line::from(value)), inner);
 }
 
-/// Value spans of one field with an inline caret (the composer's
-/// convention: the focused field draws the reversed-cell caret; masked
-/// values arrive already masked).
+/// Value spans of one field: `masked` fields never render the real
+/// character (ADR 0003 §3.2 W4) — the shared [`chrome::field_value_spans`]
+/// does the caret/clipping work.
 fn value_spans<'a>(
     value: &'a str,
     cursor: usize,
@@ -804,41 +811,7 @@ fn value_spans<'a>(
     max_width: usize,
     theme: &'a Theme,
 ) -> Vec<Span<'a>> {
-    let caret_style = Style::new()
-        .fg(theme.background)
-        .bg(theme.accent)
-        .add_modifier(Modifier::BOLD);
-    let normal = Style::new().fg(theme.text);
-    let mut spans = Vec::new();
-    let char_count = value.chars().count();
-    let mut used = 0usize;
-    for (index, ch) in value.chars().enumerate() {
-        let width = ch.to_string().width();
-        if used + width > max_width {
-            break;
-        }
-        let style = if focused && index == cursor {
-            caret_style
-        } else {
-            normal
-        };
-        // Masked fields never render the real character (ADR 0003 §3.2
-        // W4: keystrokes render as *).
-        let shown = if masked {
-            "•".to_string()
-        } else {
-            ch.to_string()
-        };
-        spans.push(Span::styled(shown, style));
-        used += width;
-    }
-    // The caret past the end of the text: a reversed space (the
-    // composer's cursor convention — the terminal cursor stays hidden
-    // app-wide).
-    if focused && cursor >= char_count && used < max_width {
-        spans.push(Span::styled(" ", caret_style));
-    }
-    spans
+    crate::ui::chrome::field_value_spans(value, cursor, focused, masked, false, max_width, theme)
 }
 
 /// The writable width inside one input box (borders + horizontal
@@ -849,19 +822,16 @@ fn input_inner_width(column: Rect) -> usize {
 
 fn toggle_chip<'a>(label: &'a str, active: bool, row_selected: bool, theme: &'a Theme) -> Span<'a> {
     let marker = if active { "[x]" } else { "[ ]" };
-    if row_selected && active {
-        Span::styled(
-            format!("{marker} {label}"),
-            Style::new()
-                .fg(theme.background)
-                .bg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
+    let style = if row_selected && active {
+        // The mode-badge convention (page-background on accent fill,
+        // bold) — `Theme::button_style` is the single look.
+        theme.button_style(true, theme.accent)
     } else if active {
-        Span::styled(format!("{marker} {label}"), Style::new().fg(theme.text))
+        Style::new().fg(theme.text)
     } else {
-        Span::styled(format!("{marker} {label}"), Style::new().fg(theme.dim))
-    }
+        Style::new().fg(theme.dim)
+    };
+    Span::styled(format!("{marker} {label}"), style)
 }
 
 fn choice_row<'a>(
@@ -872,20 +842,14 @@ fn choice_row<'a>(
 ) -> Span<'a> {
     let selected = wizard.confirm.name_choice_index == index;
     let marker = if selected { "(•)" } else { "( )" };
-    if selected {
-        Span::styled(
-            format!("{marker} {label}"),
-            Style::new()
-                .fg(theme.background)
-                .bg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
+    let style = if selected {
+        // The mode-badge convention (page-background on accent fill,
+        // bold) — `Theme::button_style` is the single look.
+        theme.button_style(true, theme.accent)
     } else {
-        Span::styled(
-            format!("{marker} {label}"),
-            Style::new().fg(theme.text_soft),
-        )
-    }
+        Style::new().fg(theme.text_soft)
+    };
+    Span::styled(format!("{marker} {label}"), style)
 }
 
 /// A dim label + value line inside the content column.
@@ -954,13 +918,12 @@ fn error_line(frame: &mut Frame<'_>, column: Rect, y: u16, error: Option<&str>, 
 }
 
 fn render_too_small(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-    let message = format!(
-        "Terminal too small ({}×{})\ntmail's wizard needs at least 46×11 columns/rows.\nEnlarge the window or press Ctrl+C to quit.",
-        area.width, area.height
+    crate::ui::chrome::render_too_small(
+        frame,
+        area,
+        (area.width, area.height),
+        "tmail's wizard needs at least 46×11 columns/rows.",
+        "Enlarge the window or press Ctrl+C to quit.",
+        theme,
     );
-    let lines: Vec<Line<'_>> = message
-        .lines()
-        .map(|l| Line::from(Span::styled(l, Style::new().fg(theme.text))))
-        .collect();
-    frame.render_widget(Paragraph::new(lines).centered(), area);
 }
