@@ -59,13 +59,29 @@ pub fn restore_title() {
 /// empty buffers (so a fresh guard repaints from scratch).
 fn enter(mouse: bool, what: &'static str) -> io::Result<TerminalGuard> {
     term::enable_raw_mode()?;
+    // Every fallible step after this point must undo raw mode on its way
+    // out (ticket 5jzr): before the guard exists there is no Drop to
+    // restore, and a leaked raw mode/alternate screen leaves the user's
+    // shell unusable.
     // Focus reporting (CSI 1004, ticket b28p) arms the "user is active"
     // signal new-mail notifications respect; terminals without support
     // ignore the mode and simply never report a change.
-    execute!(io::stdout(), term::EnterAlternateScreen, EnableFocusChange)?;
-    set_mouse_capture(mouse)?;
+    if let Err(err) = execute!(io::stdout(), term::EnterAlternateScreen, EnableFocusChange) {
+        restore();
+        return Err(err);
+    }
+    if let Err(err) = set_mouse_capture(mouse) {
+        restore();
+        return Err(err);
+    }
     let backend = CrosstermBackend::new(io::stdout());
-    let terminal = Terminal::new(backend)?;
+    let terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(err) => {
+            restore();
+            return Err(err);
+        }
+    };
     tracing::debug!(mouse, "{what}");
     Ok(TerminalGuard { terminal })
 }
