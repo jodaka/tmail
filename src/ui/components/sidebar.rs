@@ -149,9 +149,10 @@ fn render_folder_row(
     let right_pad = width.saturating_sub(2 + name.width() + suffix.width());
 
     let row_bg = if is_active {
-        // Active folder fill: one shade apart from the sidebar panel
-        // (it is `accent_bg` in the dark palette).
-        theme.accent_bg
+        // Active folder fill: the `marker` gold, the same highlight the
+        // message list's cursor row carries — `accent_bg` sat one shade
+        // off the sidebar panel and read as no fill at all.
+        theme.marker
     } else if cursor {
         // Focused-control selection fill: the sidebar cursor row is the
         // one place the `selection` token shows (ticket e6wn removed the
@@ -164,23 +165,25 @@ fn render_folder_row(
     };
     let pad = Style::new().bg(row_bg);
     let name_style = if is_active {
-        Style::new().fg(theme.text).add_modifier(Modifier::BOLD)
+        // Dark text on the marker fill (the mode-badge convention).
+        Style::new()
+            .fg(theme.background)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::new().fg(theme.text_soft)
     }
     .bg(row_bg);
     let count_style = if is_active {
-        Style::new().fg(theme.text_soft)
+        Style::new().fg(theme.background)
     } else {
         Style::new().fg(theme.dim)
     }
     .bg(row_bg);
-    // Inset left edge bar: the theme accent on the active folder and on
-    // the cursor row while the sidebar holds focus (mockup
-    // `.folder.active`).
+    // Inset left edge bar: white on the active folder and on the cursor
+    // row while the sidebar holds focus (mockup `.folder.active`).
     let marker = if cursor || is_active { "▎" } else { " " };
     let marker_style = if cursor || is_active {
-        Style::new().fg(theme.accent)
+        Style::new().fg(theme.marker_bar)
     } else {
         pad
     }

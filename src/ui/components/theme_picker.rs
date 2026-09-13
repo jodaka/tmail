@@ -69,8 +69,8 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
             (
                 "▎",
                 Style::new()
-                    .fg(theme.accent)
-                    .bg(theme.accent_bg)
+                    .fg(theme.marker_bar)
+                    .bg(theme.marker)
                     .add_modifier(Modifier::BOLD),
             )
         } else {

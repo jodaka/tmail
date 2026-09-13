@@ -71,15 +71,8 @@ pub fn render(
     // The loader animation reads elapsed wall clock (a
     // `DateTime::timestamp_millis()`), so the scanner phase does not
     // lag behind the tick cadence.
-    components::topbar::render(
-        frame,
-        topbar,
-        state,
-        theme,
-        &ctx.clock,
-        ctx.now.timestamp_millis().max(0) as u64,
-        hits,
-    );
+    let loader_millis = ctx.now.timestamp_millis().max(0) as u64;
+    components::topbar::render(frame, topbar, state, theme, &ctx.clock, hits);
     let (sidebar, list) = layout::split_body(mode, body);
     if let Some(sidebar) = sidebar {
         // No hairline divider between the sidebar and the list (temporary
@@ -97,7 +90,7 @@ pub fn render(
     } else {
         screens::mailbox::render(frame, list, state, mode, theme, ctx.now, hits);
     }
-    components::statusbar::render(frame, statusbar, state, theme, hits);
+    components::statusbar::render(frame, statusbar, state, theme, loader_millis, hits);
     render_modals(frame, state, theme, hits);
     components::help::render(frame, state, theme);
 }

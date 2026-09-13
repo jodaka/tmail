@@ -23,7 +23,6 @@ pub fn render(
     state: &AppState,
     theme: &Theme,
     clock: &str,
-    loader_millis: u64,
     hits: &mut HitMap,
 ) {
     if area.height == 0 || area.width == 0 {
@@ -64,24 +63,6 @@ pub fn render(
         ),
     ]);
     frame.render_widget(Paragraph::new(brand), brand_area);
-
-    // Loader (opencode's TUI scanner, "blocks" style): a Knight Rider
-    // sweep rendered on the row right below the logo while foreground work
-    // is in flight.
-    if state.session.operations.foreground().is_some() {
-        super::spinner::render_blocks(
-            frame,
-            Rect {
-                x: area.x.saturating_add(2),
-                y: area.y.saturating_add(2),
-                width: area.width,
-                height: 1,
-            },
-            theme.accent3,
-            theme.sidebar_bg,
-            loader_millis,
-        );
-    }
 
     // Search field: bordered well, `/` prompt, query or placeholder.
     let search_width = area.width.saturating_sub(28).clamp(12, 60);
@@ -125,8 +106,9 @@ pub fn render(
     }
 
     // Top-right slot on the brand row: a status message when one is
-    // showing (faded color, one column of padding off the right edge),
-    // otherwise the clock (`[tmail.ui].clock`, ticket w7f5: off by
+    // showing (the shortcut-label color — the same faded tone the status
+    // bar's hint labels carry — one column of padding off the right
+    // edge), otherwise the clock (`[tmail.ui].clock`, ticket w7f5: off by
     // default). Both would collide, so the message wins its row.
     let status_message = state.session.status.message.as_deref();
     // The search well may end deep into the row: the message clips in
@@ -142,7 +124,7 @@ pub fn render(
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     message,
-                    Style::new().fg(theme.muted).bg(theme.sidebar_bg),
+                    Style::new().fg(theme.label_dim).bg(theme.sidebar_bg),
                 )),
                 Rect {
                     x: area.x + area.width - width - 1,

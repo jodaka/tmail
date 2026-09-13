@@ -330,7 +330,9 @@ fn message_spans<'a>(
     };
 
     let bg = if selected {
-        theme.accent_bg
+        // The marker gold: one fill for the whole row, the same highlight
+        // the sidebar's active folder carries.
+        theme.marker
     } else if bulk_selected {
         // Same fill as selected mailboxes in the sidebar (theme.selection).
         theme.selection
@@ -347,27 +349,43 @@ fn message_spans<'a>(
 
     // Icon column (ticket cvc4): a bulk-selected row shows the filled dot
     // whatever its star state; otherwise the star, or a blank. The cell is
-    // always two columns — symbol + trailing space.
+    // always two columns — symbol + trailing space. On the selected row the
+    // dot rides the base style: like-colored fg/bg would vanish.
     let (symbol, style) = if bulk_selected {
-        ("●", theme.accent_fg().bg(bg))
+        (
+            "●",
+            if selected {
+                base
+            } else {
+                theme.accent_fg().bg(bg)
+            },
+        )
     } else if message.is_starred {
         ("*", theme.star().bg(bg))
     } else {
         (" ", base)
     };
     let icon = Span::styled(format!("{symbol} "), style);
-    // Accent bar in the marker column (mockup `.folder.active` bar): marks
-    // the focused row while the list holds focus.
+    // Bar in the marker column (mockup `.folder.active` bar): marks the
+    // focused row while the list holds focus. White over the marker fill.
     let marker = if selected && focused {
-        Span::styled("▎", Style::new().fg(theme.accent).bg(bg))
+        Span::styled("▎", Style::new().fg(theme.marker_bar).bg(bg))
     } else {
         Span::styled(" ", base)
     };
 
     // The fill marks selection and the `unread` modifier marks state, so a
-    // focused unread row keeps its bold under the accent fill — selection
-    // alone must not flatten read and unread rows into one look.
-    let who_style = if selected || bulk_selected {
+    // focused unread row keeps its bold under the marker fill — selection
+    // alone must not flatten read and unread rows into one look. The
+    // selected row's text is page-background (contrast on the gold fill,
+    // the mode-badge convention); bulk-marked rows keep the plain text.
+    let who_style = if selected {
+        if message.is_read {
+            base
+        } else {
+            base.add_modifier(theme.unread)
+        }
+    } else if bulk_selected {
         if message.is_read {
             base.fg(theme.text)
         } else {
@@ -381,8 +399,13 @@ fn message_spans<'a>(
     let subject_style = who_style;
     // The faded preview (ticket wxtx): dimmer than any subject state, so
     // the Gmail-style body preview reads as context. It keeps the row's
-    // fill (accent fill included).
-    let snippet_style = Style::new().fg(theme.snippet).bg(bg);
+    // fill (marker fill included); on the selected row it takes the row's
+    // text color — the snippet token has no contrast on the gold fill.
+    let snippet_style = if selected {
+        Style::new().fg(theme.background).bg(bg)
+    } else {
+        Style::new().fg(theme.snippet).bg(bg)
+    };
 
     // Subject plus (full mode only) the faded body preview, composed so
     // the combined cell fills exactly `cell_w`: the subject stays whole

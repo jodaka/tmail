@@ -41,6 +41,13 @@ pub struct Theme {
     pub accent3: Color,
     /// Interactive highlight (`--accent`).
     pub accent: Color,
+    /// Selected/active row fill (mockup `.mail.selected` background): the
+    /// gold highlight behind the cursor row, the active folder, and the
+    /// picker's cursor row.
+    pub marker: Color,
+    /// Left edge bar of the selected/active rows (mockup `.folder.active`):
+    /// the `▎` marker column, drawn white over the `marker` fill.
+    pub marker_bar: Color,
     /// Selected row / active folder fill (`--accent-bg`).
     pub accent_bg: Color,
     /// Bulk-selected row highlight (ticket p0s3): visibly distinct from
@@ -72,6 +79,8 @@ impl Theme {
             accent2: Color::Rgb(0x83, 0xBD, 0x63),
             accent3: Color::Rgb(0x75, 0xC0, 0xF9),
             accent: Color::Rgb(0x75, 0xC0, 0xF9),
+            marker: Color::Rgb(0xDE, 0xB6, 0x61),
+            marker_bar: Color::Rgb(0xFF, 0xFF, 0xFF),
             accent_bg: Color::Rgb(0x14, 0x18, 0x21),
             bulk_selected_bg: Color::Rgb(0x46, 0x35, 0x1B),
             warning: Color::Rgb(0xFC, 0xA3, 0x11),
@@ -177,6 +186,8 @@ impl Theme {
             "accent2" => self.accent2 = color,
             "accent3" => self.accent3 = color,
             "accent" => self.accent = color,
+            "marker" => self.marker = color,
+            "marker_bar" => self.marker_bar = color,
             "accent_bg" => self.accent_bg = color,
             "bulk_selected_bg" => self.bulk_selected_bg = color,
             "warning" => self.warning = color,
@@ -206,6 +217,8 @@ impl Theme {
             accent2: Color::Rgb(0x55, 0x7F, 0x36),
             accent3: Color::Rgb(0x2F, 0x7F, 0xD0),
             accent: Color::Rgb(0x2D, 0x63, 0xB8),
+            marker: Color::Rgb(0xDE, 0xB6, 0x61),
+            marker_bar: Color::Rgb(0xFF, 0xFF, 0xFF),
             accent_bg: Color::Rgb(0xDC, 0xE6, 0xF7),
             bulk_selected_bg: Color::Rgb(0xF7, 0xE8, 0xC8),
             warning: Color::Rgb(0x9A, 0x6B, 0x1A),
@@ -234,6 +247,8 @@ impl Theme {
             accent2: Color::Reset,
             accent3: Color::Reset,
             accent: Color::Reset,
+            marker: Color::Reset,
+            marker_bar: Color::Reset,
             accent_bg: Color::Reset,
             bulk_selected_bg: Color::Reset,
             warning: Color::Reset,
@@ -275,9 +290,11 @@ impl Theme {
         ))
     }
 
-    /// Style for a selected list row (mockup `.mail.selected`).
+    /// Style for a selected list row (mockup `.mail.selected`): the fill
+    /// is the `marker` gold with page-background text for contrast (the
+    /// mode-badge convention).
     pub fn row_selected(&self) -> Style {
-        Style::new().bg(self.accent_bg)
+        Style::new().fg(self.background).bg(self.marker)
     }
 
     /// Style for a bulk-selected row (ticket p0s3): the same selection
@@ -566,6 +583,8 @@ mod token_tests {
         assert_eq!(theme.accent2, by_index("accent2"));
         assert_eq!(theme.accent3, by_index("accent3"));
         assert_eq!(theme.accent, by_index("accent"));
+        assert_eq!(theme.marker, by_index("marker"));
+        assert_eq!(theme.marker_bar, by_index("marker_bar"));
         assert_eq!(theme.accent_bg, by_index("accent_bg"));
         assert_eq!(theme.bulk_selected_bg, by_index("bulk_selected_bg"));
         assert_eq!(theme.warning, by_index("warning"));

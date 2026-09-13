@@ -365,12 +365,14 @@ fn render_discovery(
             None => "smtp: not found",
         };
         let label_style = if selected {
-            theme.accent_fg()
+            // Page-background text on the row_selected accent fill (the
+            // mode-badge convention): accent text would vanish on accent.
+            Style::new().fg(theme.background)
         } else {
             Style::new().fg(theme.text_soft)
         };
         let detail_style = if selected {
-            theme.accent_fg()
+            Style::new().fg(theme.background)
         } else {
             Style::new().fg(theme.dim)
         };
@@ -379,7 +381,7 @@ fn render_discovery(
                 Span::styled(
                     format!("{marker} "),
                     if selected {
-                        theme.accent_fg()
+                        Style::new().fg(theme.background)
                     } else {
                         Style::new().fg(theme.dim)
                     },

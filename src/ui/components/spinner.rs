@@ -23,7 +23,7 @@ use crate::ui::theme::Theme;
 // `style: "blocks"`).
 
 /// Scanner width in blocks.
-const KR_WIDTH: i32 = 8;
+pub const KR_WIDTH: i32 = 8;
 /// Trail colors behind the head.
 const KR_TRAIL_STEPS: usize = 6;
 const KR_MIN_ALPHA: f64 = 0.3;

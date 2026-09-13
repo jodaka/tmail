@@ -114,7 +114,8 @@ error = "#ff6b5e"
 
 Overridable tokens: `background`, `surface`, `border`, `text`,
 `text_soft`, `muted`, `dim`, `snippet` (the faded message preview in the
-list), `accent`, `accent_bg`, `bulk_selected_bg`
+list), `accent`, `marker` (the selected/active row fill), `marker_bar` (its
+white left edge bar), `accent_bg`, `bulk_selected_bg`
 (the Space-marked row highlight), `warning`, `error`, `selection`. Unknown
 tokens or malformed colors fail startup validation like any other config
 problem; `NO_COLOR` overrides everything and renders with terminal

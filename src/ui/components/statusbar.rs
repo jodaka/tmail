@@ -18,14 +18,21 @@ use crate::app::state::AppState;
 use crate::input::keymap::Context;
 use crate::input::mouse::HitMap;
 use crate::ui::chrome::{self, HairlineSide};
+use crate::ui::layout::SIDEBAR_WIDTH;
 use crate::ui::theme::Theme;
 
 /// Render the status bar into `area` (height 3: hairline + content row).
+/// The foreground-work loader sits in the left corner (two spaces in from
+/// the border, ticket m3by's scanner moved here from under the top-bar
+/// logo); the hints start where the sidebar ends, lining the panel up
+/// with the message list pane.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &AppState,
     theme: &Theme,
+    loader_millis: u64,
     hits: &mut HitMap,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -51,10 +58,37 @@ pub fn render(
         height: 1,
     };
 
+    // Foreground work: the Knight Rider scanner in the left corner, two
+    // spaces in from the border (the slot the top-bar logo's row used to
+    // carry). The hints start at the sidebar's right edge, so the two
+    // never meet.
+    if state.session.operations.foreground().is_some() {
+        super::spinner::render_blocks(
+            frame,
+            Rect {
+                x: area.x.saturating_add(2),
+                y: row.y,
+                width: super::spinner::KR_WIDTH as u16,
+                height: 1,
+            },
+            theme.accent3,
+            theme.sidebar_bg,
+            loader_millis,
+        );
+    }
+
     // Key hints follow the input contract (plan §10) and the active screen
     // (mockup `.statusbar` per layout). Deliberately no j/k, no help.
     // Selection mode replaces the hint row with the bulk-operation buttons
     // (ticket p0s3): the count and the four actions, each clickable.
+    // Everything starts at the sidebar's right edge (aligned with the
+    // message list pane).
+    let hints_x = area.x.saturating_add(SIDEBAR_WIDTH);
+    let row = Rect {
+        x: hints_x,
+        width: area.x + area.width.saturating_sub(hints_x),
+        ..row
+    };
     let reader = matches!(state.active_route(), Some(Route::Message(_)));
     let composer = matches!(state.active_route(), Some(Route::Composer));
     let selection_mode = state.selection_active() && !reader && !composer;
@@ -283,8 +317,8 @@ pub fn render(
         ];
         push_hints(theme, &mut spans, &hints);
     }
-    // Foreground work is announced by the loader under the top-bar logo
-    // (ticket m3by); the status message sits top-right in the top bar.
+    // Foreground work is announced by the loader in this bar's left
+    // corner; the status message sits top-right in the top bar.
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
 }
 

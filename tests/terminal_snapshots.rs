@@ -135,12 +135,23 @@ fn selected_row_uses_accent_fill() {
         .lines()
         .position(|line| line.contains("KKF Notifications"))
         .expect("first row visible");
-    // Somewhere on the selected row the accent background must be active.
+    // Somewhere on the selected row the marker fill must be active — the
+    // gold highlight, not the blue accent.
     let has_accent_bg = (0..buffer.area.width).any(|x| {
         let style = buffer[(x, row as u16)].style();
-        style.bg == Some(theme.accent_bg)
+        style.bg == Some(theme.marker)
     });
-    assert!(has_accent_bg, "selected row lacks accent fill:\n{text}");
+    assert!(has_accent_bg, "selected row lacks marker fill:\n{text}");
+    // And the fill is one color across the whole row: every cell from the
+    // bar to the date carries the marker gold — a mixed fill (bar, text,
+    // preview, and padding each their own bg) reads as stripes.
+    for x in tmail::ui::layout::SIDEBAR_WIDTH..buffer.area.width {
+        assert_eq!(
+            buffer[(x, row as u16)].bg,
+            theme.marker,
+            "selected row cell {x} breaks the single fill:\n{text}"
+        );
+    }
 }
 
 /// In the Drafts mailbox the sender column would carry the user's own
@@ -358,15 +369,15 @@ fn theme_picker_lists_previews_and_highlights() {
     assert!(text.contains("light"), "builtin palette missing:\n{text}");
     assert!(text.contains("↵ confirm"), "binding hint missing:\n{text}");
 
-    // The cursor row (the active palette) carries the accent fill like a
+    // The cursor row (the active palette) carries the marker fill like a
     // focused list row.
     let cursor_row = text
         .lines()
         .position(|line| line.contains("default"))
         .expect("cursor row") as u16;
     let highlighted =
-        (0..buffer.area.width).any(|x| buffer[(x, cursor_row)].style().bg == Some(dark.accent_bg));
-    assert!(highlighted, "cursor row lacks the accent fill:\n{text}");
+        (0..buffer.area.width).any(|x| buffer[(x, cursor_row)].style().bg == Some(dark.marker));
+    assert!(highlighted, "cursor row lacks the marker fill:\n{text}");
 
     // Moving the cursor previews the highlighted palette behind the
     // dialog: the message-list rows repaint at once (ticket k5ba).
@@ -391,8 +402,8 @@ fn theme_picker_lists_previews_and_highlights() {
         .position(|line| line.contains("light"))
         .expect("previewed row") as u16;
     let highlighted =
-        (0..buffer.area.width).any(|x| buffer[(x, cursor_row)].style().bg == Some(light.accent_bg));
-    assert!(highlighted, "previewed row lacks the accent fill:\n{text}");
+        (0..buffer.area.width).any(|x| buffer[(x, cursor_row)].style().bg == Some(light.marker));
+    assert!(highlighted, "previewed row lacks the marker fill:\n{text}");
 }
 
 /// A theme list longer than the dialog scrolls, with a scrollbar in the
@@ -432,7 +443,7 @@ fn theme_picker_shows_a_scrollbar_when_the_list_overflows() {
     // The highlight ends before the scrollbar column, never under it.
     assert_ne!(
         buffer[(scroll_x, 14)].style().bg,
-        Some(theme.accent_bg),
+        Some(theme.marker),
         "the row fill must not run under the scrollbar"
     );
 
@@ -567,8 +578,9 @@ fn sanitized_failure(id: tmail::app::OperationId, kind: OperationKind, detail: &
 fn spinner_shows_foreground_work_without_blocking_the_frame() {
     let mut state = mock_initial_state();
     // An empty list with a page load in flight (startup / mailbox switch
-    // look): the loader runs on the row under the brand (ticket m3by) and
-    // the list pane shows its own centered spinner.
+    // look): the loader runs in the status bar's left corner (ticket m3by,
+    // moved from under the brand) and the list pane shows its own centered
+    // spinner.
     state.messages = Page::empty(20);
     let actions = vec![Action::Refresh];
     let buffer = buffer_after(&mut state, &actions, 152, 40);
@@ -576,7 +588,23 @@ fn spinner_shows_foreground_work_without_blocking_the_frame() {
     assert!(text.contains("■⬝"), "spinner frame missing:\n{text}");
     assert!(
         text.contains(concat!("tmail v", env!("CARGO_PKG_VERSION"))),
-        "the brand stays; the loader sweeps below it:\n{text}"
+        "the brand row keeps only the brand:\n{text}"
+    );
+    // The scanner sits in the footer's left corner: two spaces in from the
+    // border, on the status bar's content row (y=38 at 152×40).
+    let status_row = 40 - tmail::ui::layout::STATUSBAR_HEIGHT + 1;
+    let head = (2..10)
+        .find(|&x| buffer[(x, status_row)].symbol() == "■")
+        .expect("loader head in the status bar's left corner");
+    assert!(head >= 2, "loader starts two spaces in: {head}");
+    // The row above (the topbar's former loader slot) carries no scanner.
+    let topbar_rows: String = (0..4)
+        .flat_map(|y| (0..152).map(move |x| (x, y)))
+        .map(|(x, y)| buffer[(x, y)].symbol())
+        .collect();
+    assert!(
+        !topbar_rows.contains("■"),
+        "no loader left under the brand:\n{topbar_rows}"
     );
     // The list head and sidebar still render — work never blocks the frame.
     assert!(
@@ -596,6 +624,33 @@ fn no_spinner_when_idle() {
     assert!(
         text.contains(concat!("tmail v", env!("CARGO_PKG_VERSION"))),
         "brand restored when idle"
+    );
+}
+
+/// The status bar's hint panel starts where the sidebar ends (x=25 at
+/// 152×40), lining it up with the message list pane; the left corner
+/// stays free for the loader. Each hint opens with its own two-space
+/// padding, so the first glyph lands two columns past the edge.
+#[test]
+fn status_hints_align_with_the_sidebar_edge() {
+    let mut state = mock_initial_state();
+    state.session.size = (152, 40);
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    let status_row = 40 - tmail::ui::layout::STATUSBAR_HEIGHT + 1;
+    // The first non-space glyph of the hint row: the hint's two-space pad
+    // sits on the sidebar's right edge, the key follows.
+    let first = (0..152)
+        .find(|&x| buffer[(x, status_row)].symbol() != " ")
+        .expect("hints drawn");
+    assert_eq!(
+        first,
+        tmail::ui::layout::SIDEBAR_WIDTH + 2,
+        "hints aligned at the sidebar's end (after the hint pad)"
+    );
+    // Nothing before it: the left corner is clear.
+    assert!(
+        (0..tmail::ui::layout::SIDEBAR_WIDTH).all(|x| buffer[(x, status_row)].symbol() == " "),
+        "the loader slot stays clear while idle"
     );
 }
 
@@ -1039,7 +1094,7 @@ fn composer_sidebar_marks_drafts_and_stays_focusable() {
     let (drafts_y, _) = position_of(&text, "Drafts");
     assert_eq!(
         buffer[(2, drafts_y as u16)].bg,
-        theme.accent_bg,
+        theme.marker,
         "Drafts row is the active one while composing:\n{text}"
     );
     let (inbox_y, _) = position_of(&text, "Inbox");
@@ -1071,7 +1126,7 @@ fn composer_sidebar_marks_drafts_and_stays_focusable() {
     let (drafts_y, _) = position_of(&text, "Drafts");
     assert_eq!(
         buffer[(2, drafts_y as u16)].bg,
-        theme.accent_bg,
+        theme.marker,
         "Drafts stays marked while the sidebar holds focus:\n{text}"
     );
     let (to_y, _) = position_of(&text, "      To");
@@ -2234,8 +2289,8 @@ fn select_all_marks_rows_and_the_header_stays_a_plain_label() {
         .expect("another marked row") as u16;
     assert_eq!(
         buffer[(tmail::ui::layout::SIDEBAR_WIDTH + 2, cursor_row)].bg,
-        theme.accent_bg,
-        "cursor row keeps the accent fill"
+        theme.marker,
+        "cursor row keeps the marker fill"
     );
     // Marked rows share the sidebar's selected-mailbox fill
     // (theme.selection) — visibly distinct from the cursor fill.
@@ -2353,9 +2408,11 @@ fn list_rows_render_the_faded_preview() {
         text.contains("Re: WIP — 240 mm stainless-clad gyuto — quench done at 760 °C"),
         "preview composes onto the subject:\n{text}"
     );
-    // The first data row carries faded preview spans after its subject.
+    // An unselected data row carries faded preview spans after its subject
+    // (row 0 is the cursor row: its fill is the accent, and the preview
+    // takes the row's text color there instead of the snippet token).
     let faded = (0..buffer.area.width)
-        .map(|x| buffer[(x, 6)].clone())
+        .map(|x| buffer[(x, 8)].clone())
         .filter(|cell| cell.symbol() != " ")
         .any(|cell| cell.fg == theme.snippet);
     assert!(faded, "the preview renders in the faded snippet color");
@@ -2420,7 +2477,7 @@ fn reader_without_overflow_draws_no_scrollbar() {
 #[test]
 fn status_message_sits_top_right_of_the_brand_row() {
     // Ticket en85 (redesign): the status message lives in the TOP bar,
-    // right-aligned on the brand row in the panel's muted color — one
+    // right-aligned on the brand row in the shortcut-label color — one
     // column keeps it off the right border.
     let theme = Theme::default_dark();
     let mut state = mock_initial_state();
@@ -2440,8 +2497,9 @@ fn status_message_sits_top_right_of_the_brand_row() {
     let message = "Mailboxes loaded";
     let start = 152 - message.len() as u16 - 1;
     assert_eq!(buffer[(start, 1)].symbol(), "M", "first message glyph");
-    // The faded color: the muted token, on the panel fill.
-    assert_eq!(buffer[(start, 1)].fg, theme.muted);
+    // The faded color: the `label_dim` token — the same color the status
+    // bar's shortcut labels carry — on the panel fill.
+    assert_eq!(buffer[(start, 1)].fg, theme.label_dim);
     assert_eq!(buffer[(start, 1)].bg, theme.sidebar_bg);
     // The bottom status bar carries no message anymore.
     let bottom: String = (0..152).map(|x| buffer[(x, 38)].symbol()).collect();
@@ -2484,7 +2542,7 @@ fn search_compose_and_sidebar_cursor_sit_on_plain_backgrounds() {
     let sidebar = buffer_after(&mut state, &[], 152, 40);
     assert_eq!(sidebar[(5, 5)].bg, theme.selection, "sidebar cursor row");
     assert_eq!(sidebar[(5, 6)].bg, theme.sidebar_bg, "plain folder row");
-    assert_eq!(sidebar[(5, 4)].bg, theme.accent_bg, "active folder row");
+    assert_eq!(sidebar[(5, 4)].bg, theme.marker, "active folder row");
 }
 
 /// The header's pagination label right-aligns with the date/time column
@@ -2552,7 +2610,7 @@ fn find_text_col(buffer: &ratatui::buffer::Buffer, y: u16, needle: &str) -> usiz
 fn status_message_clears_after_the_configured_timeout() {
     // Ticket h1d7: with `[tmail].status_timeout > 0` the message clears
     // when the window elapses (the reducer owns the timer; the renderer
-    // shows the message in the muted color until then).
+    // shows the message in the shortcut-label color until then).
     let theme = Theme::default_dark();
     let mut state = mock_initial_state();
     state.session.size = (152, 40);
@@ -2564,8 +2622,8 @@ fn status_message_clears_after_the_configured_timeout() {
         },
     );
     state.set_status("Mailboxes loaded");
-    // A second into the window the message is still up, in the muted
-    // color on the panel fill.
+    // A second into the window the message is still up, in the
+    // shortcut-label color on the panel fill.
     let buffer = buffer_after(
         &mut state,
         &[Action::Tick {
@@ -2575,7 +2633,7 @@ fn status_message_clears_after_the_configured_timeout() {
         40,
     );
     let fg = buffer[(140, 1)].fg;
-    assert_eq!(fg, theme.muted, "message rides the muted color");
+    assert_eq!(fg, theme.label_dim, "message rides the label color");
     assert_eq!(buffer[(140, 1)].bg, theme.sidebar_bg);
 
     // Five-and-a-quarter seconds in: the window elapsed, the message and
@@ -2589,7 +2647,7 @@ fn status_message_clears_after_the_configured_timeout() {
         40,
     );
     let fg = buffer[(140, 1)].fg;
-    assert_ne!(fg, theme.muted, "the message cleared past the window");
+    assert_ne!(fg, theme.label_dim, "the message cleared past the window");
 }
 
 #[test]

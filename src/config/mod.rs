@@ -48,7 +48,7 @@ pub const THEME_NAMES: [&str; 2] = ["default", "light"];
 /// hex strings like `"#4e86dd"`. Kept beside the config parser because the
 /// token list is part of the file's grammar; [`crate::ui::theme::Theme`]
 /// applies them (a test pins the two lists together).
-pub const THEME_TOKENS: [&str; 18] = [
+pub const THEME_TOKENS: [&str; 20] = [
     "background",
     "surface",
     "border",
@@ -62,6 +62,8 @@ pub const THEME_TOKENS: [&str; 18] = [
     "accent2",
     "accent3",
     "accent",
+    "marker",
+    "marker_bar",
     "accent_bg",
     "bulk_selected_bg",
     "warning",

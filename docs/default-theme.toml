@@ -46,9 +46,16 @@ label_dim = "#575e71"
 accent2 = "#83bd63"
 # Tertiary accent: the loader scanner while foreground work is in flight.
 accent3 = "#75c0f9"
-# Interactive highlight: the cursor row bar, selection focus, links,
-# the status message, bulk-selection checkboxes.
+# Interactive highlight: selection focus, links, the status message,
+# bulk-selection checkboxes.
 accent = "#75c0f9"
+# Selected/active row fill: the gold highlight behind the cursor row in
+# the message list, the active folder in the sidebar, and the picker's
+# cursor row.
+marker = "#deb661"
+# Left edge bar of the selected/active rows: the white `▎` marker drawn
+# over the `marker` fill.
+marker_bar = "#ffffff"
 # Selected row / active folder fill: the background behind the highlighted
 # list row or the folder the cursor sits on.
 accent_bg = "#141821"
