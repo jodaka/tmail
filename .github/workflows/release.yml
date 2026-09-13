@@ -224,12 +224,25 @@ jobs:
         run: |
           set -euo pipefail
 
+          # A re-run of failed jobs does not re-execute the bump job, and
+          # GitHub Actions drops `needs.*.outputs` on such re-runs. Fall back
+          # to the version committed by bump (master head == the bumped
+          # checkout), and fail loudly if neither path produces semver.
+          version_pattern='s/^version = "\([0-9.]*\)"$/\1/p'
+          if [ -z "${VERSION:-}" ]; then
+            echo "::warning::bump job outputs missing (job re-run); deriving version from Cargo.toml"
+            VERSION="$(sed -n "$version_pattern" Cargo.toml)"
+            echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          fi
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::could not determine release version (got: '${VERSION}')"; exit 1; }
+
           # Fetch the checksums published by the `publish` job (one API
           # round-trip; works while the repository is private too).
           api="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}"
-          asset_id="$(curl -sf -H "Authorization: Bearer ${GH_TOKEN}" "$api" \
+          asset_id="$(curl -sS --fail-with-body -H "Authorization: Bearer ${GH_TOKEN}" "$api" \
             | python3 -c "import json, sys; print({a['name']: a['id'] for a in json.load(sys.stdin)['assets']}['SHA256SUMS-v${VERSION}.txt'])")"
-          curl -sfL -H "Authorization: Bearer ${GH_TOKEN}" \
+          curl -sS --fail-with-body -L -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/octet-stream" \
             -o SHA256SUMS.txt "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
 
