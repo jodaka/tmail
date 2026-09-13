@@ -59,13 +59,26 @@ pub async fn run(program: &[String], body: &str) -> Result<String, String> {
 /// platform default applies (Tmail's external-editor flow is macOS/Linux).
 fn write_secure(path: &Path, body: &str) -> anyhow::Result<()> {
     use std::io::Write;
-    let mut file = fs::File::create(path).context("create temporary file")?;
+    // Create the file with mode 0o600 from the start (ticket tfxm):
+    // creating first and chmodding after leaves a window in which the
+    // draft body is readable by others. `create_new` also refuses to
+    // follow a pre-planted symlink at the path.
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .context("restrict temporary file permissions")?;
-    }
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .context("create temporary file")?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .context("create temporary file")?;
     file.write_all(body.as_bytes())
         .context("write body to the temporary file")?;
     file.flush().context("flush the temporary file")?;
