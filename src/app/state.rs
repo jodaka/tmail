@@ -1,8 +1,12 @@
 //! Application state (plan §9).
 //!
-//! Everything here is plain data mutated only by the reducer. In-flight
+//! Everything here is plain data mutated only by the reducer (one
+//! documented exception: `CacheBundle.reader_doc`, interior-mutable so
+//! the renderer's cache can update through `&AppState`). In-flight
 //! backend work is tracked in `operations` (the operation registry); the
-//! `overlay` stack currently holds only the error modal.
+//! `overlay` stack holds one modal at a time: the error modal, the
+//! discard/send confirmations, the attachment explorer, the theme
+//! picker, or help.
 
 use crate::app::composer::ComposerState;
 use crate::app::focus::Focus;
@@ -215,8 +219,6 @@ pub struct SessionState {
     /// Last wall clock delivered by `Action::Tick { now }`: the
     /// reducer's only source of time (autosave debounce, saved-at stamps).
     pub clock: Option<DateTime<FixedOffset>>,
-    /// Tick counter for animation state (spinner lands in Phase 3).
-    pub ticks: u64,
     pub quit_requested: bool,
     /// Last known terminal size; drives the responsive layout (plan §18).
     pub size: (u16, u16),
@@ -339,7 +341,6 @@ impl AppState {
                     shown_at: None,
                 },
                 clock: None,
-                ticks: 0,
                 quit_requested: false,
                 size: (152, 40),
                 search_query: String::new(),
@@ -444,6 +445,26 @@ impl AppState {
     fn active_mailbox(&self) -> Option<&Mailbox> {
         let id = self.active_route()?.mailbox_id()?;
         self.mailboxes.as_loaded()?.iter().find(|m| &m.id == id)
+    }
+
+    /// Restore the list invariant after the row set changed (crash
+    /// tickets in review s843): the cursor row and the scroll window stay
+    /// inside the loaded page. The accessor the many transition tails
+    /// used to spell out as `min(len.saturating_sub(1))` twice.
+    pub fn clamp_list_positions(&mut self) {
+        let last = self.messages.items.len().saturating_sub(1);
+        self.selection = self.selection.min(last);
+        self.list_scroll = self.list_scroll.min(last);
+    }
+
+    /// Same invariant for the sidebar cursor against the loaded mailbox
+    /// listing (empty list → 0, the conventional empty-view cursor).
+    pub fn clamp_mailbox_selection(&mut self) {
+        let last = self
+            .mailboxes
+            .as_loaded()
+            .map_or(0, |list| list.len().saturating_sub(1));
+        self.mailbox_selection = self.mailbox_selection.min(last);
     }
 
     /// The mailbox the sidebar marks active. Normally the displayed

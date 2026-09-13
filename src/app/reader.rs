@@ -376,23 +376,21 @@ pub(crate) fn scroll_document(state: &AppState, width: usize) -> Rc<ReaderDoc> {
         Some(ReaderFocus::Attachment(index)) => Some(index),
         _ => None,
     };
+    // One borrow scope: the hit check and the Rc clone cannot disagree
+    // about the slot's content, so no "Impossible" fallback is needed.
     let cached_hit = {
         let cache = state.caches.reader_doc.borrow();
-        cache.as_ref().is_some_and(|cached| {
-            cached.message_id == message.id
-                && cached.width == width
-                && cached.selected_chip == selected_chip
-                && cached.fingerprint == fingerprint
-        })
-    };
-    if cached_hit {
-        let doc = state
-            .caches
-            .reader_doc
-            .borrow()
+        cache
             .as_ref()
+            .filter(|cached| {
+                cached.message_id == message.id
+                    && cached.width == width
+                    && cached.selected_chip == selected_chip
+                    && cached.fingerprint == fingerprint
+            })
             .map(|cached| Rc::clone(&cached.doc))
-            .expect("cache present after a hit check");
+    };
+    if let Some(doc) = cached_hit {
         return doc;
     }
     let lines = scroll_lines(state, width);

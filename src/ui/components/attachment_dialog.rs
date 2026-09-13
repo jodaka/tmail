@@ -84,15 +84,19 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
     }
 
     // Status row: the last failure, the in-flight listing, or the hint
-    // that Enter attaches the selected file.
+    // that Enter attaches the selected file. The status strip is one row,
+    // so a wrapped detail keeps its first line plus an ellipsis — the
+    // truncation is never silent (review s843).
     let (status, style) = match (&dialog.error, dialog.listing) {
-        (Some(detail), _) => (
-            text::wrap(detail, inner_w)
-                .into_iter()
-                .next()
-                .unwrap_or_default(),
-            Style::new().fg(theme.warning),
-        ),
+        (Some(detail), _) => {
+            let mut wrapped = text::wrap(detail, inner_w).into_iter();
+            let mut first = wrapped.next().unwrap_or_default();
+            // More wrapped lines exist: never truncate them silently.
+            if wrapped.next().is_some() {
+                first.push('…');
+            }
+            (first, Style::new().fg(theme.warning))
+        }
         (None, true) => (String::from("Listing…"), Style::new().fg(theme.dim)),
         (None, false) => (
             String::from("(↵ attaches the selected file)"),

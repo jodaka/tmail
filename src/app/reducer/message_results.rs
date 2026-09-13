@@ -220,9 +220,7 @@ pub(crate) fn message_moved(state: &mut AppState, locator: &MessageLocator) -> V
     for id in moved_ids {
         state.selected.remove(&id);
     }
-    state.selection = state
-        .selection
-        .min(state.messages.items.len().saturating_sub(1));
+    state.clamp_list_positions();
     keep_selection_visible(state);
     state.set_status("Message moved");
     // The visible context could be a mailbox page or search results
@@ -285,7 +283,6 @@ pub(crate) fn refresh_sidebar_listing(state: &mut AppState, mailboxes: Vec<Mailb
     let pointed = cursor_id
         .filter(|id| mailboxes.iter().any(|m| &m.id == id))
         .or_else(|| active_id.filter(|id| mailboxes.iter().any(|m| &m.id == id)));
-    let len = mailboxes.len();
     state.mailboxes = Loadable::Loaded(mailboxes);
     state.mailbox_selection = match pointed {
         // The same mailbox, possibly at a new position.
@@ -296,8 +293,9 @@ pub(crate) fn refresh_sidebar_listing(state: &mut AppState, mailboxes: Vec<Mailb
             .unwrap_or(0),
         // Neither the cursor's nor the displayed mailbox exists anymore:
         // keep the index inside the fresh list.
-        None => state.mailbox_selection.min(len.saturating_sub(1)),
+        None => state.mailbox_selection,
     };
+    state.clamp_mailbox_selection();
 }
 
 /// Shared body of the mailbox application (plan §19 Phase 2): pick the
@@ -397,7 +395,7 @@ pub(crate) fn apply_page(
         })
         .unwrap_or(0)
         .min(len.saturating_sub(1));
-    state.list_scroll = state.list_scroll.min(len.saturating_sub(1));
+    state.clamp_list_positions();
     keep_selection_visible(state);
     // A fresh envelope listing carries no snippets (ADR 0001 finding 2),
     // so restore what this session already previewed: a periodic refresh

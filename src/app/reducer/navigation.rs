@@ -182,9 +182,7 @@ pub(crate) fn keep_selection_visible(state: &mut AppState) {
         state.list_scroll = state.selection + 1 - visible;
     }
     // A shrunken or replaced page must never leave the window past the end.
-    state.list_scroll = state
-        .list_scroll
-        .min(state.messages.items.len().saturating_sub(1));
+    state.clamp_list_positions();
 }
 
 pub(crate) fn change_page(state: &mut AppState, delta: i64) -> Vec<Effect> {

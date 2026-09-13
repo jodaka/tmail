@@ -2304,11 +2304,12 @@ fn select_all_marks_rows_and_the_header_stays_a_plain_label() {
         theme.marker,
         "cursor row keeps the marker fill"
     );
-    // Marked rows share the sidebar's selected-mailbox fill
-    // (theme.selection) — visibly distinct from the cursor fill.
+    // Marked rows carry the bulk-highlight token (theme.bulk_selected_bg)
+    // — visibly distinct from the cursor fill, and overridable like every
+    // other theme token (review s843: the token had no readers).
     assert_eq!(
         buffer[(tmail::ui::layout::SIDEBAR_WIDTH + 2, marked_row)].bg,
-        theme.selection,
+        theme.bulk_selected_bg,
         "marked rows carry the bulk highlight"
     );
 }

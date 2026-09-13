@@ -88,6 +88,8 @@ pub struct ComposerState {
     pub external_editing: bool,
 }
 
+/// `Default` is `new()`: the canonical fresh composer (To field focused).
+/// Clippy asks for it; the constructor stays the primary entry point.
 impl Default for ComposerState {
     fn default() -> Self {
         Self::new()
@@ -437,8 +439,9 @@ impl ComposerState {
             }
             // Undo/redo route through `undo_body`/`redo_body` in the
             // reducer: they are content edits only when something changed.
-            // The word/selection moves above already returned.
-            ComposerEdit::Undo | ComposerEdit::Redo => {}
+            // The word/selection moves above already returned. History
+            // scroll and unbound edits are all handled earlier, so this
+            // arm is the intentional no-op for anything left.
             _ => {}
         }
     }

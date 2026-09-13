@@ -316,11 +316,13 @@ async fn run_effect(
             None
         }
         // Wizard discovery (ADR 0003 §3.3): the injected discoverer runs
-        // the bounded blocking client on its own worker thread.
-        OperationKind::DiscoverConfig { email } => {
-            let services = discoverer.discover(email).await;
-            Some(Ok(OperationOutcome::Discovered(services)))
-        }
+        // the bounded blocking client on its own worker thread. `Err` is
+        // a discoverer-level break surfaced like every operation failure;
+        // `Ok(empty)` strictly means "nothing found in time".
+        OperationKind::DiscoverConfig { email } => match discoverer.discover(email).await {
+            Ok(services) => Some(Ok(OperationOutcome::Discovered(services))),
+            Err(reason) => Some(Err(plain_failure(effect, &reason))),
+        },
         // Wizard credential test (ADR 0003 §3.4): a real `himalaya
         // mailbox list` against a temporary 0600 config; the detail of a
         // failure is sanitized below like every other backend error.
@@ -382,7 +384,7 @@ async fn run_effect(
                         tokio::task::spawn_blocking(move || notifier.notify(&summary, &body)).await;
                     match delivered {
                         Ok(Ok(())) => {}
-                        Ok(Err(detail)) => tracing::warn!(detail, "notification failed"),
+                        Ok(Err(detail)) => tracing::warn!(detail = %detail, "notification failed"),
                         Err(err) => tracing::warn!(%err, "notification task failed"),
                     }
                 }
@@ -555,7 +557,10 @@ fn build_attachment_explorer(
         .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
         .filter(|dir| dir.is_dir())
         .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_default();
+        .filter(|dir| dir.is_dir())
+        .ok_or_else(|| {
+            String::from("no home or working directory available for the attachment chooser")
+        })?;
     tracing::debug!(path = %target.display(), "listing attachment chooser directory");
     let listed = target.display().to_string();
     ratatui_explorer::FileExplorerBuilder::build_with_working_dir(target)
@@ -888,7 +893,11 @@ mod tests {
             Ok(())
         }
 
-        fn notify(&self, summary: &str, body: &str) -> Result<(), String> {
+        fn notify(
+            &self,
+            summary: &str,
+            body: &str,
+        ) -> Result<(), crate::backend::notifier::NotifyError> {
             self.desktop
                 .lock()
                 .expect("notifier lock")
@@ -1115,8 +1124,14 @@ mod tests {
                 Err(std::io::Error::other("no bell"))
             }
 
-            fn notify(&self, _summary: &str, _body: &str) -> Result<(), String> {
-                Err(String::from("no notification service"))
+            fn notify(
+                &self,
+                _summary: &str,
+                _body: &str,
+            ) -> Result<(), crate::backend::notifier::NotifyError> {
+                Err(crate::backend::notifier::NotifyError(String::from(
+                    "no notification service",
+                )))
             }
         }
         let backend = Arc::new(FakeBackend::ok());
@@ -1227,8 +1242,14 @@ mod cache_tests {
             Err(std::io::Error::other("unused"))
         }
 
-        fn notify(&self, _summary: &str, _body: &str) -> Result<(), String> {
-            Err(String::from("unused"))
+        fn notify(
+            &self,
+            _summary: &str,
+            _body: &str,
+        ) -> Result<(), crate::backend::notifier::NotifyError> {
+            Err(crate::backend::notifier::NotifyError(String::from(
+                "unused",
+            )))
         }
     }
 

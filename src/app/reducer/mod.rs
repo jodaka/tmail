@@ -217,7 +217,6 @@ pub(crate) fn reduce_unwizarded(state: &mut AppState, action: &Action) -> Vec<Ef
 }
 
 fn tick(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset>) -> Vec<Effect> {
-    state.session.ticks += 1;
     state.session.clock = Some(now);
     clear_expired_status(state, now);
     let mut effects = autosave_tick(state, now);

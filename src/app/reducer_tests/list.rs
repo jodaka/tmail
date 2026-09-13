@@ -536,7 +536,7 @@ fn input_and_ticks_keep_working_while_an_operation_is_in_flight() {
     // Foreground work never blocks rendering or input (plan §3): movement
     // and ticks apply while the request is in flight.
     tick(&mut s, 0);
-    assert_eq!(s.session.ticks, 1);
+    assert!(s.session.clock.is_some());
     reduce(&mut s, Action::MoveDown);
     assert_eq!(s.selection, 1);
     assert!(s.session.operations.page_in_flight(&inbox_id()).is_some());

@@ -572,7 +572,6 @@ fn modal_focus_is_outside_the_tab_cycle() {
     // The modal focus is transitory and never cycles into screen focuses.
     assert_eq!(Focus::ErrorModal.next(), Focus::ErrorModal);
     assert_eq!(Focus::ErrorModal.previous(), Focus::ErrorModal);
-    assert!(!Focus::ErrorModal.accepts_shortcuts());
 }
 
 #[test]
@@ -684,6 +683,10 @@ fn resize_keeps_selection_visible() {
         },
     );
     assert_eq!(s.list_scroll, 0);
+    // The selection invariant normalization: a cursor row at or past the
+    // page end comes back inside together with the scroll window
+    // (clamp_list_positions, review s843).
+    assert_eq!(s.selection, 19);
     // Shrink below the selection: the window follows it.
     reduce(
         &mut s,
@@ -692,7 +695,7 @@ fn resize_keeps_selection_visible() {
             height: 20,
         },
     );
-    assert_eq!(s.list_scroll, 10);
+    assert_eq!(s.list_scroll, 9);
 }
 
 #[test]
@@ -794,11 +797,11 @@ fn resize_leaves_reader_scroll_alone_outside_the_reader() {
 }
 
 #[test]
-fn tick_increments_counter_only() {
+fn tick_keeps_the_clock_and_touches_nothing_else() {
     let mut s = state();
     let before = s.clone();
     tick(&mut s, 0);
-    assert_eq!(s.session.ticks, before.session.ticks + 1);
+    assert!(s.session.clock.is_some());
     assert_eq!(s.selection, before.selection);
     assert_eq!(s.session.focus, before.session.focus);
 }

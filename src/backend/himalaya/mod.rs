@@ -125,9 +125,11 @@ pub struct HimalayaCliBackend {
     /// cheaply cloneable.
     mailboxes: Arc<RwLock<Option<Vec<Mailbox>>>>,
     /// Tmail-owned crash-safe draft journal (ADR 0002 §D.1): every revision
-    /// is recorded here before any remote call.
-    journal: DraftJournal,
-    /// Configured account identity, used as the `From` header of drafts.
+    /// is recorded here before any remote call. `None` when no data
+    /// directory could be derived (`$TMAIL_DATA_DIR` unset and no `$HOME`)
+    /// — draft operations then fail with an explicit request error
+    /// instead of an obscure filesystem failure behind a sentinel path.
+    journal: Option<DraftJournal>,
     account_email: Option<String>,
     account_display_name: Option<String>,
     /// `[tmail.attachments].downloads_dir` (plan §17), as written; a leading
@@ -148,8 +150,7 @@ impl HimalayaCliBackend {
             account,
             aliases,
             mailboxes: Arc::new(RwLock::new(None)),
-            journal: DraftJournal::open_default()
-                .unwrap_or_else(|| DraftJournal::open(PathBuf::from("/dev/null/tmail-drafts"))),
+            journal: DraftJournal::open_default(),
             account_email: None,
             account_display_name: None,
             downloads_dir: None,
@@ -158,8 +159,18 @@ impl HimalayaCliBackend {
 
     /// Override the journal location (tests, explicit data dirs).
     pub fn with_journal(mut self, journal: DraftJournal) -> Self {
-        self.journal = journal;
+        self.journal = Some(journal);
         self
+    }
+
+    /// The journal for a draft write, or the typed error explaining why
+    /// there is none (no data dir derivable at startup).
+    fn journal_required(&self) -> BackendResult<&DraftJournal> {
+        self.journal.as_ref().ok_or_else(|| {
+            BackendError::InvalidRequest(String::from(
+                "no draft journal directory is available (check $TMAIL_DATA_DIR / $HOME)",
+            ))
+        })
     }
 
     /// Backend wired from the loaded Tmail configuration.
@@ -383,7 +394,9 @@ impl MailBackend for HimalayaCliBackend {
         //    §D.1): a crash after this point can only leave duplicates,
         //    never lost text. Journal I/O runs on the blocking pool — the
         //    runtime is single-threaded and must never wait on a disk.
-        let journal = self.journal.clone();
+        //    No writable journal: refuse with the clear request error
+        //    before touching the server.
+        let journal = self.journal_required()?.clone();
         let snapshot = draft.clone();
         blocking(move || journal.record(&snapshot).map_err(BackendError::Io)).await?;
 
@@ -420,16 +433,35 @@ impl MailBackend for HimalayaCliBackend {
         self.delete_stray_draft_copies(&ctx, &drafts, Some(&new_id), &draft.message_id);
 
         // 5. Confirm the revision in the journal (newest pushed), on the
-        //    blocking pool like every journal access.
+        //    blocking pool like every journal access. Best-effort: the
+        //    remote save already succeeded, so failing the operation here
+        //    would push the user into a retry that creates a duplicate
+        //    remote copy — the dirty-revision gap is self-healed by the
+        //    restore path instead.
         let journal = self.journal.clone();
         let local_id = draft.local_id.0.clone();
         let revision = draft.revision;
-        blocking(move || {
-            journal
-                .mark_remote(&local_id, revision)
-                .map_err(BackendError::Io)
+        let confirmed = blocking(move || {
+            journal.map_or(
+                Err(BackendError::InvalidRequest(String::from(
+                    "no draft journal",
+                ))),
+                |journal| {
+                    journal
+                        .mark_remote(&local_id, revision)
+                        .map_err(BackendError::Io)
+                },
+            )
         })
-        .await?;
+        .await;
+        if let Err(err) = confirmed {
+            tracing::warn!(
+                local_id = %draft.local_id.0,
+                revision = draft.revision,
+                %err,
+                "remote draft saved but the journal confirmation failed; restore will re-run it dirty"
+            );
+        }
 
         Ok(new_id)
     }
@@ -438,8 +470,12 @@ impl MailBackend for HimalayaCliBackend {
         tracing::debug!("load_drafts");
         // Purely local (ADR 0002 §D.1): the journal is the source of truth
         // for restore, independent of account reachability. The journal
-        // walk runs on the blocking pool (single-threaded runtime).
-        let journal = self.journal.clone();
+        // walk runs on the blocking pool (single-threaded runtime). No
+        // journal directory: no draft was ever journaled — nothing to
+        // restore.
+        let Some(journal) = self.journal.clone() else {
+            return Ok(Vec::new());
+        };
         let entries = blocking(move || journal.load_all().map_err(BackendError::Io)).await?;
         Ok(entries
             .into_iter()
@@ -455,9 +491,16 @@ impl MailBackend for HimalayaCliBackend {
         // The user confirmed the discard: journal first (worst case after a
         // crash is a lingering remote copy, never a resurrected draft).
         // Journal I/O runs on the blocking pool (single-threaded runtime).
+        // No journal: nothing was recorded, so the remote cleanup below
+        // runs regardless (can only mean an earlier save proceeded
+        // without a journal).
         let journal = self.journal.clone();
         let local_id = draft.local_id.0.clone();
-        blocking(move || journal.remove(&local_id).map_err(BackendError::Io)).await?;
+        blocking(move || match journal {
+            Some(journal) => journal.remove(&local_id).map_err(BackendError::Io),
+            None => Ok(()),
+        })
+        .await?;
         if let Some(drafts) = self.mailbox_for_role(MailboxRole::Drafts) {
             // Unlike the save-path cleanup, the sweep runs *awaited* here:
             // the operation may only report Done once the IMAP deletions
@@ -474,7 +517,7 @@ impl MailBackend for HimalayaCliBackend {
                         &drafts,
                         trash.as_deref(),
                         &old.0,
-                        "",
+                        None,
                         &ctx.cancellation,
                     )
                     .await;
@@ -761,22 +804,24 @@ impl HimalayaCliBackend {
     /// possible; only valid parsed addresses are written (the composer
     /// flags invalid ones and send refuses them before starting, Phase 7).
     fn serialize_draft(&self, draft: &DraftSnapshot) -> BackendResult<Vec<u8>> {
-        if draft.message_id.is_none() {
+        // One check in one place: a draft without its stable Message-ID
+        // cannot be written (it is what replacement and reconciliation
+        // key on, ADR 0002 §D.6).
+        let Some(message_id) = draft.message_id.as_ref() else {
             return Err(BackendError::InvalidRequest(String::from(
                 "draft is missing a stable Message-ID; it must be minted \
                  before the first save",
             )));
-        }
+        };
 
+        let bare_message_id = bare_message_id(message_id);
         let mut builder = MessageBuilder::new()
             .date(chrono::Utc::now().timestamp())
             .header(
                 "X-Tmail-Draft-Id",
                 mail_builder::headers::raw::Raw::from(draft.local_id.0.clone()),
-            );
-        if let Some(message_id) = &draft.message_id {
-            builder = builder.message_id(bare_message_id(message_id));
-        }
+            )
+            .message_id(bare_message_id);
         if let Some(email) = &self.account_email {
             builder = builder.from(MailAddress::new_address(
                 self.account_display_name.clone(),
@@ -1265,7 +1310,7 @@ async fn run_stray_draft_sweep(
             &drafts_mailbox,
             trash.as_deref(),
             &id,
-            &message_id,
+            Some(&message_id),
             &ctx.cancellation,
         )
         .await;
@@ -1321,7 +1366,7 @@ async fn run_two_phase_delete(
     mailbox: &str,
     trash: Option<&str>,
     id: &str,
-    message_id: &str,
+    message_id: Option<&str>,
     cancellation: &tokio_util::sync::CancellationToken,
 ) {
     let argv =
@@ -1333,6 +1378,10 @@ async fn run_two_phase_delete(
         return;
     }
     let Some(trash) = trash.filter(|trash| *trash != mailbox) else {
+        return;
+    };
+    let Some(message_id) = message_id else {
+        tracing::warn!(old = %id, "no Message-ID; trashed draft copy cannot be located");
         return;
     };
     if message_id.is_empty() {

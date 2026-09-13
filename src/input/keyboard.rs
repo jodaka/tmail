@@ -26,12 +26,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Translate a key event into an action. `None` = not a bound key.
 pub fn to_action(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action> {
-    to_action_with(keymap, key, focus)
-}
-
-/// The translation body; named separately so tests can wrap
-/// [`to_action`] with a default keymap.
-fn to_action_with(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action> {
     let key = normalize_ctrl_chords(key);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);

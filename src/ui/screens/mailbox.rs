@@ -27,14 +27,24 @@ use crate::ui::layout::LayoutMode;
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
-/// Gap between the rendered date text and the row's right edge: the date
-/// cell is 8 columns wide (row anatomy in `message_spans`) and the common
-/// `format_relative` outputs are 5 columns (`HH:MM`, `Sep 1`), left-aligned
-/// — so dates end 3 columns short of the edge. The header's range label
-/// right-aligns to the same edge, lining it up with the date/time column
-/// instead of leaving it stuck to the pane border.
-const DATE_TEXT_RIGHT_INSET: usize = 3;
-
+/// Width of the 8-column date cell minus the top visible row's rendered
+/// date text — the header's range label aligns with what is actually
+/// drawn beneath it. The 5-column common outputs (`HH:MM`, `Sep 1`) end
+/// 3 columns short of the edge (the mockup look); the 4-column year of
+/// other-year mail ends 4 short, and the label follows instead of
+/// assuming the old constant (review s843).
+fn date_text_right_inset(state: &AppState, now: chrono::DateTime<chrono::FixedOffset>) -> usize {
+    const DATE_CELL_W: usize = 8;
+    let Some(timestamp) = state
+        .messages
+        .items
+        .get(state.list_scroll)
+        .map(|summary| summary.timestamp)
+    else {
+        return DATE_CELL_W;
+    };
+    DATE_CELL_W.saturating_sub(dates::format_relative(now, timestamp).width())
+}
 /// Render the message list into `area` (already split off from the sidebar).
 pub fn render(
     frame: &mut Frame<'_>,
@@ -69,7 +79,7 @@ pub fn render(
     } else {
         rows.width
     };
-    render_head(frame, head, state, theme, scrolling);
+    render_head(frame, head, state, theme, now, scrolling);
     // Rows of the Drafts mailbox show the recipient in the sender column:
     // a draft's sender is always the user's own address, which reads as
     // noise. Matched on the row's mailbox id, so search results over the
@@ -193,6 +203,7 @@ fn render_head(
     area: Rect,
     state: &AppState,
     theme: &Theme,
+    now: chrono::DateTime<chrono::FixedOffset>,
     scrolling: bool,
 ) {
     if area.height == 0 {
@@ -248,10 +259,10 @@ fn render_head(
     }
     if !range.is_empty() {
         // Right-align the range with the date/time column of the rows
-        // below rather than the pane border: the date cell leaves a
-        // 3-column gap after its 5-character times, and while the
-        // scrollbar shows it shaves one more column off every row.
-        let inset = (DATE_TEXT_RIGHT_INSET + usize::from(scrolling)) as u16;
+        // below rather than the pane border: exactly the gap the top
+        // visible row's date leaves in its 8-wide cell (the old constant
+        // assumed 5-column times and drifted on 4-column years).
+        let inset = (date_text_right_inset(state, now) + usize::from(scrolling)) as u16;
         let range_area = Rect {
             x: (area.x + area.width).saturating_sub(range_w as u16 + inset),
             y: row.y,
@@ -335,11 +346,11 @@ fn message_spans<'a>(
 
     let bg = if selected {
         // The marker gold: one fill for the whole row, the same highlight
-        // the sidebar's active folder carries.
+        // the sidebar's active folder carries (theme.bulk_selected_bg —
+        // the overridable bulk-highlight token).
         theme.marker
     } else if bulk_selected {
-        // Same fill as selected mailboxes in the sidebar (theme.selection).
-        theme.selection
+        theme.bulk_selected_bg
     } else {
         theme.background
     };

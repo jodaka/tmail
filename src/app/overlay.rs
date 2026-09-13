@@ -129,9 +129,12 @@ impl AttachmentFileDialog {
     /// explorer cannot act on are ignored.
     pub fn browse(&mut self, input: ratatui_explorer::Input) {
         if let Some(explorer) = self.explorer.as_mut() {
-            // Selection movement never touches the filesystem, so the
-            // Result is always Ok here.
-            let _ = explorer.handle(input);
+            // Selection movement is not supposed to touch the filesystem,
+            // but an Err here is an unforeseen crate behavior — log it
+            // rather than swallow it (ticket s843 review).
+            if let Err(err) = explorer.handle(input) {
+                tracing::warn!(error = %err, "attachment explorer refused a selection move");
+            }
         }
     }
 

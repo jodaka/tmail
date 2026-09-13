@@ -297,15 +297,15 @@ impl Theme {
         Style::new().fg(self.background).bg(self.marker)
     }
 
-    /// Style for a bulk-selected row (ticket p0s3): the same selection
-    /// fill selected mailboxes get in the sidebar. In the monochrome
-    /// theme the terminal default stays, so a dim modifier marks the rows
-    /// instead.
+    /// Style for a bulk-selected row (ticket p0s3): visibly distinct from
+    /// the cursor fill, so checked rows read as "marked", not "focused".
+    /// The dedicated `bulk_selected_bg` token — overridable like every
+    /// other token — instead of the sidebar `selection` fill.
     pub fn row_bulk_selected(&self) -> Style {
-        if self.selection == Color::Reset {
+        if self.bulk_selected_bg == Color::Reset {
             Style::new().add_modifier(Modifier::DIM)
         } else {
-            Style::new().bg(self.selection)
+            Style::new().bg(self.bulk_selected_bg)
         }
     }
 

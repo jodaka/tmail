@@ -12,10 +12,23 @@ pub trait Notifier: Send + Sync {
     fn bell(&self) -> io::Result<()>;
 
     /// Show a desktop notification with `summary` as the title and `body`
-    /// as the detail text. Blocks until the platform service accepted it;
-    /// the error is a message fit for a debug log.
-    fn notify(&self, summary: &str, body: &str) -> Result<(), String>;
+    /// as the detail text. Blocks until the platform service accepted it.
+    fn notify(&self, summary: &str, body: &str) -> Result<(), NotifyError>;
 }
+
+/// A desktop-notification failure. The platform adapter's message is kept
+/// opaque (its only consumer logs it at warn level), but the type keeps
+/// the failure from being smuggled around as user-facing text.
+#[derive(Debug, Clone)]
+pub struct NotifyError(pub String);
+
+impl std::fmt::Display for NotifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotifyError {}
 
 /// The system notifier: `\x07` on stdout and `notify-rust` desktop
 /// notifications (ticket b28p).
@@ -29,12 +42,12 @@ impl Notifier for SystemNotifier {
         crossterm::execute!(io::stdout(), crossterm::style::Print("\x07"))
     }
 
-    fn notify(&self, summary: &str, body: &str) -> Result<(), String> {
+    fn notify(&self, summary: &str, body: &str) -> Result<(), NotifyError> {
         notify_rust::Notification::new()
             .summary(summary)
             .body(body)
             .show()
             .map(|_| ())
-            .map_err(|err| err.to_string())
+            .map_err(|err| NotifyError(err.to_string()))
     }
 }

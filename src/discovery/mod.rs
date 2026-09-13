@@ -36,8 +36,11 @@ pub const DISCOVERY_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Fallback DNS-over-TCP resolver, mirroring the `pim-discovery` CLI
 /// default. Used only when [`system_resolver`] cannot determine the
-/// system's nameserver.
-const DEFAULT_DNS_RESOLVER: &str = "tcp://1.1.1.1:53";
+/// system's nameserver. Parsed once at first use (const-verified by a
+/// test); the panic then can never fire during a request.
+static DEFAULT_DNS_RESOLVER: std::sync::LazyLock<Url> = std::sync::LazyLock::new(|| {
+    Url::parse("tcp://1.1.1.1:53").expect("default DNS resolver URL is valid")
+});
 
 /// Extra slack over [`DISCOVERY_DEADLINE`] for the `spawn_blocking`
 /// hop itself before the async wrapper gives up on the join handle.
@@ -174,9 +177,12 @@ pub struct DiscoveredService {
 /// thread; fakes return canned data.
 #[async_trait::async_trait]
 pub trait EmailConfigDiscoverer: Send + Sync {
-    /// Returns the ranked candidate list; empty means nothing was
-    /// found in time (the wizard then offers manual override).
-    async fn discover(&self, email: &str) -> Vec<DiscoveredService>;
+    /// The ranked candidate list, or `Err` with a human-readable reason
+    /// when discovery itself broke. `Ok(empty)` strictly means "no
+    /// candidate mechanisms answered in time" (the wizard then offers
+    /// manual override) — so the wizard can tell the user *why* the
+    /// results are empty instead of conflating the two (review s843).
+    async fn discover(&self, email: &str) -> Result<Vec<DiscoveredService>, String>;
 }
 
 /// The real discoverer, wrapping `io-pim-discovery`'s blocking
@@ -185,7 +191,7 @@ pub struct PimDiscoverer;
 
 #[async_trait::async_trait]
 impl EmailConfigDiscoverer for PimDiscoverer {
-    async fn discover(&self, email: &str) -> Vec<DiscoveredService> {
+    async fn discover(&self, email: &str) -> Result<Vec<DiscoveredService>, String> {
         // The compose client blocks and spawns its own mechanism
         // threads, so it must leave the async reactor: run it on the
         // blocking pool. `compose_all_within` already bounds the wait
@@ -195,37 +201,33 @@ impl EmailConfigDiscoverer for PimDiscoverer {
         let email = email.to_string();
         let handle = tokio::task::spawn_blocking(move || discover_blocking(&email));
         match tokio::time::timeout(DISCOVERY_DEADLINE + BLOCKING_JOIN_SLACK, handle).await {
-            Ok(Ok(services)) => services,
-            Ok(Err(err)) => {
-                tracing::warn!(error = %err, "discovery worker panicked or was cancelled");
-                Vec::new()
-            }
-            Err(_) => {
-                tracing::warn!("discovery did not complete before the deadline");
-                Vec::new()
-            }
+            Ok(Ok(inner)) => inner,
+            Ok(Err(err)) => Err(format!("discovery worker failed to run: {err}")),
+            Err(_) => Err(String::from(
+                "discovery did not answer in time (17s deadline)",
+            )),
         }
     }
 }
 
 /// Runs the blocking compose client to completion. Called from the
 /// blocking pool only.
-fn discover_blocking(email: &str) -> Vec<DiscoveredService> {
-    let dns = system_resolver().unwrap_or_else(|| {
-        Url::parse(DEFAULT_DNS_RESOLVER).expect("default DNS resolver URL is valid")
-    });
+fn discover_blocking(email: &str) -> Result<Vec<DiscoveredService>, String> {
+    let dns = system_resolver().unwrap_or_else(|| DEFAULT_DNS_RESOLVER.clone());
     let client = DiscoveryComposeClientStd::new(dns, Tls::default());
     // Only the services himalaya can drive: IMAP incoming and SMTP
     // submission. Mechanisms irrelevant to the requested services are
     // never started, so no POP discovery work happens at all.
     let services = BTreeSet::from([DiscoveryService::Imap, DiscoveryService::Smtp]);
     match client.compose_all_within(email, services, DISCOVERY_DEADLINE) {
-        Ok(configs) => compose_candidates(configs),
+        Ok(configs) => Ok(compose_candidates(configs)),
         // Only an invalid email fails the whole compose; the wizard
-        // validates the address first, so treat this as "nothing".
+        // validates the address first, so a compose error is a
+        // discoverer-level error surfaced as `Err`, never hidden as an
+        // empty result (review s843).
         Err(err) => {
             tracing::warn!(error = %err, "discovery compose failed");
-            Vec::new()
+            Err(format!("discovery failed: {err}"))
         }
     }
 }
@@ -393,8 +395,8 @@ pub struct FakeDiscoverer;
 
 #[async_trait::async_trait]
 impl EmailConfigDiscoverer for FakeDiscoverer {
-    async fn discover(&self, _email: &str) -> Vec<DiscoveredService> {
-        vec![DiscoveredService {
+    async fn discover(&self, _email: &str) -> Result<Vec<DiscoveredService>, String> {
+        Ok(vec![DiscoveredService {
             source: ConfigSource::Provider(Provider::Gmail),
             imap: ServerEndpoint {
                 url: "imaps://imap.gmail.com:993".to_string(),
@@ -406,13 +408,20 @@ impl EmailConfigDiscoverer for FakeDiscoverer {
             }),
             provider: Some(Provider::Gmail),
             username: None,
-        }]
+        }])
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_dns_resolver_url_is_valid() {
+        // Fires the LazyLock initializer at test time: an invalid const
+        // URL is caught here, not on a user's first discovery run.
+        assert_eq!(DEFAULT_DNS_RESOLVER.as_str(), "tcp://1.1.1.1:53");
+    }
 
     fn tcp(
         service: DiscoveryService,

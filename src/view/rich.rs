@@ -444,6 +444,17 @@ mod tests {
     }
 
     #[test]
+    fn literal_gt_lines_in_pre_never_render_as_quotes() {
+        // Plain-text replies pasted into <code>/<pre>: a literal `>` is
+        // content, not a quote marker (the code guard in
+        // `apply_line_markers`). Pinned so decorator changes cannot
+        // silently break it (review s843).
+        let lines = html_to_rich("<pre>> wrote:\noriginal text</pre>", 40);
+        let quoted = lines.iter().find(|l| l.text().contains("wrote")).unwrap();
+        assert!(quoted.spans.iter().all(|s| !s.style.blockquote));
+    }
+
+    #[test]
     fn images_render_alt_text_only_without_fetching() {
         let lines = html_to_rich(
             r#"<p>hi <img src="https://tracking.example.org/pixel.gif" alt="photo of a cat"> bye</p>"#,

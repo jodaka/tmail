@@ -20,6 +20,10 @@ use crate::domain::DraftSnapshot;
 /// Journal format version (ADR 0002: versioned from day one).
 const VERSION: u32 = 1;
 
+/// Filenames keep temp writes apart when the same entry is written twice
+/// in one process (pid is shared; the counter is not).
+static TMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// One persisted draft: the newest recorded revision plus how far the
 /// remote has confirmed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,7 +132,10 @@ impl DraftJournal {
         for file in read_dir {
             let path = match file {
                 Ok(file) => file.path(),
-                Err(_) => continue,
+                Err(err) => {
+                    tracing::warn!(error = %err, "skipped an unreadable journal directory entry");
+                    continue;
+                }
             };
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -173,9 +180,16 @@ impl DraftJournal {
 
     /// Versioned temp-file + atomic rename with a file sync before the
     /// rename, so the recorded bytes survive a crash (ADR 0002 §D.1).
+    /// The temp name carries a process-unique counter on top of the pid:
+    /// two concurrent saves of the same draft (same pid, so serialized by
+    /// the single-threaded runtime today) would otherwise share one name.
     fn write_atomic(&self, path: &Path, entry: &JournalEntry) -> io::Result<()> {
         fs::create_dir_all(&self.dir)?;
-        let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        let tmp = path.with_extension(format!(
+            "json.tmp-{}-{}",
+            std::process::id(),
+            TMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         {
             let mut file = fs::File::create(&tmp)?;
             serde_json::to_writer(&mut file, entry)?;

@@ -14,7 +14,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// keymap-aware `to_action` so the behavioral assertions below stay about
 /// keys and actions, not about plumbing.
 fn to_action(key: KeyEvent, focus: Focus) -> Option<Action> {
-    to_action_with(&KeyMap::defaults(), key, focus)
+    super::to_action(&KeyMap::defaults(), key, focus)
 }
 
 fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -611,7 +611,7 @@ fn legacy_ctrl_chords_match_the_keys_the_user_presses() {
     let f = Focus::MessageList;
     // The event crossterm actually produces for Ctrl+] pages next.
     assert_eq!(
-        to_action_with(&keymap, key(KeyCode::Char('5'), KeyModifiers::CONTROL), f),
+        super::to_action(&keymap, key(KeyCode::Char('5'), KeyModifiers::CONTROL), f),
         Some(Action::PageNext)
     );
     // The other three legacy bytes map to their conventional keys too
@@ -630,7 +630,7 @@ fn legacy_ctrl_chords_match_the_keys_the_user_presses() {
     let keymap = KeyMap::build(&tables).keymap;
     for (reported, pressed) in [('4', '\\'), ('6', '^'), ('7', '_')] {
         assert_eq!(
-            to_action_with(
+            super::to_action(
                 &keymap,
                 key(KeyCode::Char(reported), KeyModifiers::CONTROL),
                 f

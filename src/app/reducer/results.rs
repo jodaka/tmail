@@ -76,14 +76,15 @@ pub(crate) fn notify_new_messages(
         .collect();
     // The finish boundary: whatever the update found is clean now.
     state.session.notifications.mark_clean(page);
-    if arrived.is_empty()
-        || state.settings.notifications == Notifications::Off
-        || state.session.terminal_focused
-    {
+    if arrived.is_empty() || state.session.terminal_focused {
         return Vec::new();
     }
+    // One dispatch on the setting: the match is total over the enum, so
+    // adding a variant becomes a compile error instead of a runtime
+    // `unreachable!`. The Off arm is only reached when `arrived` is empty
+    // or the terminal is unfocused.
     let request = match state.settings.notifications {
-        Notifications::Off => unreachable!("filtered above"),
+        Notifications::Off => return Vec::new(),
         Notifications::Bell => NotifyRequest::Bell,
         Notifications::On => desktop_request(&arrived),
     };
@@ -641,18 +642,17 @@ pub(crate) fn complete_save_attachment(
     let id = result.id;
     match result.outcome {
         Ok(OperationOutcome::SavedPath(path)) => {
-            let open = open_after.then(|| path.clone());
             attachment_saved(state, &path);
-            if open_after {
-                let path = open.expect("checked above");
-                return vec![
+            let open = open_after.then(|| path.clone());
+            match open {
+                Some(open) => vec![
                     state
                         .session
                         .operations
-                        .start(OperationKind::OpenPath { path }),
-                ];
+                        .start(OperationKind::OpenPath { path: open }),
+                ],
+                None => Vec::new(),
             }
-            Vec::new()
         }
         Ok(_) => unexpected_payload(id, "attachment save"),
         Err(failure) => open_error_modal(state, failure),
@@ -701,14 +701,17 @@ pub(crate) fn drafts_restored(state: &mut AppState, drafts: Vec<RestoredDraft>) 
         return Vec::new();
     }
     // The journal is already crash-safe storage (ADR 0002 §D.1): consume
-    // the copy instead of cloning it out of the record.
-    let RestoredDraft {
+    // the copy instead of cloning it out of the record. The guard above
+    // made the list non-empty; the max_by_key walk is total, so this
+    // cannot be None.
+    let Some(RestoredDraft {
         draft: snapshot,
         saved_revision,
-    } = drafts
-        .into_iter()
-        .max_by_key(|entry| entry.draft.revision)
-        .expect("checked above");
+    }) = drafts.into_iter().max_by_key(|entry| entry.draft.revision)
+    else {
+        tracing::debug!("draft restore skipped: empty journal listing");
+        return Vec::new();
+    };
     // A gap between the recorded and remote-confirmed revisions means the
     // crash interrupted a push: restore the draft dirty so the autosave
     // self-heals it once the window elapses.
@@ -758,19 +761,16 @@ pub(crate) fn save_draft_completed(
     result: OperationResult,
 ) -> Vec<Effect> {
     let id = result.id;
-    let current = state
-        .session
-        .composer
-        .as_ref()
-        .is_some_and(|c| c.draft.local_id.as_ref() == Some(&snapshot.local_id));
-    if !current {
-        tracing::debug!(
-            local_id = %snapshot.local_id.0,
-            "dropping draft result for a discarded or replaced draft"
-        );
-        return Vec::new();
-    }
-    let composer = state.session.composer.as_mut().expect("checked above");
+    let composer = match state.session.composer.as_mut() {
+        Some(composer) if composer.draft.local_id.as_ref() == Some(&snapshot.local_id) => composer,
+        _ => {
+            tracing::debug!(
+                local_id = %snapshot.local_id.0,
+                "dropping draft result for a discarded or replaced draft"
+            );
+            return Vec::new();
+        }
+    };
     match result.outcome {
         Ok(OperationOutcome::DraftSaved { remote_id }) => {
             let chain =

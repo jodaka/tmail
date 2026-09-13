@@ -76,10 +76,15 @@ impl Focus {
             // the sidebar at the cycle's ends (compose-mode folder list).
             Focus::Composer => self,
             _ => {
-                let i = FOCUS_ORDER
-                    .iter()
-                    .position(|f| *f == self)
-                    .expect("focus in order");
+                let i = FOCUS_ORDER.iter().position(|f| *f == self);
+                let Some(i) = i else {
+                    // A new Focus variant outside the tab ring (like the
+                    // self-cycle wizards/dialogs) stays put rather than
+                    // panicking — the match arms above already handle it,
+                    // this only catches a missed arm at edit time.
+                    debug_assert!(false, "focus not in the tab ring");
+                    return self;
+                };
                 let len = FOCUS_ORDER.len() as isize;
                 let mut n = (i as isize + dir).rem_euclid(len) as usize;
                 // Tab never *lands* on the search field (mouse click and
@@ -92,22 +97,6 @@ impl Focus {
                 FOCUS_ORDER[n]
             }
         }
-    }
-
-    /// Whether single-letter shortcuts (c, r, a, f, e, s, u, /) are active.
-    /// They never fire while editing a text field or while a modal is open
-    /// (plan §10); the reader acts on the open message.
-    pub fn accepts_shortcuts(self) -> bool {
-        !matches!(
-            self,
-            Focus::SearchField
-                | Focus::ErrorModal
-                | Focus::Dialog
-                | Focus::ThemePicker
-                | Focus::Help
-                | Focus::Composer
-                | Focus::Wizard
-        )
     }
 }
 
@@ -173,23 +162,6 @@ mod tests {
     }
 
     #[test]
-    fn shortcuts_gated_in_search_field() {
-        assert!(!Focus::SearchField.accepts_shortcuts());
-        assert!(!Focus::Composer.accepts_shortcuts());
-        assert!(!Focus::Dialog.accepts_shortcuts());
-        assert!(!Focus::ThemePicker.accepts_shortcuts());
-        assert!(Focus::Sidebar.accepts_shortcuts());
-        assert!(Focus::MessageList.accepts_shortcuts());
-    }
-
-    #[test]
-    fn wizard_focus_is_self_cycle_and_gates_shortcuts() {
-        assert_eq!(Focus::Wizard.next(), Focus::Wizard);
-        assert_eq!(Focus::Wizard.previous(), Focus::Wizard);
-        assert!(!Focus::Wizard.accepts_shortcuts());
-    }
-
-    #[test]
     fn dialog_focus_is_self_cycle() {
         assert_eq!(Focus::Dialog.next(), Focus::Dialog);
         assert_eq!(Focus::Dialog.previous(), Focus::Dialog);
@@ -198,11 +170,10 @@ mod tests {
     }
 
     #[test]
-    fn reader_focus_is_self_cycle_and_accepts_shortcuts() {
+    fn reader_focus_is_self_cycle() {
         // The reducer drives the reader's internal link/chip cursor from
         // Tab; at the screen-focus level the reader never cycles away.
         assert_eq!(Focus::Reader.next(), Focus::Reader);
         assert_eq!(Focus::Reader.previous(), Focus::Reader);
-        assert!(Focus::Reader.accepts_shortcuts());
     }
 }
