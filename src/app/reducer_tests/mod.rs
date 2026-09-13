@@ -2,6 +2,7 @@
 //! route behavior, resize; plan §19 Phase 3: operation registry semantics,
 //! stale/superseded-result rejection, cancellation, Retry/Dismiss modal).
 
+use super::test_prelude::*;
 use super::*;
 use crate::app::action::AttachmentBrowse;
 use crate::app::action::ComposerEdit;
