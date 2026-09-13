@@ -1215,16 +1215,51 @@ fn classify_send(output: process::ChildOutput) -> SendOutcome {
 /// Whether a send diagnostic clearly marks a failure *before* the SMTP
 /// DATA phase (nothing transmitted). Matched case-insensitively against
 /// the Phase 0 probe vocabulary; anything not listed is conservatively
-/// treated as unknown delivery state — except explicit DATA-phase markers,
-/// which are always tmail-connection and therefore never pre-delivery.
+/// treated as unknown delivery state.
+///
+/// Ticket 9gx6: the old vocabulary matched the broad substring
+/// "connect", so a DATA-phase error phrased "connection reset by peer"
+/// was misclassified as pre-delivery — inviting a duplicate send, the
+/// exact failure mode [`SendOutcome`] exists to prevent. The markers are
+/// now anchored: explicit DATA-phase markers and known-ambiguous
+/// transport phrases are checked first and always route to the
+/// conservative outcome; dial errors must match the himalaya shape
+/// ("connect <addr>: …") or a narrow pre-DATA vocabulary.
 fn pre_delivery_failure(detail: &str) -> bool {
     let lower = detail.to_ascii_lowercase();
-    if lower.contains("smtp data") {
+    // Explicit DATA-phase markers are never pre-delivery: himalaya tags
+    // transport errors during/after DATA with these prefixes, and the
+    // payload may already have been transmitted (probe-verified).
+    const DATA_PHASE_MARKERS: [&str; 2] = ["smtp data", "smtp write"];
+    if DATA_PHASE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
         return false;
     }
-    const PRE_DATA_MARKERS: [&str; 14] = [
-        "connect",            // "connect 127.0.0.1:3425: connection refused"
-        "connection refused", // redundant with the above, kept for clarity
+    // Known-ambiguous transport phrases: these read like connection
+    // failures but occur mid-session (the sink may already hold the
+    // payload), so they must never count as safe-to-retry.
+    const AMBIGUOUS_MARKERS: [&str; 5] = [
+        "connection reset",
+        "connection closed",
+        "broken pipe",
+        "unexpected eof",
+        "timed out",
+    ];
+    if AMBIGUOUS_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return false;
+    }
+    // Dial errors carry the himalaya shape "connect <addr>: <reason>"
+    // (probe: "connect 127.0.0.1:3425: connection refused"). Anchoring at
+    // the start keeps mid-session "connection …" phrases out.
+    if lower.starts_with("connect ") {
+        return true;
+    }
+    const PRE_DATA_MARKERS: [&str; 12] = [
         "no route",
         "network is unreachable",
         "resolve", // DNS resolution failures
@@ -1852,6 +1887,10 @@ mod send_tests {
         assert!(pre_delivery_failure("authentication failed"));
         // Explicit DATA-phase markers are never pre-delivery…
         assert!(!pre_delivery_failure("SMTP DATA failed: timeout"));
+        // Ticket 9gx6: mid-session transport phrases read like dial
+        // failures but the payload may already be transmitted.
+        assert!(!pre_delivery_failure("write tcp: connection reset by peer"));
+        assert!(!pre_delivery_failure("SMTP connection closed by peer"));
         // …and everything unlisted is conservative.
         assert!(!pre_delivery_failure("mailbox disappeared"));
     }
