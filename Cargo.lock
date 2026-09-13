@@ -2925,6 +2925,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "crossterm",
+ "fastrand",
  "futures-util",
  "html2text",
  "io-pim-discovery",

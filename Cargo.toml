@@ -26,6 +26,9 @@ html2text = "0.17.1"
 # Isolated download directories for attachment saves (plan §15: downloads
 # never touch the destination until a collision-checked write is ready).
 tempfile = "3"
+# Random component mixed into freshly minted DraftIds (ticket tfc3): a
+# wall-clock stamp alone can collide across sessions or clock rewinds.
+fastrand = "2"
 # Raw-MIME support for the test fixture corpus only (feature `test-fixtures`);
 # production builds never parse MIME — Himalaya does (ADR 0001).
 mail-parser = { version = "0.11.8", optional = true, features = ["serde"] }

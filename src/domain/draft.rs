@@ -34,9 +34,10 @@ use crate::domain::message::{Message, bracketed_message_id};
 pub const DEFAULT_AUTOSAVE_DELAY_MS: u64 = 2_000;
 
 /// Locally unique draft identity; doubles as the journal file stem
-/// (ADR 0002 §D.1). Minted once, before the first save, from reducer-supplied
-/// wall-clock time so ids are unique across sessions without the reducer
-/// touching a clock.
+/// (ADR 0002 §D.1). Minted once, before the first save, from
+/// reducer-supplied wall-clock time plus a random suffix (ticket tfc3)
+/// so ids are unique across sessions without the reducer touching a
+/// clock.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DraftId(pub String);
 
@@ -196,12 +197,19 @@ impl Draft {
     pub fn start_save(&mut self, now: DateTime<FixedOffset>) -> DraftSnapshot {
         self.save = DraftSaveState::Saving;
         if self.local_id.is_none() {
+            // Ticket tfc3: a wall-clock stamp alone can collide — two
+            // drafts started in the same nanosecond, or a clock rewind
+            // across sessions landing on a recorded stamp (silently
+            // overwriting the other draft's journal file). Mix in a
+            // random 32-bit suffix; the stamp keeps ids sortable by
+            // creation time.
             let stamp = now
                 .timestamp_nanos_opt()
                 .unwrap_or(now.timestamp_millis() * 1_000_000);
-            self.local_id = Some(DraftId(format!("local-{stamp}")));
+            let salt = fastrand::u32(..);
+            self.local_id = Some(DraftId(format!("local-{stamp}-{salt:08x}")));
             if self.message_id.is_none() {
-                self.message_id = Some(format!("<{stamp}.draft@tmail.local>"));
+                self.message_id = Some(format!("<{stamp}.{salt:08x}.draft@tmail.local>"));
             }
         }
         self.snapshot()
@@ -385,6 +393,35 @@ mod tests {
             snapshot.message_id.as_deref(),
             Some("<1778.draft@tmail.local>"),
             "the copy's Message-ID is kept, not re-minted"
+        );
+    }
+
+    #[test]
+    fn minted_ids_carry_a_random_suffix_beyond_the_clock() {
+        // Ticket tfc3: two drafts minted at the same instant (or across a
+        // clock rewind) must not share a journal file. The random suffix
+        // makes an exact collision overwhelmingly unlikely, and the
+        // Message-ID keeps the same salt so add-then-delete matching
+        // stays coherent.
+        let mut first = Draft::default();
+        let first = first.start_save(at(2));
+        let mut second = Draft::default();
+        let second = second.start_save(at(2));
+        assert_ne!(
+            first.local_id, second.local_id,
+            "same-instant drafts must not collide"
+        );
+        assert_ne!(first.message_id, second.message_id);
+        // Shape: local-<stamp>-<8 hex chars>.
+        let id = first.local_id.0.clone();
+        let salt = id.rsplit('-').next().expect("salt");
+        assert_eq!(salt.len(), 8, "8 hex chars: {id}");
+        assert!(salt.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+        assert!(
+            first
+                .message_id
+                .as_deref()
+                .is_some_and(|mid| mid.ends_with(".draft@tmail.local>"))
         );
     }
 
