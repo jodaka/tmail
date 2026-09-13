@@ -589,7 +589,7 @@ fn parse_page_size(tmail: Option<&toml::Value>, config: &mut Config, issues: &mu
     };
     match get_nonneg_int(
         value,
-        "[tmail.mail].mail.page_size must be an integer; using {DEFAULT_PAGE_SIZE}".to_string(),
+        format!("[tmail.mail].mail.page_size must be an integer; using {DEFAULT_PAGE_SIZE}"),
         invalid,
         issues,
     ) {
@@ -1174,6 +1174,20 @@ mod tests {
     fn nonpositive_page_size_falls_back_to_default() {
         let text = "[tmail.mail]\npage_size = 0\n";
         assert_eq!(parse(text, None).mail.page_size, DEFAULT_PAGE_SIZE);
+    }
+
+    #[test]
+    fn noninteger_page_size_message_reports_resolved_default() {
+        // Ticket cgnm: the not-an-integer message must render the resolved
+        // default, not the literal "{DEFAULT_PAGE_SIZE}".
+        let text = "[tmail.mail]\npage_size = \"many\"\n";
+        let (_, issues) = parse_with_issues(text, None);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains(&format!("using {DEFAULT_PAGE_SIZE}"))),
+            "issues: {issues:?}"
+        );
     }
 
     #[test]
