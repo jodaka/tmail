@@ -338,7 +338,9 @@ fn toml_str(value: &str) -> String {
 
 /// Writes the merged document: a fresh file is created with mode 0600
 /// (`create_new` — never world-readable at any instant); an existing
-/// file is overwritten in place, keeping its mode.
+/// file is replaced atomically (temp file, sync, rename — ticket 12h7),
+/// so a crash mid-write cannot corrupt the shared config, and its mode
+/// is preserved.
 fn write_document(path: &Path, doc: &DocumentMut, created: bool) -> Result<(), String> {
     let text = doc.to_string();
     if created {
@@ -353,9 +355,49 @@ fn write_document(path: &Path, doc: &DocumentMut, created: bool) -> Result<(), S
         file.write_all(text.as_bytes())
             .map_err(|err| format!("could not write config file: {err}"))
     } else {
-        std::fs::write(path, text.as_bytes())
-            .map_err(|err| format!("could not write config file: {err}"))
+        write_existing_atomically(path, text.as_bytes())
     }
+}
+
+/// Replace an existing file atomically (the `DraftJournal::write_atomic`
+/// pattern): write a sibling temp file, sync it, then rename over the
+/// target. Rename is atomic on the same filesystem, so the target is
+/// either the old or the new content — never a partial write. The temp
+/// file inherits restrictive defaults and is removed on any failure.
+fn write_existing_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = path.with_extension(format!("toml.tmp-{}", std::process::id()));
+    let remove_tmp = |tmp: &Path| {
+        let _ = std::fs::remove_file(tmp);
+    };
+    let result = (|| {
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|err| format!("could not create a temporary config file: {err}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Match the target's mode when readable, else owner-only; a
+            // shared-readable config is deliberately not downgraded
+            // silently (the wizard warns about that separately).
+            let mode = std::fs::metadata(path)
+                .ok()
+                .map(|meta| meta.permissions().mode() & 0o777)
+                .unwrap_or(0o600);
+            file.set_permissions(std::fs::Permissions::from_mode(mode))
+                .map_err(|err| format!("could not set config file permissions: {err}"))?;
+        }
+        file.write_all(bytes)
+            .map_err(|err| format!("could not write config file: {err}"))?;
+        file.sync_all()
+            .map_err(|err| format!("could not sync the config file: {err}"))?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+            .map_err(|err| format!("could not replace the config file: {err}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        remove_tmp(&tmp);
+    }
+    result
 }
 
 /// Creates the config file exclusively with mode 0600 where the OS
@@ -389,8 +431,13 @@ fn validate_written(path: &Path, name: &str) -> Result<(), String> {
         .map_err(|err| format!("saved config could not be re-read: {err}"))?;
     let (_, issues) = parse_with_issues(&text, Some(path.to_path_buf()));
     if issues.iter().any(|issue| issue.contains("not valid TOML")) {
-        return Err(String::from(
-            "internal error: the merged config does not parse; nothing was changed",
+        // Ticket 12h7: by this point the file IS written — the old message
+        // ("nothing was changed") was false. Name the file so the user can
+        // inspect or restore it.
+        return Err(format!(
+            "internal error: the merged config written to {} does not parse; \
+             the file on disk carries the broken merge and may need manual repair",
+            path.display()
         ));
     }
     let doc: toml::Value = toml::from_str(&text)
@@ -745,5 +792,53 @@ imap.server = \"imaps://imap.example.com:993\"
             std::fs::read_to_string(&path).expect("unchanged"),
             "not [valid toml"
         );
+    }
+
+    #[test]
+    fn overwrite_is_atomic_and_preserves_mode_and_content() {
+        // Ticket 12h7: the existing-file path must not overwrite in place
+        // (a crash mid-write would corrupt the shared config), and the
+        // target's mode must survive the replacement.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[accounts.old]\nemail = \"old@example.com\"\n").expect("seed");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("chmod");
+        }
+
+        save_account(&path, &gmail_raw_draft("gmail")).expect("save succeeds");
+
+        // The merge landed…
+        let text = std::fs::read_to_string(&path).expect("written");
+        assert!(text.contains("[accounts.gmail]"));
+        assert!(text.contains("[accounts.old]"));
+        // …no temp sibling is left behind…
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.contains(".tmp-"))
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
+        // …and the mode survives the rename (ticket 12h7).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path)
+                    .expect("metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o640,
+                "the replacement must keep the original mode"
+            );
+        }
     }
 }
