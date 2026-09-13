@@ -504,7 +504,12 @@ impl AppState {
         if self.session.wizard.is_some() {
             return String::from("tmail setup");
         }
-        if let Some(composer) = &self.session.composer {
+        // The composer title only applies while a Composer route is
+        // actually on screen (ticket bfd8): an Esc-parked draft keeps
+        // `session.composer` set, but the user is back in the mailbox.
+        if matches!(self.active_route(), Some(Route::Composer))
+            && let Some(composer) = &self.session.composer
+        {
             let to = composer.draft.to.as_str();
             let recipient = to
                 .split([',', ';'])
@@ -567,6 +572,7 @@ mod terminal_title_tests {
         let mut composer = ComposerState::new();
         composer.draft.to = String::from("Ada Example <ada@example.io>, ");
         state.session.composer = Some(composer);
+        state.session.routes.push(Route::Composer);
         assert_eq!(
             state.terminal_title(),
             "Mail to Ada Example <ada@example.io>"
@@ -577,7 +583,18 @@ mod terminal_title_tests {
     fn composer_without_a_recipient_dashes() {
         let mut state = mailbox_state();
         state.session.composer = Some(ComposerState::new());
+        state.session.routes.push(Route::Composer);
         assert_eq!(state.terminal_title(), "Mail to —");
+    }
+
+    #[test]
+    fn parked_draft_does_not_own_the_title() {
+        // Ticket bfd8: an Esc-parked draft keeps session.composer set, but
+        // with the mailbox route back on top the title must name the
+        // mailbox, not "Mail to …".
+        let mut state = mailbox_state();
+        state.session.composer = Some(ComposerState::new());
+        assert_eq!(state.terminal_title(), "INBOX (4 unread)");
     }
 
     #[test]
