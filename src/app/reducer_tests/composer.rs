@@ -75,7 +75,9 @@ fn composing_sidebar_focus_moves_the_folder_cursor_and_switches() {
     // '/' must not strand focus in the search field while composing.
     no_effects(&reduce(&mut s, &Action::OpenSearch));
     assert_eq!(s.session.focus, Focus::Sidebar);
-    let (id, req) = expect_page(&reduce(&mut s, &Action::Activate));
+    let effects = reduce(&mut s, &Action::Activate);
+    let (cache_id, ..) = expect_cache_list_load(&effects);
+    let (id, req) = expect_page(&complete_cache_miss(&mut s, cache_id));
     assert_eq!(req.mailbox_id.0, "drafts");
     complete_page_ok(&mut s, id, &req, 0);
     // The switch closed the composer view; the draft data is kept for

@@ -336,7 +336,7 @@ fn save_failure_keeps_the_open_chain_off() {
 #[test]
 fn esc_cancels_message_load_then_second_esc_returns() {
     let mut s = state();
-    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (id, _) = open_reader(&mut s);
     let token = s.session.operations.cancellation(id).unwrap();
     // First Esc cancels the foreground load (plan §10 order).
     reduce(&mut s, &Action::BackOrCancel);
@@ -354,7 +354,7 @@ fn esc_cancels_message_load_then_second_esc_returns() {
 fn stale_message_result_after_close_is_dropped() {
     let mut s = state();
     s.selection = 1;
-    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (id, _) = open_reader(&mut s);
     // Capture the open summary, then close the reader before the result
     // arrives.
     let summary = s.open_summary().unwrap().clone();
@@ -379,7 +379,7 @@ fn stale_message_result_after_close_is_dropped() {
 #[test]
 fn message_load_failure_opens_modal_and_retry_replays() {
     let mut s = state();
-    let (id, kind) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (id, kind) = open_reader(&mut s);
     reduce(&mut s, &failure(id, &kind, "no such message"));
     // Coherent state: reader open, failed placeholder, modal up.
     assert!(matches!(s.open_message, Loadable::Failed(_)));
@@ -422,7 +422,7 @@ fn toggle_star_from_list_requests_inverse_and_applies_on_confirmation() {
 fn star_from_reader_targets_the_open_message() {
     let mut s = state();
     s.selection = 2; // m3: not starred.
-    let (load_id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (load_id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, load_id);
     let (id, kind) = expect_kind(&reduce(&mut s, &Action::ToggleStar));
     assert!(matches!(
@@ -441,7 +441,7 @@ fn star_from_reader_targets_the_open_message() {
 fn mark_unread_updates_list_and_route_after_confirmation() {
     let mut s = state();
     s.selection = 3; // m4: read.
-    let (load_id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (load_id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, load_id);
     let (id, kind) = expect_kind(&reduce(&mut s, &Action::MarkUnread));
     assert!(matches!(&kind, OperationKind::SetRead { read: false, .. }));
@@ -487,7 +487,7 @@ fn trash_closes_reader_and_removes_row() {
     let mut s = state();
     s.selection = 4;
     let target = s.selected_message().unwrap().id.clone();
-    let (load_id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (load_id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, load_id);
     let (id, kind) = expect_kind(&reduce(&mut s, &Action::Trash));
     assert!(matches!(&kind, OperationKind::Trash(_)), "kind: {kind:?}");
@@ -515,7 +515,7 @@ fn archive_failure_keeps_row_and_opens_modal() {
 #[test]
 fn reader_scrolls_within_content_and_clamps() {
     let mut s = state();
-    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, id);
     // The scroll viewport is the rows under the fixed header (ticket 6864);
     // the clamp tracks the body alone.
@@ -729,7 +729,7 @@ fn resize_updates_size() {
 #[test]
 fn resize_clamps_reader_scroll_after_reflow() {
     let mut s = state();
-    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, id);
     // Scroll deep into a narrow (tall) document: many body lines wrap out.
     let narrow: usize = 100;

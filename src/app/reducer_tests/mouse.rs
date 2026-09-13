@@ -11,6 +11,10 @@ fn click_selects_then_opens_a_message_row() {
     assert_eq!(s.session.focus, Focus::MessageList);
     // Clicking the selected row opens it (Enter's job).
     let effects = reduce(&mut s, &Action::Click(ClickTarget::MessageRow(2)));
+    // The click starts the message cache read (ticket haeb); the miss
+    // starts the fresh foreground load.
+    let (cache_id, _) = effect_parts(&effects);
+    let effects = complete_cache_miss(&mut s, cache_id);
     let (id, kind) = effect_parts(&effects);
     let OperationKind::LoadMessage(locator) = kind else {
         panic!("expected LoadMessage, got {kind:?}");
@@ -43,7 +47,8 @@ fn click_mailbox_selects_then_switches() {
     assert_eq!(s.session.focus, Focus::Sidebar);
     // Clicking the selected mailbox switches to it (Enter's job).
     let effects = reduce(&mut s, &Action::Click(ClickTarget::Mailbox(3)));
-    let (_, req) = expect_page(&effects);
+    let (cache_id, ..) = expect_cache_list_load(&effects);
+    let (_, req) = expect_page(&complete_cache_miss(&mut s, cache_id));
     assert_eq!(req.mailbox_id.0, "archive");
     assert_eq!(
         s.active_route().and_then(Route::mailbox_id).unwrap().0,

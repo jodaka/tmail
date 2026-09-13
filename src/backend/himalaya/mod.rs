@@ -390,8 +390,11 @@ impl MailBackend for HimalayaCliBackend {
         );
         // 1. Crash-safe local record BEFORE any remote call (ADR 0002
         //    §D.1): a crash after this point can only leave duplicates,
-        //    never lost text.
-        self.journal.record(&draft)?;
+        //    never lost text. Journal I/O runs on the blocking pool — the
+        //    runtime is single-threaded and must never wait on a disk.
+        let journal = self.journal.clone();
+        let snapshot = draft.clone();
+        blocking(move || journal.record(&snapshot).map_err(BackendError::Io)).await?;
 
         // 2. Serialize the draft (library-built RFC 5322, plan §14).
         let message = self.serialize_draft(&draft)?;
@@ -430,10 +433,17 @@ impl MailBackend for HimalayaCliBackend {
         }
         self.delete_stray_draft_copies(&ctx, &drafts, Some(&new_id), &draft.message_id);
 
-        // 5. Confirm the revision in the journal (newest pushed).
-        self.journal
-            .mark_remote(&draft.local_id.0, draft.revision)
-            .map_err(BackendError::Io)?;
+        // 5. Confirm the revision in the journal (newest pushed), on the
+        //    blocking pool like every journal access.
+        let journal = self.journal.clone();
+        let local_id = draft.local_id.0.clone();
+        let revision = draft.revision;
+        blocking(move || {
+            journal
+                .mark_remote(&local_id, revision)
+                .map_err(BackendError::Io)
+        })
+        .await?;
 
         Ok(new_id)
     }
@@ -441,10 +451,11 @@ impl MailBackend for HimalayaCliBackend {
     async fn load_drafts(&self, _ctx: RequestContext) -> BackendResult<Vec<RestoredDraft>> {
         tracing::debug!("load_drafts");
         // Purely local (ADR 0002 §D.1): the journal is the source of truth
-        // for restore, independent of account reachability.
-        Ok(self
-            .journal
-            .load_all()?
+        // for restore, independent of account reachability. The journal
+        // walk runs on the blocking pool (single-threaded runtime).
+        let journal = self.journal.clone();
+        let entries = blocking(move || journal.load_all().map_err(BackendError::Io)).await?;
+        Ok(entries
             .into_iter()
             .map(|entry| RestoredDraft {
                 draft: entry.draft,
@@ -457,7 +468,10 @@ impl MailBackend for HimalayaCliBackend {
         tracing::debug!(local_id = %draft.local_id.0, "delete_draft");
         // The user confirmed the discard: journal first (worst case after a
         // crash is a lingering remote copy, never a resurrected draft).
-        self.journal.remove(&draft.local_id.0)?;
+        // Journal I/O runs on the blocking pool (single-threaded runtime).
+        let journal = self.journal.clone();
+        let local_id = draft.local_id.0.clone();
+        blocking(move || journal.remove(&local_id).map_err(BackendError::Io)).await?;
         if let Some(drafts) = self.mailbox_for_role(MailboxRole::Drafts) {
             // Unlike the save-path cleanup, the sweep runs *awaited* here:
             // the operation may only report Done once the IMAP deletions
@@ -502,7 +516,7 @@ impl MailBackend for HimalayaCliBackend {
         // 1. Serialize through the library (Phase 7.1) — refusals for a
         //    missing identity or empty recipient lists happen here, before
         //    any child process exists.
-        let bytes = self.serialize_outbound(&message)?;
+        let bytes = self.serialize_outbound(&message).await?;
         // 2. Deliver through the stdin contract (ADR 0001 decision 2,
         //    plan §11: "Pipe serialized mail to stdin when required").
         let argv = command::message_send_argv(self.config_path.as_deref(), self.account.as_deref());
@@ -520,7 +534,8 @@ impl MailBackend for HimalayaCliBackend {
         path: PathBuf,
     ) -> BackendResult<DraftAttachment> {
         tracing::debug!(operation = %ctx.operation, path = %path.display(), "read_attachment");
-        Ok(validate_attachment_source(&path)?)
+        // The source check stats and probe-opens the file: blocking pool.
+        blocking(move || validate_attachment_source(&path)).await
     }
 
     async fn save_attachment(
@@ -534,14 +549,19 @@ impl MailBackend for HimalayaCliBackend {
             "save_attachment"
         );
         // 1. Destination directory: explicit request, then config, then
-        //    the platform default. Created when missing.
+        //    the platform default. Created when missing — on the blocking
+        //    pool (single-threaded runtime).
         let dir = resolve_downloads_dir(request.dir.as_deref(), self.downloads_dir.as_deref())?;
-        std::fs::create_dir_all(&dir).map_err(|err| {
-            BackendError::File(format!(
-                "download directory `{}` could not be created: {err}",
-                dir.display()
-            ))
-        })?;
+        let to_create = dir.clone();
+        blocking(move || {
+            std::fs::create_dir_all(&to_create).map_err(|err| {
+                BackendError::File(format!(
+                    "download directory `{}` could not be created: {err}",
+                    to_create.display()
+                ))
+            })
+        })
+        .await?;
 
         // 2. Download the part into a Tmail-owned private tempdir — never
         //    straight into the destination, so nothing there can be
@@ -579,12 +599,17 @@ impl MailBackend for HimalayaCliBackend {
                     request.part_id
                 ))
             })?;
-        let bytes = std::fs::read(&source).map_err(|err| {
-            BackendError::File(format!(
-                "`{}` could not be read after download: {err}",
-                source.display()
-            ))
-        })?;
+        // The download can be tens of megabytes: the read hops to the
+        // blocking pool so the single-threaded runtime never stalls.
+        let bytes = blocking(move || {
+            std::fs::read(&source).map_err(|err| {
+                BackendError::File(format!(
+                    "`{}` could not be read after download: {err}",
+                    source.display()
+                ))
+            })
+        })
+        .await?;
 
         // 3. Destination name: the caller's display filename (reduced to a
         //    single component — traversal is impossible), else the row's,
@@ -593,10 +618,13 @@ impl MailBackend for HimalayaCliBackend {
             request.filename.as_deref().or(row.filename.as_deref()),
             request.part_id,
         );
-        let final_path = write_collision_safe(&dir, &name, &bytes)?;
+        // The collision-checked write lands on the blocking pool with the
+        // payload moved in (single-threaded runtime).
+        let byte_count = bytes.len();
+        let final_path = blocking(move || write_collision_safe(&dir, &name, &bytes)).await?;
         tracing::info!(
             part = request.part_id,
-            bytes = bytes.len(),
+            bytes = byte_count,
             saved = %final_path.display(),
             "attachment saved"
         );
@@ -833,7 +861,11 @@ impl HimalayaCliBackend {
     /// Recipients are refused here as defense in depth — [`crate::domain::OutboundMessage`]
     /// is constructed only from validated fields, so this arm is
     /// unreachable through the reducer.
-    fn serialize_outbound(&self, message: &OutboundMessage) -> BackendResult<Vec<u8>> {
+    ///
+    /// Attachment payloads are file reads (potentially tens of megabytes):
+    /// they hop to the blocking pool before the builder runs, so the
+    /// single-threaded runtime never stalls on a disk.
+    async fn serialize_outbound(&self, message: &OutboundMessage) -> BackendResult<Vec<u8>> {
         if message.recipient_count() == 0 {
             return Err(BackendError::InvalidRequest(String::from(
                 "outbound message has no recipients",
@@ -845,6 +877,7 @@ impl HimalayaCliBackend {
                  so outgoing mail has a From address",
             )));
         };
+        let payloads = read_attachment_payloads(&message.attachments).await?;
         let message_id = match &message.message_id {
             Some(id) => bare_message_id(id),
             None => format!(
@@ -891,13 +924,7 @@ impl HimalayaCliBackend {
                 ids.into_iter(),
             ));
         }
-        for attachment in &message.attachments {
-            let bytes = std::fs::read(&attachment.path).map_err(|err| {
-                BackendError::File(format!(
-                    "`{}` could not be read for sending: {err}",
-                    attachment.path.display()
-                ))
-            })?;
+        for (attachment, bytes) in message.attachments.iter().zip(payloads) {
             builder = builder.attachment(
                 crate::domain::paths::media_type_for(&attachment.name),
                 attachment.name.as_str(),
@@ -911,6 +938,20 @@ impl HimalayaCliBackend {
                 BackendError::InvalidRequest(format!("outbound serialization failed: {err}"))
             })
     }
+}
+
+/// Run one blocking file operation on the blocking pool: the main runtime
+/// is single-threaded (plan §3), so filesystem work on it stalls the UI
+/// loop — every file access below the backend boundary hops threads. A
+/// panicked task surfaces as an I/O error, like any other failure.
+async fn blocking<T, F>(task: F) -> BackendResult<T>
+where
+    F: FnOnce() -> BackendResult<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|err| BackendError::Io(std::io::Error::other(err.to_string())))?
 }
 
 /// Parse one composer address field into library addresses (valid entries
@@ -930,6 +971,32 @@ fn header_addresses(field: &str) -> Option<MailAddress<'static>> {
 /// (shared normalizer: `domain::message::bare_message_id`).
 fn bare_message_id(message_id: &str) -> String {
     crate::domain::message::bare_message_id(message_id).to_string()
+}
+
+/// Read every outbound attachment's bytes on the blocking pool, in
+/// insertion order (deterministic wire order). A missing or unreadable
+/// file is the same detailed, retryable refusal the inline read produced.
+async fn read_attachment_payloads(
+    attachments: &[crate::domain::OutboundAttachment],
+) -> BackendResult<Vec<Vec<u8>>> {
+    let specs: Vec<PathBuf> = attachments
+        .iter()
+        .map(|attachment| attachment.path.clone())
+        .collect();
+    blocking(move || {
+        let mut payloads = Vec::with_capacity(specs.len());
+        for path in &specs {
+            let bytes = std::fs::read(path).map_err(|err| {
+                BackendError::File(format!(
+                    "`{}` could not be read for sending: {err}",
+                    path.display()
+                ))
+            })?;
+            payloads.push(bytes);
+        }
+        Ok(payloads)
+    })
+    .await
 }
 
 /// Resolve the destination directory for a save (plan §15): the request's
@@ -1621,8 +1688,8 @@ mod attachment_mime_tests {
         .expect("valid recipients")
     }
 
-    #[test]
-    fn attachments_round_trip_filename_media_type_bytes_and_size() {
+    #[tokio::test]
+    async fn attachments_round_trip_filename_media_type_bytes_and_size() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         // A name with a space and a binary payload with non-UTF-8 bytes.
         let pdf_path = dir.path().join("report final.pdf");
@@ -1641,7 +1708,10 @@ mod attachment_mime_tests {
                 path: txt_path,
             },
         ]);
-        let wire = backend().serialize_outbound(&message).expect("serializes");
+        let wire = backend()
+            .serialize_outbound(&message)
+            .await
+            .expect("serializes");
 
         let parsed = mail_parser::MessageParser::default()
             .parse(&wire)
@@ -1667,14 +1737,15 @@ mod attachment_mime_tests {
         assert!(wire.windows(9).any(|w| w == b"multipart"), "mixed body");
     }
 
-    #[test]
-    fn missing_attachment_files_are_detailed_retryable_refusals() {
+    #[tokio::test]
+    async fn missing_attachment_files_are_detailed_retryable_refusals() {
         let message = outbound(vec![OutboundAttachment {
             name: String::from("gone.pdf"),
             path: std::path::PathBuf::from("/nonexistent/gone.pdf"),
         }]);
         let err = backend()
             .serialize_outbound(&message)
+            .await
             .expect_err("file missing");
         match err {
             BackendError::File(detail) => {
@@ -1685,10 +1756,11 @@ mod attachment_mime_tests {
         }
     }
 
-    #[test]
-    fn a_send_without_attachments_stays_single_part() {
+    #[tokio::test]
+    async fn a_send_without_attachments_stays_single_part() {
         let wire = backend()
             .serialize_outbound(&outbound(Vec::new()))
+            .await
             .expect("ok");
         let text = String::from_utf8_lossy(&wire);
         assert!(!text.contains("multipart"), "no attachment scaffolding");

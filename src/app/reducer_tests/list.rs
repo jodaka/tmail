@@ -154,7 +154,9 @@ fn page_result_for_other_mailbox_is_dropped() {
         .position(|m| m.id.0 == "sent")
         .unwrap();
     s.session.focus = Focus::Sidebar;
-    let (sent_op, sent_req) = expect_page(&reduce(&mut s, &Action::Activate));
+    let effects = reduce(&mut s, &Action::Activate);
+    let (cache_id, ..) = expect_cache_list_load(&effects);
+    let (sent_op, sent_req) = expect_page(&complete_cache_miss(&mut s, cache_id));
     assert_eq!(sent_req.mailbox_id.0, "sent");
     // The slower inbox result arrives after the switch: it must never
     // replace what the Sent view is loading (plan §11).
@@ -328,7 +330,9 @@ fn mailboxes_loaded_selects_inbox_role() {
             outcome: Ok(OperationOutcome::Mailboxes(mock::mock_mailboxes())),
         }),
     );
-    let (_, req) = expect_page(&reduce(&mut s, &Action::Refresh));
+    let effects = reduce(&mut s, &Action::Refresh);
+    let (cache_id, ..) = expect_cache_list_load(&effects);
+    let (_, req) = expect_page(&complete_cache_miss(&mut s, cache_id));
     assert_eq!(req.mailbox_id.0, "inbox");
     assert_eq!(req.offset, 0);
     assert_eq!(s.session.routes.len(), 1);
@@ -363,7 +367,9 @@ fn mailboxes_loaded_falls_back_to_first_mailbox() {
             outcome: Ok(OperationOutcome::Mailboxes(mailboxes)),
         }),
     );
-    let (_, req) = expect_page(&reduce(&mut s, &Action::Refresh));
+    let effects = reduce(&mut s, &Action::Refresh);
+    let (cache_id, ..) = expect_cache_list_load(&effects);
+    let (_, req) = expect_page(&complete_cache_miss(&mut s, cache_id));
     assert_eq!(req.mailbox_id.0, "notes");
     assert_eq!(s.mailbox_selection, 0);
 }
@@ -372,13 +378,14 @@ fn mailboxes_loaded_falls_back_to_first_mailbox() {
 fn mailboxes_loaded_empty_is_valid_not_an_error() {
     let mut s = AppState::initial(mock::PAGE_SIZE);
     let (id, _) = boot(&mut s);
-    no_effects(&reduce(
+    let effects = reduce(
         &mut s,
         &Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Mailboxes(Vec::new())),
         }),
-    ));
+    );
+    no_effects_except_cache_stores(&mut s, &effects);
     assert_eq!(s.session.routes.len(), 0);
     assert!(s.messages.items.is_empty());
     assert!(!s.session.quit_requested);
@@ -395,7 +402,8 @@ fn mailboxes_failure_keeps_a_failed_sidebar_and_refresh_reloads() {
     assert!(s.session.overlay.is_none());
     // `Ctrl+R` replays the typed mailbox-load intent under a new id.
     let effects = reduce(&mut s, &Action::Refresh);
-    let (retry_id, retry_kind) = effect_parts(&effects);
+    let (cache_id, _) = effect_parts(&effects);
+    let (retry_id, retry_kind) = effect_parts(&complete_cache_miss(&mut s, cache_id));
     assert_eq!(retry_kind, mailboxes_kind());
     assert_ne!(retry_id, id, "refresh gets a fresh operation id");
     assert!(s.session.operations.get(retry_id).is_some());
@@ -515,7 +523,8 @@ fn identical_page_result_changes_nothing() {
     reduce(&mut s, &Action::MoveDown);
     reduce(&mut s, &Action::MoveDown);
     let (id, req) = expect_page(&reduce(&mut s, &Action::Refresh));
-    no_effects(&complete_page_ok(&mut s, id, &req, 0));
+    let effects = complete_page_ok(&mut s, id, &req, 0);
+    no_effects_except_cache_stores(&mut s, &effects);
     assert_eq!(s.selection, 3);
     assert_eq!(s.messages.items.len(), mock::PAGE_SIZE);
 }

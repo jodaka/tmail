@@ -8,7 +8,6 @@ use crate::app::composer::ComposerState;
 use crate::app::focus::Focus;
 use crate::app::operation::OperationRegistry;
 use crate::app::overlay::Overlay;
-use crate::app::page_cache::PageCache;
 use crate::app::reader::CachedReaderDoc;
 use crate::app::route::Route;
 use crate::domain::{Mailbox, MailboxId, MailboxRole, Message, MessageId, MessageSummary, Page};
@@ -171,13 +170,10 @@ pub struct Settings {
 
 /// Session-local caches: everything here exists to avoid re-fetching or
 /// re-building work the backend already produced. Cleared implicitly when
-/// the session ends; never persisted except the on-disk page cache.
+/// the session ends. The on-disk page cache (ticket haeb) lives in the
+/// operation manager — cache I/O must never run on the reducer thread.
 #[derive(Clone)]
 pub struct CacheBundle {
-    /// Tmail-owned summary cache (ticket haeb, cache.md §2): serves the
-    /// last loaded page instantly while the fresh one loads in the
-    /// background. `None` disables caching entirely.
-    pub page_cache: Option<PageCache>,
     /// Message ids whose list preview (ticket wxtx) was already satisfied
     /// this session — fetched, in flight, or served from the on-disk
     /// message cache. One request per message, ever: a failed preview is
@@ -329,7 +325,6 @@ impl AppState {
                 theme_index: 0,
             },
             caches: CacheBundle {
-                page_cache: None,
                 preview_requested: HashSet::new(),
                 previews: HashMap::new(),
                 saved_attachments: HashMap::new(),

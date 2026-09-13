@@ -70,6 +70,140 @@ fn expect_page(effects: &[Effect]) -> (OperationId, PageRequest) {
     }
 }
 
+/// The `(id, locator)` pairs of every `CachePreviewLoad` effect.
+fn expect_cache_preview_reads(
+    effects: &[Effect],
+) -> Vec<(OperationId, crate::domain::MessageLocator)> {
+    effects
+        .iter()
+        .filter_map(|e| match &e.kind {
+            OperationKind::CachePreviewLoad { locator } => Some((e.id, locator.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The first `LoadPage` effect, wherever it sits in the batch.
+fn find_page(effects: &[Effect]) -> (OperationId, PageRequest) {
+    effects
+        .iter()
+        .find_map(|e| match &e.kind {
+            OperationKind::LoadPage(request) => Some((e.id, request.clone())),
+            _ => None,
+        })
+        .expect("a LoadPage effect")
+}
+
+/// The `(id, mailbox, query, offset, limit, fresh_background_on_hit)` of
+/// the first `CacheListLoad` effect (ticket haeb: cache reads run
+/// off-thread, so tests complete them explicitly).
+#[allow(clippy::type_complexity)]
+fn expect_cache_list_load(
+    effects: &[Effect],
+) -> (OperationId, MailboxId, Option<String>, usize, usize, bool) {
+    effects
+        .iter()
+        .find_map(|e| match &e.kind {
+            OperationKind::CacheListLoad {
+                mailbox,
+                query,
+                offset,
+                limit,
+                fresh_background_on_hit,
+            } => Some((
+                e.id,
+                mailbox.clone(),
+                query.clone(),
+                *offset,
+                *limit,
+                *fresh_background_on_hit,
+            )),
+            _ => None,
+        })
+        .expect("a CacheListLoad effect")
+}
+
+/// Complete an in-flight cache read with a miss: the fresh load starts.
+fn complete_cache_miss(s: &mut AppState, id: OperationId) -> Vec<Effect> {
+    reduce(
+        s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::CacheMiss),
+        }),
+    )
+}
+
+/// Complete an in-flight cache read with a cached page.
+fn complete_cache_page(
+    s: &mut AppState,
+    id: OperationId,
+    page: crate::domain::Page<crate::domain::MessageSummary>,
+) -> Vec<Effect> {
+    reduce(
+        s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::CachedPage(page)),
+        }),
+    )
+}
+
+/// Complete an in-flight cache message read (reader or preview path).
+fn complete_cache_message(
+    s: &mut AppState,
+    id: OperationId,
+    message: crate::domain::Message,
+) -> Vec<Effect> {
+    reduce(
+        s,
+        &Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::CachedMessage(Box::new(message))),
+        }),
+    )
+}
+
+/// Complete every cache-store effect in `effects` (ticket haeb: writes
+/// are best-effort background work whose `Done` results carry nothing to
+/// apply), assert `effects` carried nothing else, and return the stores'
+/// follow-up effects.
+fn no_effects_except_cache_stores(s: &mut AppState, effects: &[Effect]) {
+    assert!(
+        effects.iter().all(|e| matches!(
+            e.kind,
+            OperationKind::CacheListStore { .. }
+                | OperationKind::CacheMailboxesStore { .. }
+                | OperationKind::CacheMessageStore { .. }
+        )),
+        "expected only cache stores, got {effects:?}"
+    );
+    no_effects(&complete_cache_stores(s, effects));
+}
+
+/// Complete every cache-store effect in `effects` (ticket haeb: writes
+/// are best-effort background work whose `Done` results carry nothing to
+/// apply) and return their follow-up effects.
+fn complete_cache_stores(s: &mut AppState, effects: &[Effect]) -> Vec<Effect> {
+    let ids: Vec<OperationId> = effects
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                OperationKind::CacheListStore { .. }
+                    | OperationKind::CacheMailboxesStore { .. }
+                    | OperationKind::CacheMessageStore { .. }
+            )
+        })
+        .map(|e| e.id)
+        .collect();
+    let mut followups = Vec::new();
+    for id in ids {
+        followups.extend(complete_done(s, id));
+    }
+    followups
+}
+
 fn no_effects(effects: &[Effect]) {
     assert!(effects.is_empty(), "expected no effects, got {effects:?}");
 }
@@ -90,13 +224,14 @@ fn complete_page_ok(
     offset: usize,
 ) -> Vec<Effect> {
     let page = mock::mock_page(&req.mailbox_id, offset, req.limit);
-    reduce(
+    let effects = reduce(
         state,
         &Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Page(page)),
         }),
-    )
+    );
+    settle_cache_stores(state, effects)
 }
 
 /// A failure action matching `kind`, as the operation manager builds it.
@@ -121,7 +256,12 @@ fn switch_to(s: &mut AppState, mailbox: &str) {
         .position(|m| m.id.0 == mailbox)
         .unwrap();
     s.session.focus = Focus::Sidebar;
-    let (id, req) = expect_page(&reduce(s, &Action::Activate));
+    // The cold-context cache read runs first (ticket haeb); the fixture
+    // cache is empty, so the miss starts the fresh foreground load.
+    let effects = reduce(s, &Action::Activate);
+    let (cache_id, ..) = expect_cache_list_load(&effects);
+    let effects = complete_cache_miss(s, cache_id);
+    let (id, req) = expect_page(&effects);
     assert_eq!(req.mailbox_id.0, mailbox);
     assert_eq!(req.offset, 0);
     complete_page_ok(s, id, &req, 0);
@@ -130,7 +270,13 @@ fn switch_to(s: &mut AppState, mailbox: &str) {
 // ── Startup: mailbox listing via the operation registry ──────────────────
 
 fn boot(s: &mut AppState) -> (OperationId, OperationKind) {
-    effect_parts(&reduce(s, &Action::Refresh))
+    // The cold-start listing load, as the runtime reaches it: `Refresh`
+    // reads the cache first (ticket haeb; a miss in the fixture) and the
+    // miss starts the fresh background listing.
+    let effects = reduce(s, &Action::Refresh);
+    let (cache_id, _) = effect_parts(&effects);
+    let effects = complete_cache_miss(s, cache_id);
+    effect_parts(&effects)
 }
 
 // ── Background data never resets the user's state (ticket sazy) ──────────
@@ -179,13 +325,14 @@ fn open_modal(s: &mut AppState, detail: &str) -> (OperationId, PageRequest) {
 fn complete_message_ok(s: &mut AppState, id: OperationId) -> Vec<Effect> {
     let summary = s.open_summary().expect("reader open").clone();
     let message = mock::mock_message(&summary);
-    reduce(
+    let effects = reduce(
         s,
         &Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(message))),
         }),
-    )
+    );
+    settle_cache_stores(s, effects)
 }
 
 /// Complete an in-flight mutation with a `Done` outcome. Returns the
@@ -200,8 +347,43 @@ fn complete_done(s: &mut AppState, id: OperationId) -> Vec<Effect> {
     )
 }
 
+/// Settle the cache-store effects in `effects` (ticket haeb: writes are
+/// best-effort background work whose `Done` results carry nothing to
+/// apply): completes each store and returns the remaining effects with
+/// the stores' follow-ups appended.
+fn settle_cache_stores(s: &mut AppState, effects: Vec<Effect>) -> Vec<Effect> {
+    let is_store = |kind: &OperationKind| {
+        matches!(
+            kind,
+            OperationKind::CacheListStore { .. }
+                | OperationKind::CacheMailboxesStore { .. }
+                | OperationKind::CacheMessageStore { .. }
+        )
+    };
+    let store_ids: Vec<OperationId> = effects
+        .iter()
+        .filter(|e| is_store(&e.kind))
+        .map(|e| e.id)
+        .collect();
+    let mut rest: Vec<Effect> = effects.into_iter().filter(|e| !is_store(&e.kind)).collect();
+    for id in store_ids {
+        rest.extend(complete_done(s, id));
+    }
+    rest
+}
+
 fn expect_kind(effects: &[Effect]) -> (OperationId, OperationKind) {
     effect_parts(effects)
+}
+
+/// Open the reader as the runtime reaches the load: `Activate` reads the
+/// message cache first (ticket haeb; a miss in the fixture) and the miss
+/// starts the fresh foreground load. Returns its `(id, kind)`.
+fn open_reader(s: &mut AppState) -> (OperationId, OperationKind) {
+    let effects = reduce(s, &Action::Activate);
+    let (cache_id, _) = effect_parts(&effects);
+    let effects = complete_cache_miss(s, cache_id);
+    effect_parts(&effects)
 }
 
 // ── Attachment save (plan §15, Phase 8.4) ────────────────────────────────
@@ -659,13 +841,24 @@ fn expect_previews(effects: &[Effect]) -> Vec<(OperationId, crate::domain::Messa
 }
 
 /// Switch the fixture to the Sent mailbox (its rows ship without
-/// snippets) and complete the fresh page load. Returns the preview
-/// effects the page apply produced.
+/// snippets) and complete the fresh page load. The cold-context cache
+/// read runs first and misses (no cache wired in the fixture), which
+/// starts the fresh foreground load; the page apply then starts one
+/// cache read per snippet-less row, each missing into a background
+/// fetch. Returns the effects of those fetch starts.
 fn load_sent_without_snippets(s: &mut AppState) -> Vec<Effect> {
     reduce(s, &Action::Click(ClickTarget::Mailbox(1))); // select
     let effects = reduce(s, &Action::Click(ClickTarget::Mailbox(1))); // activate
+    let (cache_id, ..) = expect_cache_list_load(&effects);
+    let effects = complete_cache_miss(s, cache_id);
     let (load, req) = expect_page(&effects);
-    complete_page_ok(s, load, &req, 0)
+    let effects = complete_page_ok(s, load, &req, 0);
+    let reads = expect_cache_preview_reads(&effects);
+    let mut fetches = Vec::new();
+    for (id, _) in reads {
+        fetches.extend(complete_cache_miss(s, id));
+    }
+    fetches
 }
 
 /// Complete one in-flight preview with the mocked full message. Returns
@@ -676,13 +869,14 @@ fn complete_preview_ok(
     summary: &crate::domain::MessageSummary,
 ) -> Vec<Effect> {
     let message = mock::mock_message(summary);
-    reduce(
+    let effects = reduce(
         s,
         &Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(message))),
         }),
-    )
+    );
+    settle_cache_stores(s, effects)
 }
 
 // ── Theme picker (ticket k5ba) ───────────────────────────────────────────

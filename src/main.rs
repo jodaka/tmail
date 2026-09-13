@@ -203,6 +203,17 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
         } else {
             Arc::new(PimDiscoverer)
         };
+    // Tmail-owned summary cache (ticket haeb): instant warm starts, the
+    // fresh page always loads in the background afterwards. Owned by the
+    // operation manager — cache reads and writes are file I/O and run on
+    // the blocking pool, never on the reducer thread.
+    let page_cache = tmail::app::page_cache::PageCache::open_default(
+        config.account.as_deref(),
+        tmail::app::page_cache::CacheLimits {
+            max_messages: config.cache.max_messages,
+            max_bytes: config.cache.max_bytes,
+        },
+    );
 
     // The events stream starts before the first draw; the terminal guard
     // and the title cache ride in `SessionAssets` so effect handling stays
@@ -228,6 +239,7 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
         notifier,
         discoverer,
         String::from("himalaya"),
+        page_cache,
         result_tx,
     );
 
@@ -396,15 +408,6 @@ fn seed_state(
         themes,
         theme_index,
     };
-    // Tmail-owned summary cache (ticket haeb): instant warm starts, the
-    // fresh page always loads in the background afterwards.
-    state.caches.page_cache = tmail::app::page_cache::PageCache::open_default(
-        config.account.as_deref(),
-        tmail::app::page_cache::CacheLimits {
-            max_messages: config.cache.max_messages,
-            max_bytes: config.cache.max_bytes,
-        },
-    );
     if let Ok((width, height)) = crossterm::terminal::size() {
         state.session.size = (width, height);
     }

@@ -7,7 +7,7 @@ fn activate_on_message_list_opens_the_reader() {
     let mut s = state();
     s.selection = 1;
     let selected = s.selected_message().unwrap().clone();
-    let (id, kind) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (id, kind) = open_reader(&mut s);
     assert!(
         matches!(&kind, OperationKind::LoadMessage(locator)
                 if locator.id == selected.id && locator.mailbox == selected.mailbox_id
@@ -30,7 +30,7 @@ fn reader_result_applies_and_marks_unread_read() {
     let mut s = state();
     s.selection = 1; // m2: unread in the mock seed.
     assert!(!s.selected_message().unwrap().is_read);
-    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (id, _) = open_reader(&mut s);
     // The load completion itself emits the mark-read operation.
     let (flag_id, kind) = expect_kind(&complete_message_ok(&mut s, id));
     assert!(matches!(s.open_message, Loadable::Loaded(_)));
@@ -53,7 +53,7 @@ fn read_message_load_does_not_trigger_mark_read() {
     let mut s = state();
     s.selection = 3; // m4: read in the mock seed.
     assert!(s.selected_message().unwrap().is_read);
-    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, id);
     // No further operations: a read message needs no flag change.
     assert!(s.session.operations.is_empty());
@@ -64,7 +64,7 @@ fn reader_result_fills_missing_snippet() {
     let mut s = state();
     s.messages.items[2].snippet = None;
     s.selection = 2;
-    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, id);
     let snippet = s.messages.items[2].snippet.as_deref();
     // The list preview is the same one-line body text the background
@@ -147,29 +147,40 @@ fn preview_snippets_survive_a_background_refresh() {
 #[test]
 fn disk_cached_messages_fill_previews_without_fetching() {
     let mut s = state();
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    s.caches.page_cache = Some(crate::app::page_cache::PageCache::open(
-        dir.path().to_path_buf(),
-        crate::app::page_cache::CacheLimits::default(),
-    ));
-    // Messages fetched in an earlier session: every Sent row's full
-    // message is already on disk.
-    for summary in mock::mock_page(&MailboxId(String::from("sent")), 0, 20).items {
-        let message = mock::mock_message(&summary);
-        s.caches.page_cache.as_ref().unwrap().store_message(
-            &summary.mailbox_id,
-            &summary.id.0,
-            &message,
-        );
-    }
-    // Switch to Sent: the fresh page loads, and every preview is served
-    // from the cache — no background fetches start, nothing re-requests
-    // what was fetched before (ticket wxtx).
+    // Messages fetched in an earlier session: the manager's cache holds
+    // every Sent row's full message. The reducer only sees the reads'
+    // results, so the test plays the manager and answers each
+    // `CachePreviewLoad` from this set.
+    let cached: std::collections::HashMap<MessageId, crate::domain::Message> =
+        mock::mock_page(&MailboxId(String::from("sent")), 0, 20)
+            .items
+            .into_iter()
+            .map(|summary| {
+                let message = mock::mock_message(&summary);
+                (summary.id.clone(), message)
+            })
+            .collect();
+    // Switch to Sent: the fresh page loads (the cache read misses — no
+    // cached page), and every preview is served from the cached copies —
+    // no background fetches start, nothing re-requests what was fetched
+    // before (ticket wxtx).
     reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1))); // select
     let effects = reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1))); // activate
+    let (cache_id, ..) = expect_cache_list_load(&effects);
+    let effects = complete_cache_miss(&mut s, cache_id);
     let (load, req) = expect_page(&effects);
     let effects = complete_page_ok(&mut s, load, &req, 0);
-    no_effects(&effects);
+    let reads = expect_cache_preview_reads(&effects);
+    assert_eq!(reads.len(), 4, "one cache read per Sent row");
+    let mut followups = Vec::new();
+    for (id, locator) in reads {
+        let message = cached
+            .get(&locator.id)
+            .expect("the earlier session fetched this message")
+            .clone();
+        followups.extend(complete_cache_message(&mut s, id, message));
+    }
+    no_effects(&followups);
     assert_eq!(
         s.messages
             .items
@@ -199,7 +210,7 @@ fn esc_from_reader_restores_exact_list_state() {
     s.selection = 5;
     s.list_scroll = 3;
     let before = s.clone();
-    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, id);
     // The load may start a mark-read op; settle it so nothing is in flight.
     while !s.session.operations.is_empty() {
@@ -278,7 +289,7 @@ fn tab_cycles_the_reader_attachment_cursor_and_wraps() {
 #[test]
 fn tab_is_inert_without_focusable_items() {
     let mut s = state();
-    let (id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, id);
     assert_eq!(s.session.focus, Focus::Reader);
     reduce(&mut s, &Action::FocusNext);

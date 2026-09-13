@@ -120,7 +120,10 @@ fn reader_from_search_returns_to_the_same_results() {
     let selected = s.selected_message().cloned().expect("a result row");
     let effects = reduce(&mut s, &Action::Activate); // open reader
     assert!(matches!(s.active_route(), Some(Route::Message(_))));
-    // The fetch completes; Esc then pops the reader route itself.
+    // The cache read misses (no cache in the fixture); the fresh fetch
+    // starts. Esc then pops the reader route itself.
+    let (cache_id, _) = effect_parts(&effects);
+    let effects = complete_cache_miss(&mut s, cache_id);
     let load_id = match effects.as_slice() {
         [effect] => {
             assert!(
@@ -131,8 +134,9 @@ fn reader_from_search_returns_to_the_same_results() {
         }
         other => panic!("expected one effect, got {other:?}"),
     };
-    // Opening an unread message also starts a SetRead; complete it so the
-    // registry is idle and the next Esc reaches the route stack.
+    // Opening an unread message also starts a SetRead; complete it (and
+    // the best-effort cache store) so the registry is idle and the next
+    // Esc reaches the route stack.
     let read_effects = reduce(
         &mut s,
         &Action::BackendCompleted(OperationResult {
@@ -142,6 +146,7 @@ fn reader_from_search_returns_to_the_same_results() {
             )))),
         }),
     );
+    let read_effects = settle_cache_stores(&mut s, read_effects);
     match read_effects.as_slice() {
         [effect] => {
             assert!(

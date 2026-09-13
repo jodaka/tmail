@@ -17,8 +17,8 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::{
-    DraftSnapshot, Mailbox, Message, MessageId, MessageLocator, MessageSummary, OutboundMessage,
-    Page, PageRequest, RestoredDraft, SearchRequest, SendOutcome,
+    DraftSnapshot, Mailbox, MailboxId, Message, MessageId, MessageLocator, MessageSummary,
+    OutboundMessage, Page, PageRequest, RestoredDraft, SearchRequest, SendOutcome,
 };
 
 /// Opaque identifier carried by every backend request and result (plan §5:
@@ -153,6 +153,49 @@ pub enum OperationKind {
     /// b28p). No mail travels; the manager delivers it without blocking
     /// the UI loop (the desktop path on the blocking pool).
     Notify { request: NotifyRequest },
+    /// Serve one cached page of summaries (ticket haeb, off-thread I/O):
+    /// a cache hit renders the rows instantly and a fresh load follows
+    /// (background when `fresh_background_on_hit`, foreground otherwise);
+    /// a miss starts the fresh load in the foreground. Runs on the
+    /// blocking pool in the manager — the reducer never touches disk.
+    CacheListLoad {
+        mailbox: MailboxId,
+        query: Option<String>,
+        offset: usize,
+        limit: usize,
+        fresh_background_on_hit: bool,
+    },
+    /// Persist one page of summaries (ticket haeb, off-thread I/O). A
+    /// store result carries nothing to apply: the cache is an
+    /// optimization, never a source of truth.
+    CacheListStore {
+        mailbox: MailboxId,
+        query: Option<String>,
+        page: Box<Page<MessageSummary>>,
+    },
+    /// Serve the cached mailbox listing (ticket haeb, off-thread I/O): a
+    /// hit renders the sidebar instantly and the fresh listing still
+    /// loads in the background.
+    CacheMailboxesLoad,
+    /// Persist the mailbox listing (ticket haeb, off-thread I/O).
+    CacheMailboxesStore { mailboxes: Vec<Mailbox> },
+    /// Serve one cached full message for the reader (ticket haeb,
+    /// off-thread I/O): a hit renders the body instantly and a silent
+    /// background convergence fetch follows; a miss keeps the spinner and
+    /// loads in the foreground.
+    CacheMessageLoad { locator: MessageLocator },
+    /// Serve one cached full message for a list preview (ticket wxtx,
+    /// off-thread I/O): a hit fills the row's snippet without any fetch;
+    /// a miss may start a background preview fetch within the rolling
+    /// window.
+    CachePreviewLoad { locator: MessageLocator },
+    /// Persist one full message (ticket haeb, off-thread I/O). Best
+    /// effort: the result carries nothing to apply.
+    CacheMessageStore {
+        mailbox: MailboxId,
+        id: String,
+        message: Box<Message>,
+    },
 }
 
 /// One new-mail notification (`[tmail].notifications`, ticket b28p): the
@@ -233,6 +276,13 @@ impl OperationKind {
             OperationKind::TestAccount { .. } => "Testing account",
             OperationKind::SaveAccount { .. } => "Saving account",
             OperationKind::Notify { .. } => "Notifying",
+            OperationKind::CacheListLoad { .. }
+            | OperationKind::CacheMailboxesLoad
+            | OperationKind::CacheMessageLoad { .. }
+            | OperationKind::CachePreviewLoad { .. } => "Reading cache",
+            OperationKind::CacheListStore { .. }
+            | OperationKind::CacheMailboxesStore { .. }
+            | OperationKind::CacheMessageStore { .. } => "Caching",
         }
     }
 
@@ -314,6 +364,59 @@ impl OperationKind {
                 OperationKind::DiscoverConfig { email: older },
             ) => newer == older,
             (OperationKind::TestAccount { .. }, OperationKind::TestAccount { .. }) => true,
+            // Cache work supersedes its own identity: only the newest
+            // read or write of a page/message/listing can matter (the
+            // cache is advisory; a dropped older store just keeps the
+            // previous copy on disk).
+            (
+                OperationKind::CacheListLoad {
+                    mailbox: newer_mailbox,
+                    query: newer_query,
+                    ..
+                },
+                OperationKind::CacheListLoad {
+                    mailbox: older_mailbox,
+                    query: older_query,
+                    ..
+                },
+            )
+            | (
+                OperationKind::CacheListStore {
+                    mailbox: newer_mailbox,
+                    query: newer_query,
+                    ..
+                },
+                OperationKind::CacheListStore {
+                    mailbox: older_mailbox,
+                    query: older_query,
+                    ..
+                },
+            ) => newer_mailbox == older_mailbox && newer_query == older_query,
+            (OperationKind::CacheMailboxesLoad, OperationKind::CacheMailboxesLoad)
+            | (
+                OperationKind::CacheMailboxesStore { .. },
+                OperationKind::CacheMailboxesStore { .. },
+            ) => true,
+            (
+                OperationKind::CacheMessageLoad { locator: newer },
+                OperationKind::CacheMessageLoad { locator: older },
+            )
+            | (
+                OperationKind::CachePreviewLoad { locator: newer },
+                OperationKind::CachePreviewLoad { locator: older },
+            ) => newer.mailbox == older.mailbox && newer.id == older.id,
+            (
+                OperationKind::CacheMessageStore {
+                    mailbox: newer_mailbox,
+                    id: newer_id,
+                    ..
+                },
+                OperationKind::CacheMessageStore {
+                    mailbox: older_mailbox,
+                    id: older_id,
+                    ..
+                },
+            ) => newer_mailbox == older_mailbox && newer_id == older_id,
             // Saves never supersede: a confirmed save must report exactly
             // what it wrote.
             // Sends never supersede anything and are never superseded:
@@ -400,6 +503,19 @@ pub enum OperationOutcome {
         created: bool,
         permissions_warning: Option<String>,
     },
+    /// One cached page of summaries (ticket haeb): served off disk by the
+    /// manager, applied by the reducer only in a cold context.
+    CachedPage(Page<MessageSummary>),
+    /// One cached full message (ticket haeb): the reader renders it
+    /// instantly; the fresh fetch still converges afterwards.
+    CachedMessage(Box<Message>),
+    /// The cached mailbox listing (ticket haeb): the sidebar renders
+    /// instantly; the fresh listing still loads in the background.
+    CachedMailboxes(Vec<Mailbox>),
+    /// The requested cache entry does not exist (or is stale/unparsable):
+    /// the caller falls through to the fresh load. Cache reads never
+    /// fail — a broken cache degrades to the spinner, never to an error.
+    CacheMiss,
 }
 
 /// A failure ready for the Retry/Dismiss modal (plan §12). Built by the

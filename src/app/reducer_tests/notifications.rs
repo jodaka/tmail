@@ -69,13 +69,14 @@ fn complete_background(
     id: OperationId,
     page: Page<MessageSummary>,
 ) -> Vec<Effect> {
-    reduce(
+    let effects = reduce(
         s,
         &Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Page(page)),
         }),
-    )
+    );
+    settle_cache_stores(s, effects)
 }
 
 /// The single `Notify` effect's request.

@@ -6,7 +6,10 @@ use super::*;
 fn enter_in_other_mailboxes_still_opens_the_reader() {
     let mut s = state();
     let (_, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
-    assert!(matches!(kind, OperationKind::LoadMessage(_)));
+    assert!(
+        matches!(kind, OperationKind::CacheMessageLoad { .. }),
+        "the reader open reads the message cache first, got {kind:?}"
+    );
 }
 
 #[test]

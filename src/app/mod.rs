@@ -2,6 +2,7 @@ pub mod action;
 pub mod composer;
 pub mod effect;
 pub mod focus;
+#[cfg(any(test, feature = "testing"))]
 pub mod mock;
 pub mod operation;
 pub mod overlay;

@@ -53,3 +53,10 @@ notify-rust = "4"
 
 [features]
 test-fixtures = ["dep:mail-parser"]
+# Test fixture state (`app::mock`) for integration tests in `tests/`: the
+# in-crate unit tests get it via `cfg(test)`, the integration tests via
+# the self dev-dependency below. Release builds never compile it.
+testing = []
+
+[dev-dependencies]
+tmail = { path = ".", features = ["testing"] }

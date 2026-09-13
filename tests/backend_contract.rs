@@ -1291,6 +1291,7 @@ fn run_test_account(
             std::sync::Arc::new(tmail::backend::SystemNotifier),
             std::sync::Arc::new(tmail::discovery::FakeDiscoverer),
             fake.program().display().to_string(),
+            None,
             tx,
         );
         let effect = Effect {
@@ -1391,6 +1392,7 @@ fn wizard_test_account_cancellation_suppresses_the_result() {
             std::sync::Arc::new(tmail::backend::SystemNotifier),
             std::sync::Arc::new(tmail::discovery::FakeDiscoverer),
             fake.program().display().to_string(),
+            None,
             tx,
         );
         // Cancel before launch: the run selects on the token and reports
@@ -1431,6 +1433,7 @@ fn wizard_save_account_operation_reports_the_saved_file() {
             std::sync::Arc::new(tmail::backend::SystemNotifier),
             std::sync::Arc::new(tmail::discovery::FakeDiscoverer),
             fake.program().display().to_string(),
+            None,
             tx,
         );
         let effect = Effect {

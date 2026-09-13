@@ -157,7 +157,7 @@ fn reader_shortcuts_do_not_act_on_the_selection() {
     s.session.focus = Focus::MessageList;
     no_effects(&reduce(&mut s, &Action::SelectAll));
     // Open the first message; the reader takes focus.
-    let (load_id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (load_id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, load_id);
     assert_eq!(s.session.focus, Focus::Reader);
 

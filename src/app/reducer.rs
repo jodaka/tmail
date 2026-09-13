@@ -1613,6 +1613,43 @@ fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effe
             tracing::warn!(id = %result.id, "wizard result reached the main backend path");
             Vec::new()
         }
+        // ── Summary/message cache (ticket haeb) ─────────────────────────
+        //
+        // The cache lives in the operation manager; the reducer only
+        // applies what a read served and emits writes as effects.
+        OperationKind::CacheListLoad {
+            mailbox,
+            query,
+            offset,
+            limit,
+            fresh_background_on_hit,
+        } => complete_cache_list_load(
+            state,
+            mailbox,
+            query.as_deref(),
+            *offset,
+            *limit,
+            *fresh_background_on_hit,
+            result,
+        ),
+        OperationKind::CacheMailboxesLoad => complete_cache_mailboxes_load(state, result),
+        OperationKind::CacheMessageLoad { locator } => {
+            complete_cache_message_load(state, locator, result)
+        }
+        OperationKind::CachePreviewLoad { locator } => {
+            complete_cache_preview_load(state, locator, result)
+        }
+        // Writes are best-effort side effects: the manager logs failures
+        // inside the cache, and a dropped write can never lose mail —
+        // only warmth.
+        OperationKind::CacheListStore { .. }
+        | OperationKind::CacheMailboxesStore { .. }
+        | OperationKind::CacheMessageStore { .. } => {
+            if let Err(failure) = &result.outcome {
+                tracing::debug!(id = %result.id, detail = %failure.detail, "cache write failed");
+            }
+            Vec::new()
+        }
     }
 }
 
@@ -1628,11 +1665,15 @@ fn complete_load_mailboxes(
     match &result.outcome {
         Ok(OperationOutcome::Mailboxes(mailboxes)) => {
             // Ticket haeb: every successful listing refreshes the cached
-            // sidebar.
-            if let Some(cache) = &state.caches.page_cache {
-                cache.store_mailboxes(mailboxes);
-            }
-            mailboxes_loaded(state, mailboxes.clone())
+            // sidebar — as an effect, so the write never blocks the
+            // reducer (the manager owns the cache and the disk).
+            let mut effects = mailboxes_loaded(state, mailboxes.clone());
+            effects.push(state.session.operations.start_background(
+                OperationKind::CacheMailboxesStore {
+                    mailboxes: mailboxes.clone(),
+                },
+            ));
+            effects
         }
         Ok(OperationOutcome::Page(_)) => {
             tracing::warn!(id = %result.id, "page payload for a mailbox operation");
@@ -1700,10 +1741,15 @@ fn complete_load_page(
             effects.extend(apply_page(state, page.clone()));
             // Ticket haeb: every successful load refreshes the cached page —
             // with the previews applied (ticket wxtx), so the next cold
-            // start renders rows without re-fetching anything.
-            if let Some(cache) = &state.caches.page_cache {
-                cache.store(&request.mailbox_id, None, &state.messages);
-            }
+            // start renders rows without re-fetching anything. The write
+            // travels as an effect: the manager owns the cache and the disk.
+            effects.push(state.session.operations.start_background(
+                OperationKind::CacheListStore {
+                    mailbox: request.mailbox_id.clone(),
+                    query: None,
+                    page: Box::new(state.messages.clone()),
+                },
+            ));
             effects
         }
         Ok(OperationOutcome::Mailboxes(_)) => {
@@ -1753,10 +1799,15 @@ fn complete_search(
             }
             effects.extend(apply_page(state, page.clone()));
             // Ticket haeb: search results cache under their query — with
-            // the previews applied (ticket wxtx).
-            if let Some(cache) = &state.caches.page_cache {
-                cache.store(&request.mailbox_id, Some(&request.query), &state.messages);
-            }
+            // the previews applied (ticket wxtx). The write travels as an
+            // effect: the manager owns the cache and the disk.
+            effects.push(state.session.operations.start_background(
+                OperationKind::CacheListStore {
+                    mailbox: request.mailbox_id.clone(),
+                    query: Some(request.query.clone()),
+                    page: Box::new(state.messages.clone()),
+                },
+            ));
             effects
         }
         Ok(_) => unexpected_payload(result.id, "search"),
@@ -2363,11 +2414,23 @@ fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
     let snippet = crate::view::rich::preview_text(&message);
     let message_id = message.id.clone();
     let has_attachments = !message.attachments.is_empty();
-    // Ticket haeb: cache the viewed message (bounded by [tmail.cache]).
-    if let Some(cache) = &state.caches.page_cache
-        && let Some(Route::Message(route)) = state.active_route()
-    {
-        cache.store_message(&route.mailbox_id, &message_id.0, &message);
+    // The message was fully fetched this session: never re-requested for
+    // a preview, even when its body carries no preview text.
+    state.caches.preview_requested.insert(message_id.clone());
+    // Ticket haeb: cache the viewed message (bounded by [tmail.cache]) —
+    // as an effect, so the write never blocks the reducer.
+    let mut effects = Vec::new();
+    if let Some(Route::Message(route)) = state.active_route() {
+        effects.push(
+            state
+                .session
+                .operations
+                .start_background(OperationKind::CacheMessageStore {
+                    mailbox: route.mailbox_id.clone(),
+                    id: message_id.0.clone(),
+                    message: Box::new(message.clone()),
+                }),
+        );
     }
     state.open_message = Loadable::Loaded(message);
     // The parsed message knows attachments better than the envelope did
@@ -2399,16 +2462,17 @@ fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
     // The summary in the route knows the read state; only an unread message
     // triggers the flag operation (plan §19 Phase 4: mark read after load).
     let Some(Route::Message(route)) = state.active_route() else {
-        return Vec::new();
+        return effects;
     };
     if route.summary.is_read {
-        return Vec::new();
+        return effects;
     }
     let locator = route.summary.into_locator();
-    vec![state.session.operations.start(OperationKind::SetRead {
+    effects.push(state.session.operations.start(OperationKind::SetRead {
         locator,
         read: true,
-    })]
+    }));
+    effects
 }
 
 /// A confirmed move (archive/trash): drop the row from the displayed page,
@@ -2638,79 +2702,94 @@ fn apply_page(state: &mut AppState, page: Page<crate::domain::MessageSummary>) -
 /// queued rows start as in-flight fetches complete.
 const MAX_IN_FLIGHT_PREVIEWS: usize = 6;
 
-/// Satisfy the visible rows' previews (ticket wxtx), in priority order:
-/// rows this session already previewed were restored by `apply_page`;
-/// rows whose full message is already cached on disk (an earlier fetch,
-/// this session or a previous one) take their preview straight from the
-/// cache — no backend work, and old cached messages are never re-fetched.
-/// Only genuinely unknown messages start a background fetch, each
-/// independently, within the rolling window. Rows beyond the window stay
-/// unrequested so the next apply or preview completion picks them up.
+/// Satisfy the visible rows' previews (ticket wxtx): rows without a
+/// snippet get one cache read each (off-thread, ticket haeb). A read that
+/// hits serves the preview straight from the cached copy — no backend
+/// work, and old cached messages are never re-fetched; a miss may start a
+/// background fetch within the rolling window (decided at completion
+/// time, against the live in-flight count).
 fn start_missing_previews(state: &mut AppState) -> Vec<Effect> {
-    let mut budget =
-        MAX_IN_FLIGHT_PREVIEWS.saturating_sub(state.session.operations.previews_in_flight());
-    let mut effects = Vec::new();
-    let candidates: Vec<crate::domain::MessageSummary> = state
+    state
         .messages
         .items
         .iter()
         .filter(|s| s.snippet.is_none() && !state.caches.preview_requested.contains(&s.id))
+        .map(|summary| {
+            state
+                .session
+                .operations
+                .start_background(OperationKind::CachePreviewLoad {
+                    locator: summary.into_locator(),
+                })
+        })
+        .collect()
+}
+
+/// Apply a served preview-cache read (ticket wxtx): a hit fills the row's
+/// snippet and attachment flag from the cached copy; a miss starts a
+/// background fetch when the rolling window has room. A result for a row
+/// no longer listed is dropped.
+fn complete_cache_preview_load(
+    state: &mut AppState,
+    locator: &MessageLocator,
+    result: &OperationResult,
+) -> Vec<Effect> {
+    let Some(summary) = state
+        .messages
+        .items
+        .iter()
+        .find(|s| s.id == locator.id)
         .cloned()
-        .collect();
-    for summary in candidates {
-        let cached = state
-            .caches
-            .page_cache
-            .as_ref()
-            .and_then(|cache| cache.load_message(&summary.mailbox_id, &summary.id.0));
-        let text = cached.as_ref().and_then(crate::view::rich::preview_text);
-        match text {
-            Some(text) => {
-                // Already fetched (this session or before): serve the
-                // preview from the copy on disk and remember it for the
-                // session. The read refreshed the entry's LRU stamp, so a
-                // previewed message stays cached like a viewed one.
-                state.caches.preview_requested.insert(summary.id.clone());
-                state
-                    .caches
-                    .previews
-                    .insert(summary.id.clone(), text.clone());
-                if let Some(item) = state.messages.items.iter_mut().find(|s| s.id == summary.id) {
-                    item.snippet = Some(text);
-                    item.has_attachments = cached
-                        .as_ref()
-                        .is_some_and(|message| !message.attachments.is_empty());
+    else {
+        tracing::debug!(id = %locator.id.0, "preview cache read for an unlisted row");
+        return Vec::new();
+    };
+    match &result.outcome {
+        Ok(OperationOutcome::CachedMessage(message)) => {
+            state.caches.preview_requested.insert(summary.id.clone());
+            match crate::view::rich::preview_text(message) {
+                Some(text) => {
+                    state
+                        .caches
+                        .previews
+                        .insert(summary.id.clone(), text.clone());
+                    if let Some(item) = state.messages.items.iter_mut().find(|s| s.id == summary.id)
+                    {
+                        item.snippet = Some(text);
+                        item.has_attachments = !message.attachments.is_empty();
+                    }
+                }
+                None => {
+                    // The cached body carries no preview text (an empty
+                    // body): satisfied, nothing to fetch. The attachment
+                    // flag still reconciles from the cached copy.
+                    sync_row_attachments(state, &summary.id, !message.attachments.is_empty());
                 }
             }
-            None if cached.is_some() => {
-                // Fetched before, but the body carries no preview text
-                // (an empty body): satisfied, nothing to request. The
-                // attachment flag still reconciles from the cached copy.
-                state.caches.preview_requested.insert(summary.id.clone());
-                sync_row_attachments(
-                    state,
-                    &summary.id,
-                    cached
-                        .as_ref()
-                        .is_some_and(|message| !message.attachments.is_empty()),
-                );
+            Vec::new()
+        }
+        Ok(OperationOutcome::CacheMiss) => {
+            // Genuinely unknown: fetch in the background, once, within
+            // the rolling window (the live count, so concurrent
+            // completions cannot overshoot).
+            if state.session.operations.previews_in_flight() >= MAX_IN_FLIGHT_PREVIEWS {
+                return Vec::new();
             }
-            None if budget > 0 => {
-                // Genuinely unknown: fetch in the background, once.
-                budget -= 1;
-                state.caches.preview_requested.insert(summary.id.clone());
-                effects.push(
-                    state
-                        .session
-                        .operations
-                        .start_background(OperationKind::Preview(summary.into_locator())),
-                );
-            }
-            // Beyond the window: leave unrequested for the rolling refill.
-            None => {}
+            state.caches.preview_requested.insert(summary.id.clone());
+            vec![
+                state
+                    .session
+                    .operations
+                    .start_background(OperationKind::Preview(summary.into_locator())),
+            ]
+        }
+        Ok(_) => unexpected_payload(result.id, "cached message"),
+        Err(_) => {
+            // Cache reads never fail (a broken cache is a miss); this arm
+            // only keeps the match total.
+            Vec::new()
         }
     }
-    effects
 }
 
 /// Apply a fetched preview (ticket wxtx): convert the body to one line of
@@ -2719,9 +2798,24 @@ fn start_missing_previews(state: &mut AppState) -> Vec<Effect> {
 /// result for a message no longer listed (mailbox switched, row moved) is
 /// dropped — but still cached, so it helps if the message returns.
 fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
-    if let Some(cache) = &state.caches.page_cache {
-        cache.store_message(&message.mailbox_id, &message.id.0, &message);
-    }
+    // The message was fully fetched this session: never re-requested for
+    // a preview, even when its body carries no preview text (marking here
+    // also closes the race with the store effect below — a cache read
+    // that ran before the write would otherwise re-fetch it).
+    state.caches.preview_requested.insert(message.id.clone());
+    // Ticket haeb: cache the fetched message (bounded by [tmail.cache]) —
+    // as an effect, so the write never blocks the reducer.
+    let mut effects =
+        vec![
+            state
+                .session
+                .operations
+                .start_background(OperationKind::CacheMessageStore {
+                    mailbox: message.mailbox_id.clone(),
+                    id: message.id.0.clone(),
+                    message: Box::new(message.clone()),
+                }),
+        ];
     let message_id = message.id.clone();
     if let Some(text) = crate::view::rich::preview_text(&message) {
         state
@@ -2740,7 +2834,8 @@ fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
             summary.snippet = state.caches.previews.get(&message_id).cloned();
         }
     }
-    start_missing_previews(state)
+    effects.extend(start_missing_previews(state));
+    effects
 }
 
 // ── Navigation and input ─────────────────────────────────────────────────
@@ -2964,28 +3059,30 @@ fn request_visible_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
                 offset,
                 limit: state.messages.limit.max(1),
             };
-            // Ticket haeb: the cached page for this exact query renders
-            // immediately — cold contexts only (empty list), so a move
-            // re-sync can never resurrect moved rows from the cache; the
-            // fresh load starts right after and replaces the page.
+            // Ticket haeb: in cold contexts (empty list) the cached page
+            // for this exact query renders immediately — a move re-sync
+            // has a non-empty list, so it can never resurrect moved rows
+            // from the cache. The read runs off-thread; its completion
+            // applies the page and starts the fresh load.
             let mut effects = Vec::new();
-            if state.messages.items.is_empty()
-                && let Some(cache) = &state.caches.page_cache
-                && let Some(page) = cache.load(
-                    &request.mailbox_id,
-                    Some(&request.query),
-                    request.offset,
-                    request.limit,
-                )
-            {
-                effects.extend(apply_page(state, page));
+            if state.messages.items.is_empty() {
+                effects.push(state.session.operations.start_background(
+                    OperationKind::CacheListLoad {
+                        mailbox: request.mailbox_id.clone(),
+                        query: Some(request.query.clone()),
+                        offset: request.offset,
+                        limit: request.limit,
+                        fresh_background_on_hit: false,
+                    },
+                ));
+            } else {
+                effects.push(
+                    state
+                        .session
+                        .operations
+                        .start(OperationKind::Search(request)),
+                );
             }
-            effects.push(
-                state
-                    .session
-                    .operations
-                    .start(OperationKind::Search(request)),
-            );
             effects
         }
         Some(route) => match route.mailbox_id().cloned() {
@@ -2998,22 +3095,27 @@ fn request_visible_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
                 // Ticket haeb: cached summaries render instantly in cold
                 // contexts (empty list: startup, mailbox switch) — a move
                 // re-sync has a non-empty list, so it can never resurrect
-                // moved rows from the cache. The fresh load starts right
-                // after and its result overwrites this page.
+                // moved rows from the cache. The read runs off-thread; its
+                // completion applies the page and starts the fresh load.
                 let mut effects = Vec::new();
-                if state.messages.items.is_empty()
-                    && let Some(cache) = &state.caches.page_cache
-                    && let Some(page) =
-                        cache.load(&request.mailbox_id, None, request.offset, request.limit)
-                {
-                    effects.extend(apply_page(state, page));
+                if state.messages.items.is_empty() {
+                    effects.push(state.session.operations.start_background(
+                        OperationKind::CacheListLoad {
+                            mailbox: request.mailbox_id.clone(),
+                            query: None,
+                            offset: request.offset,
+                            limit: request.limit,
+                            fresh_background_on_hit: false,
+                        },
+                    ));
+                } else {
+                    effects.push(
+                        state
+                            .session
+                            .operations
+                            .start(OperationKind::LoadPage(request)),
+                    );
                 }
-                effects.push(
-                    state
-                        .session
-                        .operations
-                        .start(OperationKind::LoadPage(request)),
-                );
                 effects
             }
             None => Vec::new(),
@@ -3083,28 +3185,208 @@ fn request_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
     // served the visible rows, the fresh load is *consequence* work: it
     // runs in the background so `Esc` can never cancel it into "cancelled"
     // noise, and its result converges read/unread state and remote drift.
-    let mut effects = Vec::new();
-    let mut served_from_cache = false;
-    if state.messages.items.is_empty()
-        && let Some(cache) = &state.caches.page_cache
-        && let Some(page) = cache.load(&request.mailbox_id, None, request.offset, request.limit)
-    {
-        effects.extend(apply_page(state, page));
-        served_from_cache = true;
-    }
-    let load = if served_from_cache {
-        state
-            .session
-            .operations
-            .start_background(OperationKind::LoadPage(request))
+    // The read itself runs off-thread (the manager owns the cache); the
+    // completion decides the fresh load's origin.
+    if state.messages.items.is_empty() {
+        vec![
+            state
+                .session
+                .operations
+                .start_background(OperationKind::CacheListLoad {
+                    mailbox: request.mailbox_id.clone(),
+                    query: None,
+                    offset: request.offset,
+                    limit: request.limit,
+                    fresh_background_on_hit: true,
+                }),
+        ]
     } else {
-        state
-            .session
-            .operations
-            .start(OperationKind::LoadPage(request))
+        vec![
+            state
+                .session
+                .operations
+                .start(OperationKind::LoadPage(request)),
+        ]
+    }
+}
+
+/// Apply a served page-cache read (ticket haeb): in a still-cold context a
+/// hit renders the cached rows instantly and starts the fresh load
+/// (background when the read was the cold-start path, foreground
+/// otherwise); a miss starts the fresh load in the foreground. A result
+/// for a context that warmed up meanwhile is dropped — whatever filled the
+/// list already owns it.
+#[allow(clippy::too_many_arguments)]
+fn complete_cache_list_load(
+    state: &mut AppState,
+    mailbox: &MailboxId,
+    query: Option<&str>,
+    offset: usize,
+    limit: usize,
+    fresh_background_on_hit: bool,
+    result: &OperationResult,
+) -> Vec<Effect> {
+    // Currency: the visible list must still belong to this identity (a
+    // mailbox page for `query: None`, the open search otherwise) and stay
+    // cold — the cache only ever serves startup and mailbox switches.
+    let current = match query {
+        Some(query) => matches!(
+            state.active_route(),
+            Some(Route::Search(route))
+                if route.mailbox_id == *mailbox && route.query == query
+        ),
+        None => visible_mailbox_page(state).is_some_and(|id| *id == *mailbox),
     };
-    effects.push(load);
-    effects
+    if !current || !state.messages.items.is_empty() {
+        tracing::debug!(
+            id = %result.id,
+            mailbox = %mailbox.0,
+            "dropping cache read for a warmed or switched context"
+        );
+        return Vec::new();
+    }
+    match &result.outcome {
+        Ok(OperationOutcome::CachedPage(page)) => {
+            let mut effects = apply_page(state, page.clone());
+            let load = match query {
+                Some(query) => state.session.operations.start(OperationKind::Search(
+                    crate::domain::SearchRequest {
+                        mailbox_id: mailbox.clone(),
+                        query: String::from(query),
+                        offset,
+                        limit,
+                    },
+                )),
+                None => {
+                    let request = PageRequest {
+                        mailbox_id: mailbox.clone(),
+                        offset,
+                        limit,
+                    };
+                    if fresh_background_on_hit {
+                        state
+                            .session
+                            .operations
+                            .start_background(OperationKind::LoadPage(request))
+                    } else {
+                        state
+                            .session
+                            .operations
+                            .start(OperationKind::LoadPage(request))
+                    }
+                }
+            };
+            effects.push(load);
+            effects
+        }
+        Ok(OperationOutcome::CacheMiss) => {
+            let load = match query {
+                Some(query) => state.session.operations.start(OperationKind::Search(
+                    crate::domain::SearchRequest {
+                        mailbox_id: mailbox.clone(),
+                        query: String::from(query),
+                        offset,
+                        limit,
+                    },
+                )),
+                None => state
+                    .session
+                    .operations
+                    .start(OperationKind::LoadPage(PageRequest {
+                        mailbox_id: mailbox.clone(),
+                        offset,
+                        limit,
+                    })),
+            };
+            vec![load]
+        }
+        Ok(_) => unexpected_payload(result.id, "cached page"),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Apply a served mailbox-listing cache read (ticket haeb): a non-empty
+/// hit renders the sidebar instantly and roots the route stack, then the
+/// fresh listing still loads in the background (uncancellable — at startup
+/// the user has no intent to interrupt it, and a cached sidebar has
+/// already given them something interactive). A miss (or an empty cached
+/// listing) goes straight to the fresh background load.
+fn complete_cache_mailboxes_load(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
+    // Currency: the sidebar must still be unloaded — nothing else loads it
+    // between this read's start and its result.
+    if matches!(state.mailboxes, Loadable::Loaded(_)) {
+        return Vec::new();
+    }
+    match &result.outcome {
+        Ok(OperationOutcome::CachedMailboxes(mailboxes)) if !mailboxes.is_empty() => {
+            state.mailboxes = Loadable::Loaded(mailboxes.clone());
+            let mut effects = apply_mailbox_listing(state, mailboxes.clone());
+            effects.push(
+                state
+                    .session
+                    .operations
+                    .start_background(OperationKind::LoadMailboxes),
+            );
+            effects
+        }
+        Ok(_) => vec![
+            state
+                .session
+                .operations
+                .start_background(OperationKind::LoadMailboxes),
+        ],
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Apply a served message-cache read for the reader (ticket haeb): a hit
+/// renders the cached body instantly and starts the silent background
+/// convergence fetch (it reconciles read state and remote drift; it never
+/// takes the loader slot, so `Esc` cannot cancel it into "cancelled"
+/// noise). A miss keeps the spinner and loads in the foreground. A result
+/// for a closed or switched reader is dropped.
+fn complete_cache_message_load(
+    state: &mut AppState,
+    locator: &MessageLocator,
+    result: &OperationResult,
+) -> Vec<Effect> {
+    let current = matches!(
+        state.active_route(),
+        Some(Route::Message(route))
+            if route.mailbox_id == locator.mailbox && route.summary.id == locator.id
+    );
+    if !current {
+        tracing::debug!(
+            id = %result.id,
+            mailbox = %locator.mailbox.0,
+            "dropping message cache read for a closed reader"
+        );
+        return Vec::new();
+    }
+    match &result.outcome {
+        Ok(OperationOutcome::CachedMessage(message)) => {
+            // The cached body renders immediately; the convergence fetch
+            // still runs silently in the background (never cancellable,
+            // no loader slot): its result converges read state, fills the
+            // list snippet, and reconciles the attachment flag — exactly
+            // what a fresh load would do (ticket haeb).
+            state.open_message = Loadable::Loaded((**message).clone());
+            vec![
+                state
+                    .session
+                    .operations
+                    .start_background(OperationKind::LoadMessage(locator.clone())),
+            ]
+        }
+        Ok(OperationOutcome::CacheMiss) => vec![
+            state
+                .session
+                .operations
+                .start(OperationKind::LoadMessage(locator.clone())),
+        ],
+        Ok(_) => unexpected_payload(result.id, "cached message"),
+        Err(_) => Vec::new(),
+    }
 }
 
 fn activate(state: &mut AppState) -> Vec<Effect> {
@@ -3394,27 +3676,16 @@ fn open_message(state: &mut AppState, summary: crate::domain::MessageSummary) ->
     // silently in the background (never cancellable, no loader slot): its
     // result converges read/unread state and any remote drift (ticket
     // haeb). Missing from the cache is the ordinary path: a foreground
-    // load with the centered spinner.
-    let cached = state
-        .caches
-        .page_cache
-        .as_ref()
-        .and_then(|cache| cache.load_message(&locator.mailbox, &locator.id.0));
-    if let Some(message) = cached {
-        state.open_message = Loadable::Loaded(message);
-        return vec![
-            state
-                .session
-                .operations
-                .start_background(OperationKind::LoadMessage(locator)),
-        ];
-    }
+    // load with the centered spinner. The read itself runs off-thread
+    // (the manager owns the cache); the spinner shows until its result
+    // lands, then either the cached body or the foreground load takes
+    // over.
     state.open_message = Loadable::Loading;
     vec![
         state
             .session
             .operations
-            .start(OperationKind::LoadMessage(locator)),
+            .start_background(OperationKind::CacheMessageLoad { locator }),
     ]
 }
 
@@ -3850,28 +4121,17 @@ fn refresh(state: &mut AppState) -> Vec<Effect> {
         if state.session.operations.is_loading_mailboxes() {
             return Vec::new();
         }
-        let mut effects = Vec::new();
         // Ticket haeb: the cached mailbox listing renders the sidebar
         // (and, through the page cache, the first page) instantly; the
-        // fresh listing still loads and replaces it.
-        if let Some(cache) = &state.caches.page_cache
-            && let Some(mailboxes) = cache.load_mailboxes()
-            && !mailboxes.is_empty()
-        {
-            state.mailboxes = Loadable::Loaded(mailboxes.clone());
-            effects = apply_mailbox_listing(state, mailboxes);
-        }
-        // The listing is background work (uncancellable): at startup the
-        // user has no intent to interrupt it — `Esc` must not turn the
-        // listing into "cancelled" noise, and a cached sidebar has
-        // already given them something interactive.
-        effects.push(
+        // fresh listing still loads and replaces it. The read runs
+        // off-thread; its completion applies the listing and starts the
+        // fresh background load.
+        return vec![
             state
                 .session
                 .operations
-                .start_background(OperationKind::LoadMailboxes),
-        );
-        return effects;
+                .start_background(OperationKind::CacheMailboxesLoad),
+        ];
     }
     if state.active_route().is_none() {
         return Vec::new();

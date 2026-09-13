@@ -25,9 +25,11 @@ use serde::{Deserialize, Serialize};
 use crate::domain::{Mailbox, MailboxId, Message, MessageSummary, Page};
 
 /// Version of the on-disk format; bumping it invalidates old caches.
-/// 2: attachment `part_id` became the 1-based id `attachment download`
-/// expects; v1 entries cache the old 0-based index and must not be served.
-const CACHE_VERSION: u32 = 2;
+/// 3: LRU stamps moved to file modification times — pruning no longer
+/// parses file contents, and a cache hit bumps the stamp with a metadata
+/// write instead of a full rewrite. v2 entries (stamp inside the file)
+/// fail the version check and are re-fetched.
+const CACHE_VERSION: u32 = 3;
 
 /// The on-disk shape: the page payload plus the identity it must match.
 #[derive(Serialize, Deserialize)]
@@ -49,22 +51,28 @@ struct CachedMailboxes {
     mailboxes: Vec<Mailbox>,
 }
 
-/// The on-disk viewed message, keyed by its locator. `last_used_ms`
-/// drives least-recently-used eviction (ticket haeb).
+/// The on-disk viewed message, keyed by its locator. Recency is tracked
+/// by the file's modification time (bumped on every hit), so eviction
+/// never has to parse file contents.
 #[derive(Serialize, Deserialize)]
 struct CachedMessage {
     version: u32,
     mailbox: String,
     id: String,
-    last_used_ms: u64,
     message: Message,
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+/// Bump a cache entry's recency stamp: the file's modification time is
+/// the LRU key, so a hit re-stamps it with a metadata write instead of a
+/// full rewrite. Best-effort — a failed touch only makes the entry look
+/// older than it is.
+fn touch(path: &Path) {
+    let Ok(file) = fs::OpenOptions::new().append(true).open(path) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let times = fs::FileTimes::new().set_accessed(now).set_modified(now);
+    let _ = file.set_times(times);
 }
 
 /// Upper bound on stored pages per mailbox (offset/limit/query variants
@@ -269,18 +277,18 @@ impl PageCache {
     }
 
     /// Load a cached viewed message, or `None` when absent/unparsable/
-    /// for a different identity. A hit refreshes the entry's LRU stamp.
+    /// for a different identity. A hit bumps the entry's recency stamp
+    /// (the file's modification time) with a metadata write — no
+    /// re-serialization — so recently viewed messages outlive older ones
+    /// under the size caps.
     pub fn load_message(&self, mailbox: &MailboxId, id: &str) -> Option<Message> {
         let path = self.message_path(mailbox, id);
         let bytes = fs::read(&path).ok()?;
-        let mut cached: CachedMessage = serde_json::from_slice(&bytes).ok()?;
+        let cached: CachedMessage = serde_json::from_slice(&bytes).ok()?;
         if cached.version != CACHE_VERSION || cached.mailbox != mailbox.0 || cached.id != id {
             return None;
         }
-        // LRU bookkeeping: rewrite with a fresh stamp so recently viewed
-        // messages outlive older ones under the size caps.
-        cached.last_used_ms = now_ms();
-        self.write_json(&path, &cached);
+        touch(&path);
         Some(cached.message)
     }
 
@@ -297,7 +305,6 @@ impl PageCache {
             version: CACHE_VERSION,
             mailbox: mailbox.0.clone(),
             id: String::from(id),
-            last_used_ms: now_ms(),
             message: message.clone(),
         };
         let payload = match serde_json::to_vec(&cached) {
@@ -321,13 +328,16 @@ impl PageCache {
     /// Enforce [`CacheLimits`] across all mailboxes' viewed messages
     /// (`<root>/messages/<mailbox>/<id>.json`): evict the
     /// least-recently-used entries until the entry count and total byte
-    /// size fit. Entries without a parsable LRU stamp are evicted first.
+    /// size fit. Recency is the file's modification time (bumped on every
+    /// hit), so pruning reads only directory listings and metadata —
+    /// never file contents. Unparsable stamps (a legacy or foreign file)
+    /// sort as oldest and go first.
     fn prune_messages(&self) {
         let dir = self.root.join("messages");
         let Ok(mailbox_dirs) = fs::read_dir(&dir) else {
             return;
         };
-        let mut files: Vec<(u64, PathBuf, u64)> = mailbox_dirs
+        let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = mailbox_dirs
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
             .filter_map(|entry| fs::read_dir(entry.path()).ok())
@@ -335,14 +345,9 @@ impl PageCache {
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
             .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-            .map(|path| {
-                let stamp = fs::read(&path)
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<CachedMessage>(&bytes).ok())
-                    .map(|cached| cached.last_used_ms)
-                    .unwrap_or(0);
-                let len = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-                (stamp, path, len)
+            .filter_map(|path| {
+                let meta = fs::metadata(&path).ok()?;
+                Some((meta.modified().ok()?, path, meta.len()))
             })
             .collect();
         // Least recently used first.
@@ -358,6 +363,23 @@ impl PageCache {
             if fs::remove_file(path).is_ok() {
                 remaining -= 1;
                 total -= len;
+            }
+        }
+        // Crash leftovers from a torn write: the temp files never carry
+        // data the cache would serve, so they are only litter.
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    continue;
+                }
+                let Ok(files) = fs::read_dir(entry.path()) else {
+                    continue;
+                };
+                for file in files.flatten() {
+                    if file.path().extension().is_some_and(|ext| ext == "tmp") {
+                        let _ = fs::remove_file(file.path());
+                    }
+                }
             }
         }
     }
@@ -590,6 +612,45 @@ mod mailbox_message_tests {
         assert!(cache.load_message(&inbox, "a").is_none());
         assert!(cache.load_message(&inbox, "b").is_some());
         assert!(cache.load_message(&inbox, "c").is_some());
+    }
+
+    #[test]
+    fn a_hit_refreshes_recency_without_a_rewrite() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = PageCache::open(
+            dir.path().to_path_buf(),
+            CacheLimits {
+                max_messages: 2,
+                max_bytes: u64::MAX,
+            },
+        );
+        let inbox = MailboxId(String::from("INBOX"));
+        for id in ["a", "b"] {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            cache.store_message(&inbox, id, &message(id));
+        }
+        // A hit re-stamps "a" (the file's modification time), so the next
+        // store evicts "b" — the least recently *used*, not written.
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        assert!(cache.load_message(&inbox, "a").is_some());
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        cache.store_message(&inbox, "c", &message("c"));
+        assert!(cache.load_message(&inbox, "a").is_some(), "hit survives");
+        assert!(cache.load_message(&inbox, "b").is_none(), "b evicted");
+        assert!(cache.load_message(&inbox, "c").is_some());
+    }
+
+    #[test]
+    fn torn_write_tempfiles_are_swept() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
+        let inbox = MailboxId(String::from("INBOX"));
+        cache.store_message(&inbox, "a", &message("a"));
+        // A crash mid-write leaves the sibling temp file behind.
+        let tmp = cache.message_path(&inbox, "a").with_extension("json.tmp");
+        std::fs::write(&tmp, b"torn write").expect("litter the cache");
+        cache.store_message(&inbox, "b", &message("b"));
+        assert!(!tmp.exists(), "the temp file is swept on the next prune");
     }
 
     #[test]

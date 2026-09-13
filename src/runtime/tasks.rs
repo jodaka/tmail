@@ -42,6 +42,10 @@ pub struct OperationManager {
     /// the adapter, so the manager carries it for the test invocation.
     /// Overridable so contract tests point it at the fake.
     himalaya_program: String,
+    /// The summary/message cache (ticket haeb): cache reads and writes
+    /// are file I/O, so they run here on the blocking pool — the reducer
+    /// stays I/O-free. `None` disables caching (unknown data dir).
+    cache: Option<crate::app::page_cache::PageCache>,
     results: UnboundedSender<OperationResult>,
 }
 
@@ -52,6 +56,7 @@ impl OperationManager {
         notifier: Arc<dyn Notifier>,
         discoverer: Arc<dyn EmailConfigDiscoverer>,
         himalaya_program: String,
+        cache: Option<crate::app::page_cache::PageCache>,
         results: UnboundedSender<OperationResult>,
     ) -> Self {
         Self {
@@ -60,6 +65,7 @@ impl OperationManager {
             notifier,
             discoverer,
             himalaya_program,
+            cache,
             results,
         }
     }
@@ -72,6 +78,7 @@ impl OperationManager {
         let notifier = Arc::clone(&self.notifier);
         let discoverer = Arc::clone(&self.discoverer);
         let himalaya_program = self.himalaya_program.clone();
+        let cache = self.cache.clone();
         let results = self.results.clone();
         let id = effect.id;
         tokio::spawn(async move {
@@ -82,6 +89,7 @@ impl OperationManager {
                 &notifier,
                 &discoverer,
                 &himalaya_program,
+                &cache,
                 &effect,
                 &ctx,
             )
@@ -111,12 +119,14 @@ impl OperationManager {
 /// mapping. Only the arms with a different control shape (attachment
 /// explorer, platform opener, editor, discovery, credential test, account
 /// save) are spelled out.
+#[allow(clippy::too_many_arguments)]
 async fn run_effect(
     backend: &Arc<dyn MailBackend>,
     opener: &Arc<dyn PathOpener>,
     notifier: &Arc<dyn Notifier>,
     discoverer: &Arc<dyn EmailConfigDiscoverer>,
     himalaya_program: &str,
+    cache: &Option<crate::app::page_cache::PageCache>,
     effect: &Effect,
     ctx: &RequestContext,
 ) -> Option<Result<OperationOutcome, OperationFailure>> {
@@ -246,9 +256,17 @@ async fn run_effect(
             .await
         }
         OperationKind::ListAttachmentFiles { path } => {
-            match build_attachment_explorer(path.as_deref()) {
-                Ok(explorer) => Some(Ok(OperationOutcome::Explorer(Box::new(explorer)))),
-                Err(detail) => Some(Err(plain_failure(effect, &detail))),
+            // The directory walk is file I/O: it hops to the blocking pool
+            // so the single-threaded runtime never stalls (plan §3).
+            match tokio::task::spawn_blocking(move || build_attachment_explorer(path.as_deref()))
+                .await
+            {
+                Ok(Ok(explorer)) => Some(Ok(OperationOutcome::Explorer(Box::new(explorer)))),
+                Ok(Err(detail)) => Some(Err(plain_failure(effect, &detail))),
+                Err(err) => Some(Err(plain_failure(
+                    effect,
+                    &format!("directory listing task failed: {err}"),
+                ))),
             }
         }
         OperationKind::SaveAttachment { request, .. } => {
@@ -315,15 +333,24 @@ async fn run_effect(
             }
         }
         // Wizard save (ADR 0003 §3.6): the format-preserving merge runs
-        // here (file I/O), keeping the reducer I/O-free.
+        // here (file I/O on the blocking pool), keeping the reducer
+        // I/O-free and the runtime loop unblocked.
         OperationKind::SaveAccount { path, draft } => {
-            match crate::config::write::save_account(&path, &draft) {
-                Ok(report) => Some(Ok(OperationOutcome::AccountSaved {
+            match tokio::task::spawn_blocking(move || {
+                crate::config::write::save_account(&path, &draft)
+            })
+            .await
+            {
+                Ok(Ok(report)) => Some(Ok(OperationOutcome::AccountSaved {
                     path: report.path,
                     created: report.created,
                     permissions_warning: report.permissions_warning,
                 })),
-                Err(detail) => Some(Err(plain_failure(effect, &detail))),
+                Ok(Err(detail)) => Some(Err(plain_failure(effect, &detail))),
+                Err(err) => Some(Err(plain_failure(
+                    effect,
+                    &format!("account save task failed: {err}"),
+                ))),
             }
         }
         // New-mail notification (ticket b28p): best-effort and off the UI
@@ -354,6 +381,112 @@ async fn run_effect(
             }
             Some(Ok(OperationOutcome::Done))
         }
+        // ── Summary/message cache (ticket haeb, off-thread I/O) ─────────
+        //
+        // Every arm hops to the blocking pool: the main runtime is
+        // single-threaded, and a cache read or write must never stall the
+        // frame loop. Reads never fail — a broken cache degrades to a
+        // miss; writes are best-effort (failures are logged inside the
+        // cache) and always report Done.
+        OperationKind::CacheListLoad {
+            mailbox,
+            query,
+            offset,
+            limit,
+            ..
+        } => {
+            let page = run_cache(cache, move |cache| {
+                cache.load(&mailbox, query.as_deref(), offset, limit)
+            })
+            .await;
+            Some(Ok(match page {
+                Some(page) => OperationOutcome::CachedPage(page),
+                None => OperationOutcome::CacheMiss,
+            }))
+        }
+        OperationKind::CacheListStore {
+            mailbox,
+            query,
+            page,
+        } => {
+            run_cache_store(cache, move |cache| {
+                cache.store(&mailbox, query.as_deref(), &page)
+            })
+            .await;
+            Some(Ok(OperationOutcome::Done))
+        }
+        OperationKind::CacheMailboxesLoad => {
+            let mailboxes = run_cache(cache, move |cache| cache.load_mailboxes()).await;
+            Some(Ok(match mailboxes {
+                Some(mailboxes) => OperationOutcome::CachedMailboxes(mailboxes),
+                None => OperationOutcome::CacheMiss,
+            }))
+        }
+        OperationKind::CacheMailboxesStore { mailboxes } => {
+            run_cache_store(cache, move |cache| cache.store_mailboxes(&mailboxes)).await;
+            Some(Ok(OperationOutcome::Done))
+        }
+        OperationKind::CacheMessageLoad { locator } => {
+            let message = run_cache(cache, move |cache| {
+                cache.load_message(&locator.mailbox, &locator.id.0)
+            })
+            .await;
+            Some(Ok(match message {
+                Some(message) => OperationOutcome::CachedMessage(Box::new(message)),
+                None => OperationOutcome::CacheMiss,
+            }))
+        }
+        OperationKind::CachePreviewLoad { locator } => {
+            let message = run_cache(cache, move |cache| {
+                cache.load_message(&locator.mailbox, &locator.id.0)
+            })
+            .await;
+            Some(Ok(match message {
+                Some(message) => OperationOutcome::CachedMessage(Box::new(message)),
+                None => OperationOutcome::CacheMiss,
+            }))
+        }
+        OperationKind::CacheMessageStore {
+            mailbox,
+            id,
+            message,
+        } => {
+            run_cache_store(cache, move |cache| {
+                cache.store_message(&mailbox, &id, &message)
+            })
+            .await;
+            Some(Ok(OperationOutcome::Done))
+        }
+    }
+}
+
+/// Run one cache read on the blocking pool. `None` when caching is
+/// disabled or the entry is absent — both are ordinary misses.
+async fn run_cache<T, F>(cache: &Option<crate::app::page_cache::PageCache>, task: F) -> Option<T>
+where
+    F: FnOnce(crate::app::page_cache::PageCache) -> Option<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let cache = cache.clone()?;
+    tokio::task::spawn_blocking(move || task(cache))
+        .await
+        .unwrap_or_else(|err| {
+            tracing::debug!(%err, "cache read task failed");
+            None
+        })
+}
+
+/// Run one cache write on the blocking pool. Best-effort: a failed task
+/// is logged, never surfaced — the cache is an optimization.
+async fn run_cache_store<F>(cache: &Option<crate::app::page_cache::PageCache>, task: F)
+where
+    F: FnOnce(crate::app::page_cache::PageCache) + Send + 'static,
+{
+    let Some(cache) = cache.clone() else {
+        return;
+    };
+    if let Err(err) = tokio::task::spawn_blocking(move || task(cache)).await {
+        tracing::debug!(%err, "cache write task failed");
     }
 }
 
@@ -684,6 +817,7 @@ mod tests {
                 notifier,
                 std::sync::Arc::new(crate::discovery::FakeDiscoverer),
                 String::from("himalaya"),
+                None,
                 tx,
             ),
             rx,
@@ -1015,5 +1149,313 @@ mod tests {
         assert!(failure.detail.contains("https://example.org/x"));
         assert!(failure.detail.contains("no browser"));
         assert_eq!(failure.retry, Some(retry));
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::app::effect::Effect;
+    use crate::app::operation::{OperationId, OperationOutcome};
+    use crate::app::page_cache::{CacheLimits, PageCache};
+    use crate::backend::BackendResult;
+    use crate::domain::{
+        Mailbox, MailboxId, Message, MessageId, MessageLocator, MessageSummary, Page, PageRequest,
+    };
+    use std::time::Duration;
+    use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+    use tokio_util::sync::CancellationToken;
+
+    fn manager_with_cache(
+        cache: Option<PageCache>,
+    ) -> (OperationManager, UnboundedReceiver<OperationResult>) {
+        let (tx, rx) = unbounded_channel();
+        (
+            OperationManager::new(
+                Arc::new(StubBackend),
+                Arc::new(InertOpener),
+                Arc::new(InertNotifier),
+                Arc::new(crate::discovery::FakeDiscoverer),
+                String::from("himalaya"),
+                cache,
+                tx,
+            ),
+            rx,
+        )
+    }
+
+    fn ctx(id: u64, token: &CancellationToken) -> RequestContext {
+        RequestContext {
+            operation: OperationId(id),
+            cancellation: token.clone(),
+        }
+    }
+
+    struct InertOpener;
+
+    impl PathOpener for InertOpener {
+        fn open(&self, _path: &std::path::Path) -> std::io::Result<()> {
+            Err(std::io::Error::other("unused"))
+        }
+
+        fn open_url(&self, _url: &str) -> std::io::Result<()> {
+            Err(std::io::Error::other("unused"))
+        }
+    }
+
+    struct InertNotifier;
+
+    impl Notifier for InertNotifier {
+        fn bell(&self) -> std::io::Result<()> {
+            Err(std::io::Error::other("unused"))
+        }
+
+        fn notify(&self, _summary: &str, _body: &str) -> Result<(), String> {
+            Err(String::from("unused"))
+        }
+    }
+
+    /// A backend the cache arms never touch: cache work is file I/O only.
+    struct StubBackend;
+
+    #[async_trait::async_trait]
+    impl MailBackend for StubBackend {
+        async fn list_mailboxes(&self, _req: RequestContext) -> BackendResult<Vec<Mailbox>> {
+            Err(BackendError::InvalidRequest(String::from("unused")))
+        }
+
+        async fn list_messages(
+            &self,
+            _req: RequestContext,
+            _page: PageRequest,
+        ) -> BackendResult<Page<MessageSummary>> {
+            Err(BackendError::InvalidRequest(String::from("unused")))
+        }
+
+        async fn search_messages(
+            &self,
+            _req: RequestContext,
+            _request: crate::domain::SearchRequest,
+        ) -> BackendResult<Page<MessageSummary>> {
+            Err(BackendError::InvalidRequest(String::from("unused")))
+        }
+
+        async fn get_message(
+            &self,
+            _req: RequestContext,
+            _locator: MessageLocator,
+        ) -> BackendResult<Message> {
+            Err(BackendError::InvalidRequest(String::from("unused")))
+        }
+
+        async fn set_read(
+            &self,
+            _req: RequestContext,
+            _locator: MessageLocator,
+            _read: bool,
+        ) -> BackendResult<()> {
+            Err(BackendError::InvalidRequest(String::from("unused")))
+        }
+
+        async fn set_starred(
+            &self,
+            _req: RequestContext,
+            _locator: MessageLocator,
+            _starred: bool,
+        ) -> BackendResult<()> {
+            Err(BackendError::InvalidRequest(String::from("unused")))
+        }
+
+        async fn archive(
+            &self,
+            _req: RequestContext,
+            _locator: MessageLocator,
+        ) -> BackendResult<()> {
+            Err(BackendError::InvalidRequest(String::from("unused")))
+        }
+
+        async fn trash(&self, _req: RequestContext, _locator: MessageLocator) -> BackendResult<()> {
+            Err(BackendError::InvalidRequest(String::from("unused")))
+        }
+
+        async fn save_draft(
+            &self,
+            _req: RequestContext,
+            _draft: crate::domain::DraftSnapshot,
+        ) -> BackendResult<MessageId> {
+            Err(BackendError::InvalidRequest(String::from("unused")))
+        }
+
+        async fn load_drafts(
+            &self,
+            _req: RequestContext,
+        ) -> BackendResult<Vec<crate::domain::RestoredDraft>> {
+            Err(BackendError::InvalidRequest(String::from("unused")))
+        }
+
+        async fn delete_draft(
+            &self,
+            _req: RequestContext,
+            _draft: crate::domain::DraftSnapshot,
+        ) -> BackendResult<()> {
+            Err(BackendError::InvalidRequest(String::from("unused")))
+        }
+
+        async fn send_message(
+            &self,
+            _req: RequestContext,
+            _message: crate::domain::OutboundMessage,
+        ) -> BackendResult<crate::domain::SendOutcome> {
+            Err(BackendError::InvalidRequest(String::from("unused")))
+        }
+
+        async fn read_attachment(
+            &self,
+            _req: RequestContext,
+            _path: std::path::PathBuf,
+        ) -> BackendResult<crate::domain::DraftAttachment> {
+            Err(BackendError::InvalidRequest(String::from("unused")))
+        }
+
+        async fn save_attachment(
+            &self,
+            _req: RequestContext,
+            _request: crate::domain::AttachmentRequest,
+        ) -> BackendResult<std::path::PathBuf> {
+            Err(BackendError::InvalidRequest(String::from("unused")))
+        }
+    }
+
+    fn effect(kind: OperationKind) -> (Effect, CancellationToken) {
+        (
+            Effect {
+                id: OperationId(7),
+                kind,
+            },
+            CancellationToken::new(),
+        )
+    }
+
+    fn summary(id: &str) -> MessageSummary {
+        MessageSummary {
+            id: MessageId(String::from(id)),
+            mailbox_id: MailboxId(String::from("INBOX")),
+            message_id: None,
+            from: Vec::new(),
+            to: Vec::new(),
+            subject: String::from(id),
+            snippet: None,
+            timestamp: chrono::DateTime::parse_from_rfc3339("2026-09-02T10:00:00+00:00")
+                .expect("fixed ts"),
+            is_read: false,
+            is_starred: false,
+            has_attachments: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cached_page_read_serves_the_page_off_thread() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
+        cache.store(
+            &MailboxId(String::from("INBOX")),
+            None,
+            &crate::domain::Page {
+                items: vec![summary("m1")],
+                offset: 0,
+                limit: 20,
+                total: None,
+            },
+        );
+        let (manager, mut rx) = manager_with_cache(Some(cache));
+        let (effect, token) = effect(OperationKind::CacheListLoad {
+            mailbox: MailboxId(String::from("INBOX")),
+            query: None,
+            offset: 0,
+            limit: 20,
+            fresh_background_on_hit: true,
+        });
+        manager.launch(effect, ctx(7, &token));
+        let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("result")
+            .expect("result");
+        assert!(matches!(
+            result.outcome,
+            Ok(OperationOutcome::CachedPage(page)) if page.items.len() == 1
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_missing_cache_entry_reads_as_a_miss_never_a_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
+        let (manager, mut rx) = manager_with_cache(Some(cache));
+        let (effect, token) = effect(OperationKind::CacheListLoad {
+            mailbox: MailboxId(String::from("INBOX")),
+            query: None,
+            offset: 0,
+            limit: 20,
+            fresh_background_on_hit: true,
+        });
+        manager.launch(effect, ctx(7, &token));
+        let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("result")
+            .expect("result");
+        assert_eq!(result.outcome, Ok(OperationOutcome::CacheMiss));
+    }
+
+    #[tokio::test]
+    async fn cache_stores_write_off_thread_and_report_done() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
+        let (manager, mut rx) = manager_with_cache(Some(cache.clone()));
+        let (effect, token) = effect(OperationKind::CacheMessageStore {
+            mailbox: MailboxId(String::from("INBOX")),
+            id: String::from("m1"),
+            message: Box::new(Message {
+                id: MessageId(String::from("m1")),
+                mailbox_id: MailboxId(String::from("INBOX")),
+                headers: Default::default(),
+                plain_body: Some(String::from("body")),
+                html_body: None,
+                attachments: Vec::new(),
+            }),
+        });
+        manager.launch(effect, ctx(7, &token));
+        let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("result")
+            .expect("result");
+        assert_eq!(result.outcome, Ok(OperationOutcome::Done));
+        // The write actually landed (on the blocking pool).
+        assert!(
+            cache
+                .load_message(&MailboxId(String::from("INBOX")), "m1")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_work_without_a_cache_is_a_miss_or_a_noop() {
+        let (manager, mut rx) = manager_with_cache(None);
+        let (load, token) = effect(OperationKind::CacheMailboxesLoad);
+        manager.launch(load, ctx(1, &token));
+        let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("result")
+            .expect("result");
+        assert_eq!(result.outcome, Ok(OperationOutcome::CacheMiss));
+
+        let (store, token) = effect(OperationKind::CacheMailboxesStore {
+            mailboxes: Vec::new(),
+        });
+        manager.launch(store, ctx(2, &token));
+        let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("result")
+            .expect("result");
+        assert_eq!(result.outcome, Ok(OperationOutcome::Done));
     }
 }

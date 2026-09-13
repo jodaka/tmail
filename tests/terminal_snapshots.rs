@@ -580,10 +580,22 @@ fn spinner_shows_foreground_work_without_blocking_the_frame() {
     // An empty list with a page load in flight (startup / mailbox switch
     // look): the loader runs in the status bar's left corner (ticket m3by,
     // moved from under the brand) and the list pane shows its own centered
-    // spinner.
+    // spinner. The cold-context cache read (ticket haeb) is background
+    // work and shows no spinner, so the test completes it with a miss —
+    // which is what starts the fresh foreground load the user waits on.
     state.messages = Page::empty(20);
-    let actions = vec![Action::Refresh];
-    let buffer = buffer_after(&mut state, &actions, 152, 40);
+    let effects = reducer::reduce(&mut state, &Action::Refresh);
+    let [effect] = effects.as_slice() else {
+        panic!("the cold refresh reads the cache first: {effects:?}");
+    };
+    reducer::reduce(
+        &mut state,
+        &Action::BackendCompleted(OperationResult {
+            id: effect.id,
+            outcome: Ok(OperationOutcome::CacheMiss),
+        }),
+    );
+    let buffer = buffer_after(&mut state, &[], 152, 40);
     let text = text_of(&buffer);
     assert!(text.contains("■⬝"), "spinner frame missing:\n{text}");
     assert!(
