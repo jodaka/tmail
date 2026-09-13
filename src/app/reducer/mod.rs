@@ -14,10 +14,13 @@ use crate::app::route::Route;
 use crate::app::state::AppState;
 use crate::app::wizard::wizard_reduce;
 
-/// Apply `action` to `state`, returning backend work to spawn. Never
+/// Apply `action` to `state`, returning backend work to spawn. Consumes
+/// the action by value (ticket sakb): payload-carrying variants
+/// (`BackendCompleted`, `EditorFinished`, `Tick`) move their payloads into
+/// the handlers instead of every handler deep-cloning them. Never
 /// performs I/O, never panics on odd input.
-pub fn reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
-    if let Some(effects) = intercept(state, action) {
+pub fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
+    if let Some(effects) = intercept(state, &action) {
         return effects;
     }
     let effects = dispatch(state, action);
@@ -59,7 +62,7 @@ fn intercept(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
 }
 
 /// The main action dispatch, after the interceptors had their chance.
-fn dispatch(state: &mut AppState, action: &Action) -> Vec<Effect> {
+fn dispatch(state: &mut AppState, action: Action) -> Vec<Effect> {
     match action {
         Action::MoveUp => move_selection(state, -1),
         Action::MoveDown => move_selection(state, 1),
@@ -71,7 +74,7 @@ fn dispatch(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::FocusPrevious => focus_step(state, -1),
         Action::OpenSearch => open_search(state),
         Action::SearchEdit(edit) => {
-            search_edit(state, edit);
+            search_edit(state, &edit);
             Vec::new()
         }
         Action::SubmitSearch => submit_search(state),
@@ -87,7 +90,7 @@ fn dispatch(state: &mut AppState, action: &Action) -> Vec<Effect> {
         Action::Compose => open_composer(state),
         Action::OpenHelp => open_help(state),
         Action::LoadDrafts => load_drafts(state),
-        Action::ComposerEdit(edit) => composer_edit(state, edit),
+        Action::ComposerEdit(edit) => composer_edit(state, &edit),
         Action::Reply => open_reply(state),
         Action::ReplyAll => open_reply_all(state),
         Action::Forward => open_forward(state),
@@ -99,7 +102,7 @@ fn dispatch(state: &mut AppState, action: &Action) -> Vec<Effect> {
         }
         Action::DiscardDraft => open_discard_confirm(state),
         Action::EditExternal => edit_externally(state),
-        Action::EditorFinished { id, result } => editor_finished(state, *id, result.clone()),
+        Action::EditorFinished { id, result } => editor_finished(state, id, result),
         Action::RetryError
         | Action::DismissError
         | Action::DialogEdit(_)
@@ -112,17 +115,17 @@ fn dispatch(state: &mut AppState, action: &Action) -> Vec<Effect> {
             // interception at the top of `reduce`).
             Vec::new()
         }
-        Action::Click(target) => click(state, *target),
+        Action::Click(target) => click(state, target),
         Action::BackendCompleted(result) => backend_completed(state, result),
         Action::Refresh => refresh(state),
         Action::ToggleMouseCapture => toggle_mouse_capture(state),
         Action::OpenThemePicker => open_theme_picker(state),
-        Action::Tick { now } => tick(state, **now),
+        Action::Tick { now } => tick(state, *now),
         Action::SetTerminalFocus(focused) => {
-            state.session.terminal_focused = *focused;
+            state.session.terminal_focused = focused;
             Vec::new()
         }
-        Action::Resize { width, height } => resize(state, *width, *height),
+        Action::Resize { width, height } => resize(state, width, height),
         Action::Quit => {
             state.session.quit_requested = true;
             Vec::new()

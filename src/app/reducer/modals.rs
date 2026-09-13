@@ -450,7 +450,7 @@ pub(crate) fn theme_picker_reduce(state: &mut AppState, action: &Action) -> Vec<
 }
 
 /// Open the Retry/Dismiss modal for a failed operation (plan §12).
-pub(crate) fn open_error_modal(state: &mut AppState, failure: &OperationFailure) -> Vec<Effect> {
+pub(crate) fn open_error_modal(state: &mut AppState, failure: OperationFailure) -> Vec<Effect> {
     tracing::warn!(code = ?failure.code, detail = %failure.detail, "operation failed");
     state.session.overlay = Some(Overlay::Error(ErrorDialog {
         code: failure.code,

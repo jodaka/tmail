@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn d_saves_the_selected_attachment_with_a_frozen_request() {
     let mut s = reader_with_attachments();
-    let effects = reduce(&mut s, &Action::SaveAttachment);
+    let effects = reduce(&mut s, Action::SaveAttachment);
     let (id, kind) = effect_parts(&effects);
     assert_eq!(kind.summary(), "Saving attachment");
     let OperationKind::SaveAttachment {
@@ -27,7 +27,7 @@ fn d_saves_the_selected_attachment_with_a_frozen_request() {
     let final_path = PathBuf::from("/home/u/Downloads/report (1).pdf");
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::SavedPath(final_path.clone())),
         }),
@@ -47,10 +47,10 @@ fn d_saves_the_selected_attachment_with_a_frozen_request() {
 fn saving_targets_the_cursor_chip_by_part_id() {
     let mut s = reader_with_attachments();
     // Tab to the second chip (unnamed → part-id fallback naming).
-    reduce(&mut s, &Action::FocusNext);
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(1)));
-    let effects = reduce(&mut s, &Action::SaveAttachment);
+    let effects = reduce(&mut s, Action::SaveAttachment);
     let (_, kind) = effect_parts(&effects);
     let OperationKind::SaveAttachment {
         request,
@@ -67,7 +67,7 @@ fn saving_targets_the_cursor_chip_by_part_id() {
 fn save_is_reader_only_and_attachment_gated() {
     // From the list focus the action is inert.
     let mut s = state();
-    no_effects(&reduce(&mut s, &Action::SaveAttachment));
+    no_effects(&reduce(&mut s, Action::SaveAttachment));
     assert!(s.session.operations.is_empty());
     // In the reader without attachments too.
     let mut s = state();
@@ -81,7 +81,7 @@ fn save_is_reader_only_and_attachment_gated() {
         }));
     s.open_message = Loadable::Loaded(message);
     s.session.focus = Focus::Reader;
-    no_effects(&reduce(&mut s, &Action::SaveAttachment));
+    no_effects(&reduce(&mut s, Action::SaveAttachment));
     assert!(s.session.operations.is_empty());
 }
 
@@ -90,7 +90,7 @@ fn save_is_reader_only_and_attachment_gated() {
 #[test]
 fn enter_on_the_reader_opens_the_selected_attachment() {
     let mut s = reader_with_attachments();
-    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
     let OperationKind::SaveAttachment {
         request,
         open_after,
@@ -103,7 +103,7 @@ fn enter_on_the_reader_opens_the_selected_attachment() {
     // The chain completes exactly like `o`'s would.
     let effects = reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::SavedPath(PathBuf::from(
                 "/home/u/Downloads/report.pdf",
@@ -119,10 +119,10 @@ fn enter_on_the_reader_opens_the_selected_attachment() {
 #[test]
 fn enter_on_a_focused_attachment_opens_that_attachment() {
     let mut s = reader_with_attachments();
-    reduce(&mut s, &Action::FocusNext);
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(1)));
-    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
     let OperationKind::SaveAttachment {
         request,
         open_after,
@@ -135,7 +135,7 @@ fn enter_on_a_focused_attachment_opens_that_attachment() {
     let final_path = PathBuf::from("/home/u/Downloads/attachment-5.bin");
     let effects = reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::SavedPath(final_path.clone())),
         }),
@@ -152,7 +152,7 @@ fn enter_reuses_a_session_saved_attachment_path() {
     s.caches
         .saved_attachments
         .insert((message_id, 3), saved.clone());
-    let effects = reduce(&mut s, &Action::Activate);
+    let effects = reduce(&mut s, Action::Activate);
     let (_, kind) = effect_parts(&effects);
     assert_eq!(
         kind,
@@ -165,17 +165,17 @@ fn enter_reuses_a_session_saved_attachment_path() {
 fn enter_on_the_reader_without_attachments_is_inert() {
     let mut s = state();
     open_reader_with(&mut s, reply_source()); // no attachments
-    no_effects(&reduce(&mut s, &Action::Activate));
+    no_effects(&reduce(&mut s, Action::Activate));
     assert!(s.session.operations.is_empty());
 }
 
 #[test]
 fn save_failure_opens_a_retryable_modal() {
     let mut s = reader_with_attachments();
-    let (id, kind) = effect_parts(&reduce(&mut s, &Action::SaveAttachment));
+    let (id, kind) = effect_parts(&reduce(&mut s, Action::SaveAttachment));
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Err(OperationFailure {
                 code: Some(1),
@@ -192,7 +192,7 @@ fn save_failure_opens_a_retryable_modal() {
     };
     assert!(matches!(retry.kind, OperationKind::SaveAttachment { .. }));
     // Retry replays the identical request under a new operation id.
-    let replayed = reduce(&mut s, &Action::RetryError);
+    let replayed = reduce(&mut s, Action::RetryError);
     let (new_id, new_kind) = effect_parts(&replayed);
     assert_ne!(new_id, id);
     assert_eq!(new_kind, retry.kind);
@@ -240,7 +240,7 @@ fn keyboard_d_and_o_map_to_save_and_open() {
 #[test]
 fn o_saves_first_then_chains_the_opener_on_the_confirmed_path() {
     let mut s = reader_with_attachments();
-    let (id, kind) = effect_parts(&reduce(&mut s, &Action::OpenAttachment));
+    let (id, kind) = effect_parts(&reduce(&mut s, Action::OpenAttachment));
     // Nothing saved yet: the save runs with the open-after chain armed.
     let OperationKind::SaveAttachment {
         request: _,
@@ -253,7 +253,7 @@ fn o_saves_first_then_chains_the_opener_on_the_confirmed_path() {
     let final_path = PathBuf::from("/home/u/Downloads/report (2).pdf");
     let effects = reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::SavedPath(final_path.clone())),
         }),
@@ -269,7 +269,7 @@ fn o_saves_first_then_chains_the_opener_on_the_confirmed_path() {
     // Completing the open closes the loop.
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: open_id,
             outcome: Ok(OperationOutcome::Done),
         }),
@@ -285,7 +285,7 @@ fn o_reuses_a_path_saved_this_session_without_a_second_save() {
     s.caches
         .saved_attachments
         .insert((message_id, 3), saved.clone());
-    let effects = reduce(&mut s, &Action::OpenAttachment);
+    let effects = reduce(&mut s, Action::OpenAttachment);
     // Straight to the opener — no download, no duplicate file.
     let (_, kind) = effect_parts(&effects);
     assert_eq!(
@@ -298,7 +298,7 @@ fn o_reuses_a_path_saved_this_session_without_a_second_save() {
 #[test]
 fn open_is_reader_only_and_attachment_gated() {
     let mut s = state();
-    no_effects(&reduce(&mut s, &Action::OpenAttachment));
+    no_effects(&reduce(&mut s, Action::OpenAttachment));
     assert!(s.session.operations.is_empty());
 }
 
@@ -306,10 +306,10 @@ fn open_is_reader_only_and_attachment_gated() {
 fn save_failure_keeps_the_open_chain_off() {
     // A failed save-then-open opens the modal; no opener runs.
     let mut s = reader_with_attachments();
-    let (id, kind) = effect_parts(&reduce(&mut s, &Action::OpenAttachment));
+    let (id, kind) = effect_parts(&reduce(&mut s, Action::OpenAttachment));
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Err(OperationFailure {
                 code: Some(1),
@@ -322,7 +322,7 @@ fn save_failure_keeps_the_open_chain_off() {
     assert!(matches!(s.session.overlay, Some(Overlay::Error(_))));
     assert!(s.caches.saved_attachments.is_empty());
     // Retrying replays the save (with the chain armed) under a new id.
-    let replayed = reduce(&mut s, &Action::RetryError);
+    let replayed = reduce(&mut s, Action::RetryError);
     let (_, kind) = effect_parts(&replayed);
     assert!(matches!(
         kind,
@@ -339,13 +339,13 @@ fn esc_cancels_message_load_then_second_esc_returns() {
     let (id, _) = open_reader(&mut s);
     let token = s.session.operations.cancellation(id).unwrap();
     // First Esc cancels the foreground load (plan §10 order).
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert!(token.is_cancelled());
     assert!(s.session.operations.get(id).is_none());
     assert_eq!(s.session.routes.len(), 2, "reader stays open after cancel");
     assert_eq!(s.session.focus, Focus::Reader);
     // Second Esc goes back to the list.
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert_eq!(s.session.routes.len(), 1);
     assert_eq!(s.session.focus, Focus::MessageList);
 }
@@ -358,13 +358,13 @@ fn stale_message_result_after_close_is_dropped() {
     // Capture the open summary, then close the reader before the result
     // arrives.
     let summary = s.open_summary().unwrap().clone();
-    reduce(&mut s, &Action::BackOrCancel);
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert!(matches!(s.open_message, Loadable::Idle));
     let message = mock::mock_message(&summary);
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(message))),
         }),
@@ -380,12 +380,12 @@ fn stale_message_result_after_close_is_dropped() {
 fn message_load_failure_opens_modal_and_retry_replays() {
     let mut s = state();
     let (id, kind) = open_reader(&mut s);
-    reduce(&mut s, &failure(id, &kind, "no such message"));
+    reduce(&mut s, failure(id, &kind, "no such message"));
     // Coherent state: reader open, failed placeholder, modal up.
     assert!(matches!(s.open_message, Loadable::Failed(_)));
     assert!(s.session.overlay.is_some());
     assert_eq!(s.session.routes.len(), 2);
-    let effects = reduce(&mut s, &Action::RetryError);
+    let effects = reduce(&mut s, Action::RetryError);
     let (retry_id, retry_kind) = effect_parts(&effects);
     assert_ne!(retry_id, id);
     assert_eq!(retry_kind, kind, "same typed intent");
@@ -398,7 +398,7 @@ fn toggle_star_from_list_requests_inverse_and_applies_on_confirmation() {
     let mut s = state();
     s.selection = 0; // m1: not starred.
     assert!(!s.messages.items[0].is_starred);
-    let (id, kind) = expect_kind(&reduce(&mut s, &Action::ToggleStar));
+    let (id, kind) = expect_kind(&reduce(&mut s, Action::ToggleStar));
     assert!(
         matches!(&kind, OperationKind::SetStarred { starred: true, .. }),
         "kind: {kind:?}"
@@ -409,7 +409,7 @@ fn toggle_star_from_list_requests_inverse_and_applies_on_confirmation() {
     assert!(s.messages.items[0].is_starred);
 
     // Toggling a starred message requests the inverse.
-    let (id, kind) = expect_kind(&reduce(&mut s, &Action::ToggleStar));
+    let (id, kind) = expect_kind(&reduce(&mut s, Action::ToggleStar));
     assert!(
         matches!(&kind, OperationKind::SetStarred { starred: false, .. }),
         "kind: {kind:?}"
@@ -424,7 +424,7 @@ fn star_from_reader_targets_the_open_message() {
     s.selection = 2; // m3: not starred.
     let (load_id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, load_id);
-    let (id, kind) = expect_kind(&reduce(&mut s, &Action::ToggleStar));
+    let (id, kind) = expect_kind(&reduce(&mut s, Action::ToggleStar));
     assert!(matches!(
         &kind,
         OperationKind::SetStarred { starred: true, .. }
@@ -443,7 +443,7 @@ fn mark_unread_updates_list_and_route_after_confirmation() {
     s.selection = 3; // m4: read.
     let (load_id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, load_id);
-    let (id, kind) = expect_kind(&reduce(&mut s, &Action::MarkUnread));
+    let (id, kind) = expect_kind(&reduce(&mut s, Action::MarkUnread));
     assert!(matches!(&kind, OperationKind::SetRead { read: false, .. }));
     assert!(
         s.messages.items[3].is_read,
@@ -458,10 +458,10 @@ fn mark_unread_updates_list_and_route_after_confirmation() {
 fn message_actions_do_not_fire_from_sidebar_focus() {
     let mut s = state();
     s.session.focus = Focus::Sidebar;
-    no_effects(&reduce(&mut s, &Action::ToggleStar));
-    no_effects(&reduce(&mut s, &Action::Archive));
-    no_effects(&reduce(&mut s, &Action::Trash));
-    no_effects(&reduce(&mut s, &Action::MarkUnread));
+    no_effects(&reduce(&mut s, Action::ToggleStar));
+    no_effects(&reduce(&mut s, Action::Archive));
+    no_effects(&reduce(&mut s, Action::Trash));
+    no_effects(&reduce(&mut s, Action::MarkUnread));
     assert!(s.session.operations.is_empty());
 }
 
@@ -470,7 +470,7 @@ fn archive_from_list_removes_row_and_resyncs_page() {
     let mut s = state();
     s.selection = 0;
     let target = s.selected_message().unwrap().id.clone();
-    let (id, kind) = expect_kind(&reduce(&mut s, &Action::Archive));
+    let (id, kind) = expect_kind(&reduce(&mut s, Action::Archive));
     assert!(matches!(&kind, OperationKind::Archive(_)), "kind: {kind:?}");
     // The move confirmation itself emits the page re-sync effect.
     let (_, req) = expect_page(&complete_done(&mut s, id));
@@ -489,7 +489,7 @@ fn trash_closes_reader_and_removes_row() {
     let target = s.selected_message().unwrap().id.clone();
     let (load_id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, load_id);
-    let (id, kind) = expect_kind(&reduce(&mut s, &Action::Trash));
+    let (id, kind) = expect_kind(&reduce(&mut s, Action::Trash));
     assert!(matches!(&kind, OperationKind::Trash(_)), "kind: {kind:?}");
     let (_, req) = expect_page(&complete_done(&mut s, id));
     // The reader closed; the row vanished; the page re-syncs.
@@ -504,8 +504,8 @@ fn trash_closes_reader_and_removes_row() {
 fn archive_failure_keeps_row_and_opens_modal() {
     let mut s = state();
     s.selection = 1;
-    let (id, kind) = expect_kind(&reduce(&mut s, &Action::Archive));
-    reduce(&mut s, &failure(id, &kind, "imap server refused"));
+    let (id, kind) = expect_kind(&reduce(&mut s, Action::Archive));
+    reduce(&mut s, failure(id, &kind, "imap server refused"));
     // Coherent failure state: nothing removed, no reload, modal up.
     assert_eq!(s.messages.items.len(), mock::PAGE_SIZE);
     assert!(s.session.overlay.is_some());
@@ -530,21 +530,21 @@ fn reader_scrolls_within_content_and_clamps() {
     );
     let max = total - viewport;
     // Movement in reader focus scrolls the document.
-    reduce(&mut s, &Action::MoveDown);
+    reduce(&mut s, Action::MoveDown);
     assert_eq!(s.reader_scroll, 1);
     for _ in 0..(max + 10) {
-        reduce(&mut s, &Action::MoveDown);
+        reduce(&mut s, Action::MoveDown);
     }
     assert_eq!(s.reader_scroll, max, "scroll clamps at the end");
     for _ in 0..(max + 10) {
-        reduce(&mut s, &Action::MoveUp);
+        reduce(&mut s, Action::MoveUp);
     }
     assert_eq!(s.reader_scroll, 0, "scroll clamps at the start");
     // Left/Right page through the reader document in viewport steps,
     // clamped like single-line movement.
-    reduce(&mut s, &Action::PageNext);
+    reduce(&mut s, Action::PageNext);
     assert_eq!(s.reader_scroll, viewport.min(max));
-    reduce(&mut s, &Action::PagePrevious);
+    reduce(&mut s, Action::PagePrevious);
     assert_eq!(s.reader_scroll, 0);
 }
 
@@ -554,16 +554,16 @@ fn focus_cycles_tab_shift_tab() {
     assert_eq!(s.session.focus, Focus::MessageList);
     // Tab never lands on the search field (mouse click and `/` only);
     // it wraps list → sidebar.
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.session.focus, Focus::Sidebar);
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.session.focus, Focus::MessageList);
-    reduce(&mut s, &Action::FocusPrevious);
+    reduce(&mut s, Action::FocusPrevious);
     assert_eq!(s.session.focus, Focus::Sidebar);
     // Inside the search field Tab still steps out to the next control.
-    reduce(&mut s, &Action::OpenSearch);
+    reduce(&mut s, Action::OpenSearch);
     assert_eq!(s.session.focus, Focus::SearchField);
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.session.focus, Focus::Sidebar);
 }
 
@@ -578,47 +578,47 @@ fn modal_focus_is_outside_the_tab_cycle() {
 #[test]
 fn open_search_focuses_field_and_typing_edits_query() {
     let mut s = state();
-    reduce(&mut s, &Action::OpenSearch);
+    reduce(&mut s, Action::OpenSearch);
     assert_eq!(s.session.focus, Focus::SearchField);
     for c in "hello".chars() {
-        reduce(&mut s, &Action::SearchEdit(SearchEdit::Char(c)));
+        reduce(&mut s, Action::SearchEdit(SearchEdit::Char(c)));
     }
     assert_eq!(s.session.search_query, "hello");
-    reduce(&mut s, &Action::SearchEdit(SearchEdit::Backspace));
+    reduce(&mut s, Action::SearchEdit(SearchEdit::Backspace));
     assert_eq!(s.session.search_query, "hell");
 }
 
 #[test]
 fn search_edit_ignored_when_field_not_focused() {
     let mut s = state();
-    reduce(&mut s, &Action::SearchEdit(SearchEdit::Char('x')));
+    reduce(&mut s, Action::SearchEdit(SearchEdit::Char('x')));
     assert_eq!(s.session.search_query, "");
-    reduce(&mut s, &Action::SearchEdit(SearchEdit::Backspace));
+    reduce(&mut s, Action::SearchEdit(SearchEdit::Backspace));
     assert_eq!(s.session.search_query, "");
 }
 
 #[test]
 fn esc_leaves_search_field_before_quitting() {
     let mut s = state();
-    reduce(&mut s, &Action::OpenSearch);
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::OpenSearch);
+    reduce(&mut s, Action::BackOrCancel);
     assert_eq!(s.session.focus, Focus::MessageList);
     assert!(!s.session.quit_requested);
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert!(s.session.quit_requested);
 }
 
 #[test]
 fn esc_on_root_quits() {
     let mut s = state();
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert!(s.session.quit_requested);
 }
 
 #[test]
 fn quit_action_requests_quit() {
     let mut s = state();
-    reduce(&mut s, &Action::Quit);
+    reduce(&mut s, Action::Quit);
     assert!(s.session.quit_requested);
 }
 
@@ -627,12 +627,12 @@ fn move_keys_do_not_cross_focus_boundaries() {
     let mut s = state();
     // Moving in the sidebar must not move the message selection.
     s.session.focus = Focus::Sidebar;
-    reduce(&mut s, &Action::MoveDown);
+    reduce(&mut s, Action::MoveDown);
     assert_eq!(s.mailbox_selection, 1);
     assert_eq!(s.selection, 0);
     // Typing chars in the search field must not move anything.
     s.session.focus = Focus::SearchField;
-    reduce(&mut s, &Action::SearchEdit(SearchEdit::Char('c')));
+    reduce(&mut s, Action::SearchEdit(SearchEdit::Char('c')));
     assert_eq!(s.mailbox_selection, 1);
 }
 
@@ -640,9 +640,9 @@ fn move_keys_do_not_cross_focus_boundaries() {
 fn sidebar_movement_does_not_touch_messages_until_activated() {
     let mut s = state();
     s.session.focus = Focus::Sidebar;
-    reduce(&mut s, &Action::MoveDown);
+    reduce(&mut s, Action::MoveDown);
     assert_eq!(s.active_route().unwrap().mailbox_id().unwrap().0, "inbox");
-    reduce(&mut s, &Action::Activate);
+    reduce(&mut s, Action::Activate);
     assert_eq!(s.active_route().unwrap().mailbox_id().unwrap().0, "sent");
 }
 
@@ -651,22 +651,22 @@ fn selection_scrolls_to_stay_visible_on_movement() {
     let mut s = state();
     reduce(
         &mut s,
-        &Action::Resize {
+        Action::Resize {
             width: 152,
             height: 20,
         },
     );
     // 20 rows − 4 topbar − 3 statusbar − 2 list head = 11 visible rows.
     for _ in 0..14 {
-        reduce(&mut s, &Action::MoveDown);
+        reduce(&mut s, Action::MoveDown);
     }
     assert_eq!(s.selection, 14);
     assert_eq!(s.list_scroll, 4);
     // Moving up does not move the window until the selection hits its top.
-    reduce(&mut s, &Action::MoveUp);
+    reduce(&mut s, Action::MoveUp);
     assert_eq!(s.list_scroll, 4);
     for _ in 0..10 {
-        reduce(&mut s, &Action::MoveUp);
+        reduce(&mut s, Action::MoveUp);
     }
     assert_eq!(s.selection, 3);
     assert_eq!(s.list_scroll, 3);
@@ -678,7 +678,7 @@ fn resize_keeps_selection_visible() {
     s.selection = 20;
     reduce(
         &mut s,
-        &Action::Resize {
+        Action::Resize {
             width: 152,
             height: 40,
         },
@@ -687,7 +687,7 @@ fn resize_keeps_selection_visible() {
     // Shrink below the selection: the window follows it.
     reduce(
         &mut s,
-        &Action::Resize {
+        Action::Resize {
             width: 152,
             height: 20,
         },
@@ -705,7 +705,7 @@ fn scroll_is_clamped_when_the_page_shrinks() {
     // Any reducer interaction re-normalizes visibility.
     reduce(
         &mut s,
-        &Action::Resize {
+        Action::Resize {
             width: 152,
             height: 40,
         },
@@ -718,7 +718,7 @@ fn resize_updates_size() {
     let mut s = state();
     reduce(
         &mut s,
-        &Action::Resize {
+        Action::Resize {
             width: 90,
             height: 25,
         },
@@ -735,7 +735,7 @@ fn resize_clamps_reader_scroll_after_reflow() {
     let narrow: usize = 100;
     reduce(
         &mut s,
-        &Action::Resize {
+        Action::Resize {
             width: narrow as u16,
             height: 20,
         },
@@ -746,7 +746,7 @@ fn resize_clamps_reader_scroll_after_reflow() {
     // anchor must respect the re-flowed budget.
     reduce(
         &mut s,
-        &Action::Resize {
+        Action::Resize {
             width: 90,
             height: 20,
         },
@@ -765,7 +765,7 @@ fn resize_clamps_reader_scroll_after_reflow() {
     // Growing the window never resurrects an out-of-range anchor either.
     reduce(
         &mut s,
-        &Action::Resize {
+        Action::Resize {
             width: 152,
             height: 40,
         },
@@ -785,7 +785,7 @@ fn resize_leaves_reader_scroll_alone_outside_the_reader() {
     s.reader_scroll = 7;
     reduce(
         &mut s,
-        &Action::Resize {
+        Action::Resize {
             width: 152,
             height: 40,
         },
@@ -814,7 +814,7 @@ fn unimplemented_actions_are_safe_noops() {
         Action::DismissError,
         Action::SubmitSearch,
     ] {
-        no_effects(&reduce(&mut s, &action));
+        no_effects(&reduce(&mut s, action));
     }
     assert_eq!(s.selection, before.selection);
     assert_eq!(s.session.routes, before.session.routes);
@@ -829,7 +829,7 @@ fn unimplemented_actions_are_safe_noops() {
         Action::ToggleStar,
         Action::MarkUnread,
     ] {
-        no_effects(&reduce(&mut s, &action));
+        no_effects(&reduce(&mut s, action));
     }
     assert!(s.session.operations.is_empty());
 }
@@ -840,11 +840,11 @@ fn selection_is_normalized_to_valid_index() {
     // stale-result bugs) must not panic on movement.
     let mut s = state();
     s.selection = 999;
-    reduce(&mut s, &Action::MoveDown);
+    reduce(&mut s, Action::MoveDown);
     let len = s.messages.items.len();
     assert_eq!(s.selection, len - 1);
     assert!(s.list_scroll < len);
-    reduce(&mut s, &Action::MoveUp);
+    reduce(&mut s, Action::MoveUp);
     assert_eq!(s.selection, len - 2);
 }
 
@@ -854,10 +854,10 @@ fn mailbox_switch_updates_route_only_via_activate() {
     let before_routes = s.session.routes.clone();
     // MoveDown while sidebar focused does not switch the active mailbox…
     s.session.focus = Focus::Sidebar;
-    reduce(&mut s, &Action::MoveDown);
+    reduce(&mut s, Action::MoveDown);
     assert_eq!(s.session.routes, before_routes);
     // …Activate does, keeping the route stack a single root entry.
-    reduce(&mut s, &Action::Activate);
+    reduce(&mut s, Action::Activate);
     assert_eq!(s.session.routes.len(), 1);
     assert_eq!(s.active_route().unwrap().mailbox_id().unwrap().0, "sent");
 }
@@ -868,7 +868,7 @@ fn reducer_is_free_of_io_by_construction() {
     // it cannot spawn, read files, or touch the network itself. Backend
     // work is only described as effects.
     let mut s = state();
-    let effects = reduce(&mut s, &Action::Refresh);
+    let effects = reduce(&mut s, Action::Refresh);
     assert!(matches!(
         effects.as_slice(),
         [Effect {
@@ -896,7 +896,7 @@ fn enter_on_attach_opens_the_chooser_and_esc_closes_it() {
         assert_eq!(dialog.error, None);
     }
     // BackOrCancel restores the composer focus.
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert!(s.session.overlay.is_none());
     assert_eq!(s.session.focus, Focus::Composer);
     assert!(
@@ -934,8 +934,8 @@ fn arrows_move_the_selection_and_enter_submits_a_file() {
 
     // The listing starts on the parent row ("../"); files come after the
     // directories, sorted by name. Two Downs: ../ → docs/ → notes.txt.
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
     let expected = dir.join("notes.txt");
     assert_eq!(
         match s.session.overlay.as_ref().unwrap() {
@@ -947,7 +947,7 @@ fn arrows_move_the_selection_and_enter_submits_a_file() {
     );
 
     // Enter submits the selected file for backend validation, raw.
-    let (_, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let (_, kind) = effect_parts(&reduce(&mut s, Action::Activate));
     assert_eq!(
         kind,
         OperationKind::ReadAttachment { path: expected },
@@ -971,8 +971,8 @@ fn enter_on_a_directory_lists_it_and_navigation_freezes() {
     land_listing(&mut s, id, &dir);
 
     // The first directory after the parent row is `docs/`; Enter lists it.
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
-    let (id2, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    let (id2, kind) = effect_parts(&reduce(&mut s, Action::Activate));
     assert_eq!(
         kind,
         OperationKind::ListAttachmentFiles {
@@ -989,7 +989,7 @@ fn enter_on_a_directory_lists_it_and_navigation_freezes() {
     // A second directory change while the listing runs is a no-op.
     no_effects(&reduce(
         &mut s,
-        &Action::AttachmentBrowse(AttachmentBrowse::Parent),
+        Action::AttachmentBrowse(AttachmentBrowse::Parent),
     ));
 
     // The landing replaces the working directory.
@@ -1014,10 +1014,10 @@ fn left_goes_to_the_parent_and_right_into_the_selected_dir() {
     land_listing(&mut s, id, &dir);
 
     // Right on a directory lists it; Left lists the parent.
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
     let (id2, kind) = effect_parts(&reduce(
         &mut s,
-        &Action::AttachmentBrowse(AttachmentBrowse::Open),
+        Action::AttachmentBrowse(AttachmentBrowse::Open),
     ));
     assert_eq!(
         kind,
@@ -1028,7 +1028,7 @@ fn left_goes_to_the_parent_and_right_into_the_selected_dir() {
     land_listing(&mut s, id2, &dir.join("docs"));
     let (_, kind) = effect_parts(&reduce(
         &mut s,
-        &Action::AttachmentBrowse(AttachmentBrowse::Parent),
+        Action::AttachmentBrowse(AttachmentBrowse::Parent),
     ));
     assert_eq!(
         kind,
@@ -1044,9 +1044,9 @@ fn validated_file_becomes_a_chip_and_dirties_the_draft() {
     let (_guard, dir) = chooser_dir();
     land_listing(&mut s, id, &dir);
     // Down twice: ../ → docs/ → notes.txt; then use notes.txt.
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
-    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    let (id, _) = effect_parts(&reduce(&mut s, Action::Activate));
     complete_read_ok(&mut s, id, attachment("notes.txt"));
     // The dialog closed and the chip is focused.
     assert!(s.session.overlay.is_none());
@@ -1069,12 +1069,12 @@ fn validation_failure_stays_in_the_chooser_retryable() {
     let (_, id) = open_attach_dialog(&mut s);
     let (_guard, dir) = chooser_dir();
     land_listing(&mut s, id, &dir);
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
-    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Err(OperationFailure {
                 code: None,
@@ -1109,7 +1109,7 @@ fn failed_listing_keeps_the_chooser_open_with_the_detail() {
     let (_, id) = open_attach_dialog(&mut s);
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Err(OperationFailure {
                 code: None,
@@ -1127,7 +1127,7 @@ fn failed_listing_keeps_the_chooser_open_with_the_detail() {
     assert!(!dialog.listing, "navigation is free again");
     assert!(dialog.explorer.is_none(), "nothing to show");
     // Esc still closes it.
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert!(s.session.overlay.is_none());
     assert_eq!(s.session.focus, Focus::Composer);
 }
@@ -1139,10 +1139,10 @@ fn stale_results_are_dropped() {
     let (_, id) = open_attach_dialog(&mut s);
     let (_guard, dir) = chooser_dir();
     land_listing(&mut s, id, &dir);
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
-    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    let (id, _) = effect_parts(&reduce(&mut s, Action::Activate));
+    reduce(&mut s, Action::BackOrCancel);
     complete_read_ok(&mut s, id, attachment("notes.txt"));
     assert!(
         s.session
@@ -1157,10 +1157,10 @@ fn stale_results_are_dropped() {
     // Moving the selection while validating: the older result is stale.
     let (_, id) = open_attach_dialog(&mut s);
     land_listing(&mut s, id, &dir);
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
-    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Up));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    let (id, _) = effect_parts(&reduce(&mut s, Action::Activate));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Up));
     complete_read_ok(&mut s, id, attachment("notes.txt"));
     assert!(
         s.session
@@ -1179,9 +1179,9 @@ fn same_file_attaches_once() {
     let (_, id) = open_attach_dialog(&mut s);
     let (_guard, dir) = chooser_dir();
     land_listing(&mut s, id, &dir);
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
-    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    let (id, _) = effect_parts(&reduce(&mut s, Action::Activate));
     complete_read_ok(&mut s, id, attachment("notes.txt"));
     assert_eq!(
         s.session.composer.as_ref().unwrap().draft.attachments.len(),
@@ -1192,9 +1192,9 @@ fn same_file_attaches_once() {
     let revision = s.session.composer.as_ref().unwrap().draft.revision;
     let (_, id) = open_attach_dialog(&mut s);
     land_listing(&mut s, id, &dir);
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
-    reduce(&mut s, &Action::AttachmentBrowse(AttachmentBrowse::Down));
-    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    let (id, _) = effect_parts(&reduce(&mut s, Action::Activate));
     complete_read_ok(
         &mut s,
         id,
@@ -1224,7 +1224,7 @@ fn listing_results_for_a_closed_chooser_are_dropped() {
     let mut s = state();
     let (_, id) = open_attach_dialog(&mut s);
     let (_guard, dir) = chooser_dir();
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     land_listing(&mut s, id, &dir);
     assert!(s.session.overlay.is_none(), "nothing resurrected");
 }
@@ -1239,9 +1239,9 @@ fn enter_on_a_chip_removes_it_and_autosave_follows() {
     }
     // Tab to the first chip: To → … → Body → Attachment(0).
     while s.session.composer.as_ref().unwrap().field != ComposerField::Attachment(0) {
-        reduce(&mut s, &Action::FocusNext);
+        reduce(&mut s, Action::FocusNext);
     }
-    no_effects(&reduce(&mut s, &Action::Activate));
+    no_effects(&reduce(&mut s, Action::Activate));
     let composer = s.session.composer.as_ref().unwrap();
     assert_eq!(composer.draft.attachments.len(), 1);
     assert_eq!(composer.draft.attachments[0].name, "b.pdf");

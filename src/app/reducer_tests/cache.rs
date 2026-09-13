@@ -26,8 +26,8 @@ fn cached_page_serves_instantly_and_the_fresh_load_still_runs() {
     };
 
     // Switch to Sent: the cold context starts a cache read…
-    reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1)));
-    let effects = reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1)));
+    reduce(&mut s, Action::Click(ClickTarget::Mailbox(1)));
+    let effects = reduce(&mut s, Action::Click(ClickTarget::Mailbox(1)));
     let (cache_id, mailbox, query, offset, limit, fresh_background) =
         expect_cache_list_load(&effects);
     assert_eq!(mailbox.0, "sent");
@@ -62,7 +62,7 @@ fn cached_page_serves_instantly_and_the_fresh_load_still_runs() {
     let expected = mock::mock_page(&MailboxId(String::from("sent")), 0, 20);
     let effects = reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: fresh_id,
             outcome: Ok(OperationOutcome::Page(expected.clone())),
         }),
@@ -100,8 +100,8 @@ fn cached_page_serves_instantly_and_the_fresh_load_still_runs() {
 #[test]
 fn a_cache_miss_loads_the_page_in_the_foreground() {
     let mut s = state();
-    reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1)));
-    let effects = reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1)));
+    reduce(&mut s, Action::Click(ClickTarget::Mailbox(1)));
+    let effects = reduce(&mut s, Action::Click(ClickTarget::Mailbox(1)));
     let (cache_id, ..) = expect_cache_list_load(&effects);
     // The miss falls through to the ordinary foreground load.
     let effects = complete_cache_miss(&mut s, cache_id);
@@ -121,11 +121,11 @@ fn cold_start_serves_cached_mailboxes_and_first_page_instantly() {
     // Cold start: mailboxes are not loaded yet.
     s.mailboxes = crate::app::state::Loadable::Loading;
     // Startup Refresh: the cache read runs first…
-    let effects = reduce(&mut s, &Action::Refresh);
+    let effects = reduce(&mut s, Action::Refresh);
     let (mailboxes_id, _) = effect_parts(&effects);
     let effects = reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: mailboxes_id,
             outcome: Ok(OperationOutcome::CachedMailboxes(mailboxes.clone())),
         }),
@@ -159,7 +159,7 @@ fn opening_a_message_serves_the_cached_copy_instantly() {
     s.selection = 0;
     let summary = s.selected_message().unwrap().clone();
 
-    let effects = reduce(&mut s, &Action::Activate);
+    let effects = reduce(&mut s, Action::Activate);
     // The read runs off-thread; the reader shows the spinner until it
     // lands.
     assert!(matches!(
@@ -192,7 +192,7 @@ fn opening_a_message_serves_the_cached_copy_instantly() {
 fn opening_a_message_without_a_cache_hit_loads_in_the_foreground() {
     let mut s = state();
     s.selection = 0;
-    let effects = reduce(&mut s, &Action::Activate);
+    let effects = reduce(&mut s, Action::Activate);
     let (cache_id, _) = effect_parts(&effects);
     let effects = complete_cache_miss(&mut s, cache_id);
     // The spinner stays up and the fresh load is foreground work (the
@@ -231,7 +231,7 @@ fn preview_result_fills_the_list_snippet_and_caches_the_message() {
     // exactly what this test pins.
     let effects = reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(mock::mock_message(
                 &summary,
@@ -284,7 +284,7 @@ fn preview_fetch_reconciles_the_row_attachment_flag() {
     }];
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(message))),
         }),
@@ -339,8 +339,8 @@ fn cached_copies_reconcile_the_row_attachment_flag_without_a_fetch() {
         part_id: 2,
     }];
 
-    reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1))); // select
-    let effects = reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1))); // activate
+    reduce(&mut s, Action::Click(ClickTarget::Mailbox(1))); // select
+    let effects = reduce(&mut s, Action::Click(ClickTarget::Mailbox(1))); // activate
     let (cache_id, ..) = expect_cache_list_load(&effects);
     let effects = complete_cache_page(&mut s, cache_id, sent_page);
     // Every row is cache-read (no snippet yet); the fresh load started.
@@ -373,7 +373,7 @@ fn opening_a_message_reconciles_the_row_attachment_flag() {
     let mut s = state();
     let summary = s.messages.items[0].clone();
     assert!(!summary.has_attachments, "the envelope carried no flag");
-    let (cache_id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (cache_id, _) = expect_kind(&reduce(&mut s, Action::Activate));
     let effects = complete_cache_message(&mut s, cache_id, mock::mock_message(&summary));
     // The hit starts the silent convergence fetch…
     let (convergence_id, kind) = effect_parts(&effects);
@@ -388,7 +388,7 @@ fn opening_a_message_reconciles_the_row_attachment_flag() {
     }];
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: convergence_id,
             outcome: Ok(OperationOutcome::Message(Box::new(message))),
         }),
@@ -406,7 +406,7 @@ fn preview_failure_is_silent_and_never_retried() {
     let (id, locator) = expect_previews(&effects)[0].clone();
     reduce(
         &mut s,
-        &failure(
+        failure(
             id,
             &OperationKind::Preview(locator.clone()),
             "himalaya exploded",
@@ -451,12 +451,12 @@ fn esc_never_cancels_in_flight_previews() {
     assert!(!previews.is_empty(), "previews in flight");
     // Open the reader on a row; Sent rows are read, so no flag ops start.
     s.selection = 0;
-    let (cache_id, _) = expect_kind(&reduce(&mut s, &Action::Activate));
+    let (cache_id, _) = expect_kind(&reduce(&mut s, Action::Activate));
     let summary = s.open_summary().expect("reader open").clone();
     complete_cache_message(&mut s, cache_id, mock::mock_message(&summary));
     // Esc closes the reader — the previews are not foreground work for it
     // to absorb.
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert_eq!(s.session.routes.len(), 1, "reader closed");
     assert!(
         previews
@@ -503,7 +503,7 @@ fn preview_fetches_roll_within_the_window() {
     let id = s.session.operations.start(OperationKind::LoadPage(req)).id;
     let effects = reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Page(page.clone())),
         }),

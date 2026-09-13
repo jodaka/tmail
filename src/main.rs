@@ -250,9 +250,9 @@ async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
         // else: with no mailboxes loaded yet, Refresh starts the mailbox
         // listing; LoadDrafts restores any crash-safe draft from the
         // journal (plan §14).
-        let effects = reducer::reduce(&mut state, &Action::Refresh);
+        let effects = reducer::reduce(&mut state, Action::Refresh);
         handle_effects(&mut state, &manager, &mut assets, effects).await?;
-        let effects = reducer::reduce(&mut state, &Action::LoadDrafts);
+        let effects = reducer::reduce(&mut state, Action::LoadDrafts);
         handle_effects(&mut state, &manager, &mut assets, effects).await?;
     }
 
@@ -535,7 +535,7 @@ async fn run_event_loop(
                     }
                     for action in events::coalesce(batch, &hits, state) {
                         tracing::debug!(?action, "dispatch");
-                        let effects = reducer::reduce(state, &action);
+                        let effects = reducer::reduce(state, action);
                         handle_effects(state, manager, assets, effects).await?;
                         sync_mouse_capture(state, &mut capture_applied);
                     }
@@ -548,7 +548,7 @@ async fn run_event_loop(
             },
             action = result_rx.recv() => match action {
                 Some(result) => {
-                    let effects = reducer::reduce(state, &Action::BackendCompleted(result));
+                    let effects = reducer::reduce(state, Action::BackendCompleted(result));
                     handle_effects(state, manager, assets, effects).await?;
                     sync_mouse_capture(state, &mut capture_applied);
                     pace_loader(state, events_pace, &mut fast_ticks);
@@ -623,7 +623,7 @@ async fn handle_effects(
             assets.applied_title = String::new();
             let effects = reducer::reduce(
                 state,
-                &Action::EditorFinished {
+                Action::EditorFinished {
                     id: effect.id,
                     result,
                 },

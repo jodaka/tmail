@@ -5,8 +5,8 @@ use super::*;
 #[test]
 fn submit_search_stashes_mailbox_context_and_runs_search() {
     let mut s = state();
-    reduce(&mut s, &Action::MoveDown);
-    reduce(&mut s, &Action::MoveDown);
+    reduce(&mut s, Action::MoveDown);
+    reduce(&mut s, Action::MoveDown);
     let (page, selection, scroll) = (s.messages.clone(), s.selection, s.list_scroll);
 
     let effects = search(&mut s, "quote");
@@ -42,7 +42,7 @@ fn submit_search_with_empty_query_is_inert() {
     let mut s = state();
     let before = s.clone();
     s.session.focus = Focus::SearchField;
-    let effects = reduce(&mut s, &Action::SubmitSearch);
+    let effects = reduce(&mut s, Action::SubmitSearch);
     no_effects(&effects);
     assert_eq!(s.session.routes, before.session.routes);
     assert!(s.session.search_return.is_none());
@@ -52,11 +52,11 @@ fn submit_search_with_empty_query_is_inert() {
 #[test]
 fn submit_search_from_the_reader_is_inert() {
     let mut s = state();
-    reduce(&mut s, &Action::Activate); // open reader
+    reduce(&mut s, Action::Activate); // open reader
     let before = s.session.routes.clone();
     s.session.focus = Focus::SearchField;
     s.session.search_query = String::from("quote");
-    no_effects(&reduce(&mut s, &Action::SubmitSearch));
+    no_effects(&reduce(&mut s, Action::SubmitSearch));
     assert_eq!(s.session.routes, before, "no search above the reader");
     assert!(s.session.search_return.is_none());
 }
@@ -73,7 +73,7 @@ fn search_results_apply_to_the_shared_list() {
     }
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Page(page)),
         }),
@@ -91,13 +91,13 @@ fn search_results_superseded_by_a_navigation_race_are_dropped() {
     let (id, _) = expect_search(&effects);
     // The user leaves the search before the result arrives. Esc first
     // cancels the in-flight search (plan §10), then leaves the route.
-    reduce(&mut s, &Action::BackOrCancel);
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
     // The cancelled result must not clobber the restored mailbox context.
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Page(mock::mock_page(&inbox_id(), 0, 20))),
         }),
@@ -112,13 +112,13 @@ fn reader_from_search_returns_to_the_same_results() {
     let (search_id, _) = expect_search(&effects);
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: search_id,
             outcome: Ok(OperationOutcome::Page(mock::mock_page(&inbox_id(), 0, 20))),
         }),
     );
     let selected = s.selected_message().cloned().expect("a result row");
-    let effects = reduce(&mut s, &Action::Activate); // open reader
+    let effects = reduce(&mut s, Action::Activate); // open reader
     assert!(matches!(s.active_route(), Some(Route::Message(_))));
     // The cache read misses (no cache in the fixture); the fresh fetch
     // starts. Esc then pops the reader route itself.
@@ -139,7 +139,7 @@ fn reader_from_search_returns_to_the_same_results() {
     // Esc reaches the route stack.
     let read_effects = reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: load_id,
             outcome: Ok(OperationOutcome::Message(Box::new(mock::mock_message(
                 &selected,
@@ -155,7 +155,7 @@ fn reader_from_search_returns_to_the_same_results() {
             );
             reduce(
                 &mut s,
-                &Action::BackendCompleted(OperationResult {
+                Action::BackendCompleted(OperationResult {
                     id: effect.id,
                     outcome: Ok(OperationOutcome::Done),
                 }),
@@ -164,7 +164,7 @@ fn reader_from_search_returns_to_the_same_results() {
         other => no_effects(other),
     }
     // Esc returns to the search, whose results were never disturbed.
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert!(matches!(s.active_route(), Some(Route::Search(_))));
     assert_eq!(s.messages.items.len(), 20);
     assert_eq!(
@@ -176,20 +176,20 @@ fn reader_from_search_returns_to_the_same_results() {
 #[test]
 fn leaving_search_restores_the_mailbox_context_exactly() {
     let mut s = state();
-    reduce(&mut s, &Action::MoveDown);
-    reduce(&mut s, &Action::MoveDown);
+    reduce(&mut s, Action::MoveDown);
+    reduce(&mut s, Action::MoveDown);
     let before = (s.messages.clone(), s.selection, s.list_scroll);
     let effects = search(&mut s, "quote");
     let (id, _) = expect_search(&effects);
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Page(mock::mock_page(&inbox_id(), 0, 20))),
         }),
     );
     // Esc from the search route restores page, selection, and scroll.
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert_eq!(s.session.routes.len(), 1);
     assert!(s.session.search_return.is_none());
     assert_eq!(s.messages, before.0, "mailbox page restored");
@@ -231,13 +231,13 @@ fn search_pagination_issues_search_requests() {
     }
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Page(page)),
         }),
     );
     // Right: next results page as a Search request.
-    let effects = reduce(&mut s, &Action::PageNext);
+    let effects = reduce(&mut s, Action::PageNext);
     let (_, request) = expect_search(&effects);
     assert_eq!(request.offset, 20);
     assert_eq!(request.query, "quote");
@@ -264,15 +264,15 @@ fn switching_mailbox_from_search_rebuilds_the_route_stack() {
     let (id, _) = expect_search(&effects);
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Page(mock::mock_page(&inbox_id(), 0, 20))),
         }),
     );
     // Pick another mailbox in the sidebar and activate it.
     s.session.focus = Focus::Sidebar;
-    reduce(&mut s, &Action::MoveDown);
-    reduce(&mut s, &Action::Activate);
+    reduce(&mut s, Action::MoveDown);
+    reduce(&mut s, Action::Activate);
     assert_eq!(s.session.routes.len(), 1);
     assert_eq!(
         s.active_route().unwrap().mailbox_id().unwrap().0,
@@ -327,7 +327,7 @@ fn auto_refresh_stands_down_while_conflicting_work_is_in_flight() {
     no_effects(&tick(&mut s, 0));
     // A foreground operation (the startup page load) is in flight when the
     // interval elapses: the timer stands down and retries later.
-    let (manual, req) = expect_page(&reduce(&mut s, &Action::Refresh));
+    let (manual, req) = expect_page(&reduce(&mut s, Action::Refresh));
     no_effects(&tick(&mut s, 60));
     complete_page_ok(&mut s, manual, &req, 0);
     // Conflicts cleared; the manual refresh re-armed the timer to its own
@@ -346,10 +346,10 @@ fn auto_refresh_stands_down_while_composing() {
     let mut s = state();
     timer(&mut s);
     no_effects(&tick(&mut s, 0));
-    reduce(&mut s, &Action::Compose);
+    reduce(&mut s, Action::Compose);
     no_effects(&tick(&mut s, 60));
     // Leaving the composer unblocks the next tick.
-    reduce(&mut s, &Action::LeaveComposer);
+    reduce(&mut s, Action::LeaveComposer);
     let effects = tick(&mut s, 120);
     expect_page(&effects);
 }
@@ -367,7 +367,7 @@ fn auto_refresh_targets_the_open_search_context() {
     }
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Page(page)),
         }),
@@ -389,7 +389,7 @@ fn background_refresh_failure_never_opens_the_modal() {
     let (id, _) = expect_page(&effects);
     reduce(
         &mut s,
-        &failure(
+        failure(
             id,
             &OperationKind::LoadPage(PageRequest {
                 mailbox_id: inbox_id(),
@@ -421,7 +421,7 @@ fn background_failure_record_clears_on_success_and_on_manual_refresh() {
     let (id, req) = expect_page(&effects);
     reduce(
         &mut s,
-        &failure(id, &OperationKind::LoadPage(req.clone()), "connect refused"),
+        failure(id, &OperationKind::LoadPage(req.clone()), "connect refused"),
     );
     assert!(s.session.last_background_error.is_some());
     // A success clears the record: a later failure is reported again.
@@ -430,7 +430,7 @@ fn background_failure_record_clears_on_success_and_on_manual_refresh() {
     complete_page_ok(&mut s, id2, &req2, 0);
     assert!(s.session.last_background_error.is_none());
     // A manual refresh that fails is foreground work: it opens the modal.
-    reduce(&mut s, &Action::Refresh);
+    reduce(&mut s, Action::Refresh);
     // (its operation is in flight; complete it with a failure)
     let last = s
         .session
@@ -439,7 +439,7 @@ fn background_failure_record_clears_on_success_and_on_manual_refresh() {
         .map(|op| op.id)
         .expect("manual refresh");
     let kind = s.session.operations.get(last).unwrap().kind.clone();
-    reduce(&mut s, &failure(last, &kind, "also refused"));
+    reduce(&mut s, failure(last, &kind, "also refused"));
     assert!(
         matches!(s.session.overlay, Some(Overlay::Error(_))),
         "foreground failure modals"
@@ -449,7 +449,7 @@ fn background_failure_record_clears_on_success_and_on_manual_refresh() {
 #[test]
 fn manual_refresh_failure_still_opens_the_modal() {
     let mut s = state();
-    reduce(&mut s, &Action::Refresh);
+    reduce(&mut s, Action::Refresh);
     let last = s
         .session
         .operations
@@ -457,10 +457,10 @@ fn manual_refresh_failure_still_opens_the_modal() {
         .map(|op| op.id)
         .expect("refresh");
     let kind = s.session.operations.get(last).unwrap().kind.clone();
-    reduce(&mut s, &failure(last, &kind, "connect refused"));
+    reduce(&mut s, failure(last, &kind, "connect refused"));
     assert!(matches!(s.session.overlay, Some(Overlay::Error(_))));
     // Manual refresh remains available after dismissing (acceptance).
-    reduce(&mut s, &Action::DismissError);
-    let effects = reduce(&mut s, &Action::Refresh);
+    reduce(&mut s, Action::DismissError);
+    let effects = reduce(&mut s, Action::Refresh);
     expect_page(&effects);
 }

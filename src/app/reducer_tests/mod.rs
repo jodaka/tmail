@@ -128,7 +128,7 @@ fn expect_cache_list_load(
 fn complete_cache_miss(s: &mut AppState, id: OperationId) -> Vec<Effect> {
     reduce(
         s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::CacheMiss),
         }),
@@ -143,7 +143,7 @@ fn complete_cache_page(
 ) -> Vec<Effect> {
     reduce(
         s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::CachedPage(page)),
         }),
@@ -158,7 +158,7 @@ fn complete_cache_message(
 ) -> Vec<Effect> {
     reduce(
         s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::CachedMessage(Box::new(message))),
         }),
@@ -213,7 +213,7 @@ fn no_effects(effects: &[Effect]) {
 /// injected clock for autosave timing.
 fn tick(s: &mut AppState, offset_seconds: i64) -> Vec<Effect> {
     let now = mock::now() + chrono::Duration::seconds(offset_seconds);
-    reduce(s, &Action::Tick { now: Box::new(now) })
+    reduce(s, Action::Tick { now: Box::new(now) })
 }
 
 /// Complete `id` with an `Ok` page payload for `req` at `offset`. Returns
@@ -227,7 +227,7 @@ fn complete_page_ok(
     let page = mock::mock_page(&req.mailbox_id, offset, req.limit);
     let effects = reduce(
         state,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Page(page)),
         }),
@@ -259,7 +259,7 @@ fn switch_to(s: &mut AppState, mailbox: &str) {
     s.session.focus = Focus::Sidebar;
     // The cold-context cache read runs first (ticket haeb); the fixture
     // cache is empty, so the miss starts the fresh foreground load.
-    let effects = reduce(s, &Action::Activate);
+    let effects = reduce(s, Action::Activate);
     let (cache_id, ..) = expect_cache_list_load(&effects);
     let effects = complete_cache_miss(s, cache_id);
     let (id, req) = expect_page(&effects);
@@ -274,7 +274,7 @@ fn boot(s: &mut AppState) -> (OperationId, OperationKind) {
     // The cold-start listing load, as the runtime reaches it: `Refresh`
     // reads the cache first (ticket haeb; a miss in the fixture) and the
     // miss starts the fresh background listing.
-    let effects = reduce(s, &Action::Refresh);
+    let effects = reduce(s, Action::Refresh);
     let (cache_id, _) = effect_parts(&effects);
     let effects = complete_cache_miss(s, cache_id);
     effect_parts(&effects)
@@ -286,7 +286,7 @@ fn boot(s: &mut AppState) -> (OperationId, OperationKind) {
 fn complete_mailboxes(s: &mut AppState, id: OperationId, mailboxes: Vec<Mailbox>) {
     reduce(
         s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Mailboxes(mailboxes)),
         }),
@@ -302,10 +302,10 @@ fn start_listing(s: &mut AppState) -> OperationId {
 // ── Modal interactions (plan §12) ────────────────────────────────────────
 
 fn open_modal(s: &mut AppState, detail: &str) -> (OperationId, PageRequest) {
-    let (id, req) = expect_page(&reduce(s, &Action::PageNext));
+    let (id, req) = expect_page(&reduce(s, Action::PageNext));
     reduce(
         s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Err(OperationFailure {
                 code: Some(4),
@@ -328,7 +328,7 @@ fn complete_message_ok(s: &mut AppState, id: OperationId) -> Vec<Effect> {
     let message = mock::mock_message(&summary);
     let effects = reduce(
         s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(message))),
         }),
@@ -341,7 +341,7 @@ fn complete_message_ok(s: &mut AppState, id: OperationId) -> Vec<Effect> {
 fn complete_done(s: &mut AppState, id: OperationId) -> Vec<Effect> {
     reduce(
         s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Done),
         }),
@@ -381,7 +381,7 @@ fn expect_kind(effects: &[Effect]) -> (OperationId, OperationKind) {
 /// message cache first (ticket haeb; a miss in the fixture) and the miss
 /// starts the fresh foreground load. Returns its `(id, kind)`.
 fn open_reader(s: &mut AppState) -> (OperationId, OperationKind) {
-    let effects = reduce(s, &Action::Activate);
+    let effects = reduce(s, Action::Activate);
     let (cache_id, _) = effect_parts(&effects);
     let effects = complete_cache_miss(s, cache_id);
     effect_parts(&effects)
@@ -491,7 +491,7 @@ fn reader_with_non_web_link() -> AppState {
 }
 /// Open the composer and return the state (asserts the route/focus).
 fn compose(s: &mut AppState) -> &mut crate::app::composer::ComposerState {
-    no_effects(&reduce(s, &Action::Compose));
+    no_effects(&reduce(s, Action::Compose));
     assert_eq!(s.session.routes.len(), 2);
     assert!(matches!(s.active_route(), Some(Route::Composer)));
     assert_eq!(s.session.focus, Focus::Composer);
@@ -558,9 +558,9 @@ fn fetched_draft(id: &str, message_id: &str) -> Message {
 fn open_attach_dialog(s: &mut AppState) -> (&mut AttachmentFileDialog, OperationId) {
     compose(s);
     while s.session.composer.as_ref().unwrap().field != ComposerField::Attach {
-        reduce(s, &Action::FocusNext);
+        reduce(s, Action::FocusNext);
     }
-    let (id, kind) = effect_parts(&reduce(s, &Action::Activate));
+    let (id, kind) = effect_parts(&reduce(s, Action::Activate));
     assert_eq!(
         kind,
         OperationKind::ListAttachmentFiles { path: None },
@@ -589,7 +589,7 @@ fn land_listing(s: &mut AppState, id: OperationId, dir: &std::path::Path) {
     let explorer = ratatui_explorer::FileExplorerBuilder::build_with_working_dir(dir).unwrap();
     reduce(
         s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Explorer(Box::new(explorer))),
         }),
@@ -601,7 +601,7 @@ fn land_listing(s: &mut AppState, id: OperationId, dir: &std::path::Path) {
 fn complete_read_ok(s: &mut AppState, id: OperationId, attachment: DraftAttachment) {
     reduce(
         s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Attachment(attachment)),
         }),
@@ -636,7 +636,7 @@ fn complete_save_ok(
 ) -> Vec<Effect> {
     reduce(
         s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::DraftSaved {
                 remote_id: MessageId(String::from(remote)),
@@ -668,11 +668,11 @@ fn restored_draft(to: &str, revision: u64, saved_revision: u64) -> crate::domain
 }
 
 fn complete_restore(s: &mut AppState, drafts: Vec<crate::domain::RestoredDraft>) {
-    let (id, kind) = effect_parts(&reduce(s, &Action::LoadDrafts));
+    let (id, kind) = effect_parts(&reduce(s, Action::LoadDrafts));
     assert_eq!(kind, OperationKind::LoadDrafts);
     reduce(
         s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Drafts(drafts)),
         }),
@@ -684,8 +684,8 @@ fn complete_restore(s: &mut AppState, drafts: Vec<crate::domain::RestoredDraft>)
 fn open_discard_dialog(s: &mut AppState) {
     compose(s);
     tick(s, 0);
-    reduce(s, &Action::ComposerEdit(ComposerEdit::Char('x')));
-    no_effects(&reduce(s, &Action::DiscardDraft));
+    reduce(s, Action::ComposerEdit(ComposerEdit::Char('x')));
+    no_effects(&reduce(s, Action::DiscardDraft));
     assert!(matches!(
         s.session.overlay,
         Some(Overlay::ConfirmDiscard(_))
@@ -776,7 +776,7 @@ fn expect_send(effects: &[Effect]) -> (OperationId, OutboundMessage) {
 fn complete_send(s: &mut AppState, id: OperationId, outcome: SendOutcome) -> Vec<Effect> {
     reduce(
         s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::SendOutcome(outcome)),
         }),
@@ -796,11 +796,11 @@ fn expect_search(effects: &[Effect]) -> (OperationId, crate::domain::SearchReque
 
 /// Focus the search field, type a query, and submit.
 fn search(s: &mut AppState, query: &str) -> Vec<Effect> {
-    reduce(&mut *s, &Action::OpenSearch);
+    reduce(&mut *s, Action::OpenSearch);
     for c in query.chars() {
-        reduce(s, &Action::SearchEdit(SearchEdit::Char(c)));
+        reduce(s, Action::SearchEdit(SearchEdit::Char(c)));
     }
-    reduce(s, &Action::SubmitSearch)
+    reduce(s, Action::SubmitSearch)
 }
 
 // ── Phase 9: periodic refresh + suppression (plan §11/§19) ──────────────
@@ -825,7 +825,7 @@ fn identified(
 // ── External editor (plan §14, Phase 11) ─────────────────────────────────
 
 fn edit_external(s: &mut AppState) -> Vec<Effect> {
-    reduce(s, &Action::EditExternal)
+    reduce(s, Action::EditExternal)
 }
 
 // ── List previews (ticket wxtx) ──────────────────────────────────────────
@@ -848,8 +848,8 @@ fn expect_previews(effects: &[Effect]) -> Vec<(OperationId, crate::domain::Messa
 /// cache read per snippet-less row, each missing into a background
 /// fetch. Returns the effects of those fetch starts.
 fn load_sent_without_snippets(s: &mut AppState) -> Vec<Effect> {
-    reduce(s, &Action::Click(ClickTarget::Mailbox(1))); // select
-    let effects = reduce(s, &Action::Click(ClickTarget::Mailbox(1))); // activate
+    reduce(s, Action::Click(ClickTarget::Mailbox(1))); // select
+    let effects = reduce(s, Action::Click(ClickTarget::Mailbox(1))); // activate
     let (cache_id, ..) = expect_cache_list_load(&effects);
     let effects = complete_cache_miss(s, cache_id);
     let (load, req) = expect_page(&effects);
@@ -872,7 +872,7 @@ fn complete_preview_ok(
     let message = mock::mock_message(summary);
     let effects = reduce(
         s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(message))),
         }),

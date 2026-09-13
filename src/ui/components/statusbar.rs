@@ -5,11 +5,11 @@
 //! mockup's mode badge was dropped: it named the screen the user is already
 //! looking at, so it carried no information.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
-use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::action::{BulkOp, ClickTarget};

@@ -445,7 +445,7 @@ pub(crate) fn start_missing_previews(state: &mut AppState) -> Vec<Effect> {
 pub(crate) fn complete_cache_preview_load(
     state: &mut AppState,
     locator: &MessageLocator,
-    result: &OperationResult,
+    result: OperationResult,
 ) -> Vec<Effect> {
     let Some(summary) = state
         .messages
@@ -457,10 +457,10 @@ pub(crate) fn complete_cache_preview_load(
         tracing::debug!(id = %locator.id.0, "preview cache read for an unlisted row");
         return Vec::new();
     };
-    match &result.outcome {
+    match result.outcome {
         Ok(OperationOutcome::CachedMessage(message)) => {
             state.caches.preview_requested.insert(summary.id.clone());
-            match crate::view::rich::preview_text(message) {
+            match crate::view::rich::preview_text(&message) {
                 Some(text) => {
                     state
                         .caches

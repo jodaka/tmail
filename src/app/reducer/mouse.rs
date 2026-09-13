@@ -24,9 +24,9 @@ use crate::app::state::{AppState, ReaderFocus};
 /// ever runs with no overlay open.
 pub(crate) fn click(state: &mut AppState, target: ClickTarget) -> Vec<Effect> {
     match target {
-        ClickTarget::ComposeButton => reduce(state, &Action::Compose),
+        ClickTarget::ComposeButton => reduce(state, Action::Compose),
         ClickTarget::Mailbox(index) => click_mailbox(state, index),
-        ClickTarget::SearchField => reduce(state, &Action::OpenSearch),
+        ClickTarget::SearchField => reduce(state, Action::OpenSearch),
         ClickTarget::MessageRow(index) => click_message_row(state, index),
         ClickTarget::ReaderLink(index) => click_reader_link(state, index),
         ClickTarget::ReaderAttachment(index) => click_reader_attachment(state, index),
@@ -43,10 +43,10 @@ pub(crate) fn click(state: &mut AppState, target: ClickTarget) -> Vec<Effect> {
                 state.session.focus = Focus::MessageList;
             }
             match op {
-                BulkOp::Trash => reduce(state, &Action::Trash),
-                BulkOp::Archive => reduce(state, &Action::Archive),
-                BulkOp::MarkRead => reduce(state, &Action::MarkRead),
-                BulkOp::MarkUnread => reduce(state, &Action::MarkUnread),
+                BulkOp::Trash => reduce(state, Action::Trash),
+                BulkOp::Archive => reduce(state, Action::Archive),
+                BulkOp::MarkRead => reduce(state, Action::MarkRead),
+                BulkOp::MarkUnread => reduce(state, Action::MarkUnread),
             }
         }
     }
@@ -64,8 +64,8 @@ pub(crate) fn click_error_button(state: &mut AppState, button: ModalButton) -> V
         dialog.button = button;
     }
     match button {
-        ModalButton::Retry => reduce(state, &Action::RetryError),
-        ModalButton::Dismiss => reduce(state, &Action::DismissError),
+        ModalButton::Retry => reduce(state, Action::RetryError),
+        ModalButton::Dismiss => reduce(state, Action::DismissError),
     }
 }
 
@@ -75,7 +75,7 @@ pub(crate) fn click_confirm_button(state: &mut AppState, button: ConfirmButton) 
     if let Some(Overlay::ConfirmDiscard(dialog)) = state.session.overlay.as_mut() {
         dialog.button = button;
     }
-    reduce(state, &Action::Activate)
+    reduce(state, Action::Activate)
 }
 
 /// Click a sidebar mailbox row: focus follows the click, a new row is
@@ -132,7 +132,7 @@ pub(crate) fn click_reader_attachment(state: &mut AppState, index: usize) -> Vec
     }
     state.session.focus = Focus::Reader;
     if state.reader_focus == Some(ReaderFocus::Attachment(index)) {
-        return reduce(state, &Action::OpenAttachment);
+        return reduce(state, Action::OpenAttachment);
     }
     state.reader_focus = Some(ReaderFocus::Attachment(index));
     Vec::new()

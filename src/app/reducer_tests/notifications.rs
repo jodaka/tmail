@@ -71,7 +71,7 @@ fn complete_background(
 ) -> Vec<Effect> {
     let effects = reduce(
         s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Page(page)),
         }),
@@ -193,7 +193,7 @@ fn a_manual_refresh_between_updates_calms_the_notification() {
     // visible page clean).
     let mut s = notified_state(Notifications::Bell);
     arm_timer(&mut s);
-    let (id, _) = expect_page(&reduce(&mut s, &Action::Refresh));
+    let (id, _) = expect_page(&reduce(&mut s, Action::Refresh));
     let effects = complete_background(&mut s, id, page_with_new(1));
     no_effects(&effects);
     let (id, _) = background_refresh_at(&mut s, 60);
@@ -204,7 +204,7 @@ fn a_manual_refresh_between_updates_calms_the_notification() {
 #[test]
 fn foreground_page_loads_never_notify() {
     let mut s = notified_state(Notifications::Bell);
-    let (id, _) = expect_page(&reduce(&mut s, &Action::Refresh));
+    let (id, _) = expect_page(&reduce(&mut s, Action::Refresh));
     let effects = complete_background(&mut s, id, page_with_new(2));
     no_effects(&effects);
 }
@@ -213,8 +213,8 @@ fn foreground_page_loads_never_notify() {
 fn terminal_focus_actions_track_the_window_state() {
     let mut s = state();
     assert!(s.session.terminal_focused, "starts focused");
-    no_effects(&reduce(&mut s, &Action::SetTerminalFocus(false)));
+    no_effects(&reduce(&mut s, Action::SetTerminalFocus(false)));
     assert!(!s.session.terminal_focused);
-    no_effects(&reduce(&mut s, &Action::SetTerminalFocus(true)));
+    no_effects(&reduce(&mut s, Action::SetTerminalFocus(true)));
     assert!(s.session.terminal_focused);
 }

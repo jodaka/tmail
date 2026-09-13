@@ -49,14 +49,14 @@ fn wizard_mut(state: &mut AppState) -> &mut WizardState {
 }
 
 fn act(state: &mut AppState, action: WizardAction) -> Vec<Effect> {
-    reduce(state, &Action::Wizard(action))
+    reduce(state, Action::Wizard(action))
 }
 
 fn complete(state: &mut AppState, effects: &[Effect], outcome: OperationOutcome) -> Vec<Effect> {
     let id = effects.first().expect("effect to complete").id;
     reduce(
         state,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(outcome),
         }),
@@ -67,7 +67,7 @@ fn fail_with(state: &mut AppState, effects: &[Effect], detail: &str) -> Vec<Effe
     let id = effects.first().expect("effect to complete").id;
     reduce(
         state,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Err(OperationFailure {
                 code: Some(1),
@@ -446,13 +446,13 @@ fn warmup_is_suppressed_while_the_wizard_is_active() {
     let mut state = state();
     // The startup warmup actions and the auto-refresh timer's Refresh
     // must be inert (ADR 0003 §3.1): no account to load yet.
-    no_effects(&reduce(&mut state, &Action::Refresh));
-    no_effects(&reduce(&mut state, &Action::LoadDrafts));
+    no_effects(&reduce(&mut state, Action::Refresh));
+    no_effects(&reduce(&mut state, Action::LoadDrafts));
     // Mailbox keys leak nothing: they are swallowed wholesale.
-    no_effects(&reduce(&mut state, &Action::MoveDown));
-    no_effects(&reduce(&mut state, &Action::Activate));
-    no_effects(&reduce(&mut state, &Action::Compose));
-    no_effects(&reduce(&mut state, &Action::OpenSearch));
+    no_effects(&reduce(&mut state, Action::MoveDown));
+    no_effects(&reduce(&mut state, Action::Activate));
+    no_effects(&reduce(&mut state, Action::Compose));
+    no_effects(&reduce(&mut state, Action::OpenSearch));
 }
 
 #[test]
@@ -465,7 +465,7 @@ fn unknown_and_stale_results_are_rejected() {
     // An unknown id never touches the wizard.
     reduce(
         &mut state,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: OperationId(9999),
             outcome: Ok(discovered(vec![gmail_service()])),
         }),
@@ -480,7 +480,7 @@ fn unknown_and_stale_results_are_rejected() {
     let before = wizard(&state).discovery.services.len();
     reduce(
         &mut state,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(discovered(Vec::new())),
         }),
@@ -653,7 +653,7 @@ fn enter_on_the_storage_row_toggles_the_mode_without_testing() {
     assert_eq!(wizard(&state).credentials.credentials_index, 1);
 
     // Enter activates the focused control: the mode flips, no test runs.
-    let effects = reduce(&mut state, &Action::Activate);
+    let effects = reduce(&mut state, Action::Activate);
     no_effects(&effects);
     assert_eq!(wizard(&state).step, WizardStep::Credentials);
     assert_eq!(
@@ -666,7 +666,7 @@ fn enter_on_the_storage_row_toggles_the_mode_without_testing() {
     );
 
     // Enter again flips back to raw.
-    reduce(&mut state, &Action::Activate);
+    reduce(&mut state, Action::Activate);
     assert_eq!(wizard(&state).credentials.storage_mode, StorageMode::Raw);
 }
 

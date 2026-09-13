@@ -130,7 +130,10 @@ async fn run_effect(
     effect: &Effect,
     ctx: &RequestContext,
 ) -> Option<Result<OperationOutcome, OperationFailure>> {
-    match effect.kind.clone() {
+    // Ticket sakb: dispatch on a borrow — arms move only the sub-entity
+    // they need, instead of cloning the whole `OperationKind` (including
+    // draft/outbound bodies) on every launch.
+    match &effect.kind {
         OperationKind::LoadMailboxes => {
             run_call(
                 effect,
@@ -144,7 +147,7 @@ async fn run_effect(
             run_call(
                 effect,
                 ctx,
-                move |c| backend.list_messages(c, request),
+                move |c| backend.list_messages(c, request.clone()),
                 OperationOutcome::Page,
             )
             .await
@@ -153,7 +156,7 @@ async fn run_effect(
             run_call(
                 effect,
                 ctx,
-                move |c| backend.search_messages(c, request),
+                move |c| backend.search_messages(c, request.clone()),
                 OperationOutcome::Page,
             )
             .await
@@ -169,7 +172,7 @@ async fn run_effect(
             run_call(
                 effect,
                 ctx,
-                move |c| backend.get_message(c, locator),
+                move |c| backend.get_message(c, locator.clone()),
                 |message| OperationOutcome::Message(Box::new(message)),
             )
             .await
@@ -178,7 +181,7 @@ async fn run_effect(
             run_call(
                 effect,
                 ctx,
-                move |c| backend.set_read(c, locator, read),
+                move |c| backend.set_read(c, locator.clone(), *read),
                 |_| OperationOutcome::Done,
             )
             .await
@@ -187,7 +190,7 @@ async fn run_effect(
             run_call(
                 effect,
                 ctx,
-                move |c| backend.set_starred(c, locator, starred),
+                move |c| backend.set_starred(c, locator.clone(), *starred),
                 |_| OperationOutcome::Done,
             )
             .await
@@ -196,7 +199,7 @@ async fn run_effect(
             run_call(
                 effect,
                 ctx,
-                move |c| backend.archive(c, locator),
+                move |c| backend.archive(c, locator.clone()),
                 |_| OperationOutcome::Done,
             )
             .await
@@ -205,7 +208,7 @@ async fn run_effect(
             run_call(
                 effect,
                 ctx,
-                move |c| backend.trash(c, locator),
+                move |c| backend.trash(c, locator.clone()),
                 |_| OperationOutcome::Done,
             )
             .await
@@ -214,7 +217,7 @@ async fn run_effect(
             run_call(
                 effect,
                 ctx,
-                move |c| backend.save_draft(c, *draft),
+                move |c| backend.save_draft(c, draft.as_ref().clone()),
                 |remote_id| OperationOutcome::DraftSaved { remote_id },
             )
             .await
@@ -232,7 +235,7 @@ async fn run_effect(
             run_call(
                 effect,
                 ctx,
-                move |c| backend.delete_draft(c, *draft),
+                move |c| backend.delete_draft(c, draft.as_ref().clone()),
                 |_| OperationOutcome::Done,
             )
             .await
@@ -241,7 +244,7 @@ async fn run_effect(
             run_call(
                 effect,
                 ctx,
-                move |c| backend.send_message(c, *message),
+                move |c| backend.send_message(c, message.as_ref().clone()),
                 OperationOutcome::SendOutcome,
             )
             .await
@@ -250,7 +253,7 @@ async fn run_effect(
             run_call(
                 effect,
                 ctx,
-                move |c| backend.read_attachment(c, path),
+                move |c| backend.read_attachment(c, path.clone()),
                 OperationOutcome::Attachment,
             )
             .await
@@ -258,6 +261,7 @@ async fn run_effect(
         OperationKind::ListAttachmentFiles { path } => {
             // The directory walk is file I/O: it hops to the blocking pool
             // so the single-threaded runtime never stalls (plan §3).
+            let path = path.clone();
             match tokio::task::spawn_blocking(move || build_attachment_explorer(path.as_deref()))
                 .await
             {
@@ -273,7 +277,7 @@ async fn run_effect(
             run_call(
                 effect,
                 ctx,
-                move |c| backend.save_attachment(c, request),
+                move |c| backend.save_attachment(c, request.clone()),
                 OperationOutcome::SavedPath,
             )
             .await
@@ -282,7 +286,7 @@ async fn run_effect(
             tracing::debug!(path = %path.display(), "opening with platform handler");
             // Spawned directly (argv, no shell); not cancellable, so no
             // token dance here — the handler app owns its own lifetime.
-            match opener.open(&path) {
+            match opener.open(path) {
                 Ok(()) => Some(Ok(OperationOutcome::Done)),
                 Err(err) => Some(Err(plain_failure(
                     effect,
@@ -294,7 +298,7 @@ async fn run_effect(
             tracing::debug!(url = %url, "opening link with platform handler");
             // Spawned directly (argv, no shell); the opener itself refuses
             // non-web schemes before dispatching (ticket hc9n).
-            match opener.open_url(&url) {
+            match opener.open_url(url) {
                 Ok(()) => Some(Ok(OperationOutcome::Done)),
                 Err(err) => Some(Err(plain_failure(
                     effect,
@@ -314,7 +318,7 @@ async fn run_effect(
         // Wizard discovery (ADR 0003 §3.3): the injected discoverer runs
         // the bounded blocking client on its own worker thread.
         OperationKind::DiscoverConfig { email } => {
-            let services = discoverer.discover(&email).await;
+            let services = discoverer.discover(email).await;
             Some(Ok(OperationOutcome::Discovered(services)))
         }
         // Wizard credential test (ADR 0003 §3.4): a real `himalaya
@@ -323,7 +327,7 @@ async fn run_effect(
         OperationKind::TestAccount { draft } => {
             match crate::backend::himalaya::test_account_mailbox_names(
                 himalaya_program,
-                &draft,
+                draft,
                 ctx.cancellation.clone(),
             )
             .await
@@ -336,6 +340,8 @@ async fn run_effect(
         // here (file I/O on the blocking pool), keeping the reducer
         // I/O-free and the runtime loop unblocked.
         OperationKind::SaveAccount { path, draft } => {
+            let path = path.clone();
+            let draft = draft.as_ref().clone();
             match tokio::task::spawn_blocking(move || {
                 crate::config::write::save_account(&path, &draft)
             })
@@ -370,6 +376,8 @@ async fn run_effect(
                 // runs on the blocking pool so the frame loop never waits.
                 NotifyRequest::Desktop { summary, body } => {
                     let notifier = Arc::clone(notifier);
+                    let summary = summary.clone();
+                    let body = body.clone();
                     let delivered =
                         tokio::task::spawn_blocking(move || notifier.notify(&summary, &body)).await;
                     match delivered {
@@ -395,6 +403,10 @@ async fn run_effect(
             limit,
             ..
         } => {
+            let mailbox = mailbox.clone();
+            let query = query.clone();
+            let offset = *offset;
+            let limit = *limit;
             let page = run_cache(cache, move |cache| {
                 cache.load(&mailbox, query.as_deref(), offset, limit)
             })
@@ -409,6 +421,9 @@ async fn run_effect(
             query,
             page,
         } => {
+            let mailbox = mailbox.clone();
+            let query = query.clone();
+            let page = page.as_ref().clone();
             run_cache_store(cache, move |cache| {
                 cache.store(&mailbox, query.as_deref(), &page)
             })
@@ -423,24 +438,23 @@ async fn run_effect(
             }))
         }
         OperationKind::CacheMailboxesStore { mailboxes } => {
+            let mailboxes = mailboxes.clone();
             run_cache_store(cache, move |cache| cache.store_mailboxes(&mailboxes)).await;
             Some(Ok(OperationOutcome::Done))
         }
         OperationKind::CacheMessageLoad { locator } => {
-            let message = run_cache(cache, move |cache| {
-                cache.load_message(&locator.mailbox, &locator.id.0)
-            })
-            .await;
+            let mailbox = locator.mailbox.clone();
+            let id = locator.id.0.clone();
+            let message = run_cache(cache, move |cache| cache.load_message(&mailbox, &id)).await;
             Some(Ok(match message {
                 Some(message) => OperationOutcome::CachedMessage(Box::new(message)),
                 None => OperationOutcome::CacheMiss,
             }))
         }
         OperationKind::CachePreviewLoad { locator } => {
-            let message = run_cache(cache, move |cache| {
-                cache.load_message(&locator.mailbox, &locator.id.0)
-            })
-            .await;
+            let mailbox = locator.mailbox.clone();
+            let id = locator.id.0.clone();
+            let message = run_cache(cache, move |cache| cache.load_message(&mailbox, &id)).await;
             Some(Ok(match message {
                 Some(message) => OperationOutcome::CachedMessage(Box::new(message)),
                 None => OperationOutcome::CacheMiss,
@@ -451,6 +465,9 @@ async fn run_effect(
             id,
             message,
         } => {
+            let mailbox = mailbox.clone();
+            let id = id.clone();
+            let message = message.as_ref().clone();
             run_cache_store(cache, move |cache| {
                 cache.store_message(&mailbox, &id, &message)
             })

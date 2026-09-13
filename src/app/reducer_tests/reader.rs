@@ -164,8 +164,8 @@ fn disk_cached_messages_fill_previews_without_fetching() {
     // cached page), and every preview is served from the cached copies —
     // no background fetches start, nothing re-requests what was fetched
     // before (ticket wxtx).
-    reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1))); // select
-    let effects = reduce(&mut s, &Action::Click(ClickTarget::Mailbox(1))); // activate
+    reduce(&mut s, Action::Click(ClickTarget::Mailbox(1))); // select
+    let effects = reduce(&mut s, Action::Click(ClickTarget::Mailbox(1))); // activate
     let (cache_id, ..) = expect_cache_list_load(&effects);
     let effects = complete_cache_miss(&mut s, cache_id);
     let (load, req) = expect_page(&effects);
@@ -224,7 +224,7 @@ fn esc_from_reader_restores_exact_list_state() {
             complete_message_ok(&mut s, pending);
         }
     }
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert_eq!(s.session.routes.len(), 1);
     assert_eq!(s.session.focus, Focus::MessageList);
     assert!(matches!(s.open_message, Loadable::Idle));
@@ -265,24 +265,24 @@ fn tab_cycles_the_reader_attachment_cursor_and_wraps() {
     s.session.focus = Focus::Reader;
 
     assert_eq!(s.reader_focus, None, "nothing focused before Tab");
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(0)));
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(1)));
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(
         s.reader_focus,
         Some(ReaderFocus::Attachment(0)),
         "wraps forward"
     );
-    reduce(&mut s, &Action::FocusPrevious);
+    reduce(&mut s, Action::FocusPrevious);
     assert_eq!(
         s.reader_focus,
         Some(ReaderFocus::Attachment(1)),
         "wraps backward"
     );
     // Closing the reader resets the cursor.
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert_eq!(s.reader_focus, None);
 }
 
@@ -292,7 +292,7 @@ fn tab_is_inert_without_focusable_items() {
     let (id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, id);
     assert_eq!(s.session.focus, Focus::Reader);
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, None, "no links, no chips: no cursor");
 }
 
@@ -302,15 +302,15 @@ fn tab_is_inert_without_focusable_items() {
 fn tab_cycles_links_then_attachments() {
     let mut s = reader_with_links_and_attachment();
     assert_eq!(s.reader_focus, None);
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Link(0)));
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Link(1)));
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(0)));
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Link(0)), "wraps forward");
-    reduce(&mut s, &Action::FocusPrevious);
+    reduce(&mut s, Action::FocusPrevious);
     assert_eq!(
         s.reader_focus,
         Some(ReaderFocus::Attachment(0)),
@@ -318,7 +318,7 @@ fn tab_cycles_links_then_attachments() {
     );
     // Shift+Tab from nothing starts at the last item.
     s.reader_focus = None;
-    reduce(&mut s, &Action::FocusPrevious);
+    reduce(&mut s, Action::FocusPrevious);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(0)));
 }
 
@@ -327,10 +327,10 @@ fn tab_cycles_links_then_attachments() {
 #[test]
 fn enter_on_a_focused_link_opens_the_url() {
     let mut s = reader_with_links_and_attachment();
-    reduce(&mut s, &Action::FocusNext);
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Link(1)));
-    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
     let OperationKind::OpenUrl { url } = kind else {
         panic!("expected OpenUrl, got {kind:?}");
     };
@@ -366,7 +366,7 @@ fn tab_focus_scrolls_the_focused_link_into_view() {
     s.session.focus = Focus::Reader;
     s.session.size = (80, 25);
 
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Link(0)));
     let width = crate::view::layout::reader_width(s.session.size).max(10);
     let line = crate::app::reader::focus_line(&s, width, ReaderFocus::Link(0)).expect("link line");
@@ -386,9 +386,9 @@ fn tab_focus_scrolls_the_focused_link_into_view() {
 #[test]
 fn enter_on_a_non_web_link_is_refused() {
     let mut s = reader_with_non_web_link();
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Link(0)));
-    no_effects(&reduce(&mut s, &Action::Activate));
+    no_effects(&reduce(&mut s, Action::Activate));
     assert!(
         s.session
             .status
@@ -406,9 +406,9 @@ fn enter_on_a_non_web_link_is_refused() {
 #[test]
 fn attachment_actions_fall_back_to_the_first_chip() {
     let mut s = reader_with_links_and_attachment();
-    reduce(&mut s, &Action::FocusNext); // Link(0)
+    reduce(&mut s, Action::FocusNext); // Link(0)
     assert_eq!(s.reader_focus, Some(ReaderFocus::Link(0)));
-    let effects = reduce(&mut s, &Action::SaveAttachment);
+    let effects = reduce(&mut s, Action::SaveAttachment);
     let (_, kind) = effect_parts(&effects);
     let OperationKind::SaveAttachment { request, .. } = kind else {
         panic!("expected SaveAttachment, got {kind:?}");

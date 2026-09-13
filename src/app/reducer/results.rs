@@ -24,7 +24,9 @@ use crate::app::overlay::Overlay;
 use crate::app::route::Route;
 use crate::app::state::{AppState, Loadable};
 use crate::config::Notifications;
-use crate::domain::{MessageLocator, MessageSummary, Page, PageRequest, SearchRequest};
+use crate::domain::{
+    MessageLocator, MessageSummary, Page, PageRequest, RestoredDraft, SearchRequest,
+};
 
 // ── Backend results (plan §11) ───────────────────────────────────────────
 
@@ -36,7 +38,7 @@ use crate::domain::{MessageLocator, MessageSummary, Page, PageRequest, SearchReq
 /// (Phase 9.6).
 pub(crate) fn list_failure(
     state: &mut AppState,
-    failure: &OperationFailure,
+    failure: OperationFailure,
     origin: OperationOrigin,
 ) {
     if origin == OperationOrigin::Background {
@@ -120,51 +122,52 @@ pub(crate) fn unexpected_payload(id: OperationId, kind: &str) -> Vec<Effect> {
     Vec::new()
 }
 
-pub(crate) fn backend_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
-    let Some(op) = state.session.operations.get(result.id) else {
-        tracing::debug!(id = %result.id, "dropping result for unknown or cancelled operation");
+pub(crate) fn backend_completed(state: &mut AppState, result: OperationResult) -> Vec<Effect> {
+    // The registry consumes the result exactly once (ticket sakb): `finish`
+    // removes and returns the operation, so its `kind` — including heavy
+    // payloads (draft snapshots, outbound messages) — is owned, not cloned.
+    let Some(op) = state.session.operations.finish(result.id) else {
+        let id = result.id;
+        tracing::debug!(id = %id, "dropping result for unknown or cancelled operation");
         return Vec::new();
     };
-    let kind = op.kind.clone();
+    let kind = op.kind;
     let origin = op.origin;
-    // The result is consumed exactly once before dispatch: a handler's
-    // currency check reads only routes and state, and the operation must
-    // not count as in flight while its outcome is applied.
-    state.session.operations.finish(result.id);
-    match &kind {
+    let id = result.id;
+    match kind {
         OperationKind::LoadMailboxes => complete_load_mailboxes(state, origin, result),
-        OperationKind::LoadPage(request) => complete_load_page(state, request, origin, result),
+        OperationKind::LoadPage(request) => complete_load_page(state, &request, origin, result),
         OperationKind::Search(request) => complete_search(state, request, origin, result),
         OperationKind::LoadMessage(locator) => {
-            complete_load_message(state, locator, origin, result)
+            complete_load_message(state, &locator, origin, result)
         }
-        OperationKind::OpenDraft(locator) => complete_open_draft(state, locator, result),
+        OperationKind::OpenDraft(locator) => complete_open_draft(state, &locator, result),
         OperationKind::Preview(_) => complete_preview(state, result),
-        OperationKind::SeedComposer { kind, .. } => complete_seed_composer(state, result, *kind),
+        OperationKind::SeedComposer { kind, .. } => complete_seed_composer(state, result, kind),
         OperationKind::SetRead { locator, read } => {
-            complete_flag(state, result, locator, FlagChange::Read(*read))
+            complete_flag(state, result, &locator, FlagChange::Read(read))
         }
         OperationKind::SetStarred { locator, starred } => {
-            complete_flag(state, result, locator, FlagChange::Starred(*starred))
+            complete_flag(state, result, &locator, FlagChange::Starred(starred))
         }
         OperationKind::Archive(locator) | OperationKind::Trash(locator) => {
-            complete_move(state, result, locator)
+            complete_move(state, result, &locator)
         }
-        OperationKind::SaveDraft { draft } => save_draft_completed(state, draft, result),
+        OperationKind::SaveDraft { draft } => save_draft_completed(state, &draft, result),
         OperationKind::LoadDrafts => complete_load_drafts(state, result),
-        OperationKind::DeleteDraft { reason, .. } => complete_delete_draft(state, result, reason),
+        OperationKind::DeleteDraft { reason, .. } => complete_delete_draft(state, result, &reason),
         OperationKind::Send { message } => complete_send(state, result, message),
-        OperationKind::ReadAttachment { path } => attachment_validated(state, path, result),
+        OperationKind::ReadAttachment { path } => attachment_validated(state, &path, result),
         OperationKind::ListAttachmentFiles { .. } => attachment_listing_ready(state, result),
         OperationKind::SaveAttachment { open_after, .. } => {
-            complete_save_attachment(state, result, *open_after)
+            complete_save_attachment(state, result, open_after)
         }
         OperationKind::OpenPath { .. } => complete_open_path(state, result),
         OperationKind::OpenUrl { .. } => complete_open_url(state, result),
         // Notifications are best-effort side effects (ticket b28p): the
         // manager reports the attempt, state has nothing to apply.
         OperationKind::Notify { .. } => {
-            tracing::debug!(id = %result.id, "notification delivered");
+            tracing::debug!(id = %id, "notification delivered");
             Vec::new()
         }
         // The external editor completes through `Action::EditorFinished`,
@@ -172,7 +175,7 @@ pub(crate) fn backend_completed(state: &mut AppState, result: &OperationResult) 
         // not in the manager). A result arriving here would be a routing
         // bug; the operation is consumed above so the registry cannot leak.
         OperationKind::EditExternally { .. } => {
-            tracing::warn!(id = %result.id, "result for an external-editor operation");
+            tracing::warn!(id = %id, "result for an external-editor operation");
             Vec::new()
         }
         // Wizard operations complete through the wizard slice, which
@@ -182,7 +185,7 @@ pub(crate) fn backend_completed(state: &mut AppState, result: &OperationResult) 
         OperationKind::DiscoverConfig { .. }
         | OperationKind::TestAccount { .. }
         | OperationKind::SaveAccount { .. } => {
-            tracing::warn!(id = %result.id, "wizard result reached the main backend path");
+            tracing::warn!(id = %id, "wizard result reached the main backend path");
             Vec::new()
         }
         // ── Summary/message cache (ticket haeb) ─────────────────────────
@@ -197,19 +200,19 @@ pub(crate) fn backend_completed(state: &mut AppState, result: &OperationResult) 
             fresh_background_on_hit,
         } => complete_cache_list_load(
             state,
-            mailbox,
+            &mailbox,
             query.as_deref(),
-            *offset,
-            *limit,
-            *fresh_background_on_hit,
+            offset,
+            limit,
+            fresh_background_on_hit,
             result,
         ),
         OperationKind::CacheMailboxesLoad => complete_cache_mailboxes_load(state, result),
         OperationKind::CacheMessageLoad { locator } => {
-            complete_cache_message_load(state, locator, result)
+            complete_cache_message_load(state, &locator, result)
         }
         OperationKind::CachePreviewLoad { locator } => {
-            complete_cache_preview_load(state, locator, result)
+            complete_cache_preview_load(state, &locator, result)
         }
         // Writes are best-effort side effects: the manager logs failures
         // inside the cache, and a dropped write can never lose mail —
@@ -232,26 +235,28 @@ pub(crate) fn backend_completed(state: &mut AppState, result: &OperationResult) 
 pub(crate) fn complete_load_mailboxes(
     state: &mut AppState,
     origin: OperationOrigin,
-    result: &OperationResult,
+    result: OperationResult,
 ) -> Vec<Effect> {
-    match &result.outcome {
+    let id = result.id;
+    match result.outcome {
         Ok(OperationOutcome::Mailboxes(mailboxes)) => {
             // Ticket haeb: every successful listing refreshes the cached
             // sidebar — as an effect, so the write never blocks the
             // reducer (the manager owns the cache and the disk).
             let mut effects = mailboxes_loaded(state, mailboxes.clone());
-            effects.push(state.session.operations.start_background(
-                OperationKind::CacheMailboxesStore {
-                    mailboxes: mailboxes.clone(),
-                },
-            ));
+            effects.push(
+                state
+                    .session
+                    .operations
+                    .start_background(OperationKind::CacheMailboxesStore { mailboxes }),
+            );
             effects
         }
         Ok(OperationOutcome::Page(_)) => {
-            tracing::warn!(id = %result.id, "page payload for a mailbox operation");
+            tracing::warn!(id = %id, "page payload for a mailbox operation");
             Vec::new()
         }
-        Ok(_) => unexpected_payload(result.id, "mailbox"),
+        Ok(_) => unexpected_payload(id, "mailbox"),
         Err(failure) => {
             // A background refresh failure never erases a healthy sidebar:
             // what the user sees is good, the hiccup is logged. When
@@ -262,7 +267,7 @@ pub(crate) fn complete_load_mailboxes(
                 && matches!(state.mailboxes, Loadable::Loaded(_))
             {
                 tracing::debug!(
-                    id = %result.id,
+                    id = %id,
                     detail = %failure.detail,
                     "background mailbox refresh failed; sidebar untouched"
                 );
@@ -290,7 +295,7 @@ pub(crate) fn complete_load_page(
     state: &mut AppState,
     request: &PageRequest,
     origin: OperationOrigin,
-    result: &OperationResult,
+    result: OperationResult,
 ) -> Vec<Effect> {
     let current = visible_mailbox_page(state).is_some_and(|id| *id == request.mailbox_id);
     if !current {
@@ -301,16 +306,17 @@ pub(crate) fn complete_load_page(
         );
         return Vec::new();
     }
-    match &result.outcome {
+    let id = result.id;
+    match result.outcome {
         Ok(OperationOutcome::Page(page)) => {
             state.session.last_background_error = None;
             let mut effects = Vec::new();
             // Timer refreshes report new mail (ticket b28p); foreground
             // loads are user-driven and stay silent.
             if origin == OperationOrigin::Background {
-                effects.extend(notify_new_messages(state, page));
+                effects.extend(notify_new_messages(state, &page));
             }
-            effects.extend(apply_page(state, page.clone()));
+            effects.extend(apply_page(state, page));
             // Ticket haeb: every successful load refreshes the cached page —
             // with the previews applied (ticket wxtx), so the next cold
             // start renders rows without re-fetching anything. The write
@@ -325,7 +331,7 @@ pub(crate) fn complete_load_page(
             effects
         }
         Ok(OperationOutcome::Mailboxes(_)) => {
-            tracing::warn!(id = %result.id, "mailbox payload for a page operation");
+            tracing::warn!(id = %id, "mailbox payload for a page operation");
             Vec::new()
         }
         Err(failure) => {
@@ -334,7 +340,7 @@ pub(crate) fn complete_load_page(
             list_failure(state, failure, origin);
             Vec::new()
         }
-        _ => unexpected_payload(result.id, "page"),
+        _ => unexpected_payload(id, "page"),
     }
 }
 
@@ -343,9 +349,9 @@ pub(crate) fn complete_load_page(
 /// older operation, so only races with navigation land here).
 pub(crate) fn complete_search(
     state: &mut AppState,
-    request: &SearchRequest,
+    request: SearchRequest,
     origin: OperationOrigin,
-    result: &OperationResult,
+    result: OperationResult,
 ) -> Vec<Effect> {
     let current = matches!(
         state.active_route(),
@@ -360,16 +366,17 @@ pub(crate) fn complete_search(
         );
         return Vec::new();
     }
-    match &result.outcome {
+    let id = result.id;
+    match result.outcome {
         Ok(OperationOutcome::Page(page)) => {
             state.session.last_background_error = None;
             let mut effects = Vec::new();
             // A timer refresh of an open search reports matching new mail
             // like a mailbox refresh does (ticket b28p).
             if origin == OperationOrigin::Background {
-                effects.extend(notify_new_messages(state, page));
+                effects.extend(notify_new_messages(state, &page));
             }
-            effects.extend(apply_page(state, page.clone()));
+            effects.extend(apply_page(state, page));
             // Ticket haeb: search results cache under their query — with
             // the previews applied (ticket wxtx). The write travels as an
             // effect: the manager owns the cache and the disk.
@@ -382,7 +389,7 @@ pub(crate) fn complete_search(
             ));
             effects
         }
-        Ok(_) => unexpected_payload(result.id, "search"),
+        Ok(_) => unexpected_payload(id, "search"),
         Err(failure) => {
             list_failure(state, failure, origin);
             Vec::new()
@@ -396,7 +403,7 @@ pub(crate) fn complete_load_message(
     state: &mut AppState,
     locator: &MessageLocator,
     origin: OperationOrigin,
-    result: &OperationResult,
+    result: OperationResult,
 ) -> Vec<Effect> {
     let current = matches!(
         state.active_route(),
@@ -411,9 +418,10 @@ pub(crate) fn complete_load_message(
         );
         return Vec::new();
     }
-    match &result.outcome {
-        Ok(OperationOutcome::Message(message)) => message_loaded(state, (**message).clone()),
-        Ok(_) => unexpected_payload(result.id, "message"),
+    let id = result.id;
+    match result.outcome {
+        Ok(OperationOutcome::Message(message)) => message_loaded(state, *message),
+        Ok(_) => unexpected_payload(id, "message"),
         Err(failure) => {
             // A background convergence fetch of an already-cached message
             // runs silently: the reader already shows good content, so a
@@ -421,7 +429,7 @@ pub(crate) fn complete_load_message(
             // cached copy instead of interrupting with a modal.
             if origin == OperationOrigin::Background {
                 tracing::debug!(
-                    id = %result.id,
+                    id = %id,
                     detail = %failure.detail,
                     "silent convergence fetch failed; cached copy stays"
                 );
@@ -441,7 +449,7 @@ pub(crate) fn complete_load_message(
 pub(crate) fn complete_open_draft(
     state: &mut AppState,
     locator: &MessageLocator,
-    result: &OperationResult,
+    result: OperationResult,
 ) -> Vec<Effect> {
     let current = match state.active_route() {
         Some(Route::Mailbox(route)) => route.mailbox_id == locator.mailbox,
@@ -456,9 +464,10 @@ pub(crate) fn complete_open_draft(
         );
         return Vec::new();
     }
-    match &result.outcome {
-        Ok(OperationOutcome::Message(message)) => draft_message_loaded(state, (**message).clone()),
-        Ok(_) => unexpected_payload(result.id, "draft"),
+    let id = result.id;
+    match result.outcome {
+        Ok(OperationOutcome::Message(message)) => draft_message_loaded(state, *message),
+        Ok(_) => unexpected_payload(id, "draft"),
         Err(failure) => open_error_modal(state, failure),
     }
 }
@@ -466,13 +475,14 @@ pub(crate) fn complete_open_draft(
 /// Apply a finished preview fetch. A preview is decorative background
 /// context (ticket wxtx): its failure never interrupts the user and is
 /// never retried — the row simply keeps no snippet.
-pub(crate) fn complete_preview(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
-    match &result.outcome {
-        Ok(OperationOutcome::Message(message)) => preview_loaded(state, (**message).clone()),
-        Ok(_) => unexpected_payload(result.id, "preview"),
+pub(crate) fn complete_preview(state: &mut AppState, result: OperationResult) -> Vec<Effect> {
+    let id = result.id;
+    match result.outcome {
+        Ok(OperationOutcome::Message(message)) => preview_loaded(state, *message),
+        Ok(_) => unexpected_payload(id, "preview"),
         Err(failure) => {
             tracing::debug!(
-                id = %result.id,
+                id = %id,
                 detail = %failure.detail,
                 "preview fetch failed; row stays without a snippet"
             );
@@ -485,12 +495,13 @@ pub(crate) fn complete_preview(state: &mut AppState, result: &OperationResult) -
 /// message becomes the composer draft.
 pub(crate) fn complete_seed_composer(
     state: &mut AppState,
-    result: &OperationResult,
+    result: OperationResult,
     kind: crate::app::operation::SeedKind,
 ) -> Vec<Effect> {
-    match &result.outcome {
-        Ok(OperationOutcome::Message(message)) => install_seed(state, (**message).clone(), kind),
-        Ok(_) => unexpected_payload(result.id, "composer seed"),
+    let id = result.id;
+    match result.outcome {
+        Ok(OperationOutcome::Message(message)) => install_seed(state, *message, kind),
+        Ok(_) => unexpected_payload(id, "composer seed"),
         Err(failure) => open_error_modal(state, failure),
     }
 }
@@ -500,16 +511,17 @@ pub(crate) fn complete_seed_composer(
 /// state.
 pub(crate) fn complete_flag(
     state: &mut AppState,
-    result: &OperationResult,
+    result: OperationResult,
     locator: &MessageLocator,
     change: FlagChange,
 ) -> Vec<Effect> {
-    match &result.outcome {
+    let id = result.id;
+    match result.outcome {
         Ok(OperationOutcome::Done) => {
             apply_flag(state, locator, change);
         }
         Ok(_) => {
-            unexpected_payload(result.id, "flag");
+            unexpected_payload(id, "flag");
         }
         Err(failure) => {
             open_error_modal(state, failure);
@@ -523,12 +535,13 @@ pub(crate) fn complete_flag(
 /// failure state).
 pub(crate) fn complete_move(
     state: &mut AppState,
-    result: &OperationResult,
+    result: OperationResult,
     locator: &MessageLocator,
 ) -> Vec<Effect> {
-    match &result.outcome {
+    let id = result.id;
+    match result.outcome {
         Ok(OperationOutcome::Done) => message_moved(state, locator),
-        Ok(_) => unexpected_payload(result.id, "move"),
+        Ok(_) => unexpected_payload(id, "move"),
         Err(failure) => open_error_modal(state, failure),
     }
 }
@@ -536,10 +549,11 @@ pub(crate) fn complete_move(
 /// Apply the journal restore result. The journal is the crash-safety net;
 /// a failure to read it must be visible (plan §12) even though mail
 /// browsing can continue without drafts.
-pub(crate) fn complete_load_drafts(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
-    match &result.outcome {
+pub(crate) fn complete_load_drafts(state: &mut AppState, result: OperationResult) -> Vec<Effect> {
+    let id = result.id;
+    match result.outcome {
         Ok(OperationOutcome::Drafts(drafts)) => drafts_restored(state, drafts),
-        Ok(_) => unexpected_payload(result.id, "draft restore"),
+        Ok(_) => unexpected_payload(id, "draft restore"),
         Err(failure) => open_error_modal(state, failure),
     }
 }
@@ -551,10 +565,11 @@ pub(crate) fn complete_load_drafts(state: &mut AppState, result: &OperationResul
 /// (ADR 0002) and never claims a failed send.
 pub(crate) fn complete_delete_draft(
     state: &mut AppState,
-    result: &OperationResult,
+    result: OperationResult,
     reason: &DraftRemovalReason,
 ) -> Vec<Effect> {
-    match &result.outcome {
+    let id = result.id;
+    match result.outcome {
         Ok(OperationOutcome::Done) => match reason {
             // Confirmed discard: the sweep removed the draft from the
             // backing store — refresh what the user sees: the visible
@@ -581,7 +596,7 @@ pub(crate) fn complete_delete_draft(
             }
             DraftRemovalReason::Sent => Vec::new(),
         },
-        Ok(_) => unexpected_payload(result.id, "draft removal"),
+        Ok(_) => unexpected_payload(id, "draft removal"),
         Err(failure) => match reason {
             DraftRemovalReason::Discard => open_error_modal(state, failure),
             DraftRemovalReason::Sent => {
@@ -600,12 +615,13 @@ pub(crate) fn complete_delete_draft(
 /// editable (plan §19 Phase 7: failed send keeps it).
 pub(crate) fn complete_send(
     state: &mut AppState,
-    result: &OperationResult,
-    message: &crate::domain::OutboundMessage,
+    result: OperationResult,
+    message: Box<crate::domain::OutboundMessage>,
 ) -> Vec<Effect> {
-    match &result.outcome {
-        Ok(OperationOutcome::SendOutcome(outcome)) => send_completed(state, outcome, message),
-        Ok(_) => unexpected_payload(result.id, "send"),
+    let id = result.id;
+    match result.outcome {
+        Ok(OperationOutcome::SendOutcome(outcome)) => send_completed(state, &outcome, message),
+        Ok(_) => unexpected_payload(id, "send"),
         Err(failure) => {
             if let Some(composer) = state.session.composer.as_mut() {
                 composer.sending = false;
@@ -621,35 +637,39 @@ pub(crate) fn complete_send(
 /// so the chain uses exactly what was written (Phase 8.5).
 pub(crate) fn complete_save_attachment(
     state: &mut AppState,
-    result: &OperationResult,
+    result: OperationResult,
     open_after: bool,
 ) -> Vec<Effect> {
-    match &result.outcome {
+    let id = result.id;
+    match result.outcome {
         Ok(OperationOutcome::SavedPath(path)) => {
-            attachment_saved(state, path);
+            let open = open_after.then(|| path.clone());
+            attachment_saved(state, &path);
             if open_after {
+                let path = open.expect("checked above");
                 return vec![
                     state
                         .session
                         .operations
-                        .start(OperationKind::OpenPath { path: path.clone() }),
+                        .start(OperationKind::OpenPath { path }),
                 ];
             }
             Vec::new()
         }
-        Ok(_) => unexpected_payload(result.id, "attachment save"),
+        Ok(_) => unexpected_payload(id, "attachment save"),
         Err(failure) => open_error_modal(state, failure),
     }
 }
 
 /// Apply a finished `open` spawn.
-pub(crate) fn complete_open_path(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
-    match &result.outcome {
+pub(crate) fn complete_open_path(state: &mut AppState, result: OperationResult) -> Vec<Effect> {
+    let id = result.id;
+    match result.outcome {
         Ok(OperationOutcome::Done) => {
             state.set_status("Opened");
             Vec::new()
         }
-        Ok(_) => unexpected_payload(result.id, "open"),
+        Ok(_) => unexpected_payload(id, "open"),
         Err(failure) => open_error_modal(state, failure),
     }
 }
@@ -657,13 +677,14 @@ pub(crate) fn complete_open_path(state: &mut AppState, result: &OperationResult)
 /// Apply a finished link-open spawn (ticket hc9n). A failure (no browser
 /// handler, missing opener) surfaces in the Retry/Dismiss modal with the
 /// URL named, like every other open.
-pub(crate) fn complete_open_url(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
-    match &result.outcome {
+pub(crate) fn complete_open_url(state: &mut AppState, result: OperationResult) -> Vec<Effect> {
+    let id = result.id;
+    match result.outcome {
         Ok(OperationOutcome::Done) => {
             state.set_status("Opened link");
             Vec::new()
         }
-        Ok(_) => unexpected_payload(result.id, "open link"),
+        Ok(_) => unexpected_payload(id, "open link"),
         Err(failure) => open_error_modal(state, failure),
     }
 }
@@ -673,22 +694,27 @@ pub(crate) fn complete_open_url(state: &mut AppState, result: &OperationResult) 
 /// clobbers a live composer. A gap between the recorded and
 /// remote-confirmed revisions leaves the draft dirty, so the autosave
 /// self-heals the gap once composing resumes.
-pub(crate) fn drafts_restored(
-    state: &mut AppState,
-    drafts: &[crate::domain::RestoredDraft],
-) -> Vec<Effect> {
-    let Some(restored) = drafts.iter().max_by_key(|entry| entry.draft.revision) else {
+pub(crate) fn drafts_restored(state: &mut AppState, drafts: Vec<RestoredDraft>) -> Vec<Effect> {
+    if drafts.is_empty() {
         return Vec::new();
-    };
+    }
     if state.session.composer.is_some() {
         tracing::debug!("draft restore skipped: a composer draft already exists");
         return Vec::new();
     }
-    let snapshot = restored.draft.clone();
+    // The journal is already crash-safe storage (ADR 0002 §D.1): consume
+    // the copy instead of cloning it out of the record.
+    let RestoredDraft {
+        draft: snapshot,
+        saved_revision,
+    } = drafts
+        .into_iter()
+        .max_by_key(|entry| entry.draft.revision)
+        .expect("checked above");
     // A gap between the recorded and remote-confirmed revisions means the
     // crash interrupted a push: restore the draft dirty so the autosave
     // self-heals it once the window elapses.
-    let save = if snapshot.revision > restored.saved_revision {
+    let save = if snapshot.revision > saved_revision {
         crate::domain::DraftSaveState::Debouncing
     } else {
         crate::domain::DraftSaveState::Saved
@@ -701,7 +727,7 @@ pub(crate) fn drafts_restored(
         body: snapshot.body,
         attachments: snapshot.attachments,
         revision: snapshot.revision,
-        saved_revision: restored.saved_revision,
+        saved_revision,
         saved_at: None,
         last_edit_at: state.session.clock,
         save,
@@ -731,8 +757,9 @@ pub(crate) fn drafts_restored(
 pub(crate) fn save_draft_completed(
     state: &mut AppState,
     snapshot: &crate::domain::DraftSnapshot,
-    result: &OperationResult,
+    result: OperationResult,
 ) -> Vec<Effect> {
+    let id = result.id;
     let current = state
         .session
         .composer
@@ -746,13 +773,12 @@ pub(crate) fn save_draft_completed(
         return Vec::new();
     }
     let composer = state.session.composer.as_mut().expect("checked above");
-    match &result.outcome {
+    match result.outcome {
         Ok(OperationOutcome::DraftSaved { remote_id }) => {
-            let chain = composer.draft.confirm_saved(
-                snapshot.revision,
-                remote_id.clone(),
-                state.session.clock,
-            );
+            let chain =
+                composer
+                    .draft
+                    .confirm_saved(snapshot.revision, remote_id, state.session.clock);
             if chain {
                 // Remain dirty and save again (plan §14): one follow-up
                 // save covering the newest revision. It supersedes nothing
@@ -773,7 +799,7 @@ pub(crate) fn save_draft_completed(
             state.set_status("Draft save failed");
             Vec::new()
         }
-        Ok(_) => unexpected_payload(result.id, "draft save"),
+        Ok(_) => unexpected_payload(id, "draft save"),
     }
 }
 
@@ -787,22 +813,24 @@ pub(crate) fn save_draft_completed(
 pub(crate) fn attachment_validated(
     state: &mut AppState,
     path: &std::path::Path,
-    result: &OperationResult,
+    result: OperationResult,
 ) -> Vec<Effect> {
     let Some(Overlay::AttachmentExplorer(dialog)) = state.session.overlay.as_ref() else {
-        tracing::debug!(id = %result.id, "dropping attachment validation for a closed dialog");
+        let id = result.id;
+        tracing::debug!(id = %id, "dropping attachment validation for a closed dialog");
         return Vec::new();
     };
     let selection_matches = dialog
         .selected_file()
         .is_some_and(|selected| selected == path);
     if !selection_matches {
-        tracing::debug!(id = %result.id, "dropping attachment validation for a moved selection");
+        let id = result.id;
+        tracing::debug!(id = %id, "dropping attachment validation for a moved selection");
         return Vec::new();
     }
-    match &result.outcome {
+    let id = result.id;
+    match result.outcome {
         Ok(OperationOutcome::Attachment(att)) => {
-            let att = att.clone();
             let focus = dialog.previous_focus;
             state.session.overlay = None;
             state.session.focus = focus;
@@ -836,7 +864,7 @@ pub(crate) fn attachment_validated(
             }
             Vec::new()
         }
-        Ok(_) => unexpected_payload(result.id, "attachment validation"),
+        Ok(_) => unexpected_payload(id, "attachment validation"),
     }
 }
 
@@ -847,15 +875,17 @@ pub(crate) fn attachment_validated(
 /// so the user can head elsewhere or Esc).
 pub(crate) fn attachment_listing_ready(
     state: &mut AppState,
-    result: &OperationResult,
+    result: OperationResult,
 ) -> Vec<Effect> {
     if !matches!(state.session.overlay, Some(Overlay::AttachmentExplorer(_))) {
-        tracing::debug!(id = %result.id, "dropping directory listing for a closed dialog");
+        let id = result.id;
+        tracing::debug!(id = %id, "dropping directory listing for a closed dialog");
         return Vec::new();
     }
-    match &result.outcome {
+    let id = result.id;
+    match result.outcome {
         Ok(OperationOutcome::Explorer(explorer)) => {
-            let mut explorer = explorer.as_ref().clone();
+            let mut explorer = *explorer;
             // The chooser renders with the active palette; theme changes
             // cannot happen while a modal is up, so this sticks.
             let theme = state.active_theme();
@@ -875,6 +905,6 @@ pub(crate) fn attachment_listing_ready(
             }
             Vec::new()
         }
-        Ok(_) => unexpected_payload(result.id, "directory listing"),
+        Ok(_) => unexpected_payload(id, "directory listing"),
     }
 }

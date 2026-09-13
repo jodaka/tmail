@@ -493,7 +493,7 @@ fn resize_through_actions_switches_modes() {
 
     reducer::reduce(
         &mut state,
-        &Action::Resize {
+        Action::Resize {
             width: 100,
             height: 30,
         },
@@ -505,7 +505,7 @@ fn resize_through_actions_switches_modes() {
 
     reducer::reduce(
         &mut state,
-        &Action::Resize {
+        Action::Resize {
             width: 60,
             height: 15,
         },
@@ -515,7 +515,7 @@ fn resize_through_actions_switches_modes() {
 
     reducer::reduce(
         &mut state,
-        &Action::Resize {
+        Action::Resize {
             width: 152,
             height: 40,
         },
@@ -543,7 +543,7 @@ fn buffer_after(
 ) -> ratatui::buffer::Buffer {
     let now = mock::now();
     let ctx = RenderContext::new(now, dates::format_clock(now));
-    for action in actions {
+    for action in actions.iter().cloned() {
         reducer::reduce(state, action);
     }
     // Production renders with the active palette each frame (main), so the
@@ -584,13 +584,13 @@ fn spinner_shows_foreground_work_without_blocking_the_frame() {
     // work and shows no spinner, so the test completes it with a miss —
     // which is what starts the fresh foreground load the user waits on.
     state.messages = Page::empty(20);
-    let effects = reducer::reduce(&mut state, &Action::Refresh);
+    let effects = reducer::reduce(&mut state, Action::Refresh);
     let [effect] = effects.as_slice() else {
         panic!("the cold refresh reads the cache first: {effects:?}");
     };
     reducer::reduce(
         &mut state,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: effect.id,
             outcome: Ok(OperationOutcome::CacheMiss),
         }),
@@ -669,7 +669,7 @@ fn status_hints_align_with_the_sidebar_edge() {
 #[test]
 fn error_modal_renders_summary_code_buttons_and_sanitized_detail() {
     let mut state = mock_initial_state();
-    let (id, req) = match reducer::reduce(&mut state, &Action::PageNext).as_slice() {
+    let (id, req) = match reducer::reduce(&mut state, Action::PageNext).as_slice() {
         [effect] => (
             effect.id,
             match &effect.kind {
@@ -706,7 +706,7 @@ fn error_modal_renders_summary_code_buttons_and_sanitized_detail() {
 #[test]
 fn error_modal_detail_scrolls() {
     let mut state = mock_initial_state();
-    let (id, req) = match reducer::reduce(&mut state, &Action::PageNext).as_slice() {
+    let (id, req) = match reducer::reduce(&mut state, Action::PageNext).as_slice() {
         [effect] => (
             effect.id,
             match &effect.kind {
@@ -751,7 +751,7 @@ fn error_modal_detail_scrolls() {
 #[test]
 fn ambiguous_failure_shows_duplicate_warning() {
     let mut state = mock_initial_state();
-    let (id, req) = match reducer::reduce(&mut state, &Action::PageNext).as_slice() {
+    let (id, req) = match reducer::reduce(&mut state, Action::PageNext).as_slice() {
         [effect] => (
             effect.id,
             match &effect.kind {
@@ -942,7 +942,7 @@ fn reader_scrolls_body_with_reducer_state() {
     assert!(total > viewport, "document must overflow: {total} lines");
     // Scroll to the end the way the reducer does.
     for _ in 0..total {
-        reducer::reduce(&mut state, &Action::MoveDown);
+        reducer::reduce(&mut state, Action::MoveDown);
     }
     let text = draw_after(&mut state, &[], 152, 40);
     assert!(
@@ -978,7 +978,7 @@ fn reader_link_click_focuses_then_opens() {
         "the hit map must address the drawn link columns:\n{text}"
     );
     // First click focuses, exactly like Tab.
-    reducer::reduce(&mut state, &Action::Click(ClickTarget::ReaderLink(0)));
+    reducer::reduce(&mut state, Action::Click(ClickTarget::ReaderLink(0)));
     assert_eq!(state.reader_focus, Some(ReaderFocus::Link(0)));
     // The focused link draws the cursor style.
     let (focused, _) = draw_state_hits(&state, 152, 40);
@@ -990,7 +990,7 @@ fn reader_link_click_focuses_then_opens() {
         "focused link must draw the cursor style"
     );
     // Second click opens it through the platform opener.
-    let effects = reducer::reduce(&mut state, &Action::Click(ClickTarget::ReaderLink(0)));
+    let effects = reducer::reduce(&mut state, Action::Click(ClickTarget::ReaderLink(0)));
     let [effect] = &effects[..] else {
         panic!("expected one effect, got {effects:?}");
     };
@@ -1237,7 +1237,7 @@ fn search_results_render_query_head_and_empty_note() {
     }
     actions.push(Action::SubmitSearch);
     let mut effects = Vec::new();
-    for action in &actions {
+    for action in actions.iter().cloned() {
         effects.extend(reducer::reduce(&mut state, action));
     }
     let search_id = match effects.as_slice() {
@@ -1260,7 +1260,7 @@ fn search_results_render_query_head_and_empty_note() {
     // An empty result page is valid and explicit (Phase 9.3).
     reducer::reduce(
         &mut state,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: search_id,
             outcome: Ok(OperationOutcome::Page(Page::empty(20))),
         }),
@@ -1336,7 +1336,7 @@ fn composer_shows_draft_saved_with_the_time_after_success() {
     });
     // Find the save operation and confirm it.
     let mut pending = None;
-    for action in &actions {
+    for action in actions.iter().cloned() {
         for effect in reducer::reduce(&mut state, action) {
             pending = Some(effect.id);
         }
@@ -1344,7 +1344,7 @@ fn composer_shows_draft_saved_with_the_time_after_success() {
     let id = pending.expect("a save was started");
     reducer::reduce(
         &mut state,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::DraftSaved {
                 remote_id: MessageId(String::from("remote-1")),
@@ -1372,7 +1372,7 @@ fn composer_shows_save_failed_after_a_failure() {
         now: Box::new(mock::now() + chrono::Duration::seconds(2)),
     });
     let mut pending = None;
-    for action in &actions {
+    for action in actions.iter().cloned() {
         for effect in reducer::reduce(&mut state, action) {
             pending = Some(effect.id);
         }
@@ -1380,7 +1380,7 @@ fn composer_shows_save_failed_after_a_failure() {
     let id = pending.expect("a save was started");
     reducer::reduce(
         &mut state,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Err(OperationFailure {
                 code: Some(1),
@@ -1391,7 +1391,7 @@ fn composer_shows_save_failed_after_a_failure() {
         }),
     );
     // Dismiss the modal: the composer header must keep flagging the failure.
-    reducer::reduce(&mut state, &Action::DismissError);
+    reducer::reduce(&mut state, Action::DismissError);
     let text = draw_after(&mut state, &[], 152, 40);
     assert!(
         text.contains("Save failed"),
@@ -1412,7 +1412,7 @@ fn composer_shows_saving_while_the_save_is_in_flight() {
     actions.push(Action::Tick {
         now: Box::new(mock::now() + chrono::Duration::seconds(2)),
     });
-    for action in &actions {
+    for action in actions.iter().cloned() {
         reducer::reduce(&mut state, action);
     }
     let text = draw_after(&mut state, &[], 152, 40);
@@ -1595,7 +1595,7 @@ fn hit_map_records_modal_buttons_and_blocks_click_through() {
             ambiguous: false,
         }),
     });
-    reducer::reduce(&mut state, &failure);
+    reducer::reduce(&mut state, failure);
     let (_, hits) = draw_state_hits(&state, 152, 40);
     // The modal geometry comes from the same layout the renderer uses.
     let layout = tmail::ui::components::error_modal::layout((152, 40), Some(1), false);
@@ -1615,7 +1615,7 @@ fn hit_map_records_modal_buttons_and_blocks_click_through() {
 
 /// Start a page request like the runtime would and return its id.
 fn reducer_start_page(state: &mut tmail::app::AppState) -> tmail::app::OperationId {
-    let effects = reducer::reduce(state, &Action::PageNext);
+    let effects = reducer::reduce(state, Action::PageNext);
     match &effects[..] {
         [effect] => effect.id,
         other => panic!("expected one effect, got {other:?}"),
@@ -1627,7 +1627,7 @@ fn hit_map_records_composer_controls() {
     use tmail::app::action::ClickTarget as Target;
     use tmail::app::composer::ComposerField;
     let mut state = mock_initial_state();
-    reducer::reduce(&mut state, &Action::Compose);
+    reducer::reduce(&mut state, Action::Compose);
     let (_, hits) = draw_state_hits(&state, 152, 40);
     // Chrome: body area y=4..37; the action row is its last line (y=36).
     // Send sits first, Discard after the three-space gap.
@@ -1839,7 +1839,7 @@ fn reader_matches_mockup_hierarchy() {
 #[test]
 fn composer_matches_mockup_hierarchy_and_density() {
     let mut state = mock_initial_state();
-    reducer::reduce(&mut state, &Action::Compose);
+    reducer::reduce(&mut state, Action::Compose);
     let text = draw_after(&mut state, &[], 152, 40);
     let (to_y, _) = position_of(&text, "[Cc]");
     let (subject_y, subject_x) = position_of(&text, " Subject");
@@ -2109,14 +2109,14 @@ fn attachment_chooser_renders_the_explorer_and_chrome() {
     std::fs::create_dir(dir.path().join("docs")).expect("mkdir");
 
     let mut state = mock_initial_state();
-    reducer::reduce(&mut state, &Action::Compose);
+    reducer::reduce(&mut state, Action::Compose);
     // Walk to the `+ attach` control and open the chooser.
     while state.session.composer.as_ref().unwrap().field
         != tmail::app::composer::ComposerField::Attach
     {
-        reducer::reduce(&mut state, &Action::FocusNext);
+        reducer::reduce(&mut state, Action::FocusNext);
     }
-    let mut effects = reducer::reduce(&mut state, &Action::Activate);
+    let mut effects = reducer::reduce(&mut state, Action::Activate);
     let id = effects.pop().expect("a listing effect").id;
     // While listing: the pending state is explicit.
     let text = draw_after(&mut state, &[], 152, 40);
@@ -2128,7 +2128,7 @@ fn attachment_chooser_renders_the_explorer_and_chrome() {
         ratatui_explorer::FileExplorerBuilder::build_with_working_dir(dir.path()).unwrap();
     reducer::reduce(
         &mut state,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Explorer(Box::new(explorer))),
         }),
@@ -2152,18 +2152,18 @@ fn attachment_chooser_renders_the_explorer_and_chrome() {
     // A failed listing keeps the chrome with the detail inline.
     let mut state2 = mock_initial_state();
     let mut effects = {
-        reducer::reduce(&mut state2, &Action::Compose);
+        reducer::reduce(&mut state2, Action::Compose);
         while state2.session.composer.as_ref().unwrap().field
             != tmail::app::composer::ComposerField::Attach
         {
-            reducer::reduce(&mut state2, &Action::FocusNext);
+            reducer::reduce(&mut state2, Action::FocusNext);
         }
-        reducer::reduce(&mut state2, &Action::Activate)
+        reducer::reduce(&mut state2, Action::Activate)
     };
     let id = effects.pop().expect("a listing effect").id;
     reducer::reduce(
         &mut state2,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Err(OperationFailure {
                 code: None,
@@ -2360,7 +2360,7 @@ fn draw_with_hits_at(
     let theme = Theme::default_dark();
     let now = mock::now();
     let ctx = RenderContext::new(now, dates::format_clock(now));
-    for action in actions {
+    for action in actions.iter().cloned() {
         reducer::reduce(state, action);
     }
     state.session.size = (width, height);
@@ -2629,7 +2629,7 @@ fn status_message_clears_after_the_configured_timeout() {
     state.settings.status_timeout_seconds = 5;
     reducer::reduce(
         &mut state,
-        &Action::Tick {
+        Action::Tick {
             now: Box::new(mock::now()),
         },
     );
@@ -2924,7 +2924,7 @@ fn wizard_discovery_screen_lists_ranked_services_with_source_labels() {
     if let Some(wizard) = state.session.wizard.as_mut() {
         wizard.email.address.value = String::from("u@gmail.com");
     }
-    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let submit = reducer::reduce(&mut state, Action::Wizard(WizardAction::SubmitEmail));
     let id = submit[0].id;
     let text = text_of(&buffer_after(
         &mut state,
@@ -2954,7 +2954,7 @@ fn wizard_discovery_screen_shows_the_detecting_spinner() {
     if let Some(wizard) = state.session.wizard.as_mut() {
         wizard.email.address.value = String::from("u@gmail.com");
     }
-    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let submit = reducer::reduce(&mut state, Action::Wizard(WizardAction::SubmitEmail));
     assert!(!submit.is_empty(), "the discovery effect starts");
     // Still discovering: the spinner message is on screen and the
     // status bar shows the step-back hint.
@@ -2972,7 +2972,7 @@ fn wizard_empty_discovery_opens_the_manual_override_form() {
     if let Some(wizard) = state.session.wizard.as_mut() {
         wizard.email.address.value = String::from("u@custom.example");
     }
-    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let submit = reducer::reduce(&mut state, Action::Wizard(WizardAction::SubmitEmail));
     let id = submit[0].id;
     let text = text_of(&buffer_after(
         &mut state,
@@ -2998,7 +2998,7 @@ fn wizard_identity_screen_recaps_the_chosen_servers() {
     if let Some(wizard) = state.session.wizard.as_mut() {
         wizard.email.address.value = String::from("u@gmail.com");
     }
-    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let submit = reducer::reduce(&mut state, Action::Wizard(WizardAction::SubmitEmail));
     let id = submit[0].id;
     let actions = [
         discovered_result(id, vec![gmail_service()]),
@@ -3026,7 +3026,7 @@ fn wizard_credentials_screen_masks_the_password_and_shows_the_gmail_hint() {
         wizard.credentials.password.cursor = 11;
         wizard.credentials.credentials_index = 2;
     }
-    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let submit = reducer::reduce(&mut state, Action::Wizard(WizardAction::SubmitEmail));
     let id = submit[0].id;
     let actions = [
         discovered_result(id, vec![gmail_service()]),
@@ -3058,7 +3058,7 @@ fn wizard_credentials_command_mode_shows_the_command_field() {
         wizard.credentials.storage_mode = StorageMode::Command;
         wizard.credentials.command.value = String::from("pass show mail/gmail");
     }
-    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let submit = reducer::reduce(&mut state, Action::Wizard(WizardAction::SubmitEmail));
     let id = submit[0].id;
     let actions = [
         discovered_result(id, vec![gmail_service()]),
@@ -3091,19 +3091,19 @@ fn drive_to_testing(
         wizard.credentials.password.value = String::from("p");
         wizard.credentials.credentials_index = 2;
     }
-    let submit = reducer::reduce(state, &Action::Wizard(WizardAction::SubmitEmail));
+    let submit = reducer::reduce(state, Action::Wizard(WizardAction::SubmitEmail));
     let discovery_id = submit[0].id;
     reducer::reduce(
         state,
-        &discovered_result(discovery_id, vec![gmail_service()]),
+        discovered_result(discovery_id, vec![gmail_service()]),
     );
-    reducer::reduce(state, &Action::Wizard(WizardAction::SelectService));
-    reducer::reduce(state, &Action::Wizard(WizardAction::SubmitCredentials));
-    let test_effects = reducer::reduce(state, &Action::Wizard(WizardAction::SubmitCredentials));
+    reducer::reduce(state, Action::Wizard(WizardAction::SelectService));
+    reducer::reduce(state, Action::Wizard(WizardAction::SubmitCredentials));
+    let test_effects = reducer::reduce(state, Action::Wizard(WizardAction::SubmitCredentials));
     let test_id = test_effects[0].id;
     reducer::reduce(
         state,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: test_id,
             outcome: Ok(tmail::app::OperationOutcome::TestAccountCompleted { mailboxes }),
         }),
@@ -3152,27 +3152,26 @@ fn wizard_saved_screen_reports_the_path_and_permissions() {
         wizard.credentials.password.value = String::from("p");
         wizard.credentials.credentials_index = 2;
     }
-    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let submit = reducer::reduce(&mut state, Action::Wizard(WizardAction::SubmitEmail));
     let discovery_id = submit[0].id;
     reducer::reduce(
         &mut state,
-        &discovered_result(discovery_id, vec![gmail_service()]),
+        discovered_result(discovery_id, vec![gmail_service()]),
     );
-    reducer::reduce(&mut state, &Action::Wizard(WizardAction::SelectService));
-    reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitCredentials));
-    let test_effects =
-        reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitCredentials));
+    reducer::reduce(&mut state, Action::Wizard(WizardAction::SelectService));
+    reducer::reduce(&mut state, Action::Wizard(WizardAction::SubmitCredentials));
+    let test_effects = reducer::reduce(&mut state, Action::Wizard(WizardAction::SubmitCredentials));
     let test_id = test_effects[0].id;
     reducer::reduce(
         &mut state,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: test_id,
             outcome: Ok(tmail::app::OperationOutcome::TestAccountCompleted {
                 mailboxes: vec![String::from("INBOX")],
             }),
         }),
     );
-    let save_effects = reducer::reduce(&mut state, &Action::Wizard(WizardAction::ConfirmSave));
+    let save_effects = reducer::reduce(&mut state, Action::Wizard(WizardAction::ConfirmSave));
     let save_id = save_effects[0].id;
     let actions = [Action::BackendCompleted(OperationResult {
         id: save_id,
@@ -3252,7 +3251,7 @@ fn wizard_focused_fields_show_the_inline_caret() {
     if let Some(wizard) = state.session.wizard.as_mut() {
         wizard.email.address.value = String::from("u@example.com");
     }
-    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let submit = reducer::reduce(&mut state, Action::Wizard(WizardAction::SubmitEmail));
     let id = submit[0].id;
     let actions = [
         discovered_result(id, vec![gmail_service()]),
@@ -3270,7 +3269,7 @@ fn wizard_focused_fields_show_the_inline_caret() {
     if let Some(wizard) = state.session.wizard.as_mut() {
         wizard.email.address.value = String::from("u@example.com");
     }
-    let submit = reducer::reduce(&mut state, &Action::Wizard(WizardAction::SubmitEmail));
+    let submit = reducer::reduce(&mut state, Action::Wizard(WizardAction::SubmitEmail));
     let id = submit[0].id;
     let actions = [
         discovered_result(id, vec![gmail_service()]),

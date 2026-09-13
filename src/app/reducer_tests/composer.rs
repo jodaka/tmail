@@ -28,15 +28,15 @@ fn composer_focus_cycles_fields_and_actions() {
         ComposerField::Send,
         ComposerField::Discard,
     ] {
-        reduce(&mut s, &Action::FocusNext);
+        reduce(&mut s, Action::FocusNext);
         assert_eq!(s.session.composer.as_ref().unwrap().field, expected);
     }
     // Tab past the last control steps out to the sidebar (compose-mode
     // folder list); the next Tab re-enters the composer at its first
     // control.
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.session.focus, Focus::Sidebar);
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.session.focus, Focus::Composer);
     assert_eq!(
         s.session.composer.as_ref().unwrap().field,
@@ -44,15 +44,15 @@ fn composer_focus_cycles_fields_and_actions() {
     );
     // Shift+Tab from the first control steps out to the sidebar as well,
     // and re-enters at the last control.
-    reduce(&mut s, &Action::FocusPrevious);
+    reduce(&mut s, Action::FocusPrevious);
     assert_eq!(s.session.focus, Focus::Sidebar);
-    reduce(&mut s, &Action::FocusPrevious);
+    reduce(&mut s, Action::FocusPrevious);
     assert_eq!(s.session.focus, Focus::Composer);
     assert_eq!(
         s.session.composer.as_ref().unwrap().field,
         ComposerField::Discard
     );
-    reduce(&mut s, &Action::FocusPrevious);
+    reduce(&mut s, Action::FocusPrevious);
     assert_eq!(
         s.session.composer.as_ref().unwrap().field,
         ComposerField::Send
@@ -63,19 +63,19 @@ fn composer_focus_cycles_fields_and_actions() {
 fn composing_sidebar_focus_moves_the_folder_cursor_and_switches() {
     let mut s = state();
     compose(&mut s);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('d')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('d')));
     // Tab out to the sidebar (from the last control), then walk the folder
     // cursor onto Drafts and switch to it.
     s.session.composer.as_mut().unwrap().field = ComposerField::Discard;
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(s.session.focus, Focus::Sidebar);
-    reduce(&mut s, &Action::MoveDown);
-    reduce(&mut s, &Action::MoveDown);
+    reduce(&mut s, Action::MoveDown);
+    reduce(&mut s, Action::MoveDown);
     assert_eq!(s.mailbox_selection, 2, "Drafts row");
     // '/' must not strand focus in the search field while composing.
-    no_effects(&reduce(&mut s, &Action::OpenSearch));
+    no_effects(&reduce(&mut s, Action::OpenSearch));
     assert_eq!(s.session.focus, Focus::Sidebar);
-    let effects = reduce(&mut s, &Action::Activate);
+    let effects = reduce(&mut s, Action::Activate);
     let (cache_id, ..) = expect_cache_list_load(&effects);
     let (id, req) = expect_page(&complete_cache_miss(&mut s, cache_id));
     assert_eq!(req.mailbox_id.0, "drafts");
@@ -94,13 +94,13 @@ fn composing_sidebar_focus_moves_the_folder_cursor_and_switches() {
 fn enter_on_cc_toggle_reveals_and_focuses_the_cc_field() {
     let mut s = state();
     compose(&mut s);
-    reduce(&mut s, &Action::FocusNext); // CcToggle
-    reduce(&mut s, &Action::Activate);
+    reduce(&mut s, Action::FocusNext); // CcToggle
+    reduce(&mut s, Action::Activate);
     let composer = s.session.composer.as_ref().unwrap();
     assert!(composer.show_cc);
     assert_eq!(composer.field, ComposerField::Cc);
     // The cycle now contains Cc, not the toggle.
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     assert_eq!(
         s.session.composer.as_ref().unwrap().field,
         ComposerField::BccToggle
@@ -112,14 +112,14 @@ fn typing_edits_the_focused_field_only() {
     let mut s = state();
     compose(&mut s);
     for c in "max@".chars() {
-        reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char(c)));
+        reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char(c)));
     }
     // Tab through to Subject and type there.
-    reduce(&mut s, &Action::FocusNext);
-    reduce(&mut s, &Action::FocusNext);
-    reduce(&mut s, &Action::FocusNext); // Subject
+    reduce(&mut s, Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
+    reduce(&mut s, Action::FocusNext); // Subject
     for c in "Hi".chars() {
-        reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char(c)));
+        reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char(c)));
     }
     let composer = s.session.composer.as_ref().unwrap();
     assert_eq!(composer.draft.to, "max@");
@@ -133,22 +133,22 @@ fn enter_inserts_newline_in_body_only() {
     compose(&mut s);
     // Walk to the body: 3 Tabs (CcToggle, BccToggle, Subject) + 1 more.
     for _ in 0..4 {
-        reduce(&mut s, &Action::FocusNext);
+        reduce(&mut s, Action::FocusNext);
     }
     assert_eq!(
         s.session.composer.as_ref().unwrap().field,
         ComposerField::Body
     );
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('a')));
-    reduce(&mut s, &Action::Activate); // Enter
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('b')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('a')));
+    reduce(&mut s, Action::Activate); // Enter
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('b')));
     assert_eq!(
         s.session.composer.as_ref().unwrap().body.lines(),
         ["a".to_string(), "b".to_string()]
     );
     // Enter on a single-line field does not edit it.
-    reduce(&mut s, &Action::FocusPrevious); // Subject
-    reduce(&mut s, &Action::Activate);
+    reduce(&mut s, Action::FocusPrevious); // Subject
+    reduce(&mut s, Action::Activate);
     assert_eq!(s.session.composer.as_ref().unwrap().draft.subject, "");
 }
 
@@ -160,10 +160,10 @@ fn shortcuts_cannot_fire_while_composing() {
     // '/' is text, not search. (Keyboard mapping tested in input tests;
     // here the reducer-level gating is exercised via focus.)
     let before_routes = s.session.routes.clone();
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('c')));
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('/')));
-    reduce(&mut s, &Action::Archive);
-    reduce(&mut s, &Action::OpenSearch);
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('c')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('/')));
+    reduce(&mut s, Action::Archive);
+    reduce(&mut s, Action::OpenSearch);
     let composer = s.session.composer.as_ref().unwrap();
     assert_eq!(composer.draft.to, "c/");
     assert_eq!(s.session.routes, before_routes, "composer stays open");
@@ -175,8 +175,8 @@ fn shortcuts_cannot_fire_while_composing() {
 fn esc_leaves_the_composer_and_preserves_the_draft() {
     let mut s = state();
     compose(&mut s);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('d')));
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('d')));
+    reduce(&mut s, Action::BackOrCancel);
     assert_eq!(s.session.routes.len(), 1);
     assert_eq!(s.session.focus, Focus::MessageList);
     assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
@@ -189,8 +189,8 @@ fn esc_leaves_the_composer_and_preserves_the_draft() {
 fn compose_again_starts_a_blank_new_email() {
     let mut s = state();
     compose(&mut s);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('d')));
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('d')));
+    reduce(&mut s, Action::BackOrCancel);
     // The draft data survives the leave (it stays for the Drafts list).
     let composer = s.session.composer.as_ref().expect("draft preserved");
     assert_eq!(composer.draft.to, "d");
@@ -207,9 +207,9 @@ fn composing_without_a_list_underneath_is_safe() {
     // Startup with no mailbox route yet: compose still opens cleanly and
     // Esc returns to the empty root.
     let mut s = AppState::initial(mock::PAGE_SIZE);
-    no_effects(&reduce(&mut s, &Action::Compose));
+    no_effects(&reduce(&mut s, Action::Compose));
     assert!(matches!(s.active_route(), Some(Route::Composer)));
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert!(s.session.routes.is_empty());
     assert!(!s.session.quit_requested);
 }
@@ -218,17 +218,17 @@ fn composing_without_a_list_underneath_is_safe() {
 fn message_actions_do_not_fire_from_composer_focus() {
     let mut s = state();
     compose(&mut s);
-    no_effects(&reduce(&mut s, &Action::ToggleStar));
-    no_effects(&reduce(&mut s, &Action::Archive));
-    no_effects(&reduce(&mut s, &Action::Trash));
-    no_effects(&reduce(&mut s, &Action::MarkUnread));
+    no_effects(&reduce(&mut s, Action::ToggleStar));
+    no_effects(&reduce(&mut s, Action::Archive));
+    no_effects(&reduce(&mut s, Action::Trash));
+    no_effects(&reduce(&mut s, Action::MarkUnread));
     assert!(s.session.operations.is_empty());
 }
 
 #[test]
 fn composer_edits_without_composer_open_are_inert() {
     let mut s = state();
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     assert!(s.session.composer.is_none());
     assert!(!matches!(s.active_route(), Some(Route::Composer)));
 }
@@ -238,7 +238,7 @@ fn edits_arm_the_debounce_and_tick_starts_the_save() {
     let mut s = state();
     compose(&mut s);
     tick(&mut s, 0); // sets the clock
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     // Before the two-second window elapses nothing is requested.
     no_effects(&tick(&mut s, 1));
     // At 2 s the save fires with the current revision and content.
@@ -269,10 +269,10 @@ fn saving_revision_n_cannot_mark_revision_n_plus_1_clean() {
     let mut s = state();
     compose(&mut s);
     tick(&mut s, 0);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('a')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('a')));
     let (id1, snap1) = expect_save(&tick(&mut s, 2));
     // An edit lands while revision 1 is in flight.
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('b')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('b')));
     assert_eq!(s.session.composer.as_ref().unwrap().draft.revision, 2);
     // The stale success confirms only revision 1...
     let chained = complete_save_ok(&mut s, id1, snap1.revision, "remote-1");
@@ -300,7 +300,7 @@ fn rapid_edits_coalesce_into_one_pending_save() {
     compose(&mut s);
     tick(&mut s, 0);
     for c in "abc".chars() {
-        reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char(c)));
+        reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char(c)));
         tick(&mut s, 0); // within the debounce window
     }
     no_effects(&tick(&mut s, 1));
@@ -314,11 +314,11 @@ fn draft_save_failure_opens_retry_modal_and_retains_content() {
     let mut s = state();
     compose(&mut s);
     tick(&mut s, 0);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('k')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('k')));
     let (id, snapshot) = expect_save(&tick(&mut s, 2));
     reduce(
         &mut s,
-        &failure(
+        failure(
             id,
             &OperationKind::SaveDraft {
                 draft: Box::new(snapshot.clone()),
@@ -338,7 +338,7 @@ fn draft_save_failure_opens_retry_modal_and_retains_content() {
     );
     // Retry replays the *intent*: fresh snapshot of the newest revision
     // under a new operation id.
-    let effects = reduce(&mut s, &Action::RetryError);
+    let effects = reduce(&mut s, Action::RetryError);
     let (retry_id, retry_snapshot) = expect_save(&effects);
     assert_ne!(retry_id, id);
     assert_eq!(retry_snapshot.local_id, snapshot.local_id);
@@ -356,11 +356,11 @@ fn dismiss_after_failure_keeps_the_draft_awaiting_retry_or_edit() {
     let mut s = state();
     compose(&mut s);
     tick(&mut s, 0);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('k')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('k')));
     let (id, snapshot) = expect_save(&tick(&mut s, 2));
     reduce(
         &mut s,
-        &failure(
+        failure(
             id,
             &OperationKind::SaveDraft {
                 draft: Box::new(snapshot),
@@ -368,14 +368,14 @@ fn dismiss_after_failure_keeps_the_draft_awaiting_retry_or_edit() {
             "imap down",
         ),
     );
-    reduce(&mut s, &Action::DismissError);
+    reduce(&mut s, Action::DismissError);
     assert!(s.session.overlay.is_none());
     assert_eq!(s.session.focus, Focus::Composer);
     let draft = &s.session.composer.as_ref().unwrap().draft;
     assert_eq!(draft.to, "k", "dismiss never discards content");
     // No automatic re-save while Failed; the next edit re-arms autosave.
     no_effects(&tick(&mut s, 60));
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('!')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('!')));
     let (_, retry) = expect_save(&tick(&mut s, 62));
     assert_eq!(retry.to, "k!");
 }
@@ -385,14 +385,14 @@ fn caret_moves_do_not_dirty_the_draft() {
     let mut s = state();
     compose(&mut s);
     tick(&mut s, 0);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     let (id, snapshot) = expect_save(&tick(&mut s, 2));
     complete_save_ok(&mut s, id, snapshot.revision, "remote-1");
     assert!(!s.session.composer.as_ref().unwrap().draft.is_dirty());
     // Cross-field caret moves are not content edits: no new revision, no
     // follow-up save.
-    reduce(&mut s, &Action::FocusNext);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::CursorLeft));
+    reduce(&mut s, Action::FocusNext);
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::CursorLeft));
     no_effects(&tick(&mut s, 20));
     assert_eq!(s.session.composer.as_ref().unwrap().draft.revision, 1);
 }
@@ -402,13 +402,13 @@ fn stale_failure_does_not_cancel_a_scheduled_save() {
     let mut s = state();
     compose(&mut s);
     tick(&mut s, 0);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('a')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('a')));
     let (id1, snap1) = expect_save(&tick(&mut s, 2));
     // Newer edits re-arm the debounce while revision 1 is failing...
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('b')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('b')));
     reduce(
         &mut s,
-        &failure(
+        failure(
             id1,
             &OperationKind::SaveDraft {
                 draft: Box::new(snap1.clone()),
@@ -419,7 +419,7 @@ fn stale_failure_does_not_cancel_a_scheduled_save() {
     // The failure modal intercepts ticks (plan §9); dismiss it and the
     // debounce is still armed: the scheduled save retries with the newest
     // revision without user action.
-    reduce(&mut s, &Action::DismissError);
+    reduce(&mut s, Action::DismissError);
     let (_, snap2) = expect_save(&tick(&mut s, 4));
     assert_eq!(snap2.revision, 2);
     assert_eq!(snap2.to, "ab");
@@ -472,7 +472,7 @@ fn restored_unconfirmed_drafts_autosave_after_startup() {
 fn restore_is_skipped_when_a_composer_draft_already_exists() {
     let mut s = state();
     compose(&mut s);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     complete_restore(&mut s, vec![restored_draft("other@x.io", 9, 9)]);
     assert_eq!(
         s.session.composer.as_ref().unwrap().draft.to,
@@ -495,9 +495,9 @@ fn esc_mid_debounce_forces_the_save_without_waiting() {
     let mut s = state();
     compose(&mut s);
     tick(&mut s, 0);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     // Esc before the debounce elapses: the save happens NOW.
-    let effects = reduce(&mut s, &Action::BackOrCancel);
+    let effects = reduce(&mut s, Action::BackOrCancel);
     let (id, snapshot) = expect_save(&effects);
     assert_eq!(snapshot.revision, 1);
     assert_eq!(snapshot.to, "x");
@@ -519,11 +519,11 @@ fn esc_with_a_clean_draft_saves_nothing() {
     let mut s = state();
     compose(&mut s);
     tick(&mut s, 0);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     let (id, snapshot) = expect_save(&tick(&mut s, 2));
     complete_save_ok(&mut s, id, snapshot.revision, "remote-1");
     // Clean draft: leaving is silent.
-    no_effects(&reduce(&mut s, &Action::BackOrCancel));
+    no_effects(&reduce(&mut s, Action::BackOrCancel));
     assert_eq!(s.session.routes.len(), 1);
     assert_eq!(s.session.focus, Focus::MessageList);
 }
@@ -533,12 +533,12 @@ fn esc_while_the_current_revision_saves_does_not_duplicate_it() {
     let mut s = state();
     compose(&mut s);
     tick(&mut s, 0);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     let (id, snapshot) = expect_save(&tick(&mut s, 2));
     let token = s.session.operations.cancellation(id).unwrap();
     // Esc during the in-flight autosave: it is NOT cancelled and NOT
     // duplicated — leaving just lets it finish.
-    no_effects(&reduce(&mut s, &Action::BackOrCancel));
+    no_effects(&reduce(&mut s, Action::BackOrCancel));
     assert!(!token.is_cancelled(), "in-flight save must survive leaving");
     assert!(s.session.operations.get(id).is_some());
     assert_eq!(s.session.routes.len(), 1);
@@ -554,12 +554,12 @@ fn esc_with_newer_edits_supersedes_an_in_flight_older_save() {
     let mut s = state();
     compose(&mut s);
     tick(&mut s, 0);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('a')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('a')));
     let (id1, _snap1) = expect_save(&tick(&mut s, 2));
     let token1 = s.session.operations.cancellation(id1).unwrap();
     // Edits during the save, then Esc.
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('b')));
-    let effects = reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('b')));
+    let effects = reduce(&mut s, Action::BackOrCancel);
     assert!(token1.is_cancelled(), "the older save is superseded");
     let (id2, snap2) = expect_save(&effects);
     assert_eq!(
@@ -577,7 +577,7 @@ fn edit_without_a_clock_still_autosaves_once_the_clock_arrives() {
     // the next tick instead of stalling forever.
     let mut s = state();
     compose(&mut s);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     no_effects(&tick(&mut s, 0)); // arms the window
     let (_, snapshot) = expect_save(&tick(&mut s, 2));
     assert_eq!(snapshot.to, "x");
@@ -591,7 +591,7 @@ fn discard_requires_confirmation_and_defaults_to_keep() {
     assert!(s.session.composer.is_some());
     assert_eq!(s.session.routes.len(), 2);
     // Enter activates the focused button: Keep (the safe default).
-    no_effects(&reduce(&mut s, &Action::Activate));
+    no_effects(&reduce(&mut s, Action::Activate));
     assert!(s.session.composer.is_some(), "keep preserves the draft");
     assert!(s.session.overlay.is_none());
     assert_eq!(s.session.focus, Focus::Composer);
@@ -602,7 +602,7 @@ fn discard_requires_confirmation_and_defaults_to_keep() {
 fn esc_on_the_discard_dialog_keeps_the_draft() {
     let mut s = state();
     open_discard_dialog(&mut s);
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert!(s.session.overlay.is_none());
     assert!(s.session.composer.is_some());
     assert_eq!(
@@ -616,8 +616,8 @@ fn esc_on_the_discard_dialog_keeps_the_draft() {
 fn confirmed_discard_deletes_local_and_remote_state() {
     let mut s = state();
     open_discard_dialog(&mut s);
-    reduce(&mut s, &Action::FocusNext); // Discard button
-    let effects = reduce(&mut s, &Action::Activate);
+    reduce(&mut s, Action::FocusNext); // Discard button
+    let effects = reduce(&mut s, Action::Activate);
     let (id, kind) = effect_parts(&effects);
     let crate::app::operation::OperationKind::DeleteDraft {
         draft,
@@ -655,13 +655,13 @@ fn discard_cancels_an_in_flight_save_of_the_same_draft() {
     let mut s = state();
     compose(&mut s);
     tick(&mut s, 0);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     let (save_id, _) = expect_save(&tick(&mut s, 2));
     let save_token = s.session.operations.cancellation(save_id).unwrap();
     // Discard while that save is in flight.
-    reduce(&mut s, &Action::DiscardDraft);
-    reduce(&mut s, &Action::FocusNext);
-    let effects = reduce(&mut s, &Action::Activate);
+    reduce(&mut s, Action::DiscardDraft);
+    reduce(&mut s, Action::FocusNext);
+    let effects = reduce(&mut s, Action::Activate);
     assert!(
         save_token.is_cancelled(),
         "the in-flight save must not resurrect the discarded draft"
@@ -673,7 +673,7 @@ fn discard_cancels_an_in_flight_save_of_the_same_draft() {
     // The cancelled save's (suppressed) result can never apply.
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: save_id,
             outcome: Ok(OperationOutcome::DraftSaved {
                 remote_id: MessageId(String::from("late-remote")),
@@ -688,11 +688,11 @@ fn discard_dialog_swallows_unrelated_input() {
     let mut s = state();
     open_discard_dialog(&mut s);
     let draft_before = s.session.composer.as_ref().unwrap().draft.to.clone();
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('y')));
-    reduce(&mut s, &Action::SearchEdit(SearchEdit::Char('z')));
-    reduce(&mut s, &Action::Refresh);
-    reduce(&mut s, &Action::MoveDown);
-    reduce(&mut s, &Action::Quit);
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('y')));
+    reduce(&mut s, Action::SearchEdit(SearchEdit::Char('z')));
+    reduce(&mut s, Action::Refresh);
+    reduce(&mut s, Action::MoveDown);
+    reduce(&mut s, Action::Quit);
     let composer = s.session.composer.as_ref().unwrap();
     assert_eq!(composer.draft.to, draft_before);
     assert!(!s.session.quit_requested);
@@ -703,13 +703,13 @@ fn discard_dialog_swallows_unrelated_input() {
 fn discard_of_a_never_saved_draft_still_needs_confirmation() {
     let mut s = state();
     compose(&mut s);
-    no_effects(&reduce(&mut s, &Action::DiscardDraft));
+    no_effects(&reduce(&mut s, Action::DiscardDraft));
     assert!(matches!(
         s.session.overlay,
         Some(Overlay::ConfirmDiscard(_))
     ));
-    reduce(&mut s, &Action::FocusNext);
-    let effects = reduce(&mut s, &Action::Activate);
+    reduce(&mut s, Action::FocusNext);
+    let effects = reduce(&mut s, Action::Activate);
     let (_, kind) = effect_parts(&effects);
     assert!(matches!(kind, OperationKind::DeleteDraft { .. }));
     assert!(s.session.composer.is_none());
@@ -719,11 +719,11 @@ fn discard_of_a_never_saved_draft_still_needs_confirmation() {
 fn discard_delete_failure_opens_the_error_modal() {
     let mut s = state();
     compose(&mut s);
-    reduce(&mut s, &Action::DiscardDraft);
-    reduce(&mut s, &Action::FocusNext);
-    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    reduce(&mut s, Action::DiscardDraft);
+    reduce(&mut s, Action::FocusNext);
+    let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
     // The draft is already gone locally; a remote sweep failure surfaces.
-    reduce(&mut s, &failure(id, &kind, "imap refused"));
+    reduce(&mut s, failure(id, &kind, "imap refused"));
     let Some(Overlay::Error(_)) = &s.session.overlay else {
         panic!("error modal must open");
     };
@@ -741,7 +741,7 @@ fn edit_external_saves_the_draft_first_and_flags_the_composer() {
     s.settings.editor_command = Some(vec![String::from("vim")]);
     compose(&mut s);
     tick(&mut s, 0);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     assert!(s.session.composer.as_ref().unwrap().draft.is_dirty());
 
     let effects = edit_external(&mut s);
@@ -788,12 +788,12 @@ fn no_autosave_while_the_external_editor_owns_the_file() {
     compose(&mut s);
     s.session.composer.as_mut().unwrap().field = crate::app::composer::ComposerField::Body;
     tick(&mut s, 0);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     let effects = edit_external(&mut s);
     assert!(matches!(effects[0].kind, OperationKind::SaveDraft { .. }));
     // A dirty edit during the editor session would normally re-arm the
     // autosave; ticks must not save while the editor owns the file.
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('y')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('y')));
     no_effects(&tick(&mut s, 5));
     no_effects(&tick(&mut s, 10));
 }
@@ -810,7 +810,7 @@ fn editor_import_marks_dirty_and_saves_once() {
 
     let effects = reduce(
         &mut s,
-        &Action::EditorFinished {
+        Action::EditorFinished {
             id: editor_id,
             result: Ok(String::from("edited body\nline two\n")),
         },
@@ -832,12 +832,12 @@ fn editor_import_without_changes_saves_nothing() {
     compose(&mut s);
     s.session.composer.as_mut().unwrap().field = crate::app::composer::ComposerField::Body;
     tick(&mut s, 0);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     // Body is now "x"; the editor hands back exactly that.
     let editor_id = edit_external(&mut s).last().unwrap().id;
     let effects = reduce(
         &mut s,
-        &Action::EditorFinished {
+        Action::EditorFinished {
             id: editor_id,
             result: Ok(String::from("x")),
         },
@@ -853,11 +853,11 @@ fn editor_failure_keeps_the_draft_and_reports() {
     compose(&mut s);
     s.session.composer.as_mut().unwrap().field = crate::app::composer::ComposerField::Body;
     tick(&mut s, 0);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     let editor_id = edit_external(&mut s).last().unwrap().id;
     let effects = reduce(
         &mut s,
-        &Action::EditorFinished {
+        Action::EditorFinished {
             id: editor_id,
             result: Err(String::from("editor exited with code 1")),
         },
@@ -893,13 +893,13 @@ fn space_advances_to_the_next_row_after_toggling() {
     s.selection = 0;
     let first = s.messages.items[0].id.clone();
 
-    no_effects(&reduce(&mut s, &Action::ToggleSelected));
+    no_effects(&reduce(&mut s, Action::ToggleSelected));
     assert!(s.selected.contains(&first), "row 0 marked");
     assert_eq!(s.selection, 1, "cursor advanced to row 1");
 
     // The next Space marks row 1 (not unmarks row 0).
     let second = s.messages.items[1].id.clone();
-    no_effects(&reduce(&mut s, &Action::ToggleSelected));
+    no_effects(&reduce(&mut s, Action::ToggleSelected));
     assert!(s.selected.contains(&second), "row 1 marked next");
     assert!(s.selected.contains(&first), "row 0 stays marked");
     assert_eq!(s.selection, 2);
@@ -907,7 +907,7 @@ fn space_advances_to_the_next_row_after_toggling() {
     // The last row does not advance further.
     s.selection = s.messages.items.len() - 1;
     let last = s.messages.items[s.selection].id.clone();
-    no_effects(&reduce(&mut s, &Action::ToggleSelected));
+    no_effects(&reduce(&mut s, Action::ToggleSelected));
     assert_eq!(
         s.selection,
         s.messages.items.len() - 1,

@@ -79,7 +79,7 @@ pub(crate) fn send_from_composer(state: &mut AppState) -> Vec<Effect> {
 pub(crate) fn send_completed(
     state: &mut AppState,
     outcome: &crate::domain::SendOutcome,
-    message: &crate::domain::OutboundMessage,
+    message: Box<crate::domain::OutboundMessage>,
 ) -> Vec<Effect> {
     use crate::domain::SendOutcome;
     match outcome {
@@ -100,17 +100,12 @@ pub(crate) fn send_completed(
                         detail
                     }
                 },
-                retry: Some(
-                    OperationKind::Send {
-                        message: Box::new(message.clone()),
-                    }
-                    .retry_spec(),
-                ),
+                retry: Some(OperationKind::Send { message }.retry_spec()),
                 ambiguous: other.is_ambiguous(),
             };
             // The specific send status must survive the modal opening
             // (the modal sets the generic "Operation failed" first).
-            let effects = open_error_modal(state, &failure);
+            let effects = open_error_modal(state, failure);
             state.set_status(if other.is_ambiguous() {
                 "Send outcome unclear"
             } else {

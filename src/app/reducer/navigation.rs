@@ -408,8 +408,9 @@ pub(crate) fn complete_cache_list_load(
     offset: usize,
     limit: usize,
     fresh_background_on_hit: bool,
-    result: &OperationResult,
+    result: OperationResult,
 ) -> Vec<Effect> {
+    let id = result.id;
     // Currency: the visible list must still belong to this identity (a
     // mailbox page for `query: None`, the open search otherwise) and stay
     // cold — the cache only ever serves startup and mailbox switches.
@@ -423,15 +424,15 @@ pub(crate) fn complete_cache_list_load(
     };
     if !current || !state.messages.items.is_empty() {
         tracing::debug!(
-            id = %result.id,
+            id = %id,
             mailbox = %mailbox.0,
             "dropping cache read for a warmed or switched context"
         );
         return Vec::new();
     }
-    match &result.outcome {
+    match result.outcome {
         Ok(OperationOutcome::CachedPage(page)) => {
-            let mut effects = apply_page(state, page.clone());
+            let mut effects = apply_page(state, page);
             let load = match query {
                 Some(query) => state.session.operations.start(OperationKind::Search(
                     crate::domain::SearchRequest {
@@ -484,7 +485,7 @@ pub(crate) fn complete_cache_list_load(
             };
             vec![load]
         }
-        Ok(_) => unexpected_payload(result.id, "cached page"),
+        Ok(_) => unexpected_payload(id, "cached page"),
         Err(_) => Vec::new(),
     }
 }
@@ -497,17 +498,17 @@ pub(crate) fn complete_cache_list_load(
 /// listing) goes straight to the fresh background load.
 pub(crate) fn complete_cache_mailboxes_load(
     state: &mut AppState,
-    result: &OperationResult,
+    result: OperationResult,
 ) -> Vec<Effect> {
     // Currency: the sidebar must still be unloaded — nothing else loads it
     // between this read's start and its result.
     if matches!(state.mailboxes, Loadable::Loaded(_)) {
         return Vec::new();
     }
-    match &result.outcome {
+    match result.outcome {
         Ok(OperationOutcome::CachedMailboxes(mailboxes)) if !mailboxes.is_empty() => {
             state.mailboxes = Loadable::Loaded(mailboxes.clone());
-            let mut effects = apply_mailbox_listing(state, mailboxes.clone());
+            let mut effects = apply_mailbox_listing(state, mailboxes);
             effects.push(
                 state
                     .session
@@ -535,8 +536,9 @@ pub(crate) fn complete_cache_mailboxes_load(
 pub(crate) fn complete_cache_message_load(
     state: &mut AppState,
     locator: &MessageLocator,
-    result: &OperationResult,
+    result: OperationResult,
 ) -> Vec<Effect> {
+    let id = result.id;
     let current = matches!(
         state.active_route(),
         Some(Route::Message(route))
@@ -544,20 +546,20 @@ pub(crate) fn complete_cache_message_load(
     );
     if !current {
         tracing::debug!(
-            id = %result.id,
+            id = %id,
             mailbox = %locator.mailbox.0,
             "dropping message cache read for a closed reader"
         );
         return Vec::new();
     }
-    match &result.outcome {
+    match result.outcome {
         Ok(OperationOutcome::CachedMessage(message)) => {
             // The cached body renders immediately; the convergence fetch
             // still runs silently in the background (never cancellable,
             // no loader slot): its result converges read state, fills the
             // list snippet, and reconciles the attachment flag — exactly
             // what a fresh load would do (ticket haeb).
-            state.open_message = Loadable::Loaded((**message).clone());
+            state.open_message = Loadable::Loaded(*message);
             vec![
                 state
                     .session
@@ -571,7 +573,7 @@ pub(crate) fn complete_cache_message_load(
                 .operations
                 .start(OperationKind::LoadMessage(locator.clone())),
         ],
-        Ok(_) => unexpected_payload(result.id, "cached message"),
+        Ok(_) => unexpected_payload(id, "cached message"),
         Err(_) => Vec::new(),
     }
 }
@@ -601,7 +603,7 @@ pub(crate) fn activate(state: &mut AppState) -> Vec<Effect> {
         | Focus::ErrorModal
         | Focus::Wizard => {
             if state.session.focus == Focus::SearchField {
-                reduce(state, &Action::SubmitSearch)
+                reduce(state, Action::SubmitSearch)
             } else {
                 Vec::new()
             }
@@ -641,8 +643,8 @@ pub(crate) fn activate_composer(state: &mut AppState) -> Vec<Effect> {
         }
         ComposerField::Attach => open_attachment_dialog(state),
         ComposerField::Attachment(index) => remove_attachment(state, index),
-        ComposerField::Send => reduce(state, &Action::Send),
-        ComposerField::Discard => reduce(state, &Action::DiscardDraft),
+        ComposerField::Send => reduce(state, Action::Send),
+        ComposerField::Discard => reduce(state, Action::DiscardDraft),
         ComposerField::To | ComposerField::Cc | ComposerField::Bcc | ComposerField::Subject => {
             Vec::new()
         }

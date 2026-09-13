@@ -7,9 +7,9 @@ use super::*;
 #[test]
 fn esc_cancels_foreground_work_and_returns_to_stable_state() {
     let mut s = state();
-    let (id, req) = expect_page(&reduce(&mut s, &Action::PageNext));
+    let (id, req) = expect_page(&reduce(&mut s, Action::PageNext));
     let token = s.session.operations.cancellation(id).unwrap();
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     // The operation is gone and its token fired: the backend kills the
     // child it owns (Phase 3.2).
     assert!(token.is_cancelled());
@@ -38,7 +38,7 @@ fn esc_during_startup_load_leaves_it_running_then_esc_quits() {
     let token = s.session.operations.cancellation(id).unwrap();
     // The startup listing is background consequence work: the user has
     // no intent to cancel it, so Esc goes straight to quitting.
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert!(
         !token.is_cancelled(),
         "the background listing must not be esc-cancellable"
@@ -50,9 +50,9 @@ fn esc_during_startup_load_leaves_it_running_then_esc_quits() {
 #[test]
 fn esc_with_open_modal_dismisses_it() {
     let mut s = state();
-    let (id, req) = expect_page(&reduce(&mut s, &Action::PageNext));
-    reduce(&mut s, &failure(id, &page_kind(&req), "boom"));
-    reduce(&mut s, &Action::BackOrCancel);
+    let (id, req) = expect_page(&reduce(&mut s, Action::PageNext));
+    reduce(&mut s, failure(id, &page_kind(&req), "boom"));
+    reduce(&mut s, Action::BackOrCancel);
     assert!(s.session.overlay.is_none(), "Esc closes the modal");
     assert_eq!(s.session.focus, Focus::MessageList);
 }
@@ -61,7 +61,7 @@ fn esc_with_open_modal_dismisses_it() {
 fn retry_replays_equivalent_intent_with_new_operation_id() {
     let mut s = state();
     let (id, req) = open_modal(&mut s, "himalaya exploded");
-    let effects = reduce(&mut s, &Action::RetryError);
+    let effects = reduce(&mut s, Action::RetryError);
     let (retry_id, retry_kind) = effect_parts(&effects);
     assert_ne!(retry_id, id, "retry must allocate a new operation id");
     assert_eq!(retry_kind, page_kind(&req), "same typed intent");
@@ -75,7 +75,7 @@ fn retry_replays_equivalent_intent_with_new_operation_id() {
 fn dismiss_closes_modal_without_side_effects() {
     let mut s = state();
     open_modal(&mut s, "himalaya exploded");
-    no_effects(&reduce(&mut s, &Action::DismissError));
+    no_effects(&reduce(&mut s, Action::DismissError));
     assert!(s.session.overlay.is_none());
     assert_eq!(s.session.focus, Focus::MessageList);
     // The last coherent page is untouched by dismiss.
@@ -87,12 +87,12 @@ fn modal_enter_activates_the_focused_button() {
     let mut s = state();
     open_modal(&mut s, "himalaya exploded");
     // Default button is Dismiss: Enter dismisses without new work.
-    no_effects(&reduce(&mut s, &Action::Activate));
+    no_effects(&reduce(&mut s, Action::Activate));
     assert!(s.session.overlay.is_none());
     // Focus Retry first: Enter replays the intent.
     let (_, req) = open_modal(&mut s, "himalaya exploded");
-    reduce(&mut s, &Action::FocusNext);
-    let effects = reduce(&mut s, &Action::Activate);
+    reduce(&mut s, Action::FocusNext);
+    let effects = reduce(&mut s, Action::Activate);
     let (_, kind) = effect_parts(&effects);
     assert_eq!(kind, page_kind(&req));
 }
@@ -105,12 +105,12 @@ fn modal_buttons_toggle_with_tab() {
         panic!("modal open");
     };
     assert_eq!(dialog.button, crate::app::overlay::ModalButton::Dismiss);
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     let Some(Overlay::Error(dialog)) = &s.session.overlay else {
         panic!("modal open");
     };
     assert_eq!(dialog.button, crate::app::overlay::ModalButton::Retry);
-    reduce(&mut s, &Action::FocusPrevious);
+    reduce(&mut s, Action::FocusPrevious);
     let Some(Overlay::Error(dialog)) = &s.session.overlay else {
         panic!("modal open");
     };
@@ -133,21 +133,21 @@ fn modal_scroll_clamps_to_content() {
     };
     assert!(max > 0, "long detail must overflow the viewport");
     for _ in 0..(max + 20) {
-        reduce(&mut s, &Action::MoveDown);
+        reduce(&mut s, Action::MoveDown);
     }
     let Some(Overlay::Error(dialog)) = &s.session.overlay else {
         panic!("modal open");
     };
     assert_eq!(dialog.scroll, max, "scroll clamps at the end");
     for _ in 0..(max + 5) {
-        reduce(&mut s, &Action::MoveUp);
+        reduce(&mut s, Action::MoveUp);
     }
     let Some(Overlay::Error(dialog)) = &s.session.overlay else {
         panic!("modal open");
     };
     assert_eq!(dialog.scroll, 0, "scroll clamps at the start");
     // Page-style scrolling moves in viewport steps and clamps the same way.
-    reduce(&mut s, &Action::PageNext);
+    reduce(&mut s, Action::PageNext);
     let Some(Overlay::Error(dialog)) = &s.session.overlay else {
         panic!("modal open");
     };
@@ -163,7 +163,7 @@ fn modal_restores_previous_focus_on_dismiss() {
         dialog.previous_focus = Focus::Sidebar;
     }
     assert_eq!(s.session.focus, Focus::ErrorModal);
-    reduce(&mut s, &Action::DismissError);
+    reduce(&mut s, Action::DismissError);
     assert_eq!(s.session.focus, Focus::Sidebar, "focus restored");
 }
 
@@ -172,11 +172,11 @@ fn modal_swallows_unrelated_input() {
     let mut s = state();
     open_modal(&mut s, "boom");
     let before = s.clone();
-    reduce(&mut s, &Action::SearchEdit(SearchEdit::Char('x')));
-    reduce(&mut s, &Action::SubmitSearch);
-    reduce(&mut s, &Action::OpenSearch);
-    reduce(&mut s, &Action::Compose);
-    reduce(&mut s, &Action::Quit);
+    reduce(&mut s, Action::SearchEdit(SearchEdit::Char('x')));
+    reduce(&mut s, Action::SubmitSearch);
+    reduce(&mut s, Action::OpenSearch);
+    reduce(&mut s, Action::Compose);
+    reduce(&mut s, Action::Quit);
     assert_eq!(s.session.search_query, before.session.search_query);
     assert_eq!(s.session.focus, before.session.focus);
     assert_eq!(s.session.quit_requested, before.session.quit_requested);
@@ -186,10 +186,10 @@ fn modal_swallows_unrelated_input() {
 #[test]
 fn ambiguous_failure_is_flagged_for_the_modal() {
     let mut s = state();
-    let (id, req) = expect_page(&reduce(&mut s, &Action::PageNext));
+    let (id, req) = expect_page(&reduce(&mut s, Action::PageNext));
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Err(OperationFailure {
                 code: Some(1),
@@ -209,7 +209,7 @@ fn ambiguous_failure_is_flagged_for_the_modal() {
 fn t_opens_the_picker_with_the_cursor_on_the_active_theme() {
     let mut s = picker_state();
     let previous = s.session.focus;
-    no_effects(&reduce(&mut s, &Action::OpenThemePicker));
+    no_effects(&reduce(&mut s, Action::OpenThemePicker));
     let Some(Overlay::ThemePicker(dialog)) = &s.session.overlay else {
         panic!("picker must open");
     };
@@ -222,22 +222,22 @@ fn t_opens_the_picker_with_the_cursor_on_the_active_theme() {
 #[test]
 fn arrows_preview_the_highlighted_theme_without_wrapping() {
     let mut s = picker_state();
-    no_effects(&reduce(&mut s, &Action::OpenThemePicker));
+    no_effects(&reduce(&mut s, Action::OpenThemePicker));
     // Down: the cursor moves and the highlighted palette applies at once.
-    no_effects(&reduce(&mut s, &Action::MoveDown));
+    no_effects(&reduce(&mut s, Action::MoveDown));
     assert_eq!(
         s.settings.theme_index, 1,
         "the highlighted theme is the preview"
     );
     assert_eq!(s.active_theme(), crate::view::theme::Theme::default_light());
     // The cursor clamps like the message list: no wrap past the ends.
-    no_effects(&reduce(&mut s, &Action::MoveDown));
+    no_effects(&reduce(&mut s, Action::MoveDown));
     assert_eq!(s.settings.theme_index, 2);
-    no_effects(&reduce(&mut s, &Action::MoveDown));
+    no_effects(&reduce(&mut s, Action::MoveDown));
     assert_eq!(s.settings.theme_index, 2, "no wrap past the last theme");
-    no_effects(&reduce(&mut s, &Action::MoveUp));
-    no_effects(&reduce(&mut s, &Action::MoveUp));
-    no_effects(&reduce(&mut s, &Action::MoveUp));
+    no_effects(&reduce(&mut s, Action::MoveUp));
+    no_effects(&reduce(&mut s, Action::MoveUp));
+    no_effects(&reduce(&mut s, Action::MoveUp));
     assert_eq!(s.settings.theme_index, 0, "no wrap past the first theme");
 }
 
@@ -245,16 +245,16 @@ fn arrows_preview_the_highlighted_theme_without_wrapping() {
 fn esc_restores_the_theme_the_picker_opened_with() {
     let mut s = picker_state();
     s.settings.theme_index = 1;
-    no_effects(&reduce(&mut s, &Action::OpenThemePicker));
+    no_effects(&reduce(&mut s, Action::OpenThemePicker));
     // Preview toward the end of the list (the cursor clamps, no wrap)...
-    no_effects(&reduce(&mut s, &Action::MoveDown));
-    no_effects(&reduce(&mut s, &Action::MoveDown));
+    no_effects(&reduce(&mut s, Action::MoveDown));
+    no_effects(&reduce(&mut s, Action::MoveDown));
     assert_eq!(
         s.settings.theme_index, 2,
         "preview applied while navigating"
     );
     // ...then cancel: the opening palette comes back, nothing else moves.
-    no_effects(&reduce(&mut s, &Action::BackOrCancel));
+    no_effects(&reduce(&mut s, Action::BackOrCancel));
     assert!(s.session.overlay.is_none());
     assert_eq!(s.settings.theme_index, 1, "the opening palette is restored");
     assert_eq!(s.active_theme(), crate::view::theme::Theme::default_light());
@@ -268,9 +268,9 @@ fn esc_restores_the_theme_the_picker_opened_with() {
 #[test]
 fn enter_confirms_the_previewed_theme() {
     let mut s = picker_state();
-    no_effects(&reduce(&mut s, &Action::OpenThemePicker));
-    no_effects(&reduce(&mut s, &Action::MoveDown));
-    no_effects(&reduce(&mut s, &Action::Activate));
+    no_effects(&reduce(&mut s, Action::OpenThemePicker));
+    no_effects(&reduce(&mut s, Action::MoveDown));
+    no_effects(&reduce(&mut s, Action::Activate));
     assert!(s.session.overlay.is_none());
     assert_eq!(s.settings.theme_index, 1, "the previewed palette is kept");
     assert_eq!(s.active_theme(), crate::view::theme::Theme::default_light());
@@ -286,19 +286,19 @@ fn enter_confirms_the_previewed_theme() {
 fn the_picker_intercepts_every_other_input() {
     use crate::app::action::DialogEdit;
     let mut s = picker_state();
-    no_effects(&reduce(&mut s, &Action::OpenThemePicker));
+    no_effects(&reduce(&mut s, Action::OpenThemePicker));
     // A modal swallows all input (plan §9): shortcuts, edits, and backend
     // completions must not leak into the app behind the dialog.
-    no_effects(&reduce(&mut s, &Action::Compose));
+    no_effects(&reduce(&mut s, Action::Compose));
     assert!(
         s.session.composer.is_none(),
         "no composer opens behind the picker"
     );
-    no_effects(&reduce(&mut s, &Action::ToggleStar));
-    no_effects(&reduce(&mut s, &Action::DialogEdit(DialogEdit::Char('x'))));
+    no_effects(&reduce(&mut s, Action::ToggleStar));
+    no_effects(&reduce(&mut s, Action::DialogEdit(DialogEdit::Char('x'))));
     no_effects(&reduce(
         &mut s,
-        &Action::AttachmentBrowse(AttachmentBrowse::Down),
+        Action::AttachmentBrowse(AttachmentBrowse::Down),
     ));
     assert_eq!(s.settings.theme_index, 0, "nothing moved the preview");
 }
@@ -307,7 +307,7 @@ fn the_picker_intercepts_every_other_input() {
 fn the_picker_never_opens_without_themes() {
     let mut s = state();
     s.settings.themes.clear();
-    no_effects(&reduce(&mut s, &Action::OpenThemePicker));
+    no_effects(&reduce(&mut s, Action::OpenThemePicker));
     assert!(s.session.overlay.is_none());
     assert_eq!(s.session.focus, Focus::MessageList);
 }
@@ -325,11 +325,11 @@ fn the_picker_scroll_window_follows_the_cursor() {
             )
         })
         .collect();
-    no_effects(&reduce(&mut s, &Action::OpenThemePicker));
+    no_effects(&reduce(&mut s, Action::OpenThemePicker));
 
     // Inside the window the scroll offset stays put...
     for _ in 0..9 {
-        no_effects(&reduce(&mut s, &Action::MoveDown));
+        no_effects(&reduce(&mut s, Action::MoveDown));
     }
     let Some(Overlay::ThemePicker(dialog)) = &s.session.overlay else {
         panic!("picker open");
@@ -339,7 +339,7 @@ fn the_picker_scroll_window_follows_the_cursor() {
 
     // ...and the first step past the edge slides the window by one row so
     // the cursor (and its preview) stays visible.
-    no_effects(&reduce(&mut s, &Action::MoveDown));
+    no_effects(&reduce(&mut s, Action::MoveDown));
     let Some(Overlay::ThemePicker(dialog)) = &s.session.overlay else {
         panic!("picker open");
     };
@@ -367,22 +367,22 @@ fn the_active_theme_default_is_the_dark_reference() {
 #[test]
 fn help_opens_over_the_current_screen_and_closes_restoring_focus() {
     let mut s = state();
-    no_effects(&reduce(&mut s, &Action::OpenHelp));
+    no_effects(&reduce(&mut s, Action::OpenHelp));
     assert!(matches!(s.session.overlay, Some(Overlay::Help(_))));
     assert_eq!(s.session.focus, Focus::Help);
     // Esc closes back into the list.
-    no_effects(&reduce(&mut s, &Action::BackOrCancel));
+    no_effects(&reduce(&mut s, Action::BackOrCancel));
     assert!(s.session.overlay.is_none());
     assert_eq!(s.session.focus, Focus::MessageList);
     // A second open/close cycle from the composer restores the composer.
-    reduce(&mut s, &Action::Compose);
+    reduce(&mut s, Action::Compose);
     no_effects(&reduce(
         &mut s,
-        &Action::ComposerEdit(ComposerEdit::Char('h')),
+        Action::ComposerEdit(ComposerEdit::Char('h')),
     ));
-    no_effects(&reduce(&mut s, &Action::OpenHelp));
+    no_effects(&reduce(&mut s, Action::OpenHelp));
     assert_eq!(previous_focus_of(&s), Focus::Composer);
-    no_effects(&reduce(&mut s, &Action::OpenHelp));
+    no_effects(&reduce(&mut s, Action::OpenHelp));
     assert!(s.session.overlay.is_none());
     assert_eq!(s.session.focus, Focus::Composer);
     assert!(
@@ -394,10 +394,10 @@ fn help_opens_over_the_current_screen_and_closes_restoring_focus() {
 #[test]
 fn help_swallows_navigation_and_backend_results_land() {
     let mut s = state();
-    no_effects(&reduce(&mut s, &Action::OpenHelp));
+    no_effects(&reduce(&mut s, Action::OpenHelp));
     // The arrows never reach the list behind the popup.
     let before = s.clone();
-    no_effects(&reduce(&mut s, &Action::MoveDown));
+    no_effects(&reduce(&mut s, Action::MoveDown));
     assert_eq!(s.selection, before.selection);
     // Backend results are not blocked by the popup.
     let summary = s.messages.items[0].clone();
@@ -417,14 +417,14 @@ fn help_does_not_open_during_the_wizard() {
             existing_shared_readable: false,
         },
     ));
-    no_effects(&reduce(&mut s, &Action::OpenHelp));
+    no_effects(&reduce(&mut s, Action::OpenHelp));
     assert!(s.session.overlay.is_none());
 }
 
 #[test]
 fn help_lists_the_active_bindings_of_the_screen_underneath() {
     let mut s = state();
-    reduce(&mut s, &Action::OpenHelp);
+    reduce(&mut s, Action::OpenHelp);
     let Some(Overlay::Help(dialog)) = &s.session.overlay else {
         panic!("help overlay");
     };

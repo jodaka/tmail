@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn enter_in_other_mailboxes_still_opens_the_reader() {
     let mut s = state();
-    let (_, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let (_, kind) = effect_parts(&reduce(&mut s, Action::Activate));
     assert!(
         matches!(kind, OperationKind::CacheMessageLoad { .. }),
         "the reader open reads the message cache first, got {kind:?}"
@@ -16,13 +16,13 @@ fn enter_in_other_mailboxes_still_opens_the_reader() {
 fn enter_on_the_open_draft_in_drafts_reuses_it_without_a_fetch() {
     let mut s = state();
     compose(&mut s);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('d')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('d')));
     tick(&mut s, 0);
     let (id, snapshot) = expect_save(&tick(&mut s, 2));
     complete_save_ok(&mut s, id, snapshot.revision, "copy-1");
     // Leave the composer, switch to Drafts; the list shows the saved copy
     // with a refreshed backend id but the same stable `Message-ID`.
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     switch_to(&mut s, "drafts");
     let bare = snapshot
         .message_id
@@ -34,7 +34,7 @@ fn enter_on_the_open_draft_in_drafts_reuses_it_without_a_fetch() {
     s.selection = 0;
     // Enter: the composer reopens the exact in-memory draft — no backend
     // round-trip, content and remote identity intact.
-    no_effects(&reduce(&mut s, &Action::Activate));
+    no_effects(&reduce(&mut s, Action::Activate));
     assert!(matches!(s.active_route(), Some(Route::Composer)));
     let draft = &s.session.composer.as_ref().unwrap().draft;
     assert_eq!(draft.to, "d");
@@ -51,7 +51,7 @@ fn enter_on_a_remote_draft_fetches_and_opens_the_composer() {
     switch_to(&mut s, "drafts");
     s.messages.items = vec![draft_row("copy-7", Some("1778.draft@tmail.local"))];
     s.selection = 0;
-    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
     let OperationKind::OpenDraft(locator) = kind else {
         panic!("expected OpenDraft, got {kind:?}");
     };
@@ -59,7 +59,7 @@ fn enter_on_a_remote_draft_fetches_and_opens_the_composer() {
     assert_eq!(locator.mailbox, drafts_id());
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
                 "copy-7",
@@ -82,7 +82,7 @@ fn enter_on_a_remote_draft_fetches_and_opens_the_composer() {
         Some("<1778.draft@tmail.local>")
     );
     assert_eq!(draft.remote_id, Some(MessageId(String::from("copy-7"))));
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('!')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('!')));
     tick(&mut s, 0);
     let (save_id, snapshot) = expect_save(&tick(&mut s, 2));
     assert_eq!(
@@ -99,14 +99,14 @@ fn esc_cancels_a_draft_fetch_and_the_list_stays() {
     switch_to(&mut s, "drafts");
     s.messages.items = vec![draft_row("copy-7", None)];
     s.selection = 0;
-    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
-    reduce(&mut s, &Action::BackOrCancel);
+    let (id, _) = effect_parts(&reduce(&mut s, Action::Activate));
+    reduce(&mut s, Action::BackOrCancel);
     assert!(s.session.composer.is_none());
     assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
     // The cancelled fetch's result can never mutate state (plan §11).
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
                 "copy-7",
@@ -128,12 +128,12 @@ fn enter_on_a_draft_row_secures_the_parked_draft_and_swaps() {
     let mut s = state();
     compose(&mut s);
     tick(&mut s, 0); // sets the clock so the leave-save can start
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('k')));
-    let (parked_save, parked_snapshot) = expect_save(&reduce(&mut s, &Action::BackOrCancel));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('k')));
+    let (parked_save, parked_snapshot) = expect_save(&reduce(&mut s, Action::BackOrCancel));
     switch_to(&mut s, "drafts");
     s.messages.items = vec![draft_row("copy-9", Some("other@tmail.local"))];
     s.selection = 0;
-    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
     let OperationKind::OpenDraft(locator) = kind else {
         panic!("expected OpenDraft, got {kind:?}");
     };
@@ -143,7 +143,7 @@ fn enter_on_a_draft_row_secures_the_parked_draft_and_swaps() {
     // The landed copy replaces the parked draft and opens the composer.
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
                 "copy-9",
@@ -173,7 +173,7 @@ fn enter_on_a_draft_row_force_saves_an_unsaved_parked_draft() {
     s.session.composer = Some(crate::app::composer::ComposerState::from_draft(parked));
     s.messages.items = vec![draft_row("copy-9", Some("other@tmail.local"))];
     s.selection = 0;
-    let effects = reduce(&mut s, &Action::Activate);
+    let effects = reduce(&mut s, Action::Activate);
     assert_eq!(
         effects.len(),
         2,
@@ -192,7 +192,7 @@ fn enter_on_a_draft_row_force_saves_an_unsaved_parked_draft() {
     // …then the fetch lands and the fetched copy replaces it.
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: effects[1].id,
             outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
                 "copy-9",
@@ -214,15 +214,15 @@ fn rapid_draft_opens_supersede_and_the_last_row_wins() {
         draft_row("copy-8", Some("b@tmail.local")),
     ];
     s.selection = 0;
-    let (first_id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let (first_id, _) = effect_parts(&reduce(&mut s, Action::Activate));
     s.selection = 1;
-    let (second_id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let (second_id, _) = effect_parts(&reduce(&mut s, Action::Activate));
     assert_ne!(first_id, second_id);
     // The older fetch was superseded by the newer Enter: its result can
     // never open a draft (plan §11).
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: first_id,
             outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
                 "copy-7",
@@ -233,7 +233,7 @@ fn rapid_draft_opens_supersede_and_the_last_row_wins() {
     assert!(s.session.composer.is_none(), "superseded result dropped");
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: second_id,
             outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
                 "copy-8",
@@ -266,11 +266,11 @@ fn draft_fetch_is_dropped_when_the_selection_moved() {
         draft_row("copy-8", Some("b@tmail.local")),
     ];
     s.selection = 0;
-    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
-    reduce(&mut s, &Action::MoveDown);
+    let (id, _) = effect_parts(&reduce(&mut s, Action::Activate));
+    reduce(&mut s, Action::MoveDown);
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
                 "copy-7",
@@ -289,12 +289,12 @@ fn enter_on_a_draft_row_replaces_a_blank_c_draft() {
     let mut s = state();
     compose(&mut s);
     // Esc with no edits: the preserved draft is pristine blank.
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert!(s.session.composer.as_ref().unwrap().draft.is_blank());
     switch_to(&mut s, "drafts");
     s.messages.items = vec![draft_row("copy-9", Some("other@tmail.local"))];
     s.selection = 0;
-    let (id, kind) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
     let OperationKind::OpenDraft(locator) = kind else {
         panic!("expected OpenDraft, got {kind:?}");
     };
@@ -302,7 +302,7 @@ fn enter_on_a_draft_row_replaces_a_blank_c_draft() {
     // The landed copy replaces the blank and opens the composer.
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
                 "copy-9",
@@ -322,11 +322,11 @@ fn draft_fetch_result_is_dropped_after_a_mailbox_switch() {
     switch_to(&mut s, "drafts");
     s.messages.items = vec![draft_row("copy-7", None)];
     s.selection = 0;
-    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let (id, _) = effect_parts(&reduce(&mut s, Action::Activate));
     switch_to(&mut s, "sent");
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
                 "copy-7",
@@ -350,15 +350,15 @@ fn draft_fetch_result_never_clobbers_a_newer_draft() {
     switch_to(&mut s, "drafts");
     s.messages.items = vec![draft_row("copy-7", None)];
     s.selection = 0;
-    let (id, _) = effect_parts(&reduce(&mut s, &Action::Activate));
+    let (id, _) = effect_parts(&reduce(&mut s, Action::Activate));
     // While the fetch runs, the user composes a fresh draft and leaves it.
-    reduce(&mut s, &Action::Compose);
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('n')));
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::Compose);
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('n')));
+    reduce(&mut s, Action::BackOrCancel);
     // Back on the drafts list when the fetch lands: the newer draft wins.
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(fetched_draft(
                 "copy-7",
@@ -377,7 +377,7 @@ fn draft_fetch_result_never_clobbers_a_newer_draft() {
 fn reply_seeds_a_composer_on_top_of_the_reader() {
     let mut s = state();
     open_reader_with(&mut s, reply_source());
-    no_effects(&reduce(&mut s, &Action::Reply));
+    no_effects(&reduce(&mut s, Action::Reply));
     // Route stack: composer above the still-open reader; Esc from the
     // composer returns to reading.
     assert_eq!(s.session.routes.len(), 3);
@@ -415,7 +415,7 @@ fn reply_seeds_a_composer_on_top_of_the_reader() {
 fn forward_seeds_a_header_block_and_no_recipients() {
     let mut s = state();
     open_reader_with(&mut s, reply_source());
-    no_effects(&reduce(&mut s, &Action::Forward));
+    no_effects(&reduce(&mut s, Action::Forward));
     let composer = seeded_composer(&s);
     assert_eq!(composer.draft.to, "");
     assert_eq!(composer.draft.subject, "Fwd: Plan review");
@@ -437,8 +437,8 @@ fn reply_needs_a_target() {
     // No reader and an empty list: nothing to reply to.
     s.messages.items.clear();
     s.open_message = Loadable::Idle;
-    no_effects(&reduce(&mut s, &Action::Reply));
-    no_effects(&reduce(&mut s, &Action::Forward));
+    no_effects(&reduce(&mut s, Action::Reply));
+    no_effects(&reduce(&mut s, Action::Forward));
     assert!(s.session.composer.is_none());
     // Reader open but the message still loading: the seed fetch starts
     // from the reader's summary, so this is now the pending-fetch case
@@ -449,9 +449,9 @@ fn reply_needs_a_target() {
 fn reply_never_clobbers_an_existing_draft() {
     let mut s = state();
     open_reader_with(&mut s, reply_source());
-    no_effects(&reduce(&mut s, &Action::Compose)); // a draft exists already
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('k')));
-    no_effects(&reduce(&mut s, &Action::Reply));
+    no_effects(&reduce(&mut s, Action::Compose)); // a draft exists already
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('k')));
+    no_effects(&reduce(&mut s, Action::Reply));
     let composer = seeded_composer(&s);
     assert_eq!(composer.draft.to, "k", "existing draft untouched");
     assert_eq!(
@@ -467,15 +467,15 @@ fn reply_never_clobbers_an_existing_draft() {
 fn reply_replaces_a_draft_left_behind() {
     let mut s = state();
     open_reader_with(&mut s, reply_source());
-    no_effects(&reduce(&mut s, &Action::Compose));
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('k')));
-    reduce(&mut s, &Action::BackOrCancel); // Esc: save & leave
+    no_effects(&reduce(&mut s, Action::Compose));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('k')));
+    reduce(&mut s, Action::BackOrCancel); // Esc: save & leave
     assert!(matches!(s.active_route(), Some(Route::Message(_))));
     assert!(
         s.session.composer.is_some(),
         "the left draft stays in state"
     );
-    no_effects(&reduce(&mut s, &Action::Reply));
+    no_effects(&reduce(&mut s, Action::Reply));
     let composer = seeded_composer(&s);
     assert_eq!(
         composer.draft.to, "Bob <bob@example.org>",
@@ -491,10 +491,10 @@ fn reply_replaces_a_draft_left_behind() {
 fn forward_replaces_a_draft_left_behind() {
     let mut s = state();
     open_reader_with(&mut s, reply_source());
-    no_effects(&reduce(&mut s, &Action::Compose));
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('k')));
-    reduce(&mut s, &Action::BackOrCancel); // Esc: save & leave
-    no_effects(&reduce(&mut s, &Action::Forward));
+    no_effects(&reduce(&mut s, Action::Compose));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('k')));
+    reduce(&mut s, Action::BackOrCancel); // Esc: save & leave
+    no_effects(&reduce(&mut s, Action::Forward));
     let composer = seeded_composer(&s);
     assert_eq!(composer.draft.subject, "Fwd: Plan review");
     assert_eq!(
@@ -507,14 +507,14 @@ fn forward_replaces_a_draft_left_behind() {
 fn leaving_a_seeded_reply_returns_to_the_reader() {
     let mut s = state();
     open_reader_with(&mut s, reply_source());
-    reduce(&mut s, &Action::Reply);
-    reduce(&mut s, &Action::BackOrCancel); // Esc: save/leave
+    reduce(&mut s, Action::Reply);
+    reduce(&mut s, Action::BackOrCancel); // Esc: save/leave
     assert!(matches!(s.active_route(), Some(Route::Message(_))));
     assert_eq!(s.session.focus, Focus::MessageList);
     // The seeded draft stays in state (for the Drafts list).
     assert!(s.session.composer.is_some());
     // `c` starts a blank new email instead of reopening it (ticket v5x8).
-    reduce(&mut s, &Action::Compose);
+    reduce(&mut s, Action::Compose);
     let composer = s.session.composer.as_ref().unwrap();
     assert_eq!(composer.draft.in_reply_to, None, "a blank new email");
 }
@@ -538,7 +538,7 @@ fn reply_all_merges_recipients_dedups_and_excludes_self() {
         email: String::from("probe@tmail.local"),
     });
     open_reader_with(&mut s, message);
-    no_effects(&reduce(&mut s, &Action::ReplyAll));
+    no_effects(&reduce(&mut s, Action::ReplyAll));
     assert_eq!(
         s.session.status.message.as_deref(),
         Some("Reply-all draft ready")
@@ -563,13 +563,13 @@ fn reply_all_merges_recipients_dedups_and_excludes_self() {
 #[test]
 fn ctrl_enter_sends_only_from_the_composer() {
     let mut s = state();
-    no_effects(&reduce(&mut s, &Action::Send));
+    no_effects(&reduce(&mut s, Action::Send));
     assert!(s.session.composer.is_none());
     // A draft may exist without the composer route (left-open draft): the
     // route gate still applies.
     compose(&mut s);
-    reduce(&mut s, &Action::BackOrCancel);
-    no_effects(&reduce(&mut s, &Action::Send));
+    reduce(&mut s, Action::BackOrCancel);
+    no_effects(&reduce(&mut s, Action::Send));
     assert!(s.session.composer.is_some(), "draft data preserved");
     assert!(s.session.operations.is_empty());
 }
@@ -579,13 +579,13 @@ fn send_refuses_an_empty_recipient_list() {
     let mut s = state();
     compose(&mut s);
     // A subject alone is not enough: no To/Cc/Bcc, no send.
-    reduce(&mut s, &Action::FocusNext);
-    reduce(&mut s, &Action::FocusNext);
-    reduce(&mut s, &Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
     for c in "hi".chars() {
-        reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char(c)));
+        reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char(c)));
     }
-    no_effects(&reduce(&mut s, &Action::Send));
+    no_effects(&reduce(&mut s, Action::Send));
     assert_eq!(
         s.session.status.message.as_deref(),
         Some("Cannot send: add at least one recipient")
@@ -601,9 +601,9 @@ fn send_refuses_invalid_addresses() {
     let mut s = state();
     compose(&mut s);
     for c in "not an address".chars() {
-        reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char(c)));
+        reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char(c)));
     }
-    no_effects(&reduce(&mut s, &Action::Send));
+    no_effects(&reduce(&mut s, Action::Send));
     assert_eq!(
         s.session.status.message.as_deref(),
         Some("Cannot send: fix the invalid address entries")
@@ -615,7 +615,7 @@ fn send_refuses_invalid_addresses() {
 fn send_freezes_the_composer_and_starts_one_operation() {
     let mut s = state();
     sendable(&mut s);
-    let effects = reduce(&mut s, &Action::Send);
+    let effects = reduce(&mut s, Action::Send);
     let (id, message) = expect_send(&effects);
     assert_eq!(message.to.len(), 1);
     assert_eq!(message.to[0].email, "ada@example.org");
@@ -626,11 +626,11 @@ fn send_freezes_the_composer_and_starts_one_operation() {
     assert!(composer.sending);
     assert_eq!(s.session.status.message.as_deref(), Some("Sending…"));
     // Edits are frozen while the send runs; the draft keeps its content.
-    reduce(&mut s, &Action::ComposerEdit(ComposerEdit::Char('x')));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     let composer = s.session.composer.as_ref().unwrap();
     assert_eq!(composer.draft.body, "Body");
     // A second send is refused.
-    no_effects(&reduce(&mut s, &Action::Send));
+    no_effects(&reduce(&mut s, Action::Send));
     assert_eq!(s.session.operations.len(), 1);
     let _ = id;
 }
@@ -639,10 +639,10 @@ fn send_freezes_the_composer_and_starts_one_operation() {
 fn send_failure_keeps_the_draft_intact() {
     let mut s = state();
     sendable(&mut s);
-    let (id, _) = expect_send(&reduce(&mut s, &Action::Send));
+    let (id, _) = expect_send(&reduce(&mut s, Action::Send));
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Err(OperationFailure {
                 code: Some(1),
@@ -668,7 +668,7 @@ fn send_success_leaves_the_composer_and_resolves_the_draft() {
     // The draft was saved before sending: the remote copy must be swept.
     let composer = s.session.composer.as_mut().unwrap();
     composer.draft.remote_id = Some(MessageId(String::from("remote-draft")));
-    let (id, _) = expect_send(&reduce(&mut s, &Action::Send));
+    let (id, _) = expect_send(&reduce(&mut s, Action::Send));
     let effects = complete_send(&mut s, id, SendOutcome::Sent);
     // Composer closed, back to the mailbox, status confirms success.
     assert!(s.session.composer.is_none());
@@ -696,10 +696,10 @@ fn send_success_leaves_the_composer_and_resolves_the_draft() {
 fn send_success_after_leaving_still_resolves_the_draft() {
     let mut s = state();
     sendable(&mut s);
-    let (id, _) = expect_send(&reduce(&mut s, &Action::Send));
+    let (id, _) = expect_send(&reduce(&mut s, Action::Send));
     // The user left mid-send (Esc save/leaves; the draft was clean, so no
     // forced save runs).
-    reduce(&mut s, &Action::BackOrCancel);
+    reduce(&mut s, Action::BackOrCancel);
     assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
     let effects = complete_send(&mut s, id, SendOutcome::Sent);
     assert!(
@@ -714,12 +714,12 @@ fn send_success_after_leaving_still_resolves_the_draft() {
 fn sent_draft_cleanup_failure_never_claims_a_failed_send() {
     let mut s = state();
     sendable(&mut s);
-    let (id, _) = expect_send(&reduce(&mut s, &Action::Send));
+    let (id, _) = expect_send(&reduce(&mut s, Action::Send));
     let effects = complete_send(&mut s, id, SendOutcome::Sent);
     let (cleanup_id, kind) = effect_parts(&effects);
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: cleanup_id,
             outcome: Err(OperationFailure {
                 code: Some(1),
@@ -739,12 +739,12 @@ fn cleanup_of_a_discarded_draft_still_opens_the_modal_on_failure() {
     // The Sent-reason quietness must not weaken the discard flow (6.6).
     let mut s = state();
     open_discard_dialog(&mut s);
-    reduce(&mut s, &Action::FocusNext); // Discard
-    let effects = reduce(&mut s, &Action::Activate);
+    reduce(&mut s, Action::FocusNext); // Discard
+    let effects = reduce(&mut s, Action::Activate);
     let (id, kind) = effect_parts(&effects);
     reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Err(OperationFailure {
                 code: Some(1),
@@ -766,7 +766,7 @@ fn cleanup_of_a_discarded_draft_still_opens_the_modal_on_failure() {
 fn ambiguous_send_opens_the_duplicate_warning_and_keeps_the_draft() {
     let mut s = state();
     sendable(&mut s);
-    let (id, message) = expect_send(&reduce(&mut s, &Action::Send));
+    let (id, message) = expect_send(&reduce(&mut s, Action::Send));
     // Probe-verified ambiguous outcome: payload transmitted, himalaya
     // reported a DATA-phase EOF.
     complete_send(
@@ -805,7 +805,7 @@ fn ambiguous_send_opens_the_duplicate_warning_and_keeps_the_draft() {
 fn ambiguous_send_never_shows_a_failure_title_or_status() {
     let mut s = state();
     sendable(&mut s);
-    let (id, _) = expect_send(&reduce(&mut s, &Action::Send));
+    let (id, _) = expect_send(&reduce(&mut s, Action::Send));
     complete_send(
         &mut s,
         id,
@@ -829,7 +829,7 @@ fn ambiguous_send_never_shows_a_failure_title_or_status() {
 fn retrying_an_ambiguous_send_replays_the_frozen_message() {
     let mut s = state();
     sendable(&mut s);
-    let (id, message) = expect_send(&reduce(&mut s, &Action::Send));
+    let (id, message) = expect_send(&reduce(&mut s, Action::Send));
     complete_send(
         &mut s,
         id,
@@ -838,7 +838,7 @@ fn retrying_an_ambiguous_send_replays_the_frozen_message() {
             detail: String::from("connection reset"),
         },
     );
-    let effects = reduce(&mut s, &Action::RetryError);
+    let effects = reduce(&mut s, Action::RetryError);
     let (retry_id, replay) = expect_send(&effects);
     assert_ne!(retry_id, id, "a retry gets a new operation id");
     assert_eq!(replay, message, "the exact same bytes are re-sent");
@@ -851,7 +851,7 @@ fn retrying_an_ambiguous_send_replays_the_frozen_message() {
 fn failed_before_delivery_send_reports_definite_failure_safely() {
     let mut s = state();
     sendable(&mut s);
-    let (id, _) = expect_send(&reduce(&mut s, &Action::Send));
+    let (id, _) = expect_send(&reduce(&mut s, Action::Send));
     complete_send(
         &mut s,
         id,
@@ -875,7 +875,7 @@ fn failed_before_delivery_send_reports_definite_failure_safely() {
 fn reply_from_the_list_fetches_then_seeds_the_composer() {
     let mut s = state();
     assert_eq!(s.session.focus, Focus::MessageList);
-    let effects = reduce(&mut s, &Action::Reply);
+    let effects = reduce(&mut s, Action::Reply);
     let (id, locator, kind) = expect_seed(&effects);
     assert_eq!(kind, SeedKind::Reply);
     assert_eq!(locator.id, s.messages.items[0].id);
@@ -886,7 +886,7 @@ fn reply_from_the_list_fetches_then_seeds_the_composer() {
     let message = mock::mock_message(&s.messages.items[0]);
     no_effects(&reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(message))),
         }),
@@ -904,13 +904,13 @@ fn reply_from_the_list_fetches_then_seeds_the_composer() {
 #[test]
 fn forward_from_the_list_quotes_the_fetched_message() {
     let mut s = state();
-    let effects = reduce(&mut s, &Action::Forward);
+    let effects = reduce(&mut s, Action::Forward);
     let (id, _locator, kind) = expect_seed(&effects);
     assert_eq!(kind, SeedKind::Forward);
     let message = mock::mock_message(&s.messages.items[0]);
     no_effects(&reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::Message(Box::new(message))),
         }),
@@ -927,14 +927,14 @@ fn forward_from_the_list_quotes_the_fetched_message() {
 #[test]
 fn a_failed_list_seed_opens_the_modal_without_a_composer() {
     let mut s = state();
-    let effects = reduce(&mut s, &Action::Reply);
+    let effects = reduce(&mut s, Action::Reply);
     let (id, _locator, _kind) = expect_seed(&effects);
     let kind = OperationKind::SeedComposer {
         locator: s.messages.items[0].clone().into_locator(),
         kind: SeedKind::Reply,
     };
     let _ = &mut s;
-    reduce(&mut s, &failure(id, &kind, "himalaya exited with code 1"));
+    reduce(&mut s, failure(id, &kind, "himalaya exited with code 1"));
     assert!(
         matches!(s.active_route(), Some(Route::Mailbox(_))),
         "no composer on failure"
@@ -946,15 +946,15 @@ fn a_failed_list_seed_opens_the_modal_without_a_composer() {
 #[test]
 fn pressing_reply_twice_supersedes_the_first_fetch() {
     let mut s = state();
-    let (first_id, _, _) = expect_seed(&reduce(&mut s, &Action::Reply));
-    let (second_id, _, _) = expect_seed(&reduce(&mut s, &Action::Reply));
+    let (first_id, _, _) = expect_seed(&reduce(&mut s, Action::Reply));
+    let (second_id, _, _) = expect_seed(&reduce(&mut s, Action::Reply));
     assert_ne!(first_id, second_id);
     // The superseded first fetch is dropped by the registry: its late
     // result must not open the composer.
     let message = mock::mock_message(&s.messages.items[0]);
     no_effects(&reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: first_id,
             outcome: Ok(OperationOutcome::Message(Box::new(message.clone()))),
         }),
@@ -963,7 +963,7 @@ fn pressing_reply_twice_supersedes_the_first_fetch() {
     // The newest fetch wins and seeds.
     no_effects(&reduce(
         &mut s,
-        &Action::BackendCompleted(OperationResult {
+        Action::BackendCompleted(OperationResult {
             id: second_id,
             outcome: Ok(OperationOutcome::Message(Box::new(message))),
         }),
