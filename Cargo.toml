@@ -1,6 +1,6 @@
 [package]
 name = "tmail"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 description = "Tmail: a Gmail-inspired, keyboard-first terminal email client backed by the Himalaya CLI"
 
