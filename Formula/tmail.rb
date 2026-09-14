@@ -11,11 +11,10 @@ class Tmail < Formula
 
   depends_on "himalaya"
 
+  url "https://github.com/jodaka/tmail/releases/download/v#{version}/tmail-v#{version}-aarch64-apple-darwin.tar.gz"
+  sha256 "96a5b05b429d23c649d631daf353a1b720713b1e52cc3f2591cce65005073515"
+
   on_macos do
-    on_arm do
-      url "https://github.com/jodaka/tmail/releases/download/v#{version}/tmail-v#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "96a5b05b429d23c649d631daf353a1b720713b1e52cc3f2591cce65005073515"
-    end
     on_intel do
       url "https://github.com/jodaka/tmail/releases/download/v#{version}/tmail-v#{version}-x86_64-apple-darwin.tar.gz"
       sha256 "f93a061701683201dc58151c43d043213142f08eb8c0dc6d4faf2bd6ab987686"
