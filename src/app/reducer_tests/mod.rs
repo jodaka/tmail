@@ -26,6 +26,7 @@ use crate::domain::{Mailbox, MailboxId, MailboxRole, MessageId, PageRequest};
 use crate::domain::{OutboundMessage, SendOutcome};
 use std::path::PathBuf;
 
+mod accounts;
 mod attachments;
 mod bulk;
 mod cache;

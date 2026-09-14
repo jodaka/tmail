@@ -64,6 +64,28 @@ pub fn render(
     ]);
     frame.render_widget(Paragraph::new(brand), brand_area);
 
+    // Account line under the brand (ticket c0n0): the identity the
+    // backend drives — the email (the unique identity; display names are
+    // commonly shared, user request), else the display name, else the
+    // raw account name. Nothing renders when no account is resolved
+    // (multi-account configs without a default; the account switcher is
+    // the way to pick one there).
+    if let Some(account) = state.current_account_label() {
+        let account_area = Rect {
+            x: area.x.saturating_add(2),
+            y: area.y.saturating_add(2),
+            width: area.width.min(22),
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                text::truncate(&account, account_area.width as usize),
+                Style::new().fg(theme.label_dim),
+            )),
+            account_area,
+        );
+    }
+
     // Search field: bordered well, `/` prompt, query or placeholder.
     let search_width = area.width.saturating_sub(28).clamp(12, 60);
     let search_x = area.x.saturating_add(24);

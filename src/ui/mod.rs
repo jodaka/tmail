@@ -93,13 +93,16 @@ pub fn render(
 }
 
 /// The always-on modal stack drawn above every screen (plan §12/§14): the
-/// error modal, the confirm dialog, the attachment chooser, and the theme
-/// picker. Help is normal-mode only and draws on top separately.
+/// error modal, the confirm dialog, the attachment chooser, the theme
+/// picker, and the account switcher. Help is normal-mode only and draws on
+/// top separately.
 fn render_modals(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, hits: &mut HitMap) {
     components::error_modal::render(frame, state, theme, hits);
     components::confirm_modal::render(frame, state, theme, hits);
     components::attachment_dialog::render(frame, state, theme);
     components::theme_picker::render(frame, state, theme);
+    components::account_switcher::render(frame, state, theme);
+    components::account_switcher::render_confirm(frame, state, theme, hits);
 }
 
 /// Too-small mode: a clear centered message, nothing overlapping (plan §18).

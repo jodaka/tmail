@@ -197,6 +197,12 @@ pub enum Action {
     /// Enter keeps it, Esc restores the opening palette. Session-only;
     /// the config file is never rewritten.
     OpenThemePicker,
+    /// `Ctrl+G` (ticket c0n0): open the account switcher — a small list of
+    /// every `[accounts.<name>]` in the config file. Enter on another
+    /// account restarts the session with it (a full rebuild, exactly like
+    /// restarting tmail with that account); Enter on the current one
+    /// closes. Never fires while the wizard owns the screen.
+    OpenAccountSwitcher,
     Send,
     /// Save the selected reader attachment to the downloads directory
     /// (plan §15, Phase 8.4).

@@ -122,6 +122,16 @@ pub struct Settings {
     /// Reply-all seeding excludes it from recipients (Phase 7.5); the
     /// backend independently uses it as the `From` of outgoing mail.
     pub account_email: Option<String>,
+    /// The himalaya account the backend drives (`[tmail].account`, or the
+    /// resolved default — ticket c0n0). `None` in the
+    /// multi-account-without-default case, where the account switcher is
+    /// the way to pick one. Shown under the logo.
+    pub account_name: Option<String>,
+    /// Every account in the config file at startup (ticket c0n0), for the
+    /// runtime account switcher. Session-stale by design: the switch's own
+    /// reload re-reads the file, so an account added while the app runs
+    /// appears after the next restart — or after any switch.
+    pub accounts: Vec<crate::config::AccountEntry>,
     /// Periodic refresh interval in seconds (plan §11/§19 Phase 9,
     /// `[tmail.mail].refresh_interval_seconds`); `0` disables the timer.
     /// Set from the config at startup; the reducer never reads a clock for
@@ -254,6 +264,12 @@ pub struct SessionState {
     /// every action while this is set, and the renderer swaps the whole
     /// shell for the wizard screens.
     pub wizard: Option<crate::app::wizard::WizardState>,
+    /// The confirmed account switch (ticket c0n0): `Some(target)` once the
+    /// user confirmed through the switcher's confirm dialog. The event
+    /// loop exits on it and the runtime rebuilds the whole session against
+    /// the named account — every in-flight operation was already cancelled
+    /// on the way here.
+    pub switch_requested: Option<String>,
 }
 
 /// The whole application state: the visible list/reader data plus the
@@ -312,6 +328,8 @@ impl AppState {
             settings: Settings {
                 keymap: crate::input::keymap::KeyMap::defaults(),
                 account_email: None,
+                account_name: None,
+                accounts: Vec::new(),
                 refresh_interval_seconds: 0,
                 page_size_auto: false,
                 autosave_delay_ms: crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS,
@@ -352,6 +370,7 @@ impl AppState {
                 operations: OperationRegistry::default(),
                 composer: None,
                 wizard: None,
+                switch_requested: None,
             },
         }
     }
@@ -516,11 +535,35 @@ impl AppState {
             .unwrap_or_else(Theme::default_dark)
     }
 
+    /// The identity shown under the logo (ticket c0n0): the current
+    /// account's email, else its display name, else its raw name (the
+    /// email first — display names are commonly shared between accounts,
+    /// user request). `None` when no account is resolved
+    /// (multi-account configs without a default — the account switcher
+    /// is the way to pick one there).
+    pub fn current_account_label(&self) -> Option<String> {
+        let name = self.settings.account_name.as_deref()?;
+        let entry = self
+            .settings
+            .accounts
+            .iter()
+            .find(|account| account.name == name);
+        Some(
+            entry
+                .map(crate::config::AccountEntry::label)
+                .unwrap_or(name)
+                .to_owned(),
+        )
+    }
+
     /// The terminal window title for the current mode: the wizard over
     /// everything ("tmail setup"), the composer ("Mail to …", the first
     /// recipient, raw text since it may still be mid-typed), else the
     /// displayed mailbox with its unread count (search included: the
-    /// title names the folder being searched).
+    /// title names the folder being searched). With several accounts the
+    /// mailbox title is prefixed with the driving account's email
+    /// (`me@example.org: INBOX (4 unread)`, user request) — with one
+    /// account the plain mailbox title stands.
     pub fn terminal_title(&self) -> String {
         if self.session.wizard.is_some() {
             return String::from("tmail setup");
@@ -543,10 +586,29 @@ impl AppState {
             return format!("Mail to {recipient}");
         }
         let name = self.active_mailbox_name().unwrap_or("Mailbox");
-        match self.active_mailbox_unread() {
+        let mailbox = match self.active_mailbox_unread() {
             Some(unread) => format!("{name} ({unread} unread)"),
             None => String::from(name),
+        };
+        match self.multi_account_identity() {
+            Some(identity) => format!("{identity}: {mailbox}"),
+            None => mailbox,
         }
+    }
+
+    /// The identity prefix the terminal title carries when the config
+    /// holds several accounts (user request): the driving account's
+    /// email, else its display name, else its raw name. `None` with a
+    /// single (or unresolved) account — the plain mailbox title says all
+    /// there is.
+    fn multi_account_identity(&self) -> Option<String> {
+        if self.settings.accounts.len() < 2 {
+            return None;
+        }
+        self.settings
+            .account_email
+            .clone()
+            .or_else(|| self.current_account_label())
     }
 }
 
@@ -632,5 +694,33 @@ mod terminal_title_tests {
             },
         ));
         assert_eq!(state.terminal_title(), "tmail setup");
+    }
+
+    #[test]
+    fn multi_account_titles_carry_the_account_email() {
+        // User request: with several accounts the mailbox title is
+        // prefixed with the driving account's email.
+        let mut state = mailbox_state();
+        state.settings.account_name = Some(String::from("work"));
+        state.settings.account_email = Some(String::from("me@example.org"));
+        state.settings.accounts = vec![
+            crate::config::AccountEntry {
+                name: String::from("work"),
+                email: Some(String::from("me@example.org")),
+                display_name: None,
+                is_default: true,
+            },
+            crate::config::AccountEntry {
+                name: String::from("personal"),
+                email: Some(String::from("other@example.net")),
+                display_name: None,
+                is_default: false,
+            },
+        ];
+        assert_eq!(state.terminal_title(), "me@example.org: INBOX (4 unread)");
+
+        // A single account keeps the plain mailbox title.
+        state.settings.accounts.truncate(1);
+        assert_eq!(state.terminal_title(), "INBOX (4 unread)");
     }
 }

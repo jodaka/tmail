@@ -29,6 +29,9 @@ pub enum Focus {
     /// The theme picker dialog is open (ticket k5ba): arrows preview the
     /// highlighted palette, Enter keeps it, Esc restores the original.
     ThemePicker,
+    /// The account switcher popup is open (ticket c0n0): arrows move the
+    /// cursor, Enter switches (or opens the confirm dialog), Esc closes.
+    AccountSwitcher,
     /// The shortcuts help popup is open (user request): it intercepts all
     /// input; Esc (or the help keys again) returns to the saved focus.
     Help,
@@ -65,6 +68,7 @@ impl Focus {
             Focus::ErrorModal
             | Focus::Dialog
             | Focus::ThemePicker
+            | Focus::AccountSwitcher
             | Focus::Help
             | Focus::Wizard => self,
             // The reader screen keeps its screen focus; the reducer's
@@ -110,6 +114,7 @@ impl fmt::Display for Focus {
             Focus::Composer => write!(f, "composer"),
             Focus::Dialog => write!(f, "dialog"),
             Focus::ThemePicker => write!(f, "themes"),
+            Focus::AccountSwitcher => write!(f, "accounts"),
             Focus::Help => write!(f, "help"),
             Focus::ErrorModal => write!(f, "modal"),
             Focus::Wizard => write!(f, "wizard"),

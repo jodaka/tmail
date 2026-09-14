@@ -2,17 +2,20 @@
 
 A Gmail-inspired, keyboard-first terminal email client built in Rust with
 Ratatui, backed by the [Himalaya CLI](https://pimalaya.org) for all mail
-protocols, accounts, and credentials. Built using AI.
+protocols, accounts, and credentials.
+
+## AI disclaimer 
+Initial planning was performed with ChatGPT. 99.9% of the code was written by GLM-5.3-Flash. 
+Design mockups were created in Open Design using GLM-5.3-Flash.
 
 ## Quick start
 
 ```sh
-tmail --configure            # set up your account in-app
+tmail --configure            # set up your account in-app (will be started automatically if you don't have config)
 tmail                        # start reading mail
 ```
 
-See [docs/installation.md](docs/installation.md) for Homebrew and
-source installs plus requirements.
+See [docs/installation.md](docs/installation.md) for details.
 
 ## Documentation
 

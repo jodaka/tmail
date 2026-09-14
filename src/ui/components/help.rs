@@ -17,10 +17,11 @@ use crate::ui::theme::Theme;
 
 /// Geometry of the dialog for one terminal size and entry count: wide
 /// enough for "Action label — key" rows, enough rows for the entries plus
-/// the hint, clamped inside the terminal.
+/// the hint, clamped inside the terminal. The height budgets the borders
+/// and the one-line margins `modal_frame` keeps around the content.
 fn layout(size: (u16, u16), rows: usize) -> Rect {
     let width = 46u16.min(size.0.max(1));
-    let height = rows as u16 + 3; // entry rows + borders + the hint row
+    let height = rows as u16 + 5; // entry rows + hint + borders + margins
     chrome::centered(size, width, height)
 }
 
@@ -71,18 +72,20 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
         ];
         frame.render_widget(Paragraph::new(Line::from(spans)), row);
     }
+    // The hint sits in the label slot one row below the content rect —
+    // separated from the entries by the rect's last (blank) row, adjacent
+    // to the bottom border.
     let hint = Rect {
         x: inner.x,
-        y: inner.y + inner.height.saturating_sub(1),
+        y: inner.y + inner.height,
         width: inner.width,
         height: 1,
     };
     frame.render_widget(
         Paragraph::new(Span::styled(
-            text::clip(
-                "Esc or ? closes · customizable via [tmail.keybindings]",
-                inner_w,
-            ),
+            // Short on purpose: the popup clips a long hint (the config
+            // pointer does not fit at the dialog's width).
+            "Esc or ? closes",
             Style::new().fg(theme.dim),
         )),
         hint,
@@ -95,8 +98,9 @@ mod tests {
 
     #[test]
     fn dialog_geometry_fits_and_clamps() {
-        // The 27-entry table fits the reference terminal.
-        assert_eq!(layout((152, 40), 27).height, 30);
+        // The 27-entry table fits the reference terminal (27 rows + hint +
+        // borders + margins).
+        assert_eq!(layout((152, 40), 27).height, 32);
         // Tiny terminals clamp instead of overlapping.
         assert_eq!(layout((40, 10), 27).height, 10);
         assert_eq!(layout((0, 0), 0).height, 1);

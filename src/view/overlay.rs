@@ -10,6 +10,9 @@ use crate::view::text::wrap;
 /// Rows the theme picker shows before it starts scrolling.
 const MAX_VISIBLE_ROWS: usize = 10;
 
+/// Rows the account switcher shows before it starts scrolling.
+const MAX_SWITCHER_ROWS: usize = 10;
+
 /// Geometry of the error modal for one terminal size and dialog shape.
 /// Shared by the renderer and the reducer's scroll clamping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,14 +27,16 @@ pub struct ModalLayout {
 
 /// Compute the modal geometry. The modal always fits: it shrinks to the
 /// terminal and keeps at least one detail row even in tiny terminals.
+/// The height budgets the border and the one-line margins `modal_frame`
+/// keeps above and below the content.
 pub fn error_modal_layout(size: (u16, u16), code: Option<i32>, ambiguous: bool) -> ModalLayout {
     let width = size.0.saturating_sub(10).clamp(24, 76).min(size.0.max(1));
-    let height = size.1.saturating_sub(4).clamp(7, 18).min(size.1.max(1));
+    let height = size.1.saturating_sub(6).clamp(9, 18).min(size.1.max(1));
     let area = centered(size, width, height);
-    // Inside the borders: [code?] [warning?] [detail…] [buttons] [hint].
-    let inner_height = height.saturating_sub(2) as usize;
+    // Inside borders+margins: [code?] [warning?] [detail…] [buttons] [hint].
+    let content_height = height.saturating_sub(4) as usize;
     let fixed = 2 + usize::from(code.is_some()) + usize::from(ambiguous);
-    let viewport_lines = inner_height.saturating_sub(fixed).max(1);
+    let viewport_lines = content_height.saturating_sub(fixed).max(1);
     let detail_width = width.saturating_sub(4).max(1) as usize;
     ModalLayout {
         area,
@@ -77,12 +82,13 @@ pub struct PickerLayout {
 }
 
 /// Compute the picker geometry. The dialog always fits: it shrinks to the
-/// terminal and keeps at least one theme row even in tiny terminals.
+/// terminal and keeps at least one theme row even in tiny terminals. The
+/// height budgets the borders, the one-line margins `modal_frame` keeps
+/// above and below the content, and the hint row.
 pub fn picker_layout(size: (u16, u16), theme_count: usize) -> PickerLayout {
     let width = 34u16.min(size.0.max(1));
-    // Inside the borders: the theme rows plus one hint line.
-    let height = ((theme_count.min(MAX_VISIBLE_ROWS) as u16) + 3).min(size.1.max(1));
-    let visible_rows = height.saturating_sub(3).max(1) as usize;
+    let height = ((theme_count.min(MAX_VISIBLE_ROWS) as u16) + 5).min(size.1.max(1));
+    let visible_rows = height.saturating_sub(5).max(1) as usize;
     PickerLayout {
         area: centered(size, width, height),
         visible_rows,
@@ -99,4 +105,45 @@ pub fn picker_visible_rows(size: (u16, u16)) -> usize {
 /// reducer clamps against).
 pub fn picker_max_scroll(theme_count: usize, size: (u16, u16)) -> usize {
     theme_count.saturating_sub(picker_visible_rows(size))
+}
+
+/// Geometry of the account switcher (ticket c0n0) for one terminal size
+/// and account count. Same anatomy as the theme picker — shared
+/// `PickerLayout`, so the reducer's clamp and the drawn window cannot
+/// drift apart — but a wider dialog: rows carry the account's email.
+/// Height budgets the borders, the one-line margins, and the hint row.
+pub fn switcher_layout(size: (u16, u16), account_count: usize) -> PickerLayout {
+    let width = 46u16.min(size.0.max(1));
+    let height = ((account_count.min(MAX_SWITCHER_ROWS) as u16) + 5).min(size.1.max(1));
+    let visible_rows = height.saturating_sub(5).max(1) as usize;
+    PickerLayout {
+        area: centered(size, width, height),
+        visible_rows,
+    }
+}
+
+/// Rows visible in the account switcher at `size` (what the reducer keeps
+/// the cursor and scroll inside), independent of the account count cap.
+pub fn switcher_visible_rows(size: (u16, u16)) -> usize {
+    switcher_layout(size, usize::MAX).visible_rows
+}
+
+/// Largest valid scroll offset for the account list at `size` (what the
+/// reducer clamps against).
+pub fn switcher_max_scroll(account_count: usize, size: (u16, u16)) -> usize {
+    account_count.saturating_sub(switcher_visible_rows(size))
+}
+
+/// Geometry of the account-switch confirm dialog (ticket c0n0): sized to
+/// its content, centered, never exceeding the terminal — like the error
+/// modal. `operations`/`unsaved` say which optional lines the dialog
+/// carries (the frozen op summaries, the composer warning). The height
+/// budgets the borders and the one-line margins.
+pub fn switch_confirm_layout(size: (u16, u16), operations: bool, unsaved: bool) -> Rect {
+    let width = 56u16.min(size.0.max(1));
+    // Content: target line, [ops line], [unsaved line], blank, buttons,
+    // hint; outer adds the borders and the margins.
+    let inner = 4 + u16::from(operations) + u16::from(unsaved);
+    let height = (inner + 4).min(size.1.max(1));
+    centered(size, width, height)
 }

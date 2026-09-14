@@ -86,6 +86,7 @@ const DEFAULT_GLOBAL: &[DefaultBinding] = &[
     binding!("select_all", Action::SelectAll, ["Ctrl+A"]),
     binding!("toggle_mouse", Action::ToggleMouseCapture, ["m"]),
     binding!("theme", Action::OpenThemePicker, ["t"]),
+    binding!("switch_account", Action::OpenAccountSwitcher, ["Ctrl+g"]),
     binding!("reply", Action::Reply, ["r"]),
     binding!("reply_all", Action::ReplyAll, ["a"]),
     binding!("forward", Action::Forward, ["f"]),
@@ -563,6 +564,16 @@ mod tests {
         assert_ne!(
             keymap.lookup(&key(Char('d'), true, false), list),
             Some(Action::Trash)
+        );
+        // Ctrl+G opens the account switcher (ticket c0n0), from the list
+        // and the reader alike.
+        assert_eq!(
+            keymap.lookup(&key(Char('g'), true, false), list),
+            Some(Action::OpenAccountSwitcher)
+        );
+        assert_eq!(
+            keymap.lookup(&key(Char('g'), true, false), Focus::Reader),
+            Some(Action::OpenAccountSwitcher)
         );
     }
 

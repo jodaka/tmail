@@ -156,15 +156,17 @@ pub fn render(
         },
         ClickTarget::ErrorButton(ModalButton::Dismiss),
     );
-    y += 1;
 
+    // The hint sits in the label slot one row below the buttons —
+    // separated from them by the content rect's last (blank) row,
+    // adjacent to the bottom border.
     let hint = "↑↓ scroll · Tab switch · ↵ confirm · Esc dismiss";
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             crate::ui::text::clip(hint, inner_w as usize),
             Style::new().fg(theme.dim),
         ))),
-        row(y, 1),
+        row(area.y + area.height, 1),
     );
 }
 
@@ -188,9 +190,10 @@ mod tests {
     fn modal_fits_reference_size() {
         let geom = layout((152, 40), Some(1), false);
         assert_eq!(geom.area.width, 76);
-        // Height caps at 18 rows; fixed rows: code + detail + buttons + hint.
+        // Height caps at 18 rows; fixed rows: code + detail + buttons +
+        // hint, minus borders and margins.
         assert_eq!(geom.area.height, 18);
-        assert_eq!(geom.viewport_lines, 18 - 2 - 3);
+        assert_eq!(geom.viewport_lines, 18 - 4 - 3);
         assert_eq!(geom.detail_width, 72);
         // Centered.
         assert_eq!(geom.area.x, (152 - 76) / 2);
@@ -202,7 +205,7 @@ mod tests {
         assert_eq!(geom.area.width.min(geom.area.height), 1);
         assert_eq!(geom.viewport_lines, 1);
         let geom = layout((40, 10), Some(1), true);
-        // Height clamps to 7 → inner 5; minus code/warning/buttons/hint.
+        // Height clamps to 9 → content 5; minus code/warning/buttons/hint.
         assert_eq!(geom.viewport_lines, 1);
     }
 

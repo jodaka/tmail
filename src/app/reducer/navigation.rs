@@ -108,10 +108,12 @@ pub(crate) fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
         }
         Focus::Reader => scroll_reader(state, delta),
         // Wizard input never reaches the mailbox navigation (the wizard
-        // intercepts everything first, ADR 0003).
+        // intercepts everything first, ADR 0003); the modals handle their
+        // own cursor movement.
         Focus::Composer
         | Focus::Dialog
         | Focus::ThemePicker
+        | Focus::AccountSwitcher
         | Focus::Help
         | Focus::ErrorModal
         | Focus::Wizard => {}
@@ -554,6 +556,7 @@ pub(crate) fn activate(state: &mut AppState) -> Vec<Effect> {
         Focus::Reader => activate_reader_item(state),
         Focus::Dialog
         | Focus::ThemePicker
+        | Focus::AccountSwitcher
         | Focus::Help
         | Focus::SearchField
         | Focus::ErrorModal

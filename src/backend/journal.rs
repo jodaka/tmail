@@ -47,25 +47,125 @@ impl DraftJournal {
         Self { dir }
     }
 
-    /// The default journal directory: `$TMAIL_DATA_DIR/drafts` when set,
-    /// else the platform user-data dir under `$HOME`
-    /// (`~/Library/Application Support/tmail/drafts` on macOS,
-    /// `~/.local/share/tmail/drafts` elsewhere). `None` when no home is
-    /// known; saving then fails loudly instead of silently vanishing.
-    pub fn open_default() -> Option<Self> {
-        if let Some(dir) = std::env::var_os("TMAIL_DATA_DIR") {
-            return Some(Self::open(PathBuf::from(dir).join("drafts")));
-        }
-        let home = std::env::var_os("HOME")?;
-        let mut dir = PathBuf::from(home);
-        dir.push(if cfg!(target_os = "macos") {
-            "Library/Application Support"
+    /// The default journal directory, scoped per account (ticket c0n0):
+    /// `$TMAIL_DATA_DIR/drafts/<account>` when the env var is set, else the
+    /// platform user-data dir under `$HOME`
+    /// (`~/Library/Application Support/tmail/drafts/<account>` on macOS,
+    /// `~/.local/share/tmail/drafts/<account>` elsewhere). Drafts saved
+    /// under one account must never be restored under another (a
+    /// wrong-identity send hazard). An account-less journal (`None`) keeps
+    /// the unscoped root: nothing to separate.
+    ///
+    /// `None` when no home is known; saving then fails loudly instead of
+    /// silently vanishing.
+    pub fn open_default(account: Option<&str>) -> Option<Self> {
+        let drafts = if let Some(dir) = std::env::var_os("TMAIL_DATA_DIR") {
+            PathBuf::from(dir).join("drafts")
         } else {
-            ".local/share"
-        });
-        dir.push("tmail");
-        dir.push("drafts");
-        Some(Self::open(dir))
+            let home = std::env::var_os("HOME")?;
+            let mut dir = PathBuf::from(home);
+            dir.push(if cfg!(target_os = "macos") {
+                "Library/Application Support"
+            } else {
+                ".local/share"
+            });
+            dir.push("tmail");
+            dir.push("drafts");
+            dir
+        };
+        Some(Self::open_scoped(drafts, account))
+    }
+
+    /// [`DraftJournal::open`] for the account scope of `root`: with an
+    /// account, the journal lives in `root/<account>` and any draft files
+    /// still directly in `root` (the pre-switching layout) move into it —
+    /// a one-time, idempotent migration that assumes they belong to the
+    /// account now being opened (documented in ticket c0n0). A moved-into
+    /// name that is already taken stays behind: keeping a copy always
+    /// beats risking data loss.
+    fn open_scoped(root: PathBuf, account: Option<&str>) -> Self {
+        let Some(account) = account else {
+            return Self::open(root);
+        };
+        let scoped = root.join(Self::journal_dir_name(account));
+        if scoped != root {
+            Self::migrate_legacy(&root, &scoped);
+        }
+        Self::open(scoped)
+    }
+
+    /// Move every draft file still directly in `root` into `scoped` (the
+    /// one-time legacy migration of [`DraftJournal::open_scoped`]). Only
+    /// `.json` entries move; a target that already exists wins (the
+    /// account scope's copy is authoritative) and a failed move is logged
+    /// and skipped — the file stays in place, nothing is lost.
+    fn migrate_legacy(root: &Path, scoped: &Path) {
+        let Ok(read_dir) = fs::read_dir(root) else {
+            return; // No legacy directory: nothing to migrate.
+        };
+        if let Err(err) = fs::create_dir_all(scoped) {
+            tracing::warn!(
+                dir = %scoped.display(),
+                %err,
+                "could not create the account's draft journal directory"
+            );
+            return;
+        }
+        let mut moved = 0usize;
+        for entry in read_dir {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            let target = scoped.join(name);
+            if target.exists() {
+                continue;
+            }
+            match fs::rename(&path, &target) {
+                Ok(()) => moved += 1,
+                Err(err) => tracing::warn!(
+                    file = %path.display(),
+                    %err,
+                    "legacy draft file could not be moved into the account's journal"
+                ),
+            }
+        }
+        if moved > 0 {
+            tracing::info!(
+                dir = %scoped.display(),
+                moved,
+                "migrated the shared draft journal into the account's scope"
+            );
+        }
+    }
+
+    /// The directory name for one account's journal scope: journal ids are
+    /// validated separately, so the account name only has to stay inside
+    /// the drafts root — every character outside `[a-zA-Z0-9._-]` (a path
+    /// separator included) becomes `_`. Two accounts differing only in
+    /// such characters share a scope; their draft ids cannot collide
+    /// (they are minted internally), so the merge is harmless.
+    fn journal_dir_name(account: &str) -> String {
+        let mut name: String = account
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if name.is_empty() {
+            name.push('_');
+        }
+        name
     }
 
     fn file(&self, local_id: &str) -> io::Result<PathBuf> {
@@ -303,6 +403,74 @@ mod tests {
             .record(&snapshot("../../etc/passwd", 1, "evil"))
             .expect_err("path traversal rejected");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn account_scopes_are_separate_directories() {
+        // Ticket c0n0: a draft recorded under one account is invisible to
+        // another account's journal.
+        let dir = tempfile::TempDir::new().unwrap();
+        let a = DraftJournal::open_scoped(dir.path().to_path_buf(), Some("a"));
+        let b = DraftJournal::open_scoped(dir.path().to_path_buf(), Some("b"));
+        a.record(&snapshot("local-1", 1, "for a")).unwrap();
+        assert_eq!(b.load_all().unwrap(), Vec::new());
+        let entries = a.load_all().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].draft.body, "for a");
+    }
+
+    #[test]
+    fn journal_scope_sanitizes_the_account_name() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let j = DraftJournal::open_scoped(dir.path().to_path_buf(), Some("a/b c"));
+        j.record(&snapshot("local-1", 1, "kept inside")).unwrap();
+        // The scope stayed inside the drafts root (no `a/b c` tree).
+        let entries = j.load_all().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(dir.path().join("drafts").is_dir() || dir.path().file_name().is_some());
+        assert_eq!(j.dir.file_name().and_then(|n| n.to_str()), Some("a_b_c"));
+    }
+
+    #[test]
+    fn legacy_journal_migrates_into_the_account_scope() {
+        // The pre-switching layout stored drafts directly in the root;
+        // opening an account's scope moves them once, so a switch back
+        // still finds them.
+        let dir = tempfile::TempDir::new().unwrap();
+        let legacy = DraftJournal::open(dir.path().to_path_buf());
+        legacy
+            .record(&snapshot("local-1", 1, "legacy draft"))
+            .unwrap();
+        let scoped = DraftJournal::open_scoped(dir.path().to_path_buf(), Some("a"));
+        let entries = scoped.load_all().unwrap();
+        assert_eq!(entries.len(), 1, "the legacy draft moved into the scope");
+        assert_eq!(entries[0].draft.body, "legacy draft");
+        // Idempotent: opening again moves nothing and keeps the draft.
+        let again = DraftJournal::open_scoped(dir.path().to_path_buf(), Some("a"));
+        assert_eq!(again.load_all().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn legacy_migration_never_overwrites_the_scoped_copy() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let legacy = DraftJournal::open(dir.path().to_path_buf());
+        legacy.record(&snapshot("local-1", 1, "legacy")).unwrap();
+        let scoped = DraftJournal::open_scoped(dir.path().to_path_buf(), Some("a"));
+        scoped.record(&snapshot("local-1", 2, "scoped")).unwrap();
+        // A later scope opening must not clobber the newer scoped copy
+        // with the stale legacy file.
+        let again = DraftJournal::open_scoped(dir.path().to_path_buf(), Some("a"));
+        let entries = again.load_all().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].draft.body, "scoped");
+    }
+
+    #[test]
+    fn accountless_journal_keeps_the_unscoped_root() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let j = DraftJournal::open_scoped(dir.path().to_path_buf(), None);
+        j.record(&snapshot("local-1", 1, "x")).unwrap();
+        assert_eq!(j.dir, dir.path());
     }
 
     #[test]

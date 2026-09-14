@@ -764,6 +764,41 @@ impl OperationRegistry {
         }
     }
 
+    /// Cancel every in-flight operation (the confirmed account switch,
+    /// ticket c0n0): tokens fire so the backends kill their children,
+    /// entries clear so a late result is rejected as unknown, and the
+    /// foreground slot empties. Returns how many operations were
+    /// cancelled.
+    pub fn cancel_all(&mut self) -> usize {
+        let count = self.entries.len();
+        for op in self.entries.values() {
+            op.cancellation.cancel();
+        }
+        self.entries.clear();
+        self.foreground = None;
+        count
+    }
+
+    /// The in-flight operations as sorted, deduplicated display summaries
+    /// with counts (`2× Fetching preview`) — the lines the account-switch
+    /// confirmation lists (ticket c0n0).
+    pub fn in_flight_summaries(&self) -> Vec<String> {
+        let mut counts: std::collections::BTreeMap<&'static str, usize> = Default::default();
+        for op in self.entries.values() {
+            *counts.entry(op.kind.summary()).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .map(|(summary, count)| {
+                if count == 1 {
+                    summary.to_owned()
+                } else {
+                    format!("{summary} ×{count}")
+                }
+            })
+            .collect()
+    }
+
     /// Whether nothing is in flight (spinner hidden).
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -932,6 +967,48 @@ mod tests {
         assert_eq!(effect.id, registry.get(effect.id).unwrap().id);
         assert_eq!(effect.retry_spec().kind, effect.kind);
         let _ = effect as Effect; // type shape check
+    }
+
+    #[test]
+    fn cancel_all_fires_every_token_and_clears_the_registry() {
+        // Ticket c0n0: the confirmed account switch cancels everything at
+        // once — tokens fire so the children die, entries clear so late
+        // results are rejected.
+        let mut registry = OperationRegistry::default();
+        let first = registry.start(page("inbox", 0));
+        let second = registry.start(page("sent", 0));
+        let third = registry.start(OperationKind::LoadMailboxes);
+        let tokens: Vec<_> = [&first, &second, &third]
+            .into_iter()
+            .map(|effect| registry.cancellation(effect.id).unwrap())
+            .collect();
+        assert_eq!(registry.cancel_all(), 3);
+        for token in tokens {
+            assert!(token.is_cancelled());
+        }
+        assert!(registry.is_empty());
+        assert!(registry.foreground().is_none());
+        assert_eq!(registry.cancel_all(), 0, "second pass is a no-op");
+    }
+
+    #[test]
+    fn in_flight_summaries_sort_dedupe_and_count() {
+        let mut registry = OperationRegistry::default();
+        let locator = MessageLocator {
+            mailbox: MailboxId(String::from("inbox")),
+            id: MessageId(String::from("m1")),
+            message_id: None,
+        };
+        registry.start_background(OperationKind::Preview(locator.clone()));
+        registry.start_background(OperationKind::Preview(locator));
+        registry.start(page("inbox", 0));
+        assert_eq!(
+            registry.in_flight_summaries(),
+            vec![
+                String::from("Fetching preview ×2"),
+                String::from("Loading messages"),
+            ]
+        );
     }
 }
 

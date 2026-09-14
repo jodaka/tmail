@@ -417,8 +417,9 @@ fn theme_picker_shows_a_scrollbar_when_the_list_overflows() {
         .map(|i| (format!("theme-{i:02}"), Theme::default_dark()))
         .collect();
 
-    // Dialog geometry at 152×40: width 34, height 13 → inner rows at
-    // y = 14..24 (10 rows + hint), scrollbar column at x = 90.
+    // Dialog geometry at 152×40: width 34, height 15 (10 rows + hint +
+    // borders + the one-line margins) → rows at y = 14..24, scrollbar
+    // column at x = 90.
     let buffer = buffer_after(&mut state, &[Action::OpenThemePicker], 152, 40);
     let text = text_of(&buffer);
     assert!(text.contains("theme-00"), "first theme visible:\n{text}");
@@ -666,6 +667,53 @@ fn status_hints_align_with_the_sidebar_edge() {
     );
 }
 
+/// The `Ctrl+G` switch-account hint rides the mailbox screen's status bar
+/// only when more than one account is configured (user request); an
+/// unbound or single-account setup drops it instead of lying.
+#[test]
+fn switch_account_hint_shows_only_with_several_accounts() {
+    let accounts = |count: usize| {
+        (0..count)
+            .map(|i| tmail::config::AccountEntry {
+                name: format!("account-{i}"),
+                email: Some(format!("a{i}@example.org")),
+                display_name: None,
+                is_default: false,
+            })
+            .collect::<Vec<_>>()
+    };
+    let status_row = 40 - tmail::ui::layout::STATUSBAR_HEIGHT + 1;
+    let row_text = |state: &mut tmail::app::AppState| {
+        let buffer = buffer_after(state, &[], 152, 40);
+        let row: String = (0..152).map(|x| buffer[(x, status_row)].symbol()).collect();
+        row
+    };
+
+    // Two accounts: the hint rides the row before the shortcuts hint.
+    let mut state = mock_initial_state();
+    state.settings.accounts = accounts(2);
+    state.session.size = (152, 40);
+    let row = row_text(&mut state);
+    assert!(
+        row.contains("Ctrl+g accounts"),
+        "switch hint missing:\n{row:?}"
+    );
+    assert!(
+        row.find("Ctrl+g accounts").expect("hint") < row.find("shortcuts").expect("shortcuts"),
+        "the switch hint precedes the shortcuts hint"
+    );
+
+    // A single account: no hint.
+    let mut state = mock_initial_state();
+    state.settings.accounts = accounts(1);
+    state.session.size = (152, 40);
+    let row = row_text(&mut state);
+    assert!(
+        !row.contains("accounts"),
+        "switch hint must be hidden with one account:\n{row:?}"
+    );
+}
+
 #[test]
 fn error_modal_renders_summary_code_buttons_and_sanitized_detail() {
     let mut state = mock_initial_state();
@@ -703,6 +751,43 @@ fn error_modal_renders_summary_code_buttons_and_sanitized_detail() {
     assert!(text.contains("Tab switch"), "hints missing:\n{text}");
 }
 
+/// The shortcuts popup (user request): entries, then a blank separator
+/// line, then the `Esc or ? closes` label in the slot one row above the
+/// dialog's bottom border — the shared popup anatomy `modal_frame`
+/// documents (label separated from the content by a linebreak, no blank
+/// line below the label).
+#[test]
+fn help_popup_labels_the_bottom_with_a_blank_separator() {
+    let mut state = mock_initial_state();
+    state.session.size = (152, 40);
+    let buffer = buffer_after(&mut state, &[Action::OpenHelp], 152, 40);
+    let text = text_of(&buffer);
+    assert!(text.contains(" Shortcuts "), "title missing:\n{text}");
+    assert!(text.contains("Esc or ? closes"), "hint missing:\n{text}");
+    let hint_row = text
+        .lines()
+        .position(|line| line.contains("Esc or ? closes"))
+        .expect("hint row") as u16;
+    // Between the dialog's side borders, the row above the hint is blank
+    // (the separator); the row below is the bottom border.
+    let between = |row: u16| -> String {
+        let cells: Vec<&str> = (0..152).map(|x| buffer[(x, row)].symbol()).collect();
+        let first = cells.iter().position(|c| *c != " ").expect("dialog edge");
+        let last = cells.iter().rposition(|c| *c != " ").expect("dialog edge");
+        cells[first + 1..last].concat()
+    };
+    let above = between(hint_row - 1);
+    assert!(
+        above.trim().is_empty(),
+        "blank line must separate content from the label: {above:?}"
+    );
+    let below = between(hint_row + 1);
+    assert!(
+        !below.is_empty() && below.chars().all(|c| c == '─'),
+        "the label must be adjacent to the bottom border:\n{below:?}"
+    );
+}
+
 #[test]
 fn error_modal_detail_scrolls() {
     let mut state = mock_initial_state();
@@ -721,6 +806,7 @@ fn error_modal_detail_scrolls() {
     let actions = vec![
         sanitized_failure(id, kind, &lines.join("\n")),
         // Scroll to the very end (the reducer clamps).
+        Action::PageNext,
         Action::PageNext,
         Action::PageNext,
         Action::PageNext,
@@ -1598,8 +1684,10 @@ fn hit_map_records_modal_buttons_and_blocks_click_through() {
     reducer::reduce(&mut state, failure);
     let (_, hits) = draw_state_hits(&state, 152, 40);
     // The modal geometry comes from the same layout the renderer uses.
+    // Rows draw under the one-line margins: the button row sits one row
+    // higher than it did without margins (hint last, then the margin).
     let layout = tmail::ui::components::error_modal::layout((152, 40), Some(1), false);
-    let button_y = layout.area.y + layout.area.height - 3;
+    let button_y = layout.area.y + layout.area.height - 4;
     let retry_x = layout.area.x + 2;
     assert_eq!(
         hits.hit_test(retry_x + 2, button_y, true),
@@ -2517,6 +2605,179 @@ fn status_message_sits_top_right_of_the_brand_row() {
     // The bottom status bar carries no message anymore.
     let bottom: String = (0..152).map(|x| buffer[(x, 38)].symbol()).collect();
     assert!(!bottom.contains("Mailboxes loaded"), "{bottom:?}");
+}
+
+/// The account line under the logo (ticket c0n0): the label prefers the
+/// email — the unique identity; display names are commonly shared between
+/// accounts (user request) — then the display name, then the raw account
+/// name, drawn dimly below the brand row.
+#[test]
+fn account_name_shows_under_the_logo() {
+    let theme = Theme::default_dark();
+    let mut state = mock_initial_state();
+    state.session.size = (152, 40);
+    state.settings.account_name = Some(String::from("work"));
+    state.settings.accounts = vec![tmail::config::AccountEntry {
+        name: String::from("work"),
+        email: Some(String::from("work@example.org")),
+        display_name: Some(String::from("Work Mail")),
+        is_default: false,
+    }];
+    let text = draw_after(&mut state, &[], 152, 40);
+    assert!(
+        text.contains("work@example.org"),
+        "account label missing:\n{text}"
+    );
+
+    // It rides the row under the brand (y=2) in the label_dim color.
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    let row: String = (0..24).map(|x| buffer[(x, 2)].symbol()).collect();
+    assert!(row.contains("work@example.org"), "account row: {row:?}");
+    let start = 4; // brand column starts at x=2; the label follows it.
+    assert_eq!(buffer[(start, 2)].fg, theme.label_dim);
+    assert_eq!(buffer[(start, 2)].bg, theme.sidebar_bg);
+
+    // Without a resolved account nothing renders (multi-account configs
+    // without a default; the switcher is the way to pick one).
+    let mut state = mock_initial_state();
+    state.session.size = (152, 40);
+    state.settings.account_name = None;
+    let buffer = buffer_after(&mut state, &[], 152, 40);
+    let row: String = (0..24).map(|x| buffer[(x, 2)].symbol()).collect();
+    assert!(
+        row.trim().is_empty(),
+        "no label without an account: {row:?}"
+    );
+}
+
+/// A fixture state with two accounts, `personal` driving the session.
+fn switcher_state() -> tmail::app::AppState {
+    let mut state = mock_initial_state();
+    state.session.size = (152, 40);
+    state.settings.account_name = Some(String::from("personal"));
+    state.settings.accounts = vec![
+        tmail::config::AccountEntry {
+            name: String::from("personal"),
+            email: Some(String::from("me@example.org")),
+            display_name: Some(String::from("Personal")),
+            is_default: true,
+        },
+        tmail::config::AccountEntry {
+            name: String::from("work"),
+            email: Some(String::from("work@example.net")),
+            display_name: None,
+            is_default: false,
+        },
+    ];
+    state
+}
+
+/// The account switcher (ticket c0n0): `Ctrl+G` opens a dialog listing
+/// every account with its email, the current one is marked, and the
+/// cursor row carries the list's accent fill.
+#[test]
+fn account_switcher_lists_marks_and_highlights() {
+    let theme = Theme::default_dark();
+    let mut state = switcher_state();
+    let buffer = buffer_after(&mut state, &[Action::OpenAccountSwitcher], 152, 40);
+    let text = text_of(&buffer);
+    assert!(
+        text.contains(" Switch account "),
+        "dialog title missing:\n{text}"
+    );
+    assert!(
+        text.contains("me@example.org"),
+        "the email row missing:\n{text}"
+    );
+    assert!(
+        text.contains("· current"),
+        "current marker missing:\n{text}"
+    );
+    assert!(text.contains("↵ switch"), "binding hint missing:\n{text}");
+
+    // The cursor row (the current account) carries the marker fill like a
+    // focused list row. The row is found by its `· current` suffix — the
+    // topbar's account line carries the email too.
+    let cursor_row = text
+        .lines()
+        .position(|line| line.contains("· current"))
+        .expect("cursor row") as u16;
+    let highlighted =
+        (0..buffer.area.width).any(|x| buffer[(x, cursor_row)].style().bg == Some(theme.marker));
+    assert!(highlighted, "cursor row lacks the marker fill:\n{text}");
+}
+
+/// Switching with in-flight work opens the confirmation first (ticket
+/// c0n0): the dialog names the target, lists the operations confirming
+/// would cancel, and keeps `Keep working` as the safe default button.
+/// Confirming cancels the work and arms the switch.
+#[test]
+fn switch_confirm_lists_work_then_confirms() {
+    let mut state = switcher_state();
+    // One foreground page load in flight.
+    let effects = reducer::reduce(&mut state, Action::PageNext);
+    let (id, _) = match effects.as_slice() {
+        [effect] => (effect.id, effect.kind.clone()),
+        other => panic!("expected one effect, got {other:?}"),
+    };
+    assert!(
+        state.session.operations.get(id).is_some(),
+        "page load in flight"
+    );
+    let buffer = buffer_after(
+        &mut state,
+        &[
+            Action::OpenAccountSwitcher,
+            Action::MoveDown,
+            Action::Activate,
+        ],
+        152,
+        40,
+    );
+    let text = text_of(&buffer);
+    assert!(
+        text.contains(" Switch account? "),
+        "confirm title missing:\n{text}"
+    );
+    assert!(
+        text.contains("Switch to work."),
+        "target line missing:\n{text}"
+    );
+    assert!(
+        text.contains("Cancels now: Loading messages"),
+        "in-flight summary missing:\n{text}"
+    );
+    assert!(
+        text.contains("[ Switch anyway ]") && text.contains("[ Keep working ]"),
+        "buttons missing:\n{text}"
+    );
+    assert!(text.contains("Esc cancel"), "hint missing:\n{text}");
+
+    // Tab moves to `Switch anyway`; Enter proceeds: the switch arms and
+    // the confirmation closes. A fresh state — the dialog stayed open in
+    // the buffer above, and reducer state persists across draws.
+    let mut state = switcher_state();
+    let _ = buffer_after(
+        &mut state,
+        &[
+            Action::PageNext,
+            Action::OpenAccountSwitcher,
+            Action::MoveDown,
+            Action::Activate,
+            Action::FocusNext,
+            Action::Activate,
+        ],
+        152,
+        40,
+    );
+    assert!(
+        state.session.switch_requested.as_deref() == Some("work"),
+        "the switch must be armed"
+    );
+    assert!(
+        state.session.operations.is_empty(),
+        "the in-flight operation was cancelled with the switch"
+    );
 }
 
 #[test]

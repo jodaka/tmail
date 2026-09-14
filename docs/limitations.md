@@ -1,8 +1,8 @@
 # Known limitations
 
-**v1 scope** (by design, per `TMAIL_IMPLEMENTATION_PLAN.md` §23): no
-conversation threads, no multiple-account switching, no label management,
-no settings/help UI, and no offline sync.
+**v1 scope** (by design, per `TMAIL_IMPLEMENTATION_PLAN.md` §23): no conversation threads, no label management, no settings/help UI, and no offline sync. 
+
+Runtime account switching now exists — `Ctrl+G`, see [Features](features.md#account-switching) — but it works by restarting into the other account, not by merging them into one view.)
 
 **Search:**
 

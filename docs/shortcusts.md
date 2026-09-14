@@ -20,6 +20,7 @@ hints always follow the configured bindings.
 | Global | `Ctrl+A` | Select all visible messages (or clear the selection) |
 | Global | `m` | Toggle mouse capture on/off (see [Mouse](#mouse)) |
 | Global | `t` | Cycle the theme: built-ins first, then `[tmail.themes.<name>]` |
+| Global | `Ctrl+G` | Account switcher: restart into another `[accounts.<name>]` (confirm first when work is in flight or the composer has unsaved edits) |
 | Global | `?` (in text fields: `Ctrl+H`) | Shortcuts popup over the current screen (wizard excluded) |
 | List/reader | `r` / `a` / `f` | Reply / reply-all / forward. From the reader they seed from the open message; from the list the message is loaded first¹, then the composer opens |
 | List/reader | `e` / `s` / `u` | Archive / star / mark unread |

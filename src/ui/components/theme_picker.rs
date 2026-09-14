@@ -102,9 +102,12 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
             dialog.scroll,
         );
     }
+    // The hint sits in the label slot one row below the rows — separated
+    // from them by the content rect's last (blank) row, adjacent to the
+    // bottom border.
     let hint = Rect {
         x: inner.x,
-        y: inner.y + rows_height,
+        y: inner.y + rows_height + 1,
         width: inner.width,
         height: 1,
     };

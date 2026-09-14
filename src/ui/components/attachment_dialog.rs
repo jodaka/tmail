@@ -112,6 +112,9 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
         style,
     );
 
+    // The hint sits in the label slot one row below the content rect —
+    // separated from it by the rect's last (blank) row, adjacent to the
+    // bottom border.
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             text::clip("↑↓ select · ← up · → open · ↵ attach · Esc cancel", inner_w),
@@ -119,7 +122,7 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
         ))),
         Rect {
             x: inner.x,
-            y: inner.y + inner.height - 1,
+            y: inner.y + inner.height,
             width: inner.width,
             height: 1,
         },

@@ -18,8 +18,10 @@ use crate::ui::text;
 use crate::ui::theme::Theme;
 
 /// Dialog geometry for one terminal size; centered like the error modal.
+/// The height budgets the borders and the one-line margins `modal_frame`
+/// keeps around the six content rows.
 fn layout(size: (u16, u16)) -> Rect {
-    chrome::centered(size, 52, 8)
+    chrome::centered(size, 52, 10)
 }
 
 /// Render the dialog, when open, above everything already drawn.
@@ -61,13 +63,6 @@ pub fn render(
         )),
         Line::from(Span::raw("")),
         Line::from(button_spans(dialog.button, theme)),
-        Line::from(Span::styled(
-            text::clip(
-                "Tab switch · ↵ confirm · Esc keep draft",
-                inner.width as usize,
-            ),
-            Style::new().fg(theme.dim),
-        )),
     ];
     for (index, line) in body_lines
         .into_iter()
@@ -84,6 +79,24 @@ pub fn render(
             },
         );
     }
+    // The hint sits in the label slot one row below the content rect —
+    // separated from it by the rect's last (blank) row, adjacent to the
+    // bottom border.
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            text::clip(
+                "Tab switch · ↵ confirm · Esc keep draft",
+                inner.width as usize,
+            ),
+            Style::new().fg(theme.dim),
+        )),
+        Rect {
+            x: inner.x,
+            y: inner.y + inner.height,
+            width: inner.width,
+            height: 1,
+        },
+    );
     // Click targets for the two buttons when their row is drawn (plan
     // §10/§14): Tab + Enter reaches the same states. `Keep` stays the safe
     // default — clicking outside the buttons does nothing.

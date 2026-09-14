@@ -88,7 +88,10 @@ digraph g {
   himalaya's `[accounts.*]` (which Tmail never rewrites). `parse_with_issues`
   collects all problems for reporting at startup; every config knob is in
   the README's tables. `write.rs` is the wizard's format-preserving
-  account merge (ADR 0003 §3.6).
+  account merge (ADR 0003 §3.6). `list_accounts` enumerates the
+  `[accounts.*]` tables for the runtime account switcher, whose confirmed
+  selection re-loads the file through `Config::load_with_account_override`
+  (ticket c0n0).
 
 - **`discovery/`** — the account-setup wizard's email-settings discovery
   (providers, server URLs, security) wrapping `io-pim-discovery`;

@@ -120,6 +120,7 @@ fn dispatch(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::Refresh => refresh(state),
         Action::ToggleMouseCapture => toggle_mouse_capture(state),
         Action::OpenThemePicker => open_theme_picker(state),
+        Action::OpenAccountSwitcher => open_account_switcher(state),
         Action::Tick { now } => tick(state, *now),
         Action::SetTerminalFocus(focused) => {
             state.session.terminal_focused = focused;

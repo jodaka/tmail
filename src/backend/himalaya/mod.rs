@@ -144,13 +144,16 @@ impl HimalayaCliBackend {
         account: Option<String>,
         aliases: HashMap<String, String>,
     ) -> Self {
+        // The journal is scoped per account (ticket c0n0): a draft
+        // recorded under one account is never restored under another.
+        let journal = DraftJournal::open_default(account.as_deref());
         Self {
             program: program.into(),
             config_path,
             account,
             aliases,
             mailboxes: Arc::new(RwLock::new(None)),
-            journal: DraftJournal::open_default(),
+            journal,
             account_email: None,
             account_display_name: None,
             downloads_dir: None,

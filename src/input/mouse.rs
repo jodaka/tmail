@@ -111,11 +111,12 @@ fn wheel(state: &AppState, delta: i64) -> Option<Action> {
                 Action::MoveDown
             }
         }
-        // Wheeling the picker does not preview themes — arrows only.
+        // Wheeling the pickers does not preview/move — arrows only.
         Focus::SearchField
         | Focus::Composer
         | Focus::Dialog
         | Focus::ThemePicker
+        | Focus::AccountSwitcher
         | Focus::Help
         // The wizard has no scrollable region yet (keyboard-first, ADR 0003).
         | Focus::Wizard => return None,

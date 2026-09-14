@@ -89,9 +89,50 @@ pub enum Overlay {
     /// Moving the cursor previews the highlighted theme at once; Enter
     /// keeps it and Esc restores the palette the picker opened with.
     ThemePicker(ThemePickerDialog),
+    /// The runtime account switcher (ticket c0n0): a small list of every
+    /// account in the config file. Enter on another account restarts the
+    /// session with it; Enter on the current one closes.
+    AccountSwitcher(AccountSwitcherDialog),
+    /// The account-switch confirmation (ticket c0n0): listed in-flight
+    /// operations would be cancelled (an in-flight send may already be
+    /// delivered) and unsaved composer edits would be lost. Confirming
+    /// proceeds with the switch; Esc aborts it.
+    SwitchConfirm(SwitchConfirmDialog),
     /// The shortcuts help popup (user request): every active binding for
     /// the screen underneath, rendered from the keymap.
     Help(HelpDialog),
+}
+
+/// The runtime account switcher (ticket c0n0). The account list itself
+/// lives in `AppState.settings.accounts` (read from the config file at
+/// startup — the switch's own reload re-reads the file), so the dialog
+/// only tracks where the user is inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountSwitcherDialog {
+    /// Cursor into `AppState.settings.accounts`.
+    pub cursor: usize,
+    /// First visible row when the account list outgrows the dialog.
+    pub scroll: usize,
+    /// Focus to restore when the popup closes.
+    pub previous_focus: Focus,
+}
+
+/// The account-switch confirmation dialog (ticket c0n0). The in-flight
+/// operation summaries are frozen when the dialog opens — a result
+/// landing meanwhile simply shrinks what confirming will cancel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchConfirmDialog {
+    /// The account the switch would select.
+    pub target: String,
+    /// Sorted unique summaries of the in-flight operations (`2× …`).
+    pub operations: Vec<String>,
+    /// Whether the composer holds unsaved changes (a switch drops the
+    /// composer and its edits; saved revisions stay in the journal).
+    pub unsaved_draft: bool,
+    /// Keyboard-targeted button; `Keep` is the safe default.
+    pub button: ConfirmButton,
+    /// Focus to restore when the dialog closes.
+    pub previous_focus: Focus,
 }
 
 /// The shortcuts help dialog (user request). The bindings themselves live

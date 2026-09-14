@@ -167,6 +167,67 @@ pub fn parse_hex_color(value: &str) -> Option<String> {
 /// append, and the startup summary only iterates.
 pub type LoadIssues = Vec<String>;
 
+/// One account found in the config file's `[accounts]` table (ticket c0n0):
+/// the runtime account switcher lists these. The label prefers `email` —
+/// display names are commonly shared between accounts (a user request), so
+/// the unique address is the identity; `display-name` and then the raw
+/// name fall back when no email is configured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountEntry {
+    /// The `[accounts.<name>]` key — the value `[tmail].account` selects.
+    pub name: String,
+    /// `[accounts.<name>].email`, when configured.
+    pub email: Option<String>,
+    /// `[accounts.<name>].display-name`, when configured.
+    pub display_name: Option<String>,
+    /// Whether the account carries `default = true` (the one himalaya
+    /// would pick without an explicit selection).
+    pub is_default: bool,
+}
+
+impl AccountEntry {
+    /// The label the UI shows for this account: the email, else the
+    /// display name, else the raw account name.
+    pub fn label(&self) -> &str {
+        self.email
+            .as_deref()
+            .or(self.display_name.as_deref())
+            .unwrap_or(&self.name)
+    }
+}
+
+/// Every account in the config file at `path`, alphabetically by name
+/// (ticket c0n0). A missing, unreadable, or unparsable file yields an
+/// empty list — the same conservative direction [`accounts_present`] takes.
+pub fn list_accounts(path: &Path) -> Vec<AccountEntry> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(doc) = toml::from_str::<toml::Value>(&text) else {
+        return Vec::new();
+    };
+    doc.get("accounts")
+        .and_then(toml::Value::as_table)
+        .map(|table| {
+            table
+                .iter()
+                .map(|(name, account)| AccountEntry {
+                    name: name.clone(),
+                    email: account
+                        .get("email")
+                        .and_then(toml::Value::as_str)
+                        .map(str::to_owned),
+                    display_name: account
+                        .get("display-name")
+                        .and_then(toml::Value::as_str)
+                        .map(str::to_owned),
+                    is_default: account.get("default").and_then(toml::Value::as_bool) == Some(true),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Resolved, validated configuration. The flat TOML sections bunch into
 /// named groups mirroring the file ([`MailConfig`],
 /// [`ComposerConfig`], [`ThemeConfig`], [`CacheConfig`], [`UiConfig`]);
@@ -351,12 +412,25 @@ impl Config {
     /// will report the real problem) while Tmail itself runs on defaults —
     /// and the parse failure is reported as an issue.
     pub fn load_with_issues(cli_path: Option<&Path>) -> (Self, LoadIssues) {
+        Self::load_with_account_override(cli_path, None)
+    }
+
+    /// [`Config::load_with_issues`] with an explicit account selection
+    /// (ticket c0n0): the runtime account switcher restarts the session
+    /// with the account the user confirmed. `Some(name)` overrides
+    /// `[tmail].account` — the file is re-read from disk, so edits made
+    /// since startup (or by the wizard) apply — and the alias/email/
+    /// display-name resolution targets that account.
+    pub fn load_with_account_override(
+        cli_path: Option<&Path>,
+        account_override: Option<&str>,
+    ) -> (Self, LoadIssues) {
         let path = resolve_path(cli_path);
         let Some(path) = path else {
             return (Config::default(), LoadIssues::default());
         };
         match std::fs::read_to_string(&path) {
-            Ok(text) => parse_with_issues(&text, Some(path)),
+            Ok(text) => parse_with_account(&text, Some(path), account_override),
             Err(err) => {
                 let mut issues = LoadIssues::default();
                 issues.push(format!(
@@ -436,7 +510,6 @@ fn default_candidates() -> Vec<PathBuf> {
 pub fn parse(text: &str, path: Option<PathBuf>) -> Config {
     parse_with_issues(text, path).0
 }
-
 /// The value at `path` under `[tmail]` (`&["ui", "clock"]` walks
 /// `[tmail.ui].clock`): the shared traversal of the field parsers.
 fn tmail_value<'a>(tmail: Option<&'a toml::Value>, path: &[&str]) -> Option<&'a toml::Value> {
@@ -503,6 +576,18 @@ fn get_nonneg_int(
 /// honored; the issue list is what startup reports (plan §17: all issues
 /// together, sanitized).
 pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssues) {
+    parse_with_account(text, path, None)
+}
+
+/// [`parse_with_issues`] with an explicit account selection (ticket c0n0):
+/// `Some(name)` overrides `[tmail].account` before the default-account
+/// fallback, so the alias/email/display-name resolution targets the
+/// account the switcher confirmed.
+pub fn parse_with_account(
+    text: &str,
+    path: Option<PathBuf>,
+    account_override: Option<&str>,
+) -> (Config, LoadIssues) {
     let mut config = Config {
         path,
         ..Config::default()
@@ -529,6 +614,11 @@ pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssu
         .map(str::to_owned)
     {
         config.account = Some(account);
+    }
+    // The runtime override wins over the file (ticket c0n0): the session
+    // was rebuilt for exactly this account.
+    if let Some(account) = account_override.filter(|value| !value.is_empty()) {
+        config.account = Some(account.to_owned());
     }
     config.mouse = get_bool(
         tmail_value(tmail, &["mouse"]),
@@ -570,8 +660,13 @@ pub fn parse_with_issues(text: &str, path: Option<PathBuf>) -> (Config, LoadIssu
             .and_then(|accounts| accounts.get(account))
             .is_some();
         if !exists {
+            let selector = if account_override.is_some() {
+                "the requested account"
+            } else {
+                "[tmail].account"
+            };
             issues.push(format!(
-                "[tmail].account selects {account:?} but [accounts.{account}] does not exist"
+                "{selector} selects {account:?} but [accounts.{account}] does not exist"
             ));
         }
         config.aliases = aliases_for(&doc, account);
@@ -1110,6 +1205,108 @@ fn aliases_for(doc: &toml::Value, account: &str) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_accounts_with_identity_and_default_flag() {
+        let text = r#"
+            [accounts.personal]
+            default = true
+            email = "me@example.org"
+            display-name = "Personal Mail"
+
+            [accounts.work]
+            email = "w@example.net"
+        "#;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        let accounts = list_accounts(&path);
+        assert_eq!(accounts.len(), 2);
+        let work = accounts.iter().find(|a| a.name == "work").unwrap();
+        assert_eq!(work.email.as_deref(), Some("w@example.net"));
+        assert_eq!(work.display_name, None);
+        assert!(!work.is_default);
+        let personal = accounts.iter().find(|a| a.name == "personal").unwrap();
+        assert!(personal.is_default);
+        // The label prefers the email (the unique identity; display
+        // names are commonly shared), then the display name, then the
+        // raw name.
+        assert_eq!(personal.label(), "me@example.org");
+        assert_eq!(work.label(), "w@example.net");
+    }
+
+    #[test]
+    fn label_falls_back_to_display_name_then_the_raw_name() {
+        let display_only = AccountEntry {
+            name: String::from("backup"),
+            email: None,
+            display_name: Some(String::from("Backup Mail")),
+            is_default: false,
+        };
+        assert_eq!(display_only.label(), "Backup Mail");
+        let bare = AccountEntry {
+            name: String::from("bare"),
+            email: None,
+            display_name: None,
+            is_default: false,
+        };
+        assert_eq!(bare.label(), "bare");
+    }
+
+    #[test]
+    fn list_accounts_on_missing_or_broken_file_is_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(list_accounts(&dir.path().join("absent.toml")).is_empty());
+        let broken = dir.path().join("broken.toml");
+        std::fs::write(&broken, "not [ valid").unwrap();
+        assert!(list_accounts(&broken).is_empty());
+        // An existing file without an `[accounts]` table too.
+        let plain = dir.path().join("plain.toml");
+        std::fs::write(&plain, "[tmail]\naccount = \"x\"\n").unwrap();
+        assert!(list_accounts(&plain).is_empty());
+    }
+
+    #[test]
+    fn account_override_selects_the_target_account() {
+        let text = r#"
+            [accounts.a]
+            email = "a@example.org"
+
+            [accounts.b]
+            email = "b@example.net"
+
+            [accounts.b.mailbox.alias]
+            inbox = "INBOX"
+
+            [tmail]
+            account = "a"
+        "#;
+        let (config, issues) = parse_with_account(text, None, Some("b"));
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(config.account.as_deref(), Some("b"));
+        assert_eq!(config.account_email.as_deref(), Some("b@example.net"));
+        assert_eq!(
+            config.aliases.get("inbox").map(String::as_str),
+            Some("INBOX")
+        );
+    }
+
+    #[test]
+    fn account_override_for_an_unknown_account_reports_and_resolves_nothing() {
+        let text = r#"
+            [accounts.a]
+            email = "a@example.org"
+        "#;
+        let (config, issues) = parse_with_account(text, None, Some("ghost"));
+        assert_eq!(config.account.as_deref(), Some("ghost"));
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("the requested account") && issue.contains("ghost")),
+            "issues: {issues:?}"
+        );
+        assert_eq!(config.aliases, HashMap::new());
+    }
 
     #[test]
     fn parses_tmail_section_and_aliases() {

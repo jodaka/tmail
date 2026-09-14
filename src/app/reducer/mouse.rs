@@ -69,11 +69,15 @@ pub(crate) fn click_error_button(state: &mut AppState, button: ModalButton) -> V
     }
 }
 
-/// Click a confirm-discard button (plan §14): focus, then the same
-/// confirm/keep path Enter takes.
+/// Click a confirm button (plan §14): focus, then the same confirm/keep
+/// path Enter takes. One path for both confirm dialogs — the composer's
+/// discard dialog and the account switch's confirmation (ticket c0n0) —
+/// the open one receives the button.
 pub(crate) fn click_confirm_button(state: &mut AppState, button: ConfirmButton) -> Vec<Effect> {
-    if let Some(Overlay::ConfirmDiscard(dialog)) = state.session.overlay.as_mut() {
-        dialog.button = button;
+    match state.session.overlay.as_mut() {
+        Some(Overlay::ConfirmDiscard(dialog)) => dialog.button = button,
+        Some(Overlay::SwitchConfirm(dialog)) => dialog.button = button,
+        _ => {}
     }
     reduce(state, Action::Activate)
 }

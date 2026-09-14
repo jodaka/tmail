@@ -156,25 +156,49 @@ fn main() -> ExitCode {
 
 /// One session's exit reason (ADR 0003 §3.2 W7): after the wizard saves a
 /// first-run account, the app re-runs configuration and enters the normal
-/// mailbox UI without restarting the process.
+/// mailbox UI without restarting the process. A confirmed account switch
+/// (ticket c0n0) re-runs it with the target account selected — the
+/// functional equivalent of restarting tmail with that account.
 enum SessionOutcome {
     Exit(ExitCode),
     /// The wizard completed (first-run): reload the config and start the
     /// normal UI.
     Restart,
+    /// The account switcher confirmed a switch (ticket c0n0): reload the
+    /// config selecting this account.
+    Switch(String),
 }
 
 async fn run(invocation: Invocation) -> anyhow::Result<ExitCode> {
+    // The account selection carried across sessions (ticket c0n0):
+    // `None` resolves from the config file (`[tmail].account`, or the
+    // default account); `Some(name)` selects that account explicitly.
+    let mut account_override: Option<String> = None;
     loop {
-        match session(&invocation).await? {
-            SessionOutcome::Exit(code) => return Ok(code),
-            SessionOutcome::Restart => continue,
+        match session(&invocation, account_override.as_deref()).await {
+            Ok(SessionOutcome::Exit(code)) => return Ok(code),
+            Ok(SessionOutcome::Restart) => account_override = None,
+            Ok(SessionOutcome::Switch(name)) => account_override = Some(name),
+            // A session that was rebuilt *for* an account must not take
+            // the app down when the reload fails (the account vanished
+            // from the file, the file broke): fall back to the default
+            // account instead — the previous session's selection is gone,
+            // so the configured one is the honest restart point.
+            Err(err) if account_override.is_some() => {
+                tracing::warn!(%err, "account switch reload failed; falling back");
+                eprintln!("tmail: account switch aborted: {err:#}");
+                account_override = None;
+            }
+            Err(err) => return Err(err),
         }
     }
 }
 
-async fn session(invocation: &Invocation) -> anyhow::Result<SessionOutcome> {
-    let (config, keymap) = load_validated_config(invocation)?;
+async fn session(
+    invocation: &Invocation,
+    account_override: Option<&str>,
+) -> anyhow::Result<SessionOutcome> {
+    let (config, keymap) = load_validated_config(invocation, account_override)?;
 
     // First-run trigger (ADR 0003 §3.1): the resolved config yields no
     // drivable account — no file found anywhere, or a file whose
@@ -297,8 +321,12 @@ struct SessionAssets {
 /// cannot run without it.
 fn load_validated_config(
     invocation: &Invocation,
+    account_override: Option<&str>,
 ) -> anyhow::Result<(tmail::config::Config, tmail::input::keymap::KeyMap)> {
-    let (config, issues) = tmail::config::Config::load_with_issues(invocation.config.as_deref());
+    let (config, issues) = tmail::config::Config::load_with_account_override(
+        invocation.config.as_deref(),
+        account_override,
+    );
     let mut issues: Vec<String> = if invocation.configure {
         Vec::new()
     } else {
@@ -397,6 +425,16 @@ fn seed_state(
     state.settings = tmail::app::Settings {
         keymap,
         account_email: config.account_email.clone(),
+        account_name: config.account.clone(),
+        // The switcher's list (ticket c0n0): every `[accounts.<name>]` in
+        // the file as it was when the session started. Startup I/O is
+        // fine here (the config load just did the same); the reducer
+        // never touches the file.
+        accounts: config
+            .path
+            .as_deref()
+            .map(tmail::config::list_accounts)
+            .unwrap_or_default(),
         refresh_interval_seconds: config.mail.refresh_interval_seconds,
         page_size_auto: config.mail.page_size_auto,
         autosave_delay_ms: config.composer.autosave_delay_ms,
@@ -508,6 +546,13 @@ async fn run_event_loop(
             tracing::info!("quit requested; leaving event loop");
             break;
         }
+        // A confirmed account switch (ticket c0n0) leaves the loop the
+        // same way a quit does — the session ends and the runtime decides
+        // between rebuilding (with the target account) and exiting.
+        if let Some(target) = &state.session.switch_requested {
+            tracing::info!(target = %target, "account switch requested; leaving event loop");
+            break;
+        }
 
         // Test hook: `TMAIL_INDUCE_PANIC=1` panics after the first draw to
         // prove panic-safe terminal restoration (plan §19 Phase 1).
@@ -565,8 +610,12 @@ async fn run_event_loop(
 /// `--configure` completion prints the saved path and exits 0; an
 /// `Esc`-cancel exits 1 with "configuration not changed". A first-run
 /// completion restarts into the normal mailbox UI without leaving the
-/// process.
+/// process; a confirmed account switch (ticket c0n0) restarts with the
+/// target account.
 fn finish_session(state: &AppState, config: &tmail::config::Config) -> SessionOutcome {
+    if let Some(target) = state.session.switch_requested.clone() {
+        return SessionOutcome::Switch(target);
+    }
     if let Some(wizard) = &state.session.wizard {
         if wizard.completed {
             if wizard.manual {

@@ -1,5 +1,6 @@
 //! UI components (modals, sidebar, spinner, statusbar, topbar).
 
+pub mod account_switcher;
 pub mod attachment_dialog;
 pub mod confirm_modal;
 pub mod error_modal;

@@ -89,8 +89,15 @@ pub fn render_scrollbar(
 
 /// The shared modal scaffold: clear the area, draw the bordered block with
 /// an inverse-filled title on `fill`, and return the inner content rect.
-/// One anatomy for all four dialogs; `Some` means the area was large
+/// One anatomy for all the dialogs; `Some` means the area was large
 /// enough to open (callers keep their own bigger minimums).
+///
+/// Anatomy (top to bottom): title border, one blank margin row, the
+/// returned content rect, then one more row — the *label slot*, one row
+/// above the bottom border, where the dialog's bottom hint renders —
+/// separated from the content by the last row of the returned rect, which
+/// stays blank. Dialog geometry must budget all four fixed rows (outer
+/// height = content + 5).
 pub fn modal_frame(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -116,9 +123,9 @@ pub fn modal_frame(
     frame.render_widget(block, area);
     Some(Rect {
         x: area.x + 2,
-        y: area.y + 1,
+        y: area.y + 2,
         width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(2),
+        height: area.height.saturating_sub(4),
     })
 }
 

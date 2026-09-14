@@ -186,7 +186,7 @@ pub fn render(
         let context = Some(Context::List);
         let keymap = &state.settings.keymap;
         let move_hint = keymap.move_hint(context);
-        let hints = vec![
+        let mut hints = vec![
             (move_hint.as_deref(), "move"),
             hint_row(keymap, context, "activate", "open"),
             hint_row(keymap, context, "toggle_selected", "select"),
@@ -195,8 +195,14 @@ pub fn render(
             hint_row(keymap, context, "trash", "delete"),
             hint_row(keymap, context, "compose", "compose"),
             hint_row(keymap, context, "open_search", "search"),
-            hint_row(keymap, context, "open_help", "shortcuts"),
         ];
+        // The account switcher is only advertised when there is something
+        // to switch to: more than one account in the config (user
+        // request). An unbound `switch_account` drops out on its own.
+        if state.settings.accounts.len() > 1 {
+            hints.push(hint_row(keymap, context, "switch_account", "accounts"));
+        }
+        hints.push(hint_row(keymap, context, "open_help", "shortcuts"));
         push_hints(theme, &mut spans, &hints);
     }
     // Foreground work is announced by the loader in this bar's left

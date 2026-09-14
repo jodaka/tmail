@@ -8,7 +8,8 @@ use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::operation::{DraftRemovalReason, OperationFailure, OperationKind};
 use crate::app::overlay::{
-    ConfirmButton, ErrorDialog, HelpDialog, ModalButton, Overlay, ThemePickerDialog,
+    AccountSwitcherDialog, ConfirmButton, ErrorDialog, HelpDialog, ModalButton, Overlay,
+    SwitchConfirmDialog, ThemePickerDialog,
 };
 use crate::app::state::{AppState, Loadable};
 
@@ -55,6 +56,16 @@ pub(crate) fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<
             _ => Some(attachment_dialog_reduce(state, action)),
         },
         Some(Overlay::ThemePicker(_)) => Some(theme_picker_reduce(state, action)),
+        Some(Overlay::AccountSwitcher(_)) => match action {
+            // Results must land while the switcher is open (a refresh or
+            // preview in flight); the popup otherwise swallows everything.
+            Action::BackendCompleted(_) => None,
+            _ => Some(account_switcher_reduce(state, action)),
+        },
+        Some(Overlay::SwitchConfirm(_)) => match action {
+            Action::BackendCompleted(_) => None,
+            _ => Some(switch_confirm_reduce(state, action)),
+        },
         Some(Overlay::Help(_)) => match action {
             // Results must land while help is open (a send/autosave in
             // flight); the popup otherwise swallows everything.
@@ -443,6 +454,175 @@ pub(crate) fn theme_picker_reduce(state: &mut AppState, action: &Action) -> Vec<
         }
         _ => {}
     }
+    Vec::new()
+}
+
+/// Open the account switcher (ticket c0n0). The cursor starts on the
+/// account the session drives; with no account resolved (the
+/// multi-account-without-default case) it starts at the top. Inert without
+/// an account list — a config with no file or no `[accounts]` has nothing
+/// to switch to — and never over the wizard (every key there is
+/// wizard-owned; the guard mirrors [`open_help`]).
+pub(crate) fn open_account_switcher(state: &mut AppState) -> Vec<Effect> {
+    if state.session.wizard.is_some() || state.settings.accounts.is_empty() {
+        return Vec::new();
+    }
+    let cursor = state
+        .settings
+        .accounts
+        .iter()
+        .position(|account| Some(account.name.as_str()) == state.settings.account_name.as_deref())
+        .unwrap_or(0);
+    // The scroll window opens with the cursor row on screen: a long
+    // account list must not hide the account the user is on.
+    let visible = crate::view::overlay::switcher_visible_rows(state.session.size).max(1);
+    let scroll = if cursor >= visible {
+        (cursor + 1 - visible).min(crate::view::overlay::switcher_max_scroll(
+            state.settings.accounts.len(),
+            state.session.size,
+        ))
+    } else {
+        0
+    };
+    state.session.overlay = Some(Overlay::AccountSwitcher(AccountSwitcherDialog {
+        cursor,
+        scroll,
+        previous_focus: state.session.focus,
+    }));
+    state.session.focus = Focus::AccountSwitcher;
+    Vec::new()
+}
+
+/// Account switcher handling (ticket c0n0). Up/Down move the cursor with
+/// the same clamped (non-wrapping) movement the theme picker uses. Enter
+/// on the current account closes; Enter on another account switches at
+/// once when nothing would be lost (no in-flight operations, clean
+/// composer), and otherwise opens the confirmation listing exactly what
+/// would be cancelled and dropped. Esc closes without switching.
+/// Everything else is swallowed while the switcher is open.
+pub(crate) fn account_switcher_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
+    // Viewport math comes from the renderer's layout, so the clamp the
+    // reducer computes always matches what is drawn.
+    let len = state.settings.accounts.len();
+    let visible = crate::view::overlay::switcher_visible_rows(state.session.size).max(1);
+    let max_scroll = crate::view::overlay::switcher_max_scroll(len, state.session.size);
+    let Some(Overlay::AccountSwitcher(dialog)) = state.session.overlay.as_mut() else {
+        return Vec::new();
+    };
+    match action {
+        Action::MoveUp | Action::MoveDown => {
+            let delta = if matches!(action, Action::MoveUp) {
+                -1
+            } else {
+                1
+            };
+            let next = (dialog.cursor as i64 + delta).clamp(0, len as i64 - 1) as usize;
+            dialog.cursor = next;
+            dialog.scroll = if next < dialog.scroll {
+                next
+            } else if next >= dialog.scroll + visible {
+                (next + 1 - visible).min(max_scroll)
+            } else {
+                dialog.scroll
+            };
+        }
+        Action::BackOrCancel => {
+            let focus = dialog.previous_focus;
+            state.session.overlay = None;
+            state.session.focus = focus;
+        }
+        Action::Activate => {
+            let cursor = dialog.cursor;
+            let focus = dialog.previous_focus;
+            let target = state
+                .settings
+                .accounts
+                .get(cursor)
+                .map(|account| account.name.clone());
+            match target {
+                // Enter on the current account: close, nothing to do.
+                Some(name) if Some(name.as_str()) == state.settings.account_name.as_deref() => {
+                    state.session.overlay = None;
+                    state.session.focus = focus;
+                }
+                Some(name) => {
+                    let operations = state.session.operations.in_flight_summaries();
+                    let unsaved_draft = state
+                        .session
+                        .composer
+                        .as_ref()
+                        .is_some_and(|composer| composer.draft.is_dirty());
+                    if operations.is_empty() && !unsaved_draft {
+                        // Nothing would be lost: switch at once.
+                        state.session.overlay = None;
+                        proceed_with_account_switch(state, name);
+                    } else {
+                        // Confirm first: the dialog lists exactly what
+                        // confirming cancels and drops.
+                        state.session.overlay = Some(Overlay::SwitchConfirm(SwitchConfirmDialog {
+                            target: name,
+                            operations,
+                            unsaved_draft,
+                            button: ConfirmButton::Keep,
+                            previous_focus: focus,
+                        }));
+                    }
+                }
+                // Empty list (unreachable: the opener is inert then).
+                None => {}
+            }
+        }
+        _ => {}
+    }
+    Vec::new()
+}
+
+/// The switch confirmation dialog handling (ticket c0n0). Enter runs the
+/// focused button: `Switch anyway` proceeds with the switch, `Keep
+/// working` aborts it entirely. Esc aborts the same way — closing the
+/// dialog is never a switch.
+pub(crate) fn switch_confirm_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
+    let Some(Overlay::SwitchConfirm(dialog)) = state.session.overlay.as_mut() else {
+        return Vec::new();
+    };
+    match action {
+        Action::FocusNext => dialog.button = dialog.button.next(),
+        Action::FocusPrevious => dialog.button = dialog.button.previous(),
+        Action::BackOrCancel => {
+            let focus = dialog.previous_focus;
+            state.session.overlay = None;
+            state.session.focus = focus;
+        }
+        Action::Activate => {
+            let confirm = dialog.button == ConfirmButton::Discard;
+            let focus = dialog.previous_focus;
+            let target = dialog.target.clone();
+            state.session.overlay = None;
+            if confirm {
+                proceed_with_account_switch(state, target);
+            } else {
+                state.session.focus = focus;
+            }
+        }
+        // Error-modal-only actions do nothing here.
+        _ => {}
+    }
+    Vec::new()
+}
+
+/// Confirmed account switch (ticket c0n0): every in-flight operation is
+/// cancelled — tokens fire so the backends kill their children, entries
+/// clear so a late result can never re-apply — the composer and every
+/// overlay close, and the session exits with the switch intent. The
+/// runtime rebuilds the whole session against the target account,
+/// including a fresh config read: exactly what restarting tmail with that
+/// account would produce.
+pub(crate) fn proceed_with_account_switch(state: &mut AppState, target: String) -> Vec<Effect> {
+    let cancelled = state.session.operations.cancel_all();
+    tracing::info!(target = %target, cancelled, "account switch confirmed");
+    state.session.overlay = None;
+    state.session.composer = None;
+    state.session.switch_requested = Some(target);
     Vec::new()
 }
 

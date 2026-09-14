@@ -1,5 +1,30 @@
 # Features
 
+## Account switching
+
+With several `[accounts.<name>]` sections in the config file, `Ctrl+G` opens
+the account switcher — a small list of every account, the one the session
+drives marked `· current`. The account name also shows under the logo.
+
+`Enter` on another account restarts Tmail with that account selected — the
+functional equivalent of quitting and starting again with it: a fresh
+config read from disk, empty mail state, per-account page cache and draft
+journal. Enter on the current account just closes the popup.
+
+Switching is safe by confirmation:
+
+- **Work in flight** (a send, a refresh, a draft save…) — the dialog lists
+  exactly what confirming cancels. An in-flight send may already be
+  delivered; cancelling it leaves the outcome unknown, and the dialog says
+  so in those terms before you confirm.
+- **Unsaved composer edits** — listed too: confirming loses them (saved
+  revisions stay in the account's Drafts mailbox and journal, and return
+  when you switch back).
+
+`Esc` aborts at any stage. If the reload after a confirmed switch fails
+(the account vanished from the file, the file broke), Tmail falls back to
+the configured default account instead of exiting, and reports why.
+
 ## External editor
 
 With `[tmail.composer].editor` set to `"$EDITOR"` (or an explicit command
