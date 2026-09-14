@@ -13,8 +13,8 @@
 # NO_COLOR environment variable (non-empty) to ignore all of this and
 # render with the terminal's default colors.
 #
-# See `src/ui/theme.rs` for the authoritative palette and README.md
-# ("Theming") for the user-facing guide.
+# See `src/ui/theme.rs` for the authoritative palette and
+# `docs/configuration.md` ("Theming") for the user-facing guide.
 
 [tmail.theme]
 name = "default"
