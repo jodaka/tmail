@@ -1,6 +1,8 @@
 .DS_Store
 /target
+.opencode
+.ruff_cache
 .kata.local.toml
 
-# Local himalaya/Tmail config (holds credentials; never commit)
+# Local himalaya/Tmail debug config (might hold credentials; never commit)
 config.toml
