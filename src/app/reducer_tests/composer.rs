@@ -281,8 +281,15 @@ fn saving_revision_n_cannot_mark_revision_n_plus_1_clean() {
         1,
         "saved_revision must not jump to the newest revision"
     );
-    // ...and the state machine immediately chains another save.
-    let (id2, snap2) = expect_save(&chained);
+    // ...and the state machine immediately chains another save. The
+    // first push also arms the folder recount (ticket vgze): the Drafts
+    // copy count changed.
+    assert_eq!(chained.len(), 2);
+    let (id2, snap2) = match &chained[0].kind {
+        OperationKind::SaveDraft { draft } => (chained[0].id, (**draft).clone()),
+        other => panic!("expected a chained SaveDraft, got {other:?}"),
+    };
+    assert_eq!(chained[1].kind, OperationKind::LoadMailboxes);
     assert_eq!(
         snap2.revision, 2,
         "the chained save covers the newest revision"

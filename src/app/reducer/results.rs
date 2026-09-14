@@ -576,6 +576,12 @@ pub(crate) fn complete_delete_draft(
             // mailbox listing (folder counts, e.g. `Drafts (6)`). The
             // scoped backend delete awaits its sweep, so both listings
             // now see a clean Drafts mailbox.
+            //
+            // A confirmed send resolves its draft the same way (ticket
+            // vgze): the sweep removed the Drafts copy, so the sidebar's
+            // content counter must recount too. The page refresh stays
+            // discard-only — the sent draft's row belongs to the composer
+            // context, not to the mailbox page now displayed.
             DraftRemovalReason::Discard => {
                 // Both refreshes run in the background: the discard is
                 // done and its cleanup work must never sit in the
@@ -593,7 +599,12 @@ pub(crate) fn complete_delete_draft(
                 ));
                 effects
             }
-            DraftRemovalReason::Sent => Vec::new(),
+            DraftRemovalReason::Sent => vec![
+                state
+                    .session
+                    .operations
+                    .start_background(OperationKind::LoadMailboxes),
+            ],
         },
         Ok(_) => unexpected_payload(id, "draft removal"),
         Err(failure) => match reason {
@@ -773,6 +784,13 @@ pub(crate) fn save_draft_completed(
     };
     match result.outcome {
         Ok(OperationOutcome::DraftSaved { remote_id }) => {
+            // The first push of a draft (no prior remote copy) added one
+            // to the Drafts mailbox (ticket vgze): recount the folder so
+            // the sidebar's content counter keeps up. A replacement save
+            // swaps copies one-for-one — the count is unchanged, no
+            // refresh. Like every cleanup, the recount runs in the
+            // background.
+            let first_push = snapshot.remote_id.is_none();
             let chain =
                 composer
                     .draft
@@ -781,7 +799,23 @@ pub(crate) fn save_draft_completed(
                 // Remain dirty and save again (plan §14): one follow-up
                 // save covering the newest revision. It supersedes nothing
                 // in flight — the previous save just completed.
-                draft_save_effect(state).into_iter().collect()
+                let mut effects = draft_save_effect(state).into_iter().collect::<Vec<_>>();
+                if first_push {
+                    effects.push(
+                        state
+                            .session
+                            .operations
+                            .start_background(OperationKind::LoadMailboxes),
+                    );
+                }
+                effects
+            } else if first_push {
+                vec![
+                    state
+                        .session
+                        .operations
+                        .start_background(OperationKind::LoadMailboxes),
+                ]
             } else {
                 Vec::new()
             }

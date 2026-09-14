@@ -692,6 +692,94 @@ fn send_success_leaves_the_composer_and_resolves_the_draft() {
     assert!(s.session.operations.get(cleanup_id).is_some());
 }
 
+/// The first push of a new draft added a remote copy to the Drafts
+/// mailbox: the sidebar's content counter must recount (ticket vgze).
+#[test]
+fn first_push_recounts_the_drafts_folder() {
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0);
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('d')));
+    let (id, snapshot) = expect_save(&tick(&mut s, 2));
+    assert!(snapshot.remote_id.is_none(), "precondition: no copy yet");
+    let effects = complete_save_ok(&mut s, id, snapshot.revision, "copy-1");
+    assert!(
+        effects
+            .iter()
+            .any(|e| e.kind == OperationKind::LoadMailboxes),
+        "folder counts go stale without the recount, got {effects:?}"
+    );
+}
+
+/// A replacement save swaps copies one-for-one: the Drafts count is
+/// unchanged, so no recount (ticket vgze). When the save chains a
+/// follow-up (edits landed mid-flight), the follow-up save alone carries —
+/// the count still did not change.
+#[test]
+fn replacement_save_never_recounts_the_drafts_folder() {
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0);
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('d')));
+    let (id, snapshot) = expect_save(&tick(&mut s, 2));
+    complete_save_ok(&mut s, id, snapshot.revision, "copy-1");
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('e')));
+    let (id2, snapshot2) = expect_save(&tick(&mut s, 4));
+    assert_eq!(snapshot2.remote_id, Some(MessageId(String::from("copy-1"))));
+    no_effects(&complete_save_ok(&mut s, id2, snapshot2.revision, "copy-2"));
+}
+
+#[test]
+fn sent_draft_recounts_the_drafts_folder() {
+    // The swept copy leaves the Drafts mailbox: the sidebar's content
+    // counter must recount (ticket vgze).
+    let mut s = state();
+    sendable(&mut s);
+    let composer = s.session.composer.as_mut().unwrap();
+    composer.draft.remote_id = Some(MessageId(String::from("remote-draft")));
+    let (id, _) = expect_send(&reduce(&mut s, Action::Send));
+    let effects = complete_send(&mut s, id, SendOutcome::Sent);
+    let (cleanup_id, _) = effect_parts(&effects);
+    let effects = reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id: cleanup_id,
+            outcome: Ok(OperationOutcome::Done),
+        }),
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| e.kind == OperationKind::LoadMailboxes),
+        "the folder count must recount after the sweep, got {effects:?}"
+    );
+}
+#[test]
+fn failed_sent_cleanup_skips_the_recount() {
+    let mut s = state();
+    sendable(&mut s);
+    let composer = s.session.composer.as_mut().unwrap();
+    composer.draft.remote_id = Some(MessageId(String::from("remote-draft")));
+    let (id, _) = expect_send(&reduce(&mut s, Action::Send));
+    let effects = complete_send(&mut s, id, SendOutcome::Sent);
+    let (cleanup_id, _) = effect_parts(&effects);
+    // The copy was never pushed (or the sweep failed): no recount is owed,
+    // and a failed sent-reason cleanup stays silent either way.
+    let effects = reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id: cleanup_id,
+            outcome: Err(OperationFailure {
+                code: Some(1),
+                detail: String::from("drafts mailbox gone"),
+                retry: Some(mailboxes_kind().retry_spec()),
+                ambiguous: false,
+            }),
+        }),
+    );
+    no_effects(&effects);
+}
+
 #[test]
 fn send_success_after_leaving_still_resolves_the_draft() {
     let mut s = state();

@@ -12,12 +12,30 @@ brew install jodaka/tap/tmail   # installs himalaya automatically
 
 ## From source
 
+Tmail itself is built from source on every platform; only the Himalaya CLI
+dependency has platform-specific installers.
+
 1. Install the Himalaya CLI (v2.x, with the backend feature you need):
 
    ```sh
-   brew install himalaya        # macOS (Homebrew)
-   cargo install himalaya       # any platform with Rust
+   # macOS
+   brew install himalaya
+
+   # Linux
+   pacman -S himalaya                                        # Arch
+   dnf copr enable atim/himalaya && dnf install himalaya     # Fedora / RHEL / CentOS
+   nix profile install github:pimalaya/himalaya              # Nix with flakes
+
+   # any platform with Rust
+   cargo install --locked --git https://github.com/pimalaya/himalaya.git
+
+   # any Linux, prebuilt binary from GitHub releases
+   curl -sSL https://raw.githubusercontent.com/pimalaya/himalaya/master/install.sh | PREFIX=~/.local sh
    ```
+
+   The Homebrew and distro builds compile with himalaya's default features
+   (IMAP + SMTP); `cargo install` lets you pick the backend feature you
+   need. See the [himalaya docs](https://github.com/pimalaya/himalaya#installation).
 
 2. Build Tmail from source:
 
