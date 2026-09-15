@@ -476,7 +476,7 @@ fn auto_refresh_is_not_blocked_by_in_flight_previews() {
     // The interval elapses while the silent background fetches run: the
     // timer still fires (only foreground work stands it down).
     let effects = tick(&mut s, 60);
-    expect_page(&effects);
+    find_page(&effects);
 }
 
 #[test]

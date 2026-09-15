@@ -371,6 +371,8 @@ async fn run_effect(
                 NotifyRequest::Bell => {
                     if let Err(err) = notifier.bell() {
                         tracing::warn!(%err, "bell notification failed");
+                    } else {
+                        tracing::debug!("bell rung");
                     }
                 }
                 // notify-rust blocks while the desktop service answers,
@@ -380,8 +382,14 @@ async fn run_effect(
                     let notifier = Arc::clone(notifier);
                     let summary = summary.clone();
                     let body = body.clone();
-                    let delivered =
-                        tokio::task::spawn_blocking(move || notifier.notify(&summary, &body)).await;
+                    let delivered = tokio::task::spawn_blocking(move || {
+                        let result = notifier.notify(&summary, &body);
+                        if result.is_ok() {
+                            tracing::debug!(summary = %summary, "desktop notification sent");
+                        }
+                        result
+                    })
+                    .await;
                     match delivered {
                         Ok(Ok(())) => {}
                         Ok(Err(detail)) => tracing::warn!(detail = %detail, "notification failed"),

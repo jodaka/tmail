@@ -52,10 +52,12 @@ fn arm_timer(s: &mut AppState) {
 }
 
 /// Fire the background refresh due `at` seconds on the mock clock;
-/// returns the in-flight `(id, request)`.
+/// returns the in-flight `(id, request)`. A timer tick also chains the
+/// sidebar listing refresh (ticket txdt), so the page effect is found in
+/// the batch, not asserted to be the only one.
 fn background_refresh_at(s: &mut AppState, at: i64) -> (OperationId, PageRequest) {
     let effects = tick(s, at);
-    let (id, req) = expect_page(&effects);
+    let (id, req) = find_page(&effects);
     assert_eq!(
         s.session.operations.get(id).map(|op| op.origin),
         Some(OperationOrigin::Background)

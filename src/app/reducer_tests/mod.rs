@@ -795,6 +795,18 @@ fn expect_search(effects: &[Effect]) -> (OperationId, crate::domain::SearchReque
     }
 }
 
+/// The first `Search` effect, wherever it sits in the batch (a timer tick
+/// also chains the sidebar listing refresh, ticket txdt).
+fn find_search(effects: &[Effect]) -> (OperationId, crate::domain::SearchRequest) {
+    effects
+        .iter()
+        .find_map(|e| match &e.kind {
+            OperationKind::Search(request) => Some((e.id, request.clone())),
+            _ => None,
+        })
+        .expect("a Search effect")
+}
+
 /// Focus the search field, type a query, and submit.
 fn search(s: &mut AppState, query: &str) -> Vec<Effect> {
     reduce(&mut *s, Action::OpenSearch);

@@ -156,5 +156,16 @@ pub(crate) fn auto_refresh_tick(
     }
     state.session.last_refresh_at = Some(now);
     tracing::debug!(elapsed, "auto refresh");
-    request_visible_page_background(state, state.messages.offset)
+    let mut effects = request_visible_page_background(state, state.messages.offset);
+    // Ticket txdt: the sidebar counts — and with them the terminal
+    // title's unread count — only ever come from a mailbox listing,
+    // which nothing refreshed periodically. Chain a listing refresh on
+    // every timer tick so the title tracks arrivals and reads.
+    effects.push(
+        state
+            .session
+            .operations
+            .start_background(OperationKind::LoadMailboxes),
+    );
+    effects
 }

@@ -296,7 +296,7 @@ fn auto_refresh_arms_on_first_tick_and_fires_after_the_interval() {
     // The interval has elapsed on the injected clock: a *background* page
     // refresh for the visible mailbox (Phase 9.4).
     let effects = tick(&mut s, 60);
-    let (id, req) = expect_page(&effects);
+    let (id, req) = find_page(&effects);
     assert_eq!(req.mailbox_id, inbox_id());
     assert_eq!(req.offset, 0);
     assert_eq!(
@@ -309,7 +309,7 @@ fn auto_refresh_arms_on_first_tick_and_fires_after_the_interval() {
     let effects = tick(&mut s, 90);
     assert!(effects.is_empty());
     let effects = tick(&mut s, 120);
-    expect_page(&effects);
+    find_page(&effects);
 }
 
 #[test]
@@ -334,7 +334,7 @@ fn auto_refresh_stands_down_while_conflicting_work_is_in_flight() {
     // clock, so the next automatic fire is one full interval later.
     no_effects(&tick(&mut s, 50));
     let effects = tick(&mut s, 60);
-    let (id, _) = expect_page(&effects);
+    let (id, _) = find_page(&effects);
     assert_eq!(
         s.session.operations.get(id).map(|op| op.origin),
         Some(OperationOrigin::Background)
@@ -351,7 +351,7 @@ fn auto_refresh_stands_down_while_composing() {
     // Leaving the composer unblocks the next tick.
     reduce(&mut s, Action::LeaveComposer);
     let effects = tick(&mut s, 120);
-    expect_page(&effects);
+    find_page(&effects);
 }
 
 #[test]
@@ -375,7 +375,7 @@ fn auto_refresh_targets_the_open_search_context() {
     // The timer refreshes the search at the current offset (Phase 9.5:
     // refresh only the visible context).
     let effects = tick(&mut s, 60);
-    let (_, request) = expect_search(&effects);
+    let (_, request) = find_search(&effects);
     assert_eq!(request.query, "quote");
     assert_eq!(request.offset, 0);
 }
@@ -386,7 +386,7 @@ fn background_refresh_failure_never_opens_the_modal() {
     timer(&mut s);
     no_effects(&tick(&mut s, 0));
     let effects = tick(&mut s, 60);
-    let (id, _) = expect_page(&effects);
+    let (id, _) = find_page(&effects);
     reduce(
         &mut s,
         failure(
@@ -418,7 +418,7 @@ fn background_failure_record_clears_on_success_and_on_manual_refresh() {
     timer(&mut s);
     no_effects(&tick(&mut s, 0));
     let effects = tick(&mut s, 60);
-    let (id, req) = expect_page(&effects);
+    let (id, req) = find_page(&effects);
     reduce(
         &mut s,
         failure(id, &OperationKind::LoadPage(req.clone()), "connect refused"),
@@ -426,7 +426,7 @@ fn background_failure_record_clears_on_success_and_on_manual_refresh() {
     assert!(s.session.last_background_error.is_some());
     // A success clears the record: a later failure is reported again.
     let effects = tick(&mut s, 120);
-    let (id2, req2) = expect_page(&effects);
+    let (id2, req2) = find_page(&effects);
     complete_page_ok(&mut s, id2, &req2, 0);
     assert!(s.session.last_background_error.is_none());
     // A manual refresh that fails is foreground work: it opens the modal.

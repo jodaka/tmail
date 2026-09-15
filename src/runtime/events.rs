@@ -155,11 +155,13 @@ async fn event_loop(tx: UnboundedSender<Event>, mut control: UnboundedReceiver<C
                     Some(Ok(CrosstermEvent::FocusGained)) => {
                         // New-mail notifications fire only while the
                         // window is unfocused (ticket b28p).
+                        tracing::debug!("terminal focus gained");
                         if tx.send(Event::Focus(true)).is_err() {
                             break;
                         }
                     }
                     Some(Ok(CrosstermEvent::FocusLost)) => {
+                        tracing::debug!("terminal focus lost");
                         if tx.send(Event::Focus(false)).is_err() {
                             break;
                         }

@@ -76,6 +76,12 @@ pub(crate) fn notify_new_messages(
         .collect();
     // The finish boundary: whatever the update found is clean now.
     state.session.notifications.mark_clean(page);
+    tracing::debug!(
+        arrived = arrived.len(),
+        terminal_focused = state.session.terminal_focused,
+        setting = ?state.settings.notifications,
+        "new-mail notification check"
+    );
     if arrived.is_empty() || state.session.terminal_focused {
         return Vec::new();
     }

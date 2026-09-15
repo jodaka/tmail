@@ -3,14 +3,14 @@
 //! and dim one-line notes. One implementation per look, so a palette or
 //! anatomy change lands everywhere at once.
 
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
-use unicode_width::UnicodeWidthStr;
+use ratatui::Frame;
+use unicode_width::UnicodeWidthChar;
 
 use crate::ui::text;
 use crate::ui::theme::Theme;
@@ -195,22 +195,31 @@ pub fn field_value_spans<'a>(
     let char_count = text.chars().count();
     let mut spans = Vec::new();
     let mut used = 0usize;
+    // Address entries are byte-ordered and non-overlapping (they are cut
+    // sequentially at separators), so one cursor walks them in step with
+    // the characters instead of rescanning the list per char.
+    let mut entry = 0usize;
     for (index, (byte, ch)) in text.char_indices().enumerate() {
-        let width = ch.to_string().width();
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if used + width > value_w {
             break;
         }
+        while entry < entries.len() && entries[entry].range.end <= byte {
+            entry += 1;
+        }
+        let inside_invalid =
+            entry < entries.len() && entries[entry].range.contains(&byte) && !entries[entry].valid;
         let style = if focused && index == cursor {
             caret_style
-        } else if entries.iter().any(|e| e.range.contains(&byte) && !e.valid) {
+        } else if inside_invalid {
             invalid
         } else {
             normal
         };
         let shown = if masked {
-            String::from("•")
+            "•"
         } else {
-            ch.to_string()
+            &text[byte..byte + ch.len_utf8()]
         };
         spans.push(Span::styled(shown, style));
         used += width;
@@ -269,5 +278,72 @@ mod tests {
         assert_eq!(centered((40, 10), 96, 30), rect((0, 0, 40, 10)));
         // Degenerate terminals still keep a 1x1 rect (u16 floor).
         assert_eq!(centered((0, 0), 52, 8), rect((0, 0, 1, 1)));
+    }
+
+    /// Address-field validation styling (plan §14): invalid entries render
+    /// in the warning color, valid ones (and separators) do not — across
+    /// several entries, so the per-char entry walk stays in step (the old
+    /// per-char rescan covered this; the cursor must too).
+    #[test]
+    fn address_field_styles_invalid_entries() {
+        let theme = Theme::default_dark();
+        let spans = field_value_spans(
+            "a@b.co, broken, c@d.io",
+            usize::MAX,
+            false,
+            false,
+            true,
+            80,
+            &theme,
+        );
+        let styled: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(styled, "a@b.co, broken, c@d.io");
+        // Exactly the `broken` entry is warning-styled: char positions
+        // 8..=13 (each char is its own span; the field is unfocused, so
+        // no caret cell).
+        let warning_positions: Vec<usize> = spans
+            .iter()
+            .enumerate()
+            .filter(|(_, span)| span.style.fg == Some(theme.warning))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(warning_positions, vec![8, 9, 10, 11, 12, 13]);
+    }
+
+    /// Unfocused fields render no caret span (the reversed-cell caret is
+    /// only for the focused field), and plain (non-address) fields never
+    /// style anything invalid.
+    #[test]
+    fn unfocused_field_renders_plain_chars() {
+        let theme = Theme::default_dark();
+        let spans = field_value_spans("abc, broken", 0, false, false, false, 80, &theme);
+        let styled: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(styled, "abc, broken");
+        assert!(spans.iter().all(|s| s.style.fg == Some(theme.text)));
+    }
+
+    /// Masked fields never reveal the real character (ADR 0003 §3.2 W4):
+    /// one bullet per char, exactly `char_count` of them.
+    #[test]
+    fn masked_field_renders_bullets_only() {
+        let theme = Theme::default_dark();
+        let spans = field_value_spans("hunter2", usize::MAX, false, true, false, 80, &theme);
+        assert_eq!(spans.len(), 7);
+        assert!(spans.iter().all(|s| s.content == "•"));
+    }
+
+    /// The focused field's caret rides the cursor cell even inside an
+    /// invalid entry, and clipping stops at `value_w` columns.
+    #[test]
+    fn caret_wins_over_invalid_and_clip_holds() {
+        let theme = Theme::default_dark();
+        let spans = field_value_spans("broken, more", 1, true, false, true, 5, &theme);
+        let styled: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(styled, "broke");
+        // Index 1 sits in the invalid `broken` entry but is the caret cell.
+        assert_eq!(spans[1].style.fg, Some(theme.background));
+        assert_eq!(spans[1].style.bg, Some(theme.accent));
+        // The rest of the clipped range stays warning-colored.
+        assert!(spans[3..].iter().all(|s| s.style.fg == Some(theme.warning)));
     }
 }
