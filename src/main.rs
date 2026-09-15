@@ -69,21 +69,15 @@ where
             "--configure" => {
                 invocation.configure = true;
                 // The optional path value: only when it does not look
-                // like the next flag (which stays for the loop to
+                // like the next flag (which stays queued for the loop to
                 // classify).
-                if let Some(next) = args.peek()
-                    && !next.starts_with('-')
-                {
-                    let path = args.next().expect("value peeked above");
+                if let Some(path) = args.next_if(|next| !next.starts_with('-')) {
                     set_positional(&mut invocation, PathBuf::from(path))?;
                 }
             }
             "--theme" => {
-                let name = match args.peek() {
-                    Some(next) if !next.starts_with('-') => {
-                        args.next().expect("value peeked above")
-                    }
-                    _ => return Err(String::from("--theme requires a theme name")),
+                let Some(name) = args.next_if(|next| !next.starts_with('-')) else {
+                    return Err(String::from("--theme requires a theme name"));
                 };
                 if invocation.theme.is_some() {
                     return Err(String::from("--theme given more than once"));
@@ -534,10 +528,11 @@ async fn run_event_loop(
         // The palette the reducer last selected (ticket z0s4): `t` swaps
         // it at runtime, and the next frame picks it up from state.
         let theme = state.active_theme();
-        assets
+        let guard = assets
             .guard
             .as_mut()
-            .expect("terminal guard alive while drawing")
+            .context("terminal guard missing while drawing")?;
+        guard
             .terminal_mut()
             .draw(|frame| tmail::ui::render(frame, state, &theme, &ctx, &mut hits))
             .context("terminal draw failed")?;
@@ -556,6 +551,9 @@ async fn run_event_loop(
 
         // Test hook: `TMAIL_INDUCE_PANIC=1` panics after the first draw to
         // prove panic-safe terminal restoration (plan §19 Phase 1).
+        // Compiled out of release binaries: it is a restoration test, not
+        // a runtime feature.
+        #[cfg(any(test, debug_assertions))]
         if std::env::var_os("TMAIL_INDUCE_PANIC").is_some() {
             panic!("induced panic: TMAIL_INDUCE_PANIC is set (restoration test)");
         }
@@ -658,7 +656,13 @@ async fn handle_effects(
             // pause the event reader so it cannot steal the editor's
             // keystrokes (plan §14 steps 2 and 5).
             assets.events_control.pause();
-            drop(assets.guard.take().expect("terminal guard to suspend"));
+            let Some(guard) = assets.guard.take() else {
+                // The reader stays paused; the `?` ends the session, whose
+                // teardown drops the control — same as a failed re-enter
+                // below.
+                bail!("terminal guard missing while suspending for the editor");
+            };
+            drop(guard);
             let mouse = state.settings.mouse_capture;
             let result = tmail::runtime::editor::run(program, body).await;
             // Step 7: restore the terminal even on editor failure —

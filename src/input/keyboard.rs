@@ -110,12 +110,12 @@ fn search_field_action(keymap: &KeyMap, key: KeyEvent, ctrl: bool, alt: bool) ->
         // A ctrl/alt chord pierces text entry only as quit/refresh
         // (below); every other chord still types the character, as
         // before (Ctrl+A types an `a` into the query).
-        KeyCode::Char(_) => {
+        // This arm only receives `KeyCode::Char` (the unmodified chord was
+        // handled above), so the pattern binding is always a real char.
+        KeyCode::Char(c) => {
             return match keymap.lookup(&key, Focus::SearchField) {
                 Some(action @ (Action::Quit | Action::Refresh)) => FocusOutcome::Action(action),
-                _ => FocusOutcome::Action(Action::SearchEdit(SearchEdit::Char(
-                    key.code.as_char().expect("Char code"),
-                ))),
+                _ => FocusOutcome::Action(Action::SearchEdit(SearchEdit::Char(c))),
             };
         }
         _ => return FocusOutcome::Inert,
