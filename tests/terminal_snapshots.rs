@@ -1022,9 +1022,9 @@ fn reader_scrolls_body_with_reducer_state() {
     // The body scrolls beneath the fixed header (ticket 6864): the clamp
     // tracks the body against the viewport under the header.
     let width = state.session.size.0 as usize;
-    let total = tmail::ui::screens::reader::scroll_line_count(&state, width);
+    let total = tmail::app::reader::scroll_line_count(&state, width);
     let viewport = tmail::ui::layout::reader_rows_visible(state.session.size)
-        .saturating_sub(tmail::ui::screens::reader::header_line_count(&state, width));
+        .saturating_sub(tmail::app::reader::header_line_count(&state, width));
     assert!(total > viewport, "document must overflow: {total} lines");
     // Scroll to the end the way the reducer does.
     for _ in 0..total {

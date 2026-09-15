@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 
 pub mod write;
 
-use crate::app::sanitize::sanitize;
 use crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS;
 use crate::domain::paths::{expand_tilde, home_dir};
+use crate::domain::sanitize::sanitize;
 
 /// Default page size when the config does not provide a usable one
 /// (plan §16/§17: explicit pagination, default 20).

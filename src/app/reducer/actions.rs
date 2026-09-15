@@ -7,9 +7,9 @@ use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::operation::OperationKind;
 use crate::app::route::Route;
-use crate::app::sanitize::sanitize;
 use crate::app::state::{AppState, ReaderFocus};
 use crate::domain::MessageLocator;
+use crate::domain::sanitize::sanitize;
 
 // ── Message actions (plan §19 Phase 4) ───────────────────────────────────
 

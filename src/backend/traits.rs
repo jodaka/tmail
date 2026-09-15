@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::operation::OperationId;
+use crate::domain::operation::OperationId;
 use crate::domain::{
     AttachmentRequest, DraftAttachment, DraftSnapshot, Mailbox, Message, MessageId, MessageLocator,
     MessageSummary, OutboundMessage, Page, PageRequest, RestoredDraft, SearchRequest, SendOutcome,
@@ -31,7 +31,7 @@ pub struct RequestContext {
 
 /// Typed backend failures (plan §12: typed library errors at the backend,
 /// `anyhow` context at the app layer). Details are safe for display and
-/// logging after [`crate::app::sanitize::sanitize`] runs — they contain
+/// logging after [`crate::domain::sanitize::sanitize`] runs — they contain
 /// exit codes and child diagnostics, never credentials.
 #[derive(Debug, Error)]
 pub enum BackendError {
