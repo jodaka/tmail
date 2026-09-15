@@ -5,6 +5,11 @@
 //!
 //! Responsibilities:
 //! - launch effects against the backend without blocking the UI loop;
+//! - bound the concurrent backend child processes (issue 1v38): servers
+//!   cap concurrent sessions per user (Gmail ~15; Exchange varies), so a
+//!   burst of effects queues on a small permit pool instead of stacking
+//!   dozens of simultaneous logins that the server rejects with
+//!   confusing auth errors;
 //! - map typed [`BackendError`]s into modal-ready [`OperationFailure`]s,
 //!   sanitizing every detail before it can reach logs or the UI (plan §12);
 //! - suppress results of cancelled operations — cancellation also
@@ -13,6 +18,7 @@
 
 use std::sync::Arc;
 
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app::effect::Effect;
@@ -24,6 +30,14 @@ use crate::backend::{
 };
 use crate::discovery::EmailConfigDiscoverer;
 use crate::domain::sanitize::sanitize;
+
+/// Concurrent backend child processes the manager allows at once
+/// (issue 1v38): small enough that a page load plus a bulk action never
+/// trips a per-user session cap (Gmail ~15), large enough that the
+/// search, the previews, and one or two interactive operations all make
+/// progress. Queued operations acquire a permit before dispatching; the
+/// spawn itself stays unbounded so cancellation tokens stay live.
+const MAX_CONCURRENT_BACKEND_CALLS: usize = 4;
 
 /// Spawns backend tasks for the effects the reducer emits.
 pub struct OperationManager {
@@ -47,6 +61,10 @@ pub struct OperationManager {
     /// are file I/O, so they run here on the blocking pool — the reducer
     /// stays I/O-free. `None` disables caching (unknown data dir).
     cache: Option<crate::app::page_cache::PageCache>,
+    /// Bounds the concurrently *dispatching* backend children (issue
+    /// 1v38): each task acquires one permit before running its backend
+    /// call and holds it to completion.
+    permits: Arc<Semaphore>,
     results: UnboundedSender<OperationResult>,
 }
 
@@ -67,12 +85,21 @@ impl OperationManager {
             discoverer,
             tester,
             cache,
+            permits: Arc::new(Semaphore::new(MAX_CONCURRENT_BACKEND_CALLS)),
             results,
         }
     }
 
     /// Launch one effect. The cancellation token comes from the operation
     /// registry (`AppState.session.operations`), so `Esc` reaches the child process.
+    ///
+    /// The task acquires one of the manager's [`MAX_CONCURRENT_BACKEND_CALLS`]
+    /// permits before dispatching (issue 1v38): a burst of effects queues on
+    /// the pool instead of stacking unbounded concurrent IMAP sessions the
+    /// server would reject. The spawn itself is unbounded, so a queued task
+    /// still observes its cancellation token and exits silently — the
+    /// permit (if taken) drops and the result is suppressed exactly like a
+    /// cancelled in-flight operation.
     pub fn launch(&self, effect: Effect, ctx: RequestContext) {
         let backend = Arc::clone(&self.backend);
         let opener = Arc::clone(&self.opener);
@@ -80,10 +107,15 @@ impl OperationManager {
         let discoverer = Arc::clone(&self.discoverer);
         let tester = Arc::clone(&self.tester);
         let cache = self.cache.clone();
+        let permits = Arc::clone(&self.permits);
         let results = self.results.clone();
         let id = effect.id;
         tokio::spawn(async move {
             tracing::debug!(id = %id, "operation launched");
+            // Issue 1v38: queue behind the bounded pool before dispatching.
+            // `acquire` can only fail when the semaphore is closed, and the
+            // manager never closes it.
+            let _permit = permits.acquire().await.expect("semaphore never closed");
             match run_effect(
                 &backend,
                 &opener,
@@ -183,6 +215,16 @@ async fn run_effect(
                 effect,
                 ctx,
                 move |c| backend.set_read(c, locator.clone(), *read),
+                |_| OperationOutcome::Done,
+            )
+            .await
+        }
+        // One backend call for the whole selection (ticket aavy).
+        OperationKind::SetReadBulk { locators, read } => {
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.set_read_bulk(c, locators.clone(), *read),
                 |_| OperationOutcome::Done,
             )
             .await
@@ -1002,6 +1044,174 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(300));
         let second = rx.recv().await.expect("slow result");
         assert_eq!(second.id, slow_id);
+    }
+
+    #[tokio::test]
+    async fn concurrent_backend_calls_are_bounded_by_the_permit_pool() {
+        // Issue 1v38: a burst of effects must queue on the semaphore
+        // instead of stacking unbounded concurrent backend children.
+        // A fake that counts simultaneous occupants: each call parks
+        // while the test probes the count.
+        struct CountingBackend {
+            occupants: std::sync::Mutex<usize>,
+            probe: tokio::sync::watch::Sender<usize>,
+        }
+
+        #[async_trait::async_trait]
+        impl MailBackend for CountingBackend {
+            async fn list_mailboxes(&self, _req: RequestContext) -> BackendResult<Vec<Mailbox>> {
+                let now = {
+                    let mut occupants = self.occupants.lock().expect("occupant lock");
+                    *occupants += 1;
+                    *occupants
+                };
+                let _ = self.probe.send(now);
+                // Hold the slot until the test lets go.
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Ok(Vec::new())
+            }
+
+            async fn list_messages(
+                &self,
+                _req: RequestContext,
+                _page: PageRequest,
+            ) -> BackendResult<Page<MessageSummary>> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn search_messages(
+                &self,
+                _req: RequestContext,
+                _request: SearchRequest,
+            ) -> BackendResult<Page<MessageSummary>> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn get_message(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+            ) -> BackendResult<Message> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn set_read(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+                _read: bool,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn set_starred(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+                _starred: bool,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn archive(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn trash(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn save_draft(
+                &self,
+                _req: RequestContext,
+                _draft: crate::domain::DraftSnapshot,
+            ) -> BackendResult<MessageId> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn load_drafts(
+                &self,
+                _req: RequestContext,
+            ) -> BackendResult<Vec<crate::domain::RestoredDraft>> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn delete_draft(
+                &self,
+                _req: RequestContext,
+                _draft: crate::domain::DraftSnapshot,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn send_message(
+                &self,
+                _req: RequestContext,
+                _message: crate::domain::OutboundMessage,
+            ) -> BackendResult<crate::domain::SendOutcome> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn read_attachment(
+                &self,
+                _req: RequestContext,
+                _path: std::path::PathBuf,
+            ) -> BackendResult<crate::domain::DraftAttachment> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn save_attachment(
+                &self,
+                _req: RequestContext,
+                _request: crate::domain::AttachmentRequest,
+            ) -> BackendResult<std::path::PathBuf> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+        }
+
+        let occupants = std::sync::Mutex::new(0usize);
+        let (probe_tx, mut probe_rx) = tokio::sync::watch::channel(0usize);
+        let backend = Arc::new(CountingBackend {
+            occupants,
+            probe: probe_tx,
+        });
+        let (manager, _rx) = manager(Arc::clone(&backend) as _);
+
+        // Launch a burst well past the pool size.
+        let burst = 8;
+        let mut tokens = Vec::new();
+        for i in 0..burst {
+            let token = CancellationToken::new();
+            let (effect, _) = effect(OperationKind::LoadMailboxes);
+            manager.launch(effect, ctx(i as u64, &token));
+            tokens.push(token);
+        }
+
+        // The pool admits exactly `MAX_CONCURRENT_BACKEND_CALLS`; the rest
+        // must stay queued (no more occupants ever).
+        let deadline = Duration::from_secs(5);
+        tokio::time::timeout(
+            deadline,
+            probe_rx.wait_for(|c| *c >= MAX_CONCURRENT_BACKEND_CALLS),
+        )
+        .await
+        .expect("the pool admits the bounded count")
+        .expect("watch sender alive");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let peak = *probe_rx.borrow();
+        assert_eq!(
+            peak, MAX_CONCURRENT_BACKEND_CALLS,
+            "queued calls must wait instead of stacking"
+        );
+        assert!(peak < burst, "the burst must not run all at once");
     }
 
     #[tokio::test]
