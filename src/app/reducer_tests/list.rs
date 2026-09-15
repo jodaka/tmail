@@ -652,6 +652,7 @@ fn resize_while_a_modal_is_open_keeps_state_coherent() {
             &dialog.detail,
             dialog.code,
             dialog.ambiguous,
+            dialog.more_failures,
             s.session.size,
         );
         assert!(dialog.scroll <= max);

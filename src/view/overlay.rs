@@ -31,14 +31,22 @@ pub struct ModalLayout {
 /// Compute the modal geometry. The modal always fits: it shrinks to the
 /// terminal and keeps at least one detail row even in tiny terminals.
 /// The height budgets the border and the one-line margins `modal_frame`
-/// keeps above and below the content.
-pub fn error_modal_layout(size: (u16, u16), code: Option<i32>, ambiguous: bool) -> ModalLayout {
+/// keeps above and below the content. `more_failures` is the queued
+/// "and N more failed" count (issue 8859); any nonzero count adds one
+/// fixed warning row between the detail and the buttons.
+pub fn error_modal_layout(
+    size: (u16, u16),
+    code: Option<i32>,
+    ambiguous: bool,
+    more_failures: usize,
+) -> ModalLayout {
     let width = size.0.saturating_sub(10).clamp(24, 76).min(size.0.max(1));
     let height = size.1.saturating_sub(6).clamp(9, 18).min(size.1.max(1));
     let area = centered(size, width, height);
-    // Inside borders+margins: [code?] [warning?] [detail…] [buttons] [hint].
+    // Inside borders+margins: [code?] [warning?] [more?] [detail…] [buttons] [hint].
     let content_height = height.saturating_sub(4) as usize;
-    let fixed = 2 + usize::from(code.is_some()) + usize::from(ambiguous);
+    let fixed =
+        2 + usize::from(code.is_some()) + usize::from(ambiguous) + usize::from(more_failures > 0);
     let viewport_lines = content_height.saturating_sub(fixed).max(1);
     let detail_width = width.saturating_sub(4).max(1) as usize;
     ModalLayout {
@@ -55,8 +63,9 @@ pub fn error_detail_lines(
     size: (u16, u16),
     code: Option<i32>,
     ambiguous: bool,
+    more_failures: usize,
 ) -> Vec<String> {
-    let layout = error_modal_layout(size, code, ambiguous);
+    let layout = error_modal_layout(size, code, ambiguous, more_failures);
     wrap(detail, layout.detail_width)
 }
 
@@ -66,10 +75,11 @@ pub fn error_modal_max_scroll(
     detail: &str,
     code: Option<i32>,
     ambiguous: bool,
+    more_failures: usize,
     size: (u16, u16),
 ) -> usize {
-    let lines = error_detail_lines(detail, size, code, ambiguous);
-    let layout = error_modal_layout(size, code, ambiguous);
+    let lines = error_detail_lines(detail, size, code, ambiguous, more_failures);
+    let layout = error_modal_layout(size, code, ambiguous, more_failures);
     lines.len().saturating_sub(layout.viewport_lines)
 }
 

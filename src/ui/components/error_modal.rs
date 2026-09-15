@@ -29,6 +29,7 @@ pub fn max_scroll(dialog: &ErrorDialog, size: (u16, u16)) -> usize {
         &dialog.detail,
         dialog.code,
         dialog.ambiguous,
+        dialog.more_failures,
         size,
     )
 }
@@ -45,7 +46,7 @@ pub fn render(
     };
     let area = frame.area();
     let size = (area.width, area.height);
-    let layout = layout(size, dialog.code, dialog.ambiguous);
+    let layout = layout(size, dialog.code, dialog.ambiguous, dialog.more_failures);
     if layout.area.width < 3 || layout.area.height < 3 {
         return;
     }
@@ -72,7 +73,7 @@ pub fn render(
     };
 
     // Rows are laid out top to bottom inside the border, matching `layout`:
-    // [code?] [warning?] [detail viewport] [buttons] [hint].
+    // [code?] [warning?] [more?] [detail viewport] [buttons] [hint].
     let inner_x = area.x;
     let inner_w = area.width;
     let mut y = area.y;
@@ -102,12 +103,38 @@ pub fn render(
         );
         y += 1;
     }
+    // Failures queued while this modal was already open (issue 8859):
+    // one fixed warning line; each detail went to the log at WARN.
+    if dialog.more_failures > 0 {
+        let text = if dialog.more_failures == 1 {
+            String::from("and 1 more operation failed — see the log")
+        } else {
+            format!(
+                "and {} more operations failed — see the log",
+                dialog.more_failures
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                text,
+                Style::new().fg(theme.warning),
+            ))),
+            row(y, 1),
+        );
+        y += 1;
+    }
 
     // Detail viewport: skip `scroll` wrapped lines, draw at most
     // `viewport_lines`, with a subtle continuation marker. The clamp is
     // the shared `max_scroll` — the same offset the reducer clamps
     // against — not an inline recomputation of the formula.
-    let lines = detail_lines(&dialog.detail, size, dialog.code, dialog.ambiguous);
+    let lines = detail_lines(
+        &dialog.detail,
+        size,
+        dialog.code,
+        dialog.ambiguous,
+        dialog.more_failures,
+    );
     let scroll = dialog.scroll.min(max_scroll(dialog, size));
     let visible: Vec<Line<'_>> = lines
         .iter()
@@ -180,6 +207,7 @@ mod tests {
             detail: String::from(detail),
             retry: None,
             ambiguous: false,
+            more_failures: 0,
             scroll: 0,
             button: ModalButton::Dismiss,
             previous_focus: crate::app::focus::Focus::MessageList,
@@ -188,7 +216,7 @@ mod tests {
 
     #[test]
     fn modal_fits_reference_size() {
-        let geom = layout((152, 40), Some(1), false);
+        let geom = layout((152, 40), Some(1), false, 0);
         assert_eq!(geom.area.width, 76);
         // Height caps at 18 rows; fixed rows: code + detail + buttons +
         // hint, minus borders and margins.
@@ -201,12 +229,23 @@ mod tests {
 
     #[test]
     fn modal_shrinks_for_small_terminals_without_panicking() {
-        let geom = layout((0, 0), None, false);
+        let geom = layout((0, 0), None, false, 0);
         assert_eq!(geom.area.width.min(geom.area.height), 1);
         assert_eq!(geom.viewport_lines, 1);
-        let geom = layout((40, 10), Some(1), true);
+        let geom = layout((40, 10), Some(1), true, 0);
         // Height clamps to 9 → content 5; minus code/warning/buttons/hint.
         assert_eq!(geom.viewport_lines, 1);
+    }
+
+    #[test]
+    fn queued_failures_budget_one_fixed_row() {
+        // Issue 8859: any nonzero "and N more failed" count takes one row
+        // away from the detail viewport, once — 1 and 3 behave alike.
+        let base = layout((152, 40), None, false, 0);
+        let one = layout((152, 40), None, false, 1);
+        let three = layout((152, 40), None, false, 3);
+        assert_eq!(one.viewport_lines, base.viewport_lines - 1);
+        assert_eq!(three.viewport_lines, one.viewport_lines);
     }
 
     #[test]

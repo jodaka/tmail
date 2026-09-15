@@ -164,6 +164,7 @@ fn click_error_modal_retry_without_intent_is_inert() {
         detail: String::from("no retry offered"),
         retry: None,
         ambiguous: false,
+        more_failures: 0,
         scroll: 0,
         button: ModalButton::Dismiss,
         previous_focus: Focus::MessageList,

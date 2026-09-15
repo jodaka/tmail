@@ -127,6 +127,7 @@ fn modal_scroll_clamps_to_content() {
             &dialog.detail,
             dialog.code,
             dialog.ambiguous,
+            dialog.more_failures,
             s.session.size,
         ),
         other => panic!("error modal open, got {other:?}"),
@@ -203,6 +204,104 @@ fn ambiguous_failure_is_flagged_for_the_modal() {
         panic!("modal open");
     };
     assert!(dialog.ambiguous, "ambiguity must reach the modal");
+}
+
+// ── Results while the error modal is open (issue 8859) ───────────────────
+
+#[test]
+fn backend_successes_apply_while_the_error_modal_is_open() {
+    let mut s = state();
+    let (failed, req) = open_modal(&mut s, "himalaya exploded");
+    // A second page load (a timer refresh, a queued preview batch, …)
+    // completes while the modal is up: it is not input, it applies.
+    let id = s.session.operations.start(page_kind(&req)).id;
+    complete_page_ok(&mut s, id, &req, req.offset);
+    assert!(
+        matches!(s.session.overlay, Some(Overlay::Error(_))),
+        "the modal stays open"
+    );
+    assert_eq!(s.messages.offset, req.offset, "the success applied");
+    assert!(s.session.operations.get(id).is_none());
+    assert!(s.session.operations.get(failed).is_none());
+}
+
+#[test]
+fn a_foreground_failure_while_the_modal_is_open_queues_into_it() {
+    let mut s = state();
+    let (first, req) = open_modal(&mut s, "first failure");
+    // A concurrent mutating operation fails behind the modal.
+    let locator = MessageLocator {
+        mailbox: inbox_id(),
+        id: MessageId(String::from("m1")),
+        message_id: None,
+    };
+    let kind = OperationKind::SetRead {
+        locator: locator.clone(),
+        read: true,
+    };
+    let id = s.session.operations.start(kind.clone()).id;
+    no_effects(&reduce(&mut s, failure(id, &kind, "second failure")));
+    let Some(Overlay::Error(dialog)) = &s.session.overlay else {
+        panic!("modal open");
+    };
+    assert_eq!(dialog.more_failures, 1, "the failure queued into the modal");
+    assert_eq!(dialog.detail, "first failure", "the visible failure stays");
+    assert_eq!(
+        dialog.retry.as_ref().map(|r| r.kind.clone()),
+        Some(page_kind(&req)),
+        "retry keeps the visible failure's intent"
+    );
+    // Both operations left the registry: the queued failure is consumed,
+    // it can never re-apply and cannot leak (issue 8859 acceptance).
+    assert!(s.session.operations.get(id).is_none());
+    assert!(s.session.operations.get(first).is_none());
+}
+
+#[test]
+fn queued_failure_count_clamps_and_never_wraps() {
+    let mut s = state();
+    open_modal(&mut s, "first failure");
+    for i in 1..=3 {
+        let kind = OperationKind::Archive(MessageLocator {
+            mailbox: inbox_id(),
+            id: MessageId(format!("m{i}")),
+            message_id: None,
+        });
+        let id = s.session.operations.start(kind.clone()).id;
+        no_effects(&reduce(&mut s, failure(id, &kind, "failure")));
+        let Some(Overlay::Error(dialog)) = &s.session.overlay else {
+            panic!("modal open");
+        };
+        assert_eq!(dialog.more_failures, i);
+    }
+}
+
+#[test]
+fn a_background_failure_while_the_modal_is_open_lands_in_the_status_line() {
+    let mut s = state();
+    open_modal(&mut s, "first failure");
+    // A timer refresh fails behind the modal: background failures never
+    // interrupt — status line, no queue line, no modal swap.
+    let req = PageRequest {
+        mailbox_id: inbox_id(),
+        offset: 0,
+        limit: mock::PAGE_SIZE,
+    };
+    let kind = page_kind(&req);
+    let id = s.session.operations.start_background(kind.clone()).id;
+    reduce(&mut s, failure(id, &kind, "refresh blew up"));
+    let Some(Overlay::Error(dialog)) = &s.session.overlay else {
+        panic!("modal open");
+    };
+    assert_eq!(dialog.more_failures, 0, "background failures never queue");
+    assert!(
+        s.session
+            .status
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("Refresh failed")),
+        "the background failure reached the status line"
+    );
 }
 
 #[test]
