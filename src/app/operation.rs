@@ -57,6 +57,14 @@ pub enum OperationKind {
     },
     /// Mark a message read (`read: true`) or unread.
     SetRead { locator: MessageLocator, read: bool },
+    /// One batched read-flag change over the whole selection (ticket
+    /// aavy): the backend applies every locator in a single call, so a
+    /// bulk mark costs one IMAP session instead of one per message. The
+    /// locators share the mailbox the bulk action was pressed in.
+    SetReadBulk {
+        locators: Vec<MessageLocator>,
+        read: bool,
+    },
     /// Star (`starred: true`) or unstar a message.
     SetStarred {
         locator: MessageLocator,
@@ -256,6 +264,8 @@ impl OperationKind {
             },
             OperationKind::SetRead { read: true, .. } => "Marking read",
             OperationKind::SetRead { read: false, .. } => "Marking unread",
+            OperationKind::SetReadBulk { read: true, .. } => "Marking read",
+            OperationKind::SetReadBulk { read: false, .. } => "Marking unread",
             OperationKind::SetStarred { starred: true, .. } => "Starring",
             OperationKind::SetStarred { starred: false, .. } => "Unstarring",
             OperationKind::Archive(_) => "Archiving",

@@ -104,7 +104,34 @@ fn bulk_archive_starts_one_operation_per_selected_message() {
 }
 
 #[test]
-fn bulk_trash_read_and_unread_follow_the_same_pattern() {
+fn bulk_mark_read_is_one_batched_operation() {
+    let mut s = state();
+    s.session.focus = Focus::MessageList;
+    no_effects(&reduce(&mut s, Action::SelectAll));
+    let count = s.messages.items.len();
+
+    // Ticket aavy: the whole selection travels as ONE SetReadBulk
+    // operation — one backend session, never one process per message.
+    let effects = reduce(&mut s, Action::MarkRead);
+    assert_eq!(effects.len(), 1, "one batched operation for the batch");
+    let OperationKind::SetReadBulk {
+        locators,
+        read: true,
+    } = &effects[0].kind
+    else {
+        panic!("expected SetReadBulk read=true, got {:?}", effects[0].kind);
+    };
+    assert_eq!(locators.len(), count, "every selected row in the batch");
+
+    let effects = reduce(&mut s, Action::MarkUnread);
+    assert_eq!(effects.len(), 1, "one batched operation for the batch");
+    let OperationKind::SetReadBulk { read: false, .. } = &effects[0].kind else {
+        panic!("expected SetReadBulk read=false, got {:?}", effects[0].kind);
+    };
+}
+
+#[test]
+fn bulk_trash_stays_one_operation_per_selected_message() {
     let mut s = state();
     s.session.focus = Focus::MessageList;
     no_effects(&reduce(&mut s, Action::SelectAll));
@@ -117,21 +144,26 @@ fn bulk_trash_read_and_unread_follow_the_same_pattern() {
             .iter()
             .all(|e| matches!(e.kind, OperationKind::Trash(_)))
     );
+}
 
-    let effects = reduce(&mut s, Action::MarkRead);
-    assert_eq!(effects.len(), count);
+#[test]
+fn bulk_mark_read_confirmation_flips_every_selected_row() {
+    let mut s = state();
+    s.session.focus = Focus::MessageList;
+    no_effects(&reduce(&mut s, Action::SelectAll));
+    let (id, kind) = expect_kind(&reduce(&mut s, Action::MarkRead));
+    let OperationKind::SetReadBulk {
+        locators,
+        read: true,
+    } = &kind
+    else {
+        panic!("kind: {kind:?}");
+    };
+    assert_eq!(locators.len(), s.messages.items.len());
+    complete_done(&mut s, id);
     assert!(
-        effects
-            .iter()
-            .all(|e| matches!(e.kind, OperationKind::SetRead { read: true, .. }))
-    );
-
-    let effects = reduce(&mut s, Action::MarkUnread);
-    assert_eq!(effects.len(), count);
-    assert!(
-        effects
-            .iter()
-            .all(|e| matches!(e.kind, OperationKind::SetRead { read: false, .. }))
+        s.messages.items.iter().all(|m| m.is_read),
+        "the single confirmation marks every row read"
     );
 }
 

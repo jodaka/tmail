@@ -400,6 +400,43 @@ impl MailBackend for HimalayaCliBackend {
         self.run_flag(&ctx, &locator, "seen", read).await
     }
 
+    /// One `flag {add,remove}` process for the whole selection (ticket
+    /// aavy): himalaya carries every id as one argv run, so the batch
+    /// costs one IMAP session instead of one per message — N concurrent
+    /// logins is what tripped the server's throttling in the reported
+    /// failure. Locators are grouped by mailbox (a bulk selection is
+    /// single-mailbox today; grouping keeps that assumption local).
+    async fn set_read_bulk(
+        &self,
+        ctx: RequestContext,
+        locators: Vec<MessageLocator>,
+        read: bool,
+    ) -> BackendResult<()> {
+        tracing::debug!(operation = %ctx.operation, read, count = locators.len(), "set_read_bulk");
+        let mut groups: std::collections::HashMap<&str, Vec<String>> =
+            std::collections::HashMap::new();
+        for locator in &locators {
+            groups
+                .entry(locator.mailbox.0.as_str())
+                .or_default()
+                .push(locator.id.0.clone());
+        }
+        for (mailbox, ids) in groups {
+            let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            let argv = command::flag_argv(
+                self.config_path.as_deref(),
+                self.account.as_deref(),
+                read,
+                mailbox,
+                "seen",
+                &id_refs,
+            );
+            let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
+            process::decode_on_pool::<serde_json::Value>(output).await?;
+        }
+        Ok(())
+    }
+
     async fn set_starred(
         &self,
         ctx: RequestContext,
@@ -743,7 +780,7 @@ impl HimalayaCliBackend {
             add,
             &locator.mailbox.0,
             flag,
-            &locator.id.0,
+            &[&locator.id.0],
         );
         let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
         process::decode_on_pool::<serde_json::Value>(output).await?;
