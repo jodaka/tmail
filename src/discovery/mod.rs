@@ -197,7 +197,11 @@ impl EmailConfigDiscoverer for PimDiscoverer {
         // blocking pool. `compose_all_within` already bounds the wait
         // to the deadline (still-running mechanisms are abandoned in
         // the background); the outer timeout only guards the
-        // spawn_blocking hop itself.
+        // spawn_blocking hop itself. A timed-out handle is dropped, not
+        // awaited, so the bounded worker runs to its own deadline in the
+        // background (ticket tnc1 review) — a retry can therefore overlap
+        // with the previous attempt, but every worker is deadline-bounded,
+        // so at most two run concurrently and nothing leaks unbounded.
         let email = email.to_string();
         let handle = tokio::task::spawn_blocking(move || discover_blocking(&email));
         match tokio::time::timeout(DISCOVERY_DEADLINE + BLOCKING_JOIN_SLACK, handle).await {

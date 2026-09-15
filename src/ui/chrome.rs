@@ -3,13 +3,13 @@
 //! and dim one-line notes. One implementation per look, so a palette or
 //! anatomy change lands everywhere at once.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
-use ratatui::Frame;
 use unicode_width::UnicodeWidthChar;
 
 use crate::ui::text;

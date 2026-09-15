@@ -56,28 +56,41 @@ pub(crate) async fn test_account_mailbox_names(
 ) -> BackendResult<Vec<String>> {
     // Guarded creation: the file exists only after the mode is 0600 (on
     // unix, tempfile already creates it 0600; re-assert defensively)
-    // and before any secret is placed inside.
-    let temp = tempfile::Builder::new()
-        .prefix("tmail-wizard-")
-        .suffix(".toml")
-        .tempfile()
-        .map_err(|err| BackendError::File(format!("could not create the test config: {err}")))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        temp.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|err| {
-                BackendError::File(format!("could not secure the test config: {err}"))
-            })?;
-    }
+    // and before any secret is placed inside. The tempfile work hops to
+    // the blocking pool — the single-threaded runtime never waits on a
+    // disk (plan §3).
     let fragment = crate::config::write::draft_account_fragment(draft);
-    temp.as_file()
-        .write_all(fragment.as_bytes())
-        .map_err(|err| BackendError::File(format!("could not write the test config: {err}")))?;
-    temp.as_file()
-        .flush()
-        .map_err(|err| BackendError::File(format!("could not write the test config: {err}")))?;
+    let temp = tokio::task::spawn_blocking(move || -> BackendResult<tempfile::NamedTempFile> {
+        let temp = tempfile::Builder::new()
+            .prefix("tmail-wizard-")
+            .suffix(".toml")
+            .tempfile()
+            .map_err(|err| {
+                BackendError::File(format!("could not create the test config: {err}"))
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            temp.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|err| {
+                    BackendError::File(format!("could not secure the test config: {err}"))
+                })?;
+        }
+        temp.as_file()
+            .write_all(fragment.as_bytes())
+            .map_err(|err| BackendError::File(format!("could not write the test config: {err}")))?;
+        temp.as_file()
+            .flush()
+            .map_err(|err| BackendError::File(format!("could not write the test config: {err}")))?;
+        Ok(temp)
+    })
+    .await
+    .map_err(|join| {
+        BackendError::Io(std::io::Error::other(format!(
+            "test config task failed: {join}"
+        )))
+    })??;
 
     let path = temp.path().to_path_buf();
     let argv = command::mailbox_list_argv(Some(&path), Some(&draft.name), false);
@@ -95,7 +108,7 @@ pub(crate) async fn test_account_mailbox_names(
             ),
         })??;
 
-    let dto: dto::MailboxesDto = process::decode(output)?;
+    let dto: dto::MailboxesDto = process::decode_on_pool(output).await?;
     // Drop the temp file (deleting it) before reporting.
     drop(temp);
     Ok(map::mailboxes(dto, &HashMap::new())
@@ -123,6 +136,13 @@ pub struct HimalayaCliBackend {
     /// actually exposes instead of guessing names (ADR 0001: map semantic
     /// operations inside the backend adapter). `Arc` keeps the struct
     /// cheaply cloneable.
+    ///
+    /// The lock is deliberately `std::sync::RwLock`: it is never held
+    /// across an `.await`, its critical sections are a `Vec` clone of a
+    /// handful of mailboxes, and every writer runs on the single
+    /// main-runtime thread — so there is no executor stall to avoid
+    /// (ticket tnc1 review) and no async lock has to infect the sync
+    /// callers (`mailbox_for_role`, used from sync cleanup paths).
     mailboxes: Arc<RwLock<Option<Vec<Mailbox>>>>,
     /// Tmail-owned crash-safe draft journal (ADR 0002 §D.1): every revision
     /// is recorded here before any remote call. `None` when no data
@@ -256,7 +276,7 @@ impl HimalayaCliBackend {
             ),
         };
         let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
-        let dto: dto::EnvelopesDto = process::decode(output)?;
+        let dto: dto::EnvelopesDto = process::decode_on_pool(output).await?;
         Ok(map::envelopes(dto, mailbox_id, aligned, limit))
     }
 
@@ -278,7 +298,7 @@ impl MailBackend for HimalayaCliBackend {
         let argv =
             command::mailbox_list_argv(self.config_path.as_deref(), self.account.as_deref(), true);
         let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
-        let dto: dto::MailboxesDto = process::decode(output)?;
+        let dto: dto::MailboxesDto = process::decode_on_pool(output).await?;
         let mailboxes = map::mailboxes(dto, &self.aliases);
         // Remember the listing so archive/trash resolution works even when
         // the semantic operation runs long after the sidebar loaded.
@@ -311,7 +331,7 @@ impl MailBackend for HimalayaCliBackend {
             &locator.id.0,
         );
         let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
-        let dto: dto::MessageReadDto = process::decode(output)?;
+        let dto: dto::MessageReadDto = process::decode_on_pool(output).await?;
         Ok(map::message(dto, locator))
     }
 
@@ -378,7 +398,7 @@ impl MailBackend for HimalayaCliBackend {
             &locator.id.0,
         );
         let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
-        process::decode::<serde_json::Value>(output)?;
+        process::decode_on_pool::<serde_json::Value>(output).await?;
         Ok(())
     }
 
@@ -425,7 +445,7 @@ impl MailBackend for HimalayaCliBackend {
             &ctx.cancellation,
         )
         .await?;
-        let added: dto::MessageAddDto = process::decode(output)?;
+        let added: dto::MessageAddDto = process::decode_on_pool(output).await?;
         let new_id = MessageId(added.id);
 
         // 4. Only after the new copy is confirmed: best-effort deletion of
@@ -606,9 +626,13 @@ impl MailBackend for HimalayaCliBackend {
         // 2. Download the part into a Tmail-owned private tempdir — never
         //    straight into the destination, so nothing there can be
         //    touched until the collision-checked write is ready. The dir
-        //    travels as one argv entry: no shell, whatever the path.
-        let temp = tempfile::tempdir()
-            .map_err(|err| BackendError::File(format!("temporary download dir: {err}")))?;
+        //    travels as one argv entry: no shell, whatever the path. The
+        //    tempdir creation hops to the blocking pool (plan §3).
+        let temp = blocking(move || {
+            tempfile::tempdir()
+                .map_err(|err| BackendError::File(format!("temporary download dir: {err}")))
+        })
+        .await?;
         let argv = command::attachment_download_argv(
             self.config_path.as_deref(),
             self.account.as_deref(),
@@ -618,7 +642,7 @@ impl MailBackend for HimalayaCliBackend {
             temp.path(),
         );
         let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
-        let dto: dto::AttachmentsDto = process::decode(output)?;
+        let dto: dto::AttachmentsDto = process::decode_on_pool(output).await?;
         let row = find_row(&dto, request.part_id)?;
         let source = row
             .path
@@ -691,7 +715,7 @@ impl HimalayaCliBackend {
             &locator.id.0,
         );
         let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
-        process::decode::<serde_json::Value>(output)?;
+        process::decode_on_pool::<serde_json::Value>(output).await?;
         Ok(())
     }
 
@@ -710,7 +734,7 @@ impl HimalayaCliBackend {
             &locator.id.0,
         );
         let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
-        process::decode::<serde_json::Value>(output)?;
+        process::decode_on_pool::<serde_json::Value>(output).await?;
         Ok(())
     }
 
@@ -1339,7 +1363,7 @@ async fn list_envelope_ids_with_message_id(
     let Ok(output) = process::run(&cli.program, &argv, cancellation).await else {
         return Vec::new();
     };
-    let Ok(listed) = process::decode::<dto::EnvelopesDto>(output) else {
+    let Ok(listed) = process::decode_on_pool::<dto::EnvelopesDto>(output).await else {
         return Vec::new();
     };
     let bare = crate::domain::message::bare_message_id(message_id);

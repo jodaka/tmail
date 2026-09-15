@@ -170,6 +170,21 @@ pub(crate) fn decode<T: DeserializeOwned>(output: ChildOutput) -> BackendResult<
     })
 }
 
+/// [`decode`] on the blocking pool: parsing child output is CPU work over
+/// bytes that can reach tens of megabytes (a full message dump, a large
+/// listing), and the main runtime is single-threaded (plan §3) — the frame
+/// loop must never spend itself on a serde parse.
+pub(crate) async fn decode_on_pool<T: DeserializeOwned + Send + 'static>(
+    output: ChildOutput,
+) -> BackendResult<T> {
+    match tokio::task::spawn_blocking(move || decode(output)).await {
+        Ok(result) => result,
+        Err(join) => Err(BackendError::Io(std::io::Error::other(format!(
+            "decode task failed: {join}"
+        )))),
+    }
+}
+
 /// Build the error for a non-zero exit. Prefers the JSON error object on
 /// stdout (ADR 0001 finding 1), then stderr, then a generic note.
 fn command_error(output: &ChildOutput) -> BackendError {

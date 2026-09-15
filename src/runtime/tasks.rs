@@ -286,7 +286,7 @@ async fn run_effect(
             tracing::debug!(path = %path.display(), "opening with platform handler");
             // Spawned directly (argv, no shell); not cancellable, so no
             // token dance here — the handler app owns its own lifetime.
-            match opener.open(path) {
+            match opener.open(path).await {
                 Ok(()) => Some(Ok(OperationOutcome::Done)),
                 Err(err) => Some(Err(plain_failure(
                     effect,
@@ -298,7 +298,7 @@ async fn run_effect(
             tracing::debug!(url = %url, "opening link with platform handler");
             // Spawned directly (argv, no shell); the opener itself refuses
             // non-web schemes before dispatching (ticket hc9n).
-            match opener.open_url(url) {
+            match opener.open_url(url).await {
                 Ok(()) => Some(Ok(OperationOutcome::Done)),
                 Err(err) => Some(Err(plain_failure(
                     effect,
@@ -365,14 +365,18 @@ async fn run_effect(
         // thread. A failure is logged, never modaled.
         OperationKind::Notify { request } => {
             match request {
-                // One byte to stdout: fast enough to stay on the runtime,
-                // and it can never interleave with a draw the way a
-                // blocking-pool write to the same terminal could.
+                // One byte to stdout — but a write to a flow-controlled
+                // or full tty buffer can block, so it hops to the blocking
+                // pool like the Desktop arm. A single-byte write cannot
+                // split a frame's escape sequences (each `write(2)` lands
+                // whole), so offloading it is safe for the terminal.
                 NotifyRequest::Bell => {
-                    if let Err(err) = notifier.bell() {
-                        tracing::warn!(%err, "bell notification failed");
-                    } else {
-                        tracing::debug!("bell rung");
+                    let notifier = Arc::clone(notifier);
+                    let rung = tokio::task::spawn_blocking(move || notifier.bell()).await;
+                    match rung {
+                        Ok(Ok(())) => tracing::debug!("bell rung"),
+                        Ok(Err(err)) => tracing::warn!(%err, "bell notification failed"),
+                        Err(err) => tracing::warn!(%err, "bell task failed"),
                     }
                 }
                 // notify-rust blocks while the desktop service answers,
@@ -862,8 +866,9 @@ mod tests {
         urls: std::sync::Mutex<Vec<String>>,
     }
 
+    #[async_trait::async_trait]
     impl PathOpener for RecordingOpener {
-        fn open(&self, path: &std::path::Path) -> std::io::Result<()> {
+        async fn open(&self, path: &std::path::Path) -> std::io::Result<()> {
             self.opened
                 .lock()
                 .expect("opener lock")
@@ -871,7 +876,7 @@ mod tests {
             Ok(())
         }
 
-        fn open_url(&self, url: &str) -> std::io::Result<()> {
+        async fn open_url(&self, url: &str) -> std::io::Result<()> {
             self.urls.lock().expect("opener lock").push(url.to_string());
             Ok(())
         }
@@ -1036,15 +1041,16 @@ mod tests {
     #[tokio::test]
     async fn open_failures_name_the_path_and_stay_retryable() {
         struct RefusingOpener;
+        #[async_trait::async_trait]
         impl PathOpener for RefusingOpener {
-            fn open(&self, _path: &std::path::Path) -> std::io::Result<()> {
+            async fn open(&self, _path: &std::path::Path) -> std::io::Result<()> {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::Unsupported,
                     "no opener",
                 ))
             }
 
-            fn open_url(&self, _url: &str) -> std::io::Result<()> {
+            async fn open_url(&self, _url: &str) -> std::io::Result<()> {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::Unsupported,
                     "no opener",
@@ -1163,12 +1169,13 @@ mod tests {
     #[tokio::test]
     async fn open_url_failures_name_the_link_and_stay_retryable() {
         struct RefusingUrlOpener;
+        #[async_trait::async_trait]
         impl PathOpener for RefusingUrlOpener {
-            fn open(&self, _path: &std::path::Path) -> std::io::Result<()> {
+            async fn open(&self, _path: &std::path::Path) -> std::io::Result<()> {
                 Ok(())
             }
 
-            fn open_url(&self, _url: &str) -> std::io::Result<()> {
+            async fn open_url(&self, _url: &str) -> std::io::Result<()> {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::Unsupported,
                     "no browser",
@@ -1233,12 +1240,13 @@ mod cache_tests {
 
     struct InertOpener;
 
+    #[async_trait::async_trait]
     impl PathOpener for InertOpener {
-        fn open(&self, _path: &std::path::Path) -> std::io::Result<()> {
+        async fn open(&self, _path: &std::path::Path) -> std::io::Result<()> {
             Err(std::io::Error::other("unused"))
         }
 
-        fn open_url(&self, _url: &str) -> std::io::Result<()> {
+        async fn open_url(&self, _url: &str) -> std::io::Result<()> {
             Err(std::io::Error::other("unused"))
         }
     }

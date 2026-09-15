@@ -99,6 +99,13 @@ impl DraftJournal {
     /// `.json` entries move; a target that already exists wins (the
     /// account scope's copy is authoritative) and a failed move is logged
     /// and skipped — the file stays in place, nothing is lost.
+    ///
+    /// This runs synchronously from session construction, before the
+    /// event loop and terminal exist: nothing else runs on the runtime
+    /// then, so the sync I/O cannot stall the UI (ticket tnc1 review).
+    /// One-time and idempotent — after the first migration it is a single
+    /// `read_dir` of the root — so the accepted trade-off is startup
+    /// latency, never frame time.
     fn migrate_legacy(root: &Path, scoped: &Path) {
         let Ok(read_dir) = fs::read_dir(root) else {
             return; // No legacy directory: nothing to migrate.

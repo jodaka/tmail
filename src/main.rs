@@ -560,7 +560,12 @@ async fn run_event_loop(
             panic!("induced panic: TMAIL_INDUCE_PANIC is set (restoration test)");
         }
 
+        // `biased` polls the event stream first (ticket tnc1 review):
+        // input dispatches ahead of backend results, so a burst of
+        // completions can never starve the keyboard, and the batch drain
+        // below keeps a keypress burst from starving backend results.
         tokio::select! {
+            biased;
             event = events.recv() => match event {
                 Some(first) => {
                     // Drain what already queued behind this event (a
