@@ -6,7 +6,9 @@ use super::composer_flow::{close_composer_route, switch_mailbox};
 use crate::app::action::{Action, AttachmentBrowse};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
-use crate::app::operation::{DraftRemovalReason, OperationFailure, OperationKind};
+use crate::app::operation::{
+    DraftRemovalReason, OperationFailure, OperationKind, OperationOrigin, OperationResult,
+};
 use crate::app::overlay::{
     AccountSwitcherDialog, ConfirmButton, ErrorDialog, HelpDialog, MailboxesDialog, ModalButton,
     Overlay, SwitchConfirmDialog, ThemePickerDialog,
@@ -46,10 +48,32 @@ pub(crate) fn clear_expired_status(
 /// Handle `action` while any modal is open. Returns `None` when no modal
 /// is open (the caller falls through to normal handling). The attachment
 /// dialog likewise falls through for `BackendCompleted`: the pending
-/// validation result must land while the dialog is up.
+/// validation result must land while the dialog is up. The error modal
+/// (issue 8859) falls through too — successes apply behind it and
+/// background failures land in the status line — and queues a *foreground*
+/// failure into the open dialog instead of dropping it.
 pub(crate) fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
     match state.session.overlay {
-        Some(Overlay::Error(_)) => Some(error_modal_reduce(state, action)),
+        Some(Overlay::Error(_)) => match action {
+            Action::BackendCompleted(result) => {
+                // Results are not input (issue 8859): a success applies
+                // normally behind the modal, and a background failure
+                // keeps its status-line routing. Only a foreground
+                // failure queues into the open dialog.
+                if result.outcome.is_ok()
+                    || state
+                        .session
+                        .operations
+                        .get(result.id)
+                        .is_none_or(|op| op.origin == OperationOrigin::Background)
+                {
+                    None
+                } else {
+                    Some(queue_error_modal_failure(state, result))
+                }
+            }
+            _ => Some(error_modal_reduce(state, action)),
+        },
         Some(Overlay::ConfirmDiscard(_)) => Some(discard_modal_reduce(state, action)),
         Some(Overlay::AttachmentExplorer(_)) => match action {
             Action::BackendCompleted(_) => None,
@@ -259,12 +283,14 @@ pub(crate) fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<E
                 state.session.size,
                 dialog.code,
                 dialog.ambiguous,
+                dialog.more_failures,
             );
             (
                 crate::view::overlay::error_modal_max_scroll(
                     &dialog.detail,
                     dialog.code,
                     dialog.ambiguous,
+                    dialog.more_failures,
                     state.session.size,
                 ),
                 layout.viewport_lines,
@@ -765,11 +791,40 @@ pub(crate) fn open_error_modal(state: &mut AppState, failure: OperationFailure) 
         detail: failure.detail.clone(),
         retry: failure.retry.clone(),
         ambiguous: failure.ambiguous,
+        more_failures: 0,
         scroll: 0,
         button: ModalButton::Dismiss,
         previous_focus: state.session.focus,
     }));
     state.session.focus = Focus::ErrorModal;
     state.set_status("Operation failed");
+    Vec::new()
+}
+
+/// A foreground failure completing while the error modal is already open
+/// (issue 8859): the visible failure stays put — replacing it would
+/// swallow what the user is reading — and the new failure queues into
+/// the dialog as the "and N more failed" line, its detail logged at
+/// WARN. The registry entry is consumed here exactly like
+/// `backend_completed` would, so the queued operation can never
+/// re-apply and cannot leak.
+fn queue_error_modal_failure(state: &mut AppState, result: &OperationResult) -> Vec<Effect> {
+    if state.session.operations.finish(result.id).is_none() {
+        tracing::debug!(id = %result.id, "dropping result for unknown or cancelled operation");
+        return Vec::new();
+    }
+    let Err(failure) = &result.outcome else {
+        // Only failures are routed here; an Ok outcome fell through.
+        return Vec::new();
+    };
+    tracing::warn!(
+        id = %result.id,
+        code = ?failure.code,
+        detail = %failure.detail,
+        "operation failed while an error modal was already open"
+    );
+    if let Some(Overlay::Error(dialog)) = state.session.overlay.as_mut() {
+        dialog.more_failures = dialog.more_failures.saturating_add(1);
+    }
     Vec::new()
 }

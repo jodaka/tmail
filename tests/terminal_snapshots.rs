@@ -1686,7 +1686,7 @@ fn hit_map_records_modal_buttons_and_blocks_click_through() {
     // The modal geometry comes from the same layout the renderer uses.
     // Rows draw under the one-line margins: the button row sits one row
     // higher than it did without margins (hint last, then the margin).
-    let layout = tmail::ui::components::error_modal::layout((152, 40), Some(1), false);
+    let layout = tmail::ui::components::error_modal::layout((152, 40), Some(1), false, 0);
     let button_y = layout.area.y + layout.area.height - 4;
     let retry_x = layout.area.x + 2;
     assert_eq!(
