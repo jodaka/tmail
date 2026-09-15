@@ -218,20 +218,29 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.bump.outputs.tag }}
+          # On a re-run of failed jobs the bump outputs are gone; fall back
+          # to the dispatched branch, whose head carries the bump commit
+          # (bump pushes HEAD to the same ref atomically with the tag).
+          ref: ${{ needs.bump.outputs.tag || github.ref_name }}
 
       - name: Sync formula into tap
         run: |
           set -euo pipefail
 
           # A re-run of failed jobs does not re-execute the bump job, and
-          # GitHub Actions drops `needs.*.outputs` on such re-runs. Fall back
-          # to the version committed by bump (master head == the bumped
-          # checkout), and fail loudly if neither path produces semver.
-          version_pattern='s/^version = "\([0-9.]*\)"$/\1/p'
+          # GitHub Actions drops `needs.*.outputs` on such re-runs. Fall
+          # back to the release the `publish` job actually created (this
+          # job only runs after publish, so it exists) — the same release
+          # the checksums below are fetched from, so the version and the
+          # sums can never disagree. Fail loudly if neither path
+          # produces semver; never fall back to the working tree, whose
+          # Cargo.toml may predate the bump (a stale read silently
+          # re-syncs the previous release instead).
           if [ -z "${VERSION:-}" ]; then
-            echo "::warning::bump job outputs missing (job re-run); deriving version from Cargo.toml"
-            VERSION="$(sed -n "$version_pattern" Cargo.toml)"
+            echo "::warning::bump job outputs missing (job re-run); deriving version from the latest published release"
+            VERSION="$(curl -sS --fail-with-body -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest" \
+              | python3 -c "import json, sys; print(json.load(sys.stdin)['tag_name'].removeprefix('v'))")"
             echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           fi
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
