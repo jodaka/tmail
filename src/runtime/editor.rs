@@ -6,6 +6,14 @@
 //! (step 4) — on a secure temporary file holding the body (step 3), and
 //! the run waits for exit (step 5). The edited file is read back on
 //! success (step 6); a non-zero exit imports nothing and reports why.
+//!
+//! Deliberately no timeout or cancellation (ticket tnc1 review): the run
+//! is an interactive user session — minutes in an editor are normal — so
+//! any timeout would destroy the user's work mid-edit. The TUI is
+//! suspended while it runs, by design. A hung editor is user-recoverable:
+//! Ctrl-C reaches the foreground process group, the default SIGINT
+//! terminates both the editor and tmail, and the terminal guard's Drop
+//! restores the screen on that exit path.
 
 use std::fs;
 use std::path::Path;
