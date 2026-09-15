@@ -23,6 +23,7 @@ use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address as MailAddress;
 
 use crate::backend::journal::DraftJournal;
+use crate::backend::tester::AccountTester;
 use crate::backend::traits::{BackendError, BackendResult, MailBackend, RequestContext};
 use crate::config::Config;
 use crate::domain::{
@@ -49,7 +50,7 @@ const TEST_ACCOUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// other backend call, and returns the mailbox names. The temp file is
 /// deleted in all outcomes (guarded `NamedTempFile` drop); nothing
 /// containing the credential is ever written to the real config.
-pub(crate) async fn test_account_mailbox_names(
+async fn test_account_mailbox_names(
     program: &str,
     draft: &crate::config::write::DraftAccount,
     cancellation: tokio_util::sync::CancellationToken,
@@ -115,6 +116,36 @@ pub(crate) async fn test_account_mailbox_names(
         .into_iter()
         .map(|mailbox| mailbox.name)
         .collect())
+}
+
+/// The real credential-test adapter (ADR 0003 §3.4): wraps
+/// [`test_account_mailbox_names`] with the adapter's own program name, so
+/// the operation manager never names a concrete backend (ticket 55t6).
+#[derive(Debug, Clone)]
+pub struct HimalayaAccountTester {
+    /// Executable name or path, mirroring [`HimalayaCliBackend`]'s
+    /// `program` field; overridable so tests can point at a fake.
+    program: String,
+}
+
+impl HimalayaAccountTester {
+    /// Test through the given executable name or path.
+    pub fn new(program: impl Into<String>) -> Self {
+        Self {
+            program: program.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl AccountTester for HimalayaAccountTester {
+    async fn test_account(
+        &self,
+        draft: &crate::config::write::DraftAccount,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> BackendResult<Vec<String>> {
+        test_account_mailbox_names(&self.program, draft, cancellation).await
+    }
 }
 
 /// Drives the `himalaya` executable with argv-only child processes.

@@ -11,7 +11,6 @@
 //! killed on cancellation (Phase 3.2).
 
 use std::collections::HashMap;
-use std::fmt;
 use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
@@ -21,17 +20,7 @@ use crate::domain::{
     OutboundMessage, Page, PageRequest, RestoredDraft, SearchRequest, SendOutcome,
 };
 
-/// Opaque identifier carried by every backend request and result (plan §5:
-/// "Every request and result carries an `OperationId`"). Constructed only
-/// by the registry; test code may synthesize unknown ids.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct OperationId(pub u64);
-
-impl fmt::Display for OperationId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "op-{}", self.0)
-    }
-}
+pub use crate::domain::operation::OperationId;
 
 /// The typed intent of one backend operation (plan §5: "Effects launch
 /// typed backend requests").
