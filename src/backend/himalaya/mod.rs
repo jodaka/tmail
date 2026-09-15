@@ -186,6 +186,13 @@ pub struct HimalayaCliBackend {
     /// `[tmail.attachments].downloads_dir` (plan §17), as written; a leading
     /// `~` is expanded at use time. `None` falls back to `$HOME/Downloads`.
     downloads_dir: Option<PathBuf>,
+    /// At most one stray-draft sweep runs at a time (ticket 8s0g): sweeps
+    /// are detached so cleanup never delays the save result, and their
+    /// token belongs to the already-finished save — rapid saves would
+    /// otherwise pile up unbounded detached sweeps. A skipped sweep is
+    /// harmless: every copy carries the same stable `Message-ID`, so the
+    /// next save's sweep removes whatever this one missed.
+    sweeps: Arc<tokio::sync::Semaphore>,
 }
 
 impl HimalayaCliBackend {
@@ -208,6 +215,7 @@ impl HimalayaCliBackend {
             account_email: None,
             account_display_name: None,
             downloads_dir: None,
+            sweeps: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 
@@ -882,14 +890,26 @@ impl HimalayaCliBackend {
         let Some(message_id) = message_id else {
             return;
         };
-        tokio::spawn(run_stray_draft_sweep(
-            self.cli(),
-            drafts_mailbox.to_string(),
-            self.mailbox_for_role(MailboxRole::Trash),
-            keep.map(|id| id.0.clone()),
-            Some(message_id.clone()),
-            ctx.clone(),
-        ));
+        // One sweep at a time (ticket 8s0g): each sweep is detached and
+        // effectively uncancellable, so rapid saves must not pile them
+        // up unbounded. Skipping is safe — every copy carries the same
+        // stable Message-ID, so the next save's sweep removes the
+        // leftovers this one missed.
+        let Ok(permit) = self.sweeps.clone().try_acquire_owned() else {
+            tracing::debug!("a stray draft sweep is already running; skipping this one");
+            return;
+        };
+        let cli = self.cli();
+        let drafts_mailbox = drafts_mailbox.to_string();
+        let trash = self.mailbox_for_role(MailboxRole::Trash);
+        let keep = keep.map(|id| id.0.clone());
+        let message_id = Some(message_id.clone());
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            run_stray_draft_sweep(cli, drafts_mailbox, trash, keep, message_id, ctx).await;
+            // Hold the single-sweep permit until the sweep ends.
+            drop(permit);
+        });
     }
 
     /// Serialize one draft revision as a single-part `text/plain` RFC 5322
@@ -1973,5 +1993,62 @@ mod send_tests {
         assert!(!pre_delivery_failure("SMTP connection closed by peer"));
         // …and everything unlisted is conservative.
         assert!(!pre_delivery_failure("mailbox disappeared"));
+    }
+}
+
+#[cfg(test)]
+mod stray_sweep_tests {
+    //! The detached stray-draft sweep is bounded to one at a time
+    //! (ticket 8s0g): a sweep in flight makes further saves skip their
+    //! sweep instead of piling up unbounded detached work.
+
+    use super::*;
+    use crate::domain::operation::OperationId;
+    use tokio_util::sync::CancellationToken;
+
+    fn ctx() -> RequestContext {
+        RequestContext {
+            operation: OperationId(1),
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_sweep_is_skipped_while_one_is_in_flight() {
+        let backend = HimalayaCliBackend::new("himalaya", None, None, HashMap::new());
+        // Hold the single permit the way an in-flight sweep does.
+        let permit = backend
+            .sweeps
+            .clone()
+            .try_acquire_owned()
+            .expect("idle permit");
+        backend.delete_stray_draft_copies(&ctx(), "Drafts", None, &Some(String::from("<a@b>")));
+        // The skipped call neither took nor released the permit.
+        assert!(
+            backend.sweeps.try_acquire().is_err(),
+            "permit must still be held by the in-flight sweep"
+        );
+        drop(permit);
+    }
+
+    #[tokio::test]
+    async fn an_idle_sweep_slot_is_taken_and_released_by_a_spawned_sweep() {
+        let backend = HimalayaCliBackend::new("no-such-himalaya", None, None, HashMap::new());
+        backend.delete_stray_draft_copies(&ctx(), "Drafts", None, &Some(String::from("<a@b>")));
+        // The sweep took the permit; its processes fail fast (no such
+        // program), and when it ends the permit is released again.
+        assert!(
+            backend.sweeps.try_acquire().is_err(),
+            "permit held while the sweep runs"
+        );
+        // Wait for the spawned sweep to finish its failed runs, then the
+        // slot must be free again.
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if backend.sweeps.try_acquire().is_ok() {
+                return;
+            }
+        }
+        panic!("sweep permit was never released");
     }
 }
