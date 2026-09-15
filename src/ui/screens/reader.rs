@@ -30,8 +30,6 @@ use crate::ui::theme::Theme;
 use crate::view::rich::RichStyle;
 use crate::view::text;
 
-pub use crate::app::reader::{header_line_count, scroll_line_count};
-
 /// Render the reader into `area` (the body area right of the sidebar). The
 /// fixed header draws from the top of `area` on every frame (ticket 6864);
 /// the body scrolls beneath it from the reducer-maintained `reader_scroll`

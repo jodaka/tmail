@@ -5,8 +5,8 @@ use super::modals::open_error_modal;
 use crate::app::effect::Effect;
 use crate::app::operation::{DraftRemovalReason, OperationFailure, OperationKind};
 use crate::app::route::Route;
-use crate::app::sanitize::sanitize;
 use crate::app::state::AppState;
+use crate::domain::sanitize::sanitize;
 
 // ── Send (plan §14, Phase 7.6/7.7) ───────────────────────────────────────
 

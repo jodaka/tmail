@@ -6,9 +6,11 @@ pub mod address;
 pub mod draft;
 pub mod mailbox;
 pub mod message;
+pub mod operation;
 pub mod page;
 pub mod paths;
 pub mod reply;
+pub mod sanitize;
 pub mod send;
 pub mod url;
 

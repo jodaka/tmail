@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use tmail::app::{Action, AppState, Effect, OperationResult, reducer};
 use tmail::backend::{
     MailBackend, Notifier, PathOpener, RequestContext, SystemNotifier, SystemOpener,
-    himalaya::HimalayaCliBackend,
+    himalaya::{HimalayaAccountTester, HimalayaCliBackend},
 };
 use tmail::discovery::{EmailConfigDiscoverer, FakeDiscoverer, PimDiscoverer};
 use tmail::input::mouse;
@@ -256,7 +256,9 @@ async fn session(
         opener,
         notifier,
         discoverer,
-        String::from("himalaya"),
+        // The credential test goes through the injected adapter, so the
+        // manager never names a concrete backend (ticket 55t6).
+        Arc::new(HimalayaAccountTester::new("himalaya")),
         page_cache,
         result_tx,
     );

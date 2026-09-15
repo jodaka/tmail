@@ -19,9 +19,11 @@ use crate::app::effect::Effect;
 use crate::app::operation::{
     NotifyRequest, OperationFailure, OperationKind, OperationOutcome, OperationResult,
 };
-use crate::app::sanitize::sanitize;
-use crate::backend::{BackendError, MailBackend, Notifier, PathOpener, RequestContext};
+use crate::backend::{
+    AccountTester, BackendError, MailBackend, Notifier, PathOpener, RequestContext,
+};
 use crate::discovery::EmailConfigDiscoverer;
+use crate::domain::sanitize::sanitize;
 
 /// Spawns backend tasks for the effects the reducer emits.
 pub struct OperationManager {
@@ -37,11 +39,10 @@ pub struct OperationManager {
     /// effects (ADR 0003 §3.7): injected like the backend and opener,
     /// so tests and smoke runs swap in a fake.
     discoverer: Arc<dyn EmailConfigDiscoverer>,
-    /// The himalaya executable the wizard credential test runs
-    /// (ADR 0003 §3.4): the backend's own program name is private to
-    /// the adapter, so the manager carries it for the test invocation.
-    /// Overridable so contract tests point it at the fake.
-    himalaya_program: String,
+    /// The wizard credential-test adapter (ADR 0003 §3.4): injected like
+    /// the discoverer, so the manager stays adapter-agnostic and tests
+    /// swap in a fake (ticket 55t6).
+    tester: Arc<dyn AccountTester>,
     /// The summary/message cache (ticket haeb): cache reads and writes
     /// are file I/O, so they run here on the blocking pool — the reducer
     /// stays I/O-free. `None` disables caching (unknown data dir).
@@ -55,7 +56,7 @@ impl OperationManager {
         opener: Arc<dyn PathOpener>,
         notifier: Arc<dyn Notifier>,
         discoverer: Arc<dyn EmailConfigDiscoverer>,
-        himalaya_program: String,
+        tester: Arc<dyn AccountTester>,
         cache: Option<crate::app::page_cache::PageCache>,
         results: UnboundedSender<OperationResult>,
     ) -> Self {
@@ -64,7 +65,7 @@ impl OperationManager {
             opener,
             notifier,
             discoverer,
-            himalaya_program,
+            tester,
             cache,
             results,
         }
@@ -77,7 +78,7 @@ impl OperationManager {
         let opener = Arc::clone(&self.opener);
         let notifier = Arc::clone(&self.notifier);
         let discoverer = Arc::clone(&self.discoverer);
-        let himalaya_program = self.himalaya_program.clone();
+        let tester = Arc::clone(&self.tester);
         let cache = self.cache.clone();
         let results = self.results.clone();
         let id = effect.id;
@@ -88,7 +89,7 @@ impl OperationManager {
                 &opener,
                 &notifier,
                 &discoverer,
-                &himalaya_program,
+                &tester,
                 &cache,
                 &effect,
                 &ctx,
@@ -125,7 +126,7 @@ async fn run_effect(
     opener: &Arc<dyn PathOpener>,
     notifier: &Arc<dyn Notifier>,
     discoverer: &Arc<dyn EmailConfigDiscoverer>,
-    himalaya_program: &str,
+    tester: &Arc<dyn AccountTester>,
     cache: &Option<crate::app::page_cache::PageCache>,
     effect: &Effect,
     ctx: &RequestContext,
@@ -323,17 +324,11 @@ async fn run_effect(
             Ok(services) => Some(Ok(OperationOutcome::Discovered(services))),
             Err(reason) => Some(Err(plain_failure(effect, &reason))),
         },
-        // Wizard credential test (ADR 0003 §3.4): a real `himalaya
-        // mailbox list` against a temporary 0600 config; the detail of a
-        // failure is sanitized below like every other backend error.
+        // Wizard credential test (ADR 0003 §3.4): the injected tester runs
+        // its credential path against a temporary 0600 config; the detail
+        // of a failure is sanitized below like every other backend error.
         OperationKind::TestAccount { draft } => {
-            match crate::backend::himalaya::test_account_mailbox_names(
-                himalaya_program,
-                draft,
-                ctx.cancellation.clone(),
-            )
-            .await
-            {
+            match tester.test_account(draft, ctx.cancellation.clone()).await {
                 Ok(mailboxes) => Some(Ok(OperationOutcome::TestAccountCompleted { mailboxes })),
                 Err(err) => operation_failure(effect, err).map(Err),
             }
@@ -626,6 +621,23 @@ fn operation_failure(effect: &Effect, err: BackendError) -> Option<OperationFail
     })
 }
 
+/// No test drives `TestAccount` through the manager yet: the fake
+/// refuses everything so an accidental call is loud.
+#[cfg(test)]
+struct InertTester;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl AccountTester for InertTester {
+    async fn test_account(
+        &self,
+        _draft: &crate::config::write::DraftAccount,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> crate::backend::BackendResult<Vec<String>> {
+        Err(BackendError::InvalidRequest(String::from("unused")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,12 +851,14 @@ mod tests {
         }
     }
 
+    /// No test drives `TestAccount` through the manager yet: the fake
+    /// (`super::InertTester`) refuses everything so an accidental call
+    /// is loud.
     fn manager(
         backend: Arc<dyn MailBackend>,
     ) -> (OperationManager, UnboundedReceiver<OperationResult>) {
         manager_with_opener(backend, Arc::new(RecordingOpener::default()))
     }
-
     fn manager_with_opener(
         backend: Arc<dyn MailBackend>,
         opener: Arc<dyn PathOpener>,
@@ -864,7 +878,7 @@ mod tests {
                 opener,
                 notifier,
                 std::sync::Arc::new(crate::discovery::FakeDiscoverer),
-                String::from("himalaya"),
+                std::sync::Arc::new(InertTester),
                 None,
                 tx,
             ),
@@ -1237,7 +1251,7 @@ mod cache_tests {
                 Arc::new(InertOpener),
                 Arc::new(InertNotifier),
                 Arc::new(crate::discovery::FakeDiscoverer),
-                String::from("himalaya"),
+                Arc::new(InertTester),
                 cache,
                 tx,
             ),
