@@ -48,6 +48,7 @@ pub(crate) fn apply_flag(state: &mut AppState, locator: &MessageLocator, change:
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum FlagChange {
     Read(bool),
     Starred(bool),

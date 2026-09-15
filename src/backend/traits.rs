@@ -112,6 +112,23 @@ pub trait MailBackend: Send + Sync {
         read: bool,
     ) -> BackendResult<()>;
 
+    /// One read-flag change over several messages (ticket aavy): the
+    /// whole batch in one backend session, so a bulk mark never fans out
+    /// into one login per message. The default falls back to per-message
+    /// calls; adapters that can batch SHOULD override (the himalaya
+    /// adapter does). All locators are expected to share a mailbox.
+    async fn set_read_bulk(
+        &self,
+        ctx: RequestContext,
+        locators: Vec<MessageLocator>,
+        read: bool,
+    ) -> BackendResult<()> {
+        for locator in locators {
+            self.set_read(ctx.clone(), locator, read).await?;
+        }
+        Ok(())
+    }
+
     /// Star/unstar via flag operations.
     async fn set_starred(
         &self,

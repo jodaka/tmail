@@ -151,12 +151,22 @@ pub(crate) fn backend_completed(state: &mut AppState, result: OperationResult) -
         OperationKind::OpenDraft(locator) => complete_open_draft(state, &locator, result),
         OperationKind::Preview(_) => complete_preview(state, result),
         OperationKind::SeedComposer { kind, .. } => complete_seed_composer(state, result, kind),
-        OperationKind::SetRead { locator, read } => {
-            complete_flag(state, result, &locator, FlagChange::Read(read))
+        OperationKind::SetRead { locator, read } => complete_flag(
+            state,
+            result,
+            std::slice::from_ref(&locator),
+            FlagChange::Read(read),
+        ),
+        // One confirmation flips every locator of the batch (ticket aavy).
+        OperationKind::SetReadBulk { locators, read } => {
+            complete_flag(state, result, &locators, FlagChange::Read(read))
         }
-        OperationKind::SetStarred { locator, starred } => {
-            complete_flag(state, result, &locator, FlagChange::Starred(starred))
-        }
+        OperationKind::SetStarred { locator, starred } => complete_flag(
+            state,
+            result,
+            std::slice::from_ref(&locator),
+            FlagChange::Starred(starred),
+        ),
         OperationKind::Archive(locator) | OperationKind::Trash(locator) => {
             complete_move(state, result, &locator)
         }
@@ -523,16 +533,22 @@ pub(crate) fn complete_seed_composer(
 /// not resulting state (ADR 0001 finding 6): the confirmed request is the
 /// state. The corrected visible page is re-stored into the on-disk cache
 /// (ticket kkaq) so a warm start never resurrects the stale pre-flag copy.
+/// Apply a confirmed flag change. The locators are the batch the
+/// operation targeted (one for the single path, the whole selection for a
+/// batched bulk mark, ticket aavy); every listed row matching any locator
+/// flips, and the visible list cache stores the updated page.
 pub(crate) fn complete_flag(
     state: &mut AppState,
     result: OperationResult,
-    locator: &MessageLocator,
+    locators: &[MessageLocator],
     change: FlagChange,
 ) -> Vec<Effect> {
     let id = result.id;
     match result.outcome {
         Ok(OperationOutcome::Done) => {
-            apply_flag(state, locator, change);
+            for locator in locators {
+                apply_flag(state, locator, change);
+            }
             if let Some((mailbox, query)) = visible_list_identity(state) {
                 return vec![state.session.operations.start_background(
                     OperationKind::CacheListStore {
