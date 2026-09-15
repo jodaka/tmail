@@ -33,6 +33,7 @@ mod cache;
 mod composer;
 mod drafts;
 mod list;
+mod mailboxes;
 mod modals;
 mod mouse;
 mod notifications;

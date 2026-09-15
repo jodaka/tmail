@@ -102,6 +102,7 @@ fn render_modals(frame: &mut Frame<'_>, state: &AppState, theme: &Theme, hits: &
     components::attachment_dialog::render(frame, state, theme);
     components::theme_picker::render(frame, state, theme);
     components::account_switcher::render(frame, state, theme);
+    components::mailboxes_popup::render(frame, state, theme);
     components::account_switcher::render_confirm(frame, state, theme, hits);
 }
 

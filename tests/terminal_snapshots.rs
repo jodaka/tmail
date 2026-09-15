@@ -3555,3 +3555,97 @@ fn wizard_focused_fields_show_the_inline_caret() {
     let buffer = buffer_after(&mut state, &[], 80, 24);
     assert_eq!(count_accent_bg(&buffer, theme.accent), 1);
 }
+
+/// The compact mode's mailbox-title button (issue brnw): the head title
+/// ("INBOX 24 unread") is the mailbox switcher — Tab focuses it (accent
+/// fill), Enter opens the Mailboxes popup with the sidebar's folder rows,
+/// and full mode keeps the title a plain, unfocusable header.
+#[test]
+fn compact_title_button_focuses_and_opens_the_mailboxes_popup() {
+    let theme = Theme::default_dark();
+    let mut state = mock_initial_state();
+    state.session.size = (100, 30);
+
+    // Idle compact frame: the title is the plain header — no button fill.
+    let idle = buffer_after(&mut state, &[], 100, 30);
+    let idle_row = text_of(&idle)
+        .lines()
+        .position(|line| line.contains("INBOX"))
+        .expect("title row") as u16;
+    let filled = (0..100).any(|x| idle[(x, idle_row)].style().bg == Some(theme.accent));
+    assert!(
+        !filled,
+        "idle compact title must not carry the button fill:\n{}",
+        text_of(&idle)
+    );
+
+    // Tab at compact size lands on the title button (the sidebar is
+    // hidden), and the focused button lights up.
+    let mut state = mock_initial_state();
+    state.session.size = (100, 30);
+    let focused = buffer_after(&mut state, &[Action::FocusNext], 100, 30);
+    let text = text_of(&focused);
+    let focused_row = text
+        .lines()
+        .position(|line| line.contains("INBOX"))
+        .expect("title row") as u16;
+    let filled = (0..100).any(|x| focused[(x, focused_row)].style().bg == Some(theme.accent));
+    assert!(filled, "focused title lacks the button fill:\n{text}");
+
+    // Enter opens the Mailboxes popup: the sidebar's rows in a modal.
+    let mut state = mock_initial_state();
+    state.session.size = (100, 30);
+    let opened = buffer_after(&mut state, &[Action::FocusNext, Action::Activate], 100, 30);
+    let text = text_of(&opened);
+    assert!(text.contains(" Mailboxes "), "popup title missing:\n{text}");
+    assert!(text.contains("Inbox (24)"), "folder rows missing:\n{text}");
+    assert!(
+        text.contains("Drafts (3)"),
+        "draft counter missing:\n{text}"
+    );
+    assert!(text.contains("↵ switch"), "hint missing:\n{text}");
+
+    // Full mode: the title stays a plain header — Tab goes to the
+    // sidebar, never the title.
+    let mut full = mock_initial_state();
+    full.session.size = (152, 40);
+    let full_focused = buffer_after(&mut full, &[Action::FocusNext], 152, 40);
+    let full_text = text_of(&full_focused);
+    let full_row = full_text
+        .lines()
+        .position(|line| line.contains("INBOX"))
+        .expect("title row") as u16;
+    let filled = (0..152).any(|x| full_focused[(x, full_row)].style().bg == Some(theme.accent));
+    assert!(
+        !filled,
+        "full-mode title must not carry the button fill:\n{full_text}"
+    );
+}
+
+/// The compact click target sits under the title button (issue brnw):
+/// the head row's title+unread block opens the popup; full mode keeps
+/// the sidebar's folder rows clickable there instead, never the header.
+#[test]
+fn compact_hit_map_records_the_title_button() {
+    let mut state = mock_initial_state();
+    state.session.size = (100, 30);
+    let now = mock::now();
+    let ctx = RenderContext::new(now, dates::format_clock(now));
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).expect("test backend");
+    let mut hits = HitMap::default();
+    let theme = state.active_theme();
+    terminal
+        .draw(|frame| render(frame, &state, &theme, &ctx, &mut hits))
+        .expect("draw");
+    // List head row y=4; the title+unread block spans the left edge.
+    assert_eq!(hits.hit_test(10, 4, false), Some(ClickTarget::MailboxTitle));
+    // Full mode: the same spot is the sidebar's first folder row; the
+    // header (x≥25) is not a button (ticket fypg).
+    let (_, full_hits) = draw_with_hits(152, 40);
+    assert_eq!(
+        full_hits.hit_test(10, 4, false),
+        Some(ClickTarget::Mailbox(0))
+    );
+    assert_eq!(full_hits.hit_test(30, 4, false), None);
+}
