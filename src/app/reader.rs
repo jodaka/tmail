@@ -186,13 +186,13 @@ pub(crate) fn header_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
     // §19 Phase 4 acceptance: reader handles missing subject). Once the
     // full message is loaded, its headers are authoritative; the summary
     // snapshot fills anything the fetch does not provide.
-    let subject = loaded
-        .and_then(|m| (!m.headers.subject.is_empty()).then_some(m.headers.subject.clone()))
-        .unwrap_or_else(|| summary.subject.clone());
+    let subject: &str = loaded
+        .and_then(|m| (!m.headers.subject.is_empty()).then_some(m.headers.subject.as_str()))
+        .unwrap_or(&summary.subject);
     let subject = if subject.is_empty() {
         "(no subject)"
     } else {
-        subject.as_str()
+        subject
     };
     lines.push(ReaderLine::chrome(Tone::Strong, padded_field(subject, w)));
 
@@ -200,24 +200,19 @@ pub(crate) fn header_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
     // come from the summary snapshot (available before the fetch lands);
     // Cc only once the full message is here. Missing senders and dates
     // degrade to dim placeholders, never empty rows.
-    let from = loaded
-        .and_then(|m| (!m.headers.from.is_empty()).then_some(m.headers.from.clone()))
-        .unwrap_or_else(|| summary.from.clone());
+    let from: &[crate::domain::Address] = loaded
+        .and_then(|m| (!m.headers.from.is_empty()).then_some(m.headers.from.as_slice()))
+        .unwrap_or(&summary.from);
     push_meta(
         &mut lines,
         "From",
-        &address_list_or(&from, "(unknown sender)"),
+        &address_list_or(from, "(unknown sender)"),
         w,
     );
-    let to = loaded
-        .and_then(|m| (!m.headers.to.is_empty()).then_some(m.headers.to.clone()))
-        .unwrap_or_else(|| summary.to.clone());
-    push_meta(
-        &mut lines,
-        "To",
-        &address_list_or(&to, "(no recipients)"),
-        w,
-    );
+    let to: &[crate::domain::Address] = loaded
+        .and_then(|m| (!m.headers.to.is_empty()).then_some(m.headers.to.as_slice()))
+        .unwrap_or(&summary.to);
+    push_meta(&mut lines, "To", &address_list_or(to, "(no recipients)"), w);
     if let Some(message) = loaded
         && !message.headers.cc.is_empty()
     {

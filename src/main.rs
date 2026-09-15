@@ -299,7 +299,7 @@ async fn session(
     // hand the session's original title back (best-effort, popped from
     // the title stack pushed by `enable`).
     terminal::restore_title();
-    Ok(finish_session(&state, &config))
+    Ok(finish_session(&mut state, &config))
 }
 
 /// The terminal and event-reader assets the loop owns between effects: the
@@ -617,19 +617,14 @@ async fn run_event_loop(
 /// completion restarts into the normal mailbox UI without leaving the
 /// process; a confirmed account switch (ticket c0n0) restarts with the
 /// target account.
-fn finish_session(state: &AppState, config: &tmail::config::Config) -> SessionOutcome {
-    if let Some(target) = state.session.switch_requested.clone() {
+fn finish_session(state: &mut AppState, config: &tmail::config::Config) -> SessionOutcome {
+    if let Some(target) = state.session.switch_requested.take() {
         return SessionOutcome::Switch(target);
     }
     if let Some(wizard) = &state.session.wizard {
         if wizard.completed {
             if wizard.manual {
-                if let Some(path) = wizard
-                    .confirm
-                    .saved_path
-                    .clone()
-                    .or_else(|| config.path.clone())
-                {
+                if let Some(path) = wizard.confirm.saved_path.as_ref().or(config.path.as_ref()) {
                     println!("{}", path.display());
                 }
                 return SessionOutcome::Exit(ExitCode::SUCCESS);
@@ -657,8 +652,7 @@ async fn handle_effects(
     effects: Vec<Effect>,
 ) -> anyhow::Result<()> {
     for effect in effects {
-        if let tmail::app::operation::OperationKind::EditExternally { program, body } =
-            effect.kind.clone()
+        if let tmail::app::operation::OperationKind::EditExternally { program, body } = &effect.kind
         {
             // Suspend: drop the guard (its Drop restores the terminal) and
             // pause the event reader so it cannot steal the editor's
@@ -666,7 +660,7 @@ async fn handle_effects(
             assets.events_control.pause();
             drop(assets.guard.take().expect("terminal guard to suspend"));
             let mouse = state.settings.mouse_capture;
-            let result = tmail::runtime::editor::run(&program, &body).await;
+            let result = tmail::runtime::editor::run(program, body).await;
             // Step 7: restore the terminal even on editor failure —
             // unconditionally, before anything else runs. The fresh guard
             // repaints from scratch on the next draw.
