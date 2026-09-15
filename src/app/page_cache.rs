@@ -166,18 +166,17 @@ impl PageCache {
         }
     }
 
-    /// Where a page lives on disk.
-    fn path(
-        &self,
-        mailbox: &MailboxId,
-        query: Option<&str>,
-        offset: usize,
-        limit: usize,
-    ) -> PathBuf {
+    /// Where a page lives on disk. The `limit` is deliberately *not*
+    /// part of the file name (ticket kkaq): `page_size_auto` resizes
+    /// change the limit, and keying the name by it would linger one file
+    /// per historical limit per mailbox instead of overwriting in place.
+    /// The identity stored inside the file still validates the limit, so
+    /// a mismatched limit is a miss — re-fetched, never wrong mail.
+    fn path(&self, mailbox: &MailboxId, query: Option<&str>, offset: usize) -> PathBuf {
         let query_key = query.map_or_else(String::new, key_part);
         self.root
             .join(key_part(&mailbox.0))
-            .join(format!("{query_key}-{offset:06}-{limit}.json"))
+            .join(format!("{query_key}-{offset:06}.json"))
     }
 
     /// Load the cached page, or `None` when absent, unparsable, stale
@@ -190,7 +189,7 @@ impl PageCache {
         offset: usize,
         limit: usize,
     ) -> Option<Page<MessageSummary>> {
-        let bytes = fs::read(self.path(mailbox, query, offset, limit)).ok()?;
+        let bytes = fs::read(self.path(mailbox, query, offset)).ok()?;
         let cached: CachedPage = serde_json::from_slice(&bytes).ok()?;
         if cached.version != CACHE_VERSION
             || cached.mailbox != mailbox.0
@@ -211,7 +210,7 @@ impl PageCache {
     /// Persist a successful page. Failures are logged and swallowed: the
     /// cache is an optimization, never a source of truth.
     pub fn store(&self, mailbox: &MailboxId, query: Option<&str>, page: &Page<MessageSummary>) {
-        let path = self.path(mailbox, query, page.offset, page.limit);
+        let path = self.path(mailbox, query, page.offset);
         let cached = CachedPage {
             version: CACHE_VERSION,
             mailbox: mailbox.0.clone(),
@@ -229,10 +228,12 @@ impl PageCache {
     /// stored copy list a message that left the mailbox, and the local
     /// post-move page cannot be re-stored truthfully (backend ids shift),
     /// so the file is removed — a warm start then re-fetches instead of
-    /// resurrecting the moved row. A missing file is already "evicted";
-    /// like every cache write, failure is logged and swallowed.
-    pub fn evict(&self, mailbox: &MailboxId, query: Option<&str>, offset: usize, limit: usize) {
-        let path = self.path(mailbox, query, offset, limit);
+    /// resurrecting the moved row. The name carries no limit, so every
+    /// limit variant for the identity goes with it. A missing file is
+    /// already "evicted"; like every cache write, failure is logged and
+    /// swallowed.
+    pub fn evict(&self, mailbox: &MailboxId, query: Option<&str>, offset: usize) {
+        let path = self.path(mailbox, query, offset);
         if let Err(err) = fs::remove_file(&path)
             && err.kind() != std::io::ErrorKind::NotFound
         {
@@ -500,13 +501,13 @@ mod tests {
 
         cache.store(&mailbox, None, &page(0));
         assert!(cache.load(&mailbox, None, 0, 20).is_some());
-        cache.evict(&mailbox, None, 0, 20);
+        cache.evict(&mailbox, None, 0);
         assert!(cache.load(&mailbox, None, 0, 20).is_none(), "evicted");
         // Evicting an absent entry is a no-op.
-        cache.evict(&mailbox, None, 0, 20);
+        cache.evict(&mailbox, None, 0);
         // A different identity is untouched.
         cache.store(&mailbox, None, &page(0));
-        cache.evict(&mailbox, Some("query"), 0, 20);
+        cache.evict(&mailbox, Some("query"), 0);
         assert!(
             cache.load(&mailbox, None, 0, 20).is_some(),
             "unrelated identity kept"
@@ -534,7 +535,7 @@ mod tests {
         let mailbox = MailboxId(String::from("inbox"));
         cache.store(&mailbox, None, &page(0));
         // Corrupt the file in place.
-        let path = cache.path(&mailbox, None, 0, 20);
+        let path = cache.path(&mailbox, None, 0);
         std::fs::write(&path, b"not json at all").expect("corrupt");
         assert!(cache.load(&mailbox, None, 0, 20).is_none());
     }

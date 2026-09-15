@@ -177,12 +177,13 @@ pub enum OperationKind {
     /// stored copy lists a message that left the mailbox, and the local
     /// post-move page cannot be stored truthfully (backend ids shift, so
     /// the follow-up re-sync owns the next write). Evicting makes a warm
-    /// start re-fetch instead of resurrecting the moved row.
+    /// start re-fetch instead of resurrecting the moved row. The file name
+    /// carries no limit, so one identity (mailbox + query + offset)
+    /// evicts every limit variant.
     CacheListEvict {
         mailbox: MailboxId,
         query: Option<String>,
         offset: usize,
-        limit: usize,
     },
     /// Serve the cached mailbox listing (ticket haeb, off-thread I/O): a
     /// hit renders the sidebar instantly and the fresh listing still
