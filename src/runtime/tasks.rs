@@ -444,6 +444,22 @@ async fn run_effect(
             .await;
             Some(Ok(OperationOutcome::Done))
         }
+        OperationKind::CacheListEvict {
+            mailbox,
+            query,
+            offset,
+            limit,
+        } => {
+            let mailbox = mailbox.clone();
+            let query = query.clone();
+            let offset = *offset;
+            let limit = *limit;
+            run_cache_store(cache, move |cache| {
+                cache.evict(&mailbox, query.as_deref(), offset, limit)
+            })
+            .await;
+            Some(Ok(OperationOutcome::Done))
+        }
         OperationKind::CacheMailboxesLoad => {
             let mailboxes = run_cache(cache, move |cache| cache.load_mailboxes()).await;
             Some(Ok(match mailboxes {

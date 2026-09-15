@@ -8,6 +8,9 @@
 //! identity recorded inside the file (mailbox, offset, limit, query /
 //! message id), and anything unparsable or mismatched is ignored — a
 //! stale cache degrades to today's spinner, never to wrong mail.
+//! Confirmed mutations keep it truthful (ticket kkaq): flag changes
+//! re-store the corrected page, and moves evict it so a warm start
+//! re-fetches instead of resurrecting a moved row.
 //! Summaries and rendered messages contain no credentials (plan §21:
 //! nothing secret is stored or logged).
 //!
@@ -220,6 +223,21 @@ impl PageCache {
         };
         self.write_json(&path, &cached);
         self.prune(mailbox);
+    }
+
+    /// Drop one cached page (ticket kkaq): a confirmed move makes the
+    /// stored copy list a message that left the mailbox, and the local
+    /// post-move page cannot be re-stored truthfully (backend ids shift),
+    /// so the file is removed — a warm start then re-fetches instead of
+    /// resurrecting the moved row. A missing file is already "evicted";
+    /// like every cache write, failure is logged and swallowed.
+    pub fn evict(&self, mailbox: &MailboxId, query: Option<&str>, offset: usize, limit: usize) {
+        let path = self.path(mailbox, query, offset, limit);
+        if let Err(err) = fs::remove_file(&path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::debug!(path = %path.display(), %err, "cache: evict failed");
+        }
     }
 
     /// Keep at most [`MAX_FILES_PER_MAILBOX`] files for this mailbox,
@@ -472,6 +490,27 @@ mod tests {
         assert!(cache.load(&inbox, None, 20, 20).is_none());
         // Same identity loads again.
         assert!(cache.load(&inbox, None, 0, 20).is_some());
+    }
+
+    #[test]
+    fn an_evicted_page_is_no_longer_served() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
+        let mailbox = MailboxId(String::from("inbox"));
+
+        cache.store(&mailbox, None, &page(0));
+        assert!(cache.load(&mailbox, None, 0, 20).is_some());
+        cache.evict(&mailbox, None, 0, 20);
+        assert!(cache.load(&mailbox, None, 0, 20).is_none(), "evicted");
+        // Evicting an absent entry is a no-op.
+        cache.evict(&mailbox, None, 0, 20);
+        // A different identity is untouched.
+        cache.store(&mailbox, None, &page(0));
+        cache.evict(&mailbox, Some("query"), 0, 20);
+        assert!(
+            cache.load(&mailbox, None, 0, 20).is_some(),
+            "unrelated identity kept"
+        );
     }
 
     #[test]

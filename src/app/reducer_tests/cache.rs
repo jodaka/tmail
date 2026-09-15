@@ -556,3 +556,82 @@ fn preview_fetches_roll_within_the_window() {
         "queued rows are tracked"
     );
 }
+
+// ── Mutation invalidation (ticket kkaq) ──────────────────────────────────
+
+/// A confirmed flag change re-stores the corrected visible page, so a
+/// warm start never resurrects the stale pre-flag copy.
+#[test]
+fn a_confirmed_flag_change_stores_the_corrected_page() {
+    let mut s = state();
+    s.selection = 0; // m1: not starred.
+    let (id, kind) = expect_kind(&reduce(&mut s, Action::ToggleStar));
+    assert!(
+        matches!(&kind, OperationKind::SetStarred { .. }),
+        "kind: {kind:?}"
+    );
+    let effects = complete_done(&mut s, id);
+    let stores: Vec<&Effect> = effects
+        .iter()
+        .filter(|e| matches!(e.kind, OperationKind::CacheListStore { .. }))
+        .collect();
+    let [effect] = &stores[..] else {
+        panic!("expected exactly one page store, got {effects:?}");
+    };
+    let OperationKind::CacheListStore {
+        mailbox,
+        query,
+        page,
+    } = &effect.kind
+    else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(mailbox.0, "inbox");
+    assert_eq!(query.as_deref(), None);
+    assert_eq!((page.offset, page.limit), (0, mock::PAGE_SIZE));
+    let row = page
+        .items
+        .iter()
+        .find(|m| m.id == s.messages.items[0].id)
+        .expect("stored page lists the row");
+    assert!(row.is_starred, "the stored copy carries the confirmed flag");
+    assert!(s.messages.items[0].is_starred);
+}
+
+/// A confirmed move evicts the cached page for the visible identity: the
+/// local post-move page cannot be stored truthfully (backend ids shift),
+/// so a warm start must re-fetch instead of resurrecting the moved row.
+#[test]
+fn a_confirmed_move_evicts_the_cached_page() {
+    let mut s = state();
+    s.selection = 0;
+    let target = s.selected_message().unwrap().id.clone();
+    let (id, kind) = expect_kind(&reduce(&mut s, Action::Archive));
+    assert!(matches!(&kind, OperationKind::Archive(_)), "kind: {kind:?}");
+    let effects = complete_done(&mut s, id);
+    // The re-sync load and the eviction both go out…
+    let (_, req) = find_page(&effects);
+    assert_eq!(req.mailbox_id.0, "inbox");
+    assert_eq!(req.offset, 0);
+    // …and the eviction targets the exact cached identity.
+    let evicts: Vec<&Effect> = effects
+        .iter()
+        .filter(|e| matches!(e.kind, OperationKind::CacheListEvict { .. }))
+        .collect();
+    let [effect] = &evicts[..] else {
+        panic!("expected exactly one page eviction, got {effects:?}");
+    };
+    let OperationKind::CacheListEvict {
+        mailbox,
+        query,
+        offset,
+        limit,
+    } = &effect.kind
+    else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(mailbox.0, "inbox");
+    assert_eq!(query.as_deref(), None);
+    assert_eq!((*offset, *limit), (0, mock::PAGE_SIZE));
+    assert!(s.messages.items.iter().all(|m| m.id != target));
+}
