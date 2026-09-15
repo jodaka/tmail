@@ -1467,3 +1467,72 @@ fn wizard_save_account_operation_reports_the_saved_file() {
     assert!(text.contains("[accounts.gmail]"));
     assert!(text.contains("imap.sasl.plain.password.raw"));
 }
+
+// ── Bulk mark read (ticket aavy) ──────────────────────────────────────────
+
+/// One batched `SetReadBulk` runs ONE `flag add` invocation carrying every
+/// id — the fanout that tripped the IMAP server's throttling in the
+/// reported failure must never come back.
+#[test]
+fn bulk_mark_read_runs_one_flag_invocation_for_the_whole_batch() {
+    let fake = FakeHimalaya::spawn("ok", "ok");
+    let outcome = block(async {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let manager = OperationManager::new(
+            std::sync::Arc::new(backend(&fake, Some("probe"))),
+            std::sync::Arc::new(tmail::backend::SystemOpener),
+            std::sync::Arc::new(tmail::backend::SystemNotifier),
+            std::sync::Arc::new(tmail::discovery::FakeDiscoverer),
+            std::sync::Arc::new(tmail::backend::himalaya::HimalayaAccountTester::new(
+                fake.program().display().to_string(),
+            )),
+            None,
+            tx,
+        );
+        let locators: Vec<_> = ["env-1", "env-2", "env-3"]
+            .iter()
+            .map(|id| MessageLocator {
+                mailbox: MailboxId(String::from("/root/maildir/INBOX")),
+                id: MessageId(String::from(*id)),
+                message_id: None,
+            })
+            .collect();
+        let effect = Effect {
+            id: OperationId(80),
+            kind: OperationKind::SetReadBulk {
+                locators,
+                read: true,
+            },
+        };
+        let ctx = RequestContext {
+            operation: effect.id,
+            cancellation: CancellationToken::new(),
+        };
+        manager.launch(effect, ctx);
+        let result = rx.recv().await.expect("result for the launched effect");
+        result.outcome
+    })
+    .expect("the batched mark read succeeds");
+    assert!(
+        matches!(outcome, OperationOutcome::Done),
+        "outcome: {outcome:?}"
+    );
+
+    // Exactly one flag invocation, carrying every id of the batch.
+    let flag_runs: Vec<_> = fake
+        .argv()
+        .into_iter()
+        .filter(|argv| argv.iter().any(|arg| arg == "flag"))
+        .collect();
+    assert_eq!(
+        flag_runs.len(),
+        1,
+        "one process for the batch: {flag_runs:?}"
+    );
+    for id in ["env-1", "env-2", "env-3"] {
+        assert!(
+            flag_runs[0].iter().any(|arg| arg == id),
+            "the invocation carries {id}: {flag_runs:?}"
+        );
+    }
+}

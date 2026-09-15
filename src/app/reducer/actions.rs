@@ -57,32 +57,54 @@ pub(crate) fn trash_message(state: &mut AppState) -> Vec<Effect> {
 
 /// Mark read (ticket p0s3): the whole selection in selection mode, else the
 /// focused row (the list has no read shortcut today; the reader marks read
-/// on open, so the single path stays list-only).
+/// on open, so the single path stays list-only). The bulk path starts ONE
+/// batched operation (ticket aavy): N per-message effects would spawn N
+/// concurrent himalaya processes — the IMAP fanout that tripped the
+/// server's throttling.
 pub(crate) fn mark_read(state: &mut AppState) -> Vec<Effect> {
-    bulk_or_single(
-        state,
-        "Marking {count} messages read…",
-        "Marking read…",
-        true,
-        |locator| OperationKind::SetRead {
-            locator,
+    if let Some(locators) = bulk_targets(state) {
+        let count = locators.len();
+        state.set_status(format!("Marking {count} messages read…"));
+        return vec![state.session.operations.start(OperationKind::SetReadBulk {
+            locators,
             read: true,
-        },
-    )
+        })];
+    }
+    single_flag(state, true, "Marking read…", true)
 }
 
 /// The unread counterpart (ticket p0s3).
 pub(crate) fn mark_unread(state: &mut AppState) -> Vec<Effect> {
-    bulk_or_single(
-        state,
-        "Marking {count} messages unread…",
-        "Marking unread…",
-        false,
-        |locator| OperationKind::SetRead {
-            locator,
+    if let Some(locators) = bulk_targets(state) {
+        let count = locators.len();
+        state.set_status(format!("Marking {count} messages unread…"));
+        return vec![state.session.operations.start(OperationKind::SetReadBulk {
+            locators,
             read: false,
-        },
-    )
+        })];
+    }
+    single_flag(state, false, "Marking unread…", false)
+}
+
+/// The focused-row read-flag change (the single path of mark read/unread).
+/// `list_only` keeps the shortcut from firing over the reader when the
+/// action is list-only (mark read: the reader marks read on open itself).
+fn single_flag(state: &mut AppState, read: bool, status: &str, list_only: bool) -> Vec<Effect> {
+    if list_only && state.session.focus != Focus::MessageList {
+        return Vec::new();
+    }
+    match message_target(state) {
+        Some(locator) => {
+            state.set_status(status);
+            vec![
+                state
+                    .session
+                    .operations
+                    .start(OperationKind::SetRead { locator, read }),
+            ]
+        }
+        None => Vec::new(),
+    }
 }
 
 /// The target summary carries the current state to invert; the UI only
@@ -102,12 +124,13 @@ pub(crate) fn toggle_star(state: &mut AppState) -> Vec<Effect> {
 }
 
 /// The shared "bulk in selection mode, else the focused row" skeleton of
-/// the flag operations (ticket p0s3): builds one [`OperationKind`] per
+/// the move operations (ticket p0s3): builds one [`OperationKind`] per
 /// target from `make`, and forms the status message — `bulk` templates one
 /// `{count}` plural in bulk mode, `single` is the fixed phrase for one
 /// message. `list_only` keeps the single path from firing over the reader
-/// (mark read/unread are list shortcuts today); the bulk path always
-/// implies list focus.
+/// (archive/trash are list shortcuts today); the bulk path always implies
+/// list focus. Bulk mark read/unread bypasses this skeleton: they start
+/// one batched operation instead (ticket aavy).
 pub(crate) fn bulk_or_single(
     state: &mut AppState,
     bulk: &str,

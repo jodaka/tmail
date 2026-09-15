@@ -148,18 +148,20 @@ pub(crate) fn message_read_argv(
     argv
 }
 
-/// `flag {add,remove} -m <mailbox> --flag <flag> <id> --json`. Without
+/// `flag {add,remove} -m <mailbox> --flag <flag> <id>... --json`. Without
 /// `--json` the flag commands print human text; with it they emit
 /// `{"flags":[…]}` (ADR 0001 finding 6, corrected in the Phase 4 probe:
 /// plain text on stdout otherwise). Output shape is validated, not
-/// interpreted — success is the exit status.
+/// interpreted — success is the exit status. The ids travel as one argv
+/// run: himalaya applies them in a single IMAP session, so a bulk flag
+/// change never fans out into one login per message (ticket aavy).
 pub(crate) fn flag_argv(
     config: Option<&Path>,
     account: Option<&str>,
     add: bool,
     mailbox_id: &str,
     flag: &str,
-    id: &str,
+    ids: &[&str],
 ) -> Vec<String> {
     let mut argv = global_flags(config, account);
     args!(
@@ -169,10 +171,10 @@ pub(crate) fn flag_argv(
         "-m",
         mailbox_id,
         "--flag",
-        flag,
-        id,
-        "--json"
+        flag
     );
+    argv.extend(ids.iter().map(|id| String::from(*id)));
+    argv.push(String::from("--json"));
     argv
 }
 
@@ -491,18 +493,38 @@ mod tests {
 
     #[test]
     fn flag_argv_switches_add_and_remove() {
-        let add = flag_argv(None, None, true, "INBOX", "seen", "env-1");
+        let add = flag_argv(None, None, true, "INBOX", "seen", &["env-1"]);
         assert_eq!(
             add,
             vec![
                 "flag", "add", "-m", "INBOX", "--flag", "seen", "env-1", "--json"
             ]
         );
-        let remove = flag_argv(None, None, false, "INBOX", "flagged", "env-1");
+        let remove = flag_argv(None, None, false, "INBOX", "flagged", &["env-1"]);
         assert_eq!(
             remove,
             vec![
                 "flag", "remove", "-m", "INBOX", "--flag", "flagged", "env-1", "--json"
+            ]
+        );
+    }
+
+    #[test]
+    fn flag_argv_carries_every_id_in_one_invocation() {
+        // The batch is the point (ticket aavy): one argv run, one IMAP
+        // session, no per-message fanout.
+        let argv = flag_argv(
+            None,
+            None,
+            true,
+            "INBOX",
+            "seen",
+            &["env-1", "env-2", "env-3"],
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "flag", "add", "-m", "INBOX", "--flag", "seen", "env-1", "env-2", "env-3", "--json"
             ]
         );
     }
