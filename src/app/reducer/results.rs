@@ -5,7 +5,7 @@ use super::actions::attachment_saved;
 use super::composer_flow::draft_save_effect;
 use super::message_results::{
     FlagChange, apply_flag, apply_page, complete_cache_preview_load, mailboxes_loaded,
-    message_loaded, message_moved, preview_loaded, visible_mailbox_page,
+    message_loaded, message_moved, preview_loaded, visible_list_identity, visible_mailbox_page,
 };
 use super::modals::open_error_modal;
 use super::navigation::{
@@ -221,10 +221,11 @@ pub(crate) fn backend_completed(state: &mut AppState, result: OperationResult) -
         OperationKind::CachePreviewLoad { locator } => {
             complete_cache_preview_load(state, &locator, result)
         }
-        // Writes are best-effort side effects: the manager logs failures
-        // inside the cache, and a dropped write can never lose mail —
-        // only warmth.
+        // Writes and evictions are best-effort side effects: the manager
+        // logs failures inside the cache, and a dropped write can never
+        // lose mail — only warmth.
         OperationKind::CacheListStore { .. }
+        | OperationKind::CacheListEvict { .. }
         | OperationKind::CacheMailboxesStore { .. }
         | OperationKind::CacheMessageStore { .. } => {
             if let Err(failure) = &result.outcome {
@@ -513,7 +514,8 @@ pub(crate) fn complete_seed_composer(
 
 /// Apply one confirmed flag change. The flag commands echo affected flags,
 /// not resulting state (ADR 0001 finding 6): the confirmed request is the
-/// state.
+/// state. The corrected visible page is re-stored into the on-disk cache
+/// (ticket kkaq) so a warm start never resurrects the stale pre-flag copy.
 pub(crate) fn complete_flag(
     state: &mut AppState,
     result: OperationResult,
@@ -524,6 +526,15 @@ pub(crate) fn complete_flag(
     match result.outcome {
         Ok(OperationOutcome::Done) => {
             apply_flag(state, locator, change);
+            if let Some((mailbox, query)) = visible_list_identity(state) {
+                return vec![state.session.operations.start_background(
+                    OperationKind::CacheListStore {
+                        mailbox,
+                        query,
+                        page: Box::new(state.messages.clone()),
+                    },
+                )];
+            }
         }
         Ok(_) => {
             unexpected_payload(id, "flag");

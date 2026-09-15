@@ -473,7 +473,7 @@ fn archive_from_list_removes_row_and_resyncs_page() {
     let (id, kind) = expect_kind(&reduce(&mut s, Action::Archive));
     assert!(matches!(&kind, OperationKind::Archive(_)), "kind: {kind:?}");
     // The move confirmation itself emits the page re-sync effect.
-    let (_, req) = expect_page(&complete_done(&mut s, id));
+    let (_, req) = find_page(&complete_done(&mut s, id));
     // Confirmation removed the row, kept the selection index on what took
     // its place, and re-synced the page at the same offset.
     assert_eq!(s.messages.items.len(), mock::PAGE_SIZE - 1);
@@ -491,7 +491,7 @@ fn trash_closes_reader_and_removes_row() {
     complete_message_ok(&mut s, load_id);
     let (id, kind) = expect_kind(&reduce(&mut s, Action::Trash));
     assert!(matches!(&kind, OperationKind::Trash(_)), "kind: {kind:?}");
-    let (_, req) = expect_page(&complete_done(&mut s, id));
+    let (_, req) = find_page(&complete_done(&mut s, id));
     // The reader closed; the row vanished; the page re-syncs.
     assert_eq!(s.session.routes.len(), 1);
     assert_eq!(s.session.focus, Focus::MessageList);

@@ -173,6 +173,17 @@ pub enum OperationKind {
         query: Option<String>,
         page: Box<Page<MessageSummary>>,
     },
+    /// Drop one cached page (ticket kkaq): after a confirmed move the
+    /// stored copy lists a message that left the mailbox, and the local
+    /// post-move page cannot be stored truthfully (backend ids shift, so
+    /// the follow-up re-sync owns the next write). Evicting makes a warm
+    /// start re-fetch instead of resurrecting the moved row.
+    CacheListEvict {
+        mailbox: MailboxId,
+        query: Option<String>,
+        offset: usize,
+        limit: usize,
+    },
     /// Serve the cached mailbox listing (ticket haeb, off-thread I/O): a
     /// hit renders the sidebar instantly and the fresh listing still
     /// loads in the background.
@@ -281,6 +292,7 @@ impl OperationKind {
             | OperationKind::CacheMessageLoad { .. }
             | OperationKind::CachePreviewLoad { .. } => "Reading cache",
             OperationKind::CacheListStore { .. }
+            | OperationKind::CacheListEvict { .. }
             | OperationKind::CacheMailboxesStore { .. }
             | OperationKind::CacheMessageStore { .. } => "Caching",
         }
@@ -387,6 +399,18 @@ impl OperationKind {
                     ..
                 },
                 OperationKind::CacheListStore {
+                    mailbox: older_mailbox,
+                    query: older_query,
+                    ..
+                },
+            )
+            | (
+                OperationKind::CacheListEvict {
+                    mailbox: newer_mailbox,
+                    query: newer_query,
+                    ..
+                },
+                OperationKind::CacheListEvict {
                     mailbox: older_mailbox,
                     query: older_query,
                     ..
