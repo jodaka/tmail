@@ -13,6 +13,9 @@ const MAX_VISIBLE_ROWS: usize = 10;
 /// Rows the account switcher shows before it starts scrolling.
 const MAX_SWITCHER_ROWS: usize = 10;
 
+/// Rows the Mailboxes popup shows before it starts scrolling.
+const MAX_MAILBOXES_ROWS: usize = 10;
+
 /// Geometry of the error modal for one terminal size and dialog shape.
 /// Shared by the renderer and the reducer's scroll clamping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +135,35 @@ pub fn switcher_visible_rows(size: (u16, u16)) -> usize {
 /// reducer clamps against).
 pub fn switcher_max_scroll(account_count: usize, size: (u16, u16)) -> usize {
     account_count.saturating_sub(switcher_visible_rows(size))
+}
+
+/// Geometry of the Mailboxes popup (issue brnw) for one terminal size and
+/// mailbox count. Same anatomy as the account switcher — shared
+/// `PickerLayout`, so the reducer's clamp and the drawn window cannot
+/// drift apart — but a narrower dialog: rows are the sidebar's folder
+/// rows (name + unread counter), and the compact terminal it serves is
+/// at least 90 columns wide. Height budgets the borders, the one-line
+/// margins, and the hint row.
+pub fn mailboxes_layout(size: (u16, u16), mailbox_count: usize) -> PickerLayout {
+    let width = 40u16.min(size.0.max(1));
+    let height = ((mailbox_count.min(MAX_MAILBOXES_ROWS) as u16) + 5).min(size.1.max(1));
+    let visible_rows = height.saturating_sub(5).max(1) as usize;
+    PickerLayout {
+        area: centered(size, width, height),
+        visible_rows,
+    }
+}
+
+/// Rows visible in the Mailboxes popup at `size` (what the reducer keeps
+/// the cursor and scroll inside), independent of the mailbox count cap.
+pub fn mailboxes_visible_rows(size: (u16, u16)) -> usize {
+    mailboxes_layout(size, usize::MAX).visible_rows
+}
+
+/// Largest valid scroll offset for the mailbox list at `size` (what the
+/// reducer clamps against).
+pub fn mailboxes_max_scroll(mailbox_count: usize, size: (u16, u16)) -> usize {
+    mailbox_count.saturating_sub(mailboxes_visible_rows(size))
 }
 
 /// Geometry of the account-switch confirm dialog (ticket c0n0): sized to

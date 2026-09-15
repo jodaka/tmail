@@ -7,6 +7,7 @@ use super::composer_flow::{draft_save_effect, open_composer_screen, switch_mailb
 use super::message_results::{
     apply_mailbox_listing, apply_page, cycle_reader_focus, visible_mailbox_page,
 };
+use super::modals::open_mailboxes_popup;
 use super::reduce;
 use super::results::unexpected_payload;
 use super::seeding::install_composer_draft;
@@ -21,6 +22,7 @@ use crate::app::state::{AppState, Loadable};
 use crate::domain::{
     MailboxId, MailboxRole, MessageLocator, PageRequest, SearchRequest, bare_message_id,
 };
+use crate::view::layout::LayoutMode;
 
 // ── Navigation and input ─────────────────────────────────────────────────
 
@@ -35,13 +37,21 @@ use crate::domain::{
 pub(crate) fn focus_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
     match state.session.focus {
         Focus::Composer => {
+            // Only when the sidebar is actually drawn (issue brnw): in
+            // compact mode the sidebar is hidden, so stepping out would
+            // strand focus on nothing — Tab wraps inside the composer
+            // instead, and the mailbox-title button (the compact mailbox
+            // switcher) is not drawn while the composer replaces the
+            // list either.
+            let sidebar_visible = layout_mode(state) == LayoutMode::Full;
             let Some(composer) = state.session.composer.as_mut() else {
                 return Vec::new();
             };
             // The sidebar sits just past the cycle's ends: Tab leaves from
             // the last control, Shift+Tab from the first.
-            let step_out = (delta > 0 && composer.field == ComposerField::Discard)
-                || (delta < 0 && composer.field == ComposerField::To);
+            let step_out = sidebar_visible
+                && ((delta > 0 && composer.field == ComposerField::Discard)
+                    || (delta < 0 && composer.field == ComposerField::To));
             if step_out {
                 state.session.focus = Focus::Sidebar;
             } else if delta > 0 {
@@ -73,14 +83,41 @@ pub(crate) fn focus_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
             Vec::new()
         }
         _ => {
-            state.session.focus = if delta > 0 {
-                state.session.focus.next()
-            } else {
-                state.session.focus.previous()
-            };
+            state.session.focus = tab_target(state, delta);
             Vec::new()
         }
     }
+}
+
+/// The current responsive layout mode (plan §18): the pure `mode_for`
+/// math applied to the last known terminal size.
+fn layout_mode(state: &AppState) -> LayoutMode {
+    crate::view::layout::mode_for(state.session.size.0, state.session.size.1)
+}
+
+/// Tab/Shift+Tab's landing control: one step around the ring, then past
+/// every control the current layout does not draw (issue brnw). The
+/// sidebar exists only in full mode; the mailbox-title button only in
+/// compact (full mode's title is a plain header, the too-small screen
+/// draws nothing at all). The loop always terminates: every mode keeps a
+/// cycle that does not empty out.
+fn tab_target(state: &AppState, delta: i64) -> Focus {
+    let mode = layout_mode(state);
+    let mut next = if delta > 0 {
+        state.session.focus.next()
+    } else {
+        state.session.focus.previous()
+    };
+    while (next == Focus::Sidebar && mode != LayoutMode::Full)
+        || (next == Focus::MailboxTitle && mode != LayoutMode::Compact)
+    {
+        next = if delta > 0 {
+            next.next()
+        } else {
+            next.previous()
+        };
+    }
+    next
 }
 
 pub(crate) fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
@@ -107,14 +144,18 @@ pub(crate) fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
             // the query is edited append/backspace only (Phase 1).
         }
         Focus::Reader => scroll_reader(state, delta),
+        // The mailbox-title button has no selection of its own (its
+        // arrows are inert).
+        Focus::MailboxTitle => {}
         // Wizard input never reaches the mailbox navigation (the wizard
         // intercepts everything first, ADR 0003); the modals handle their
-        // own cursor movement.
+        // own cursor movement — the Mailboxes popup's arrows included.
         Focus::Composer
         | Focus::Dialog
         | Focus::ThemePicker
         | Focus::AccountSwitcher
         | Focus::Help
+        | Focus::Mailboxes
         | Focus::ErrorModal
         | Focus::Wizard => {}
     }
@@ -546,6 +587,9 @@ pub(crate) fn activate(state: &mut AppState) -> Vec<Effect> {
             Some(summary) => open_selected(state, summary),
             None => Vec::new(),
         },
+        // Enter on the compact mode's mailbox-title button (issue brnw)
+        // opens the Mailboxes popup — the sidebar stand-in.
+        Focus::MailboxTitle => open_mailboxes_popup(state),
         Focus::Composer => activate_composer(state),
         // The dialogs intercept Enter themselves; unreachable in practice.
         // Enter on the reader activates the focused item (tickets 61qx,
@@ -558,6 +602,7 @@ pub(crate) fn activate(state: &mut AppState) -> Vec<Effect> {
         | Focus::ThemePicker
         | Focus::AccountSwitcher
         | Focus::Help
+        | Focus::Mailboxes
         | Focus::SearchField
         | Focus::ErrorModal
         | Focus::Wizard => {

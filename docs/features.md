@@ -116,6 +116,21 @@ Notes and limitations:
 - See [Known limitations](limitations.md) for backend-specific search
   caveats (non-ASCII text on IMAP, text search on Maildir).
 
+## Compact windows
+
+When the terminal is narrower than 120 columns, the sidebar hides to give
+the message list room. `Tab` then never moves focus to anything invisible:
+the cycle runs between the message list and the list header's mailbox
+title, which acts as a button in this mode.
+
+- `Tab` focuses the mailbox title (it lights up); `Enter` — or a click on
+  it — opens the **Mailboxes** popup, a small list of every mailbox drawn
+  with the sidebar's folder rows.
+- Arrows choose, `Enter` switches (Enter on the displayed mailbox just
+  closes), `Esc` closes without switching.
+- Resizing back to full width returns the title to a plain header and
+  focus to the message list.
+
 ## Mouse
 
 Mouse support is **off by default** — enable it with `[tmail] mouse = true`
@@ -126,6 +141,7 @@ capture at any time. With it enabled:
   selected row opens it (the same select → Enter rhythm as the keyboard).
 - **Folder (sidebar)** — first click selects; clicking the selected folder
   switches to it.
+- **Mailbox title (compact)** — opens the Mailboxes popup (see below).
 - **Compose button** — opens the composer (same as `c`).
 - **Search field** — focuses it (same as `/`).
 - **Links (reader)** — first click focuses the link; clicking the focused

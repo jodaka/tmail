@@ -78,7 +78,15 @@ pub fn render(
                     width: rows.width,
                     height: 1,
                 };
-                render_folder_row(frame, row_area, theme, mailbox, is_active, cursor);
+                render_folder_row(
+                    frame,
+                    row_area,
+                    theme,
+                    mailbox,
+                    is_active,
+                    cursor,
+                    theme.sidebar_bg,
+                );
                 // Clicking a folder selects it; clicking the selected one
                 // switches (arrows + Enter, plan §10).
                 hits.push(row_area, ClickTarget::Mailbox(i));
@@ -113,7 +121,12 @@ fn display_name(imap_name: &str) -> &str {
     }
 }
 
-fn render_folder_row(
+/// One sidebar folder row: marker column + name + ` (N)` unread counter.
+/// Shared with the Mailboxes popup (issue brnw) so the popup draws the
+/// sidebar's rows exactly — `panel_bg` is the color plain (inactive,
+/// unfocused) rows sit on: the sidebar panel there, the popup's page
+/// background in the popup.
+pub(crate) fn render_folder_row(
     frame: &mut Frame<'_>,
     area: Rect,
     theme: &Theme,
@@ -124,6 +137,7 @@ fn render_folder_row(
     // the message list (or search field) holding focus leaves no folder
     // marked, even the active one.
     cursor: bool,
+    panel_bg: ratatui::style::Color,
 ) {
     let width = area.width as usize;
     // Row anatomy (ticket ye28): 1 marker col + 1 left pad + name +
@@ -159,9 +173,10 @@ fn render_folder_row(
         // hover-only `surface2`).
         theme.selection
     } else {
-        // Plain folder rows sit on the sidebar panel color, no longer
-        // the page background.
-        theme.sidebar_bg
+        // Plain folder rows sit on the caller's panel color: the sidebar
+        // panel in the sidebar, the page background in the Mailboxes
+        // popup (issue brnw).
+        panel_bg
     };
     let pad = Style::new().bg(row_bg);
     let name_style = if is_active {

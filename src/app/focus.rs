@@ -12,6 +12,13 @@ pub enum Focus {
     /// shortcuts must not fire here (plan §10).
     SearchField,
     Sidebar,
+    /// The mailbox-title button in the list head ("INBOX 4 unread"), a
+    /// control only the compact layout draws (issue brnw): in compact mode
+    /// the sidebar is hidden, and this button opens the Mailboxes popup —
+    /// the way to switch mailboxes without a sidebar. The full layout
+    /// keeps the title a plain header, so the reducer's tab filtering
+    /// skips this focus there.
+    MailboxTitle,
     MessageList,
     /// The message reader screen is open (plan §19 Phase 4): Up/Down scroll
     /// the body; single-letter shortcuts act on the open message. Tab is
@@ -35,6 +42,10 @@ pub enum Focus {
     /// The shortcuts help popup is open (user request): it intercepts all
     /// input; Esc (or the help keys again) returns to the saved focus.
     Help,
+    /// The Mailboxes popup is open (issue brnw): the compact-mode stand-in
+    /// for the sidebar — a small list of every mailbox. Arrows move the
+    /// cursor, Enter switches (or closes on the current one), Esc closes.
+    Mailboxes,
     /// The Retry/Dismiss error modal is open; it intercepts all input.
     ErrorModal,
     /// The account configuration wizard (ADR 0003) owns the whole screen:
@@ -48,7 +59,18 @@ pub enum Focus {
 /// composer's own controls first, then the sidebar — the reducer's
 /// `focus_step` bridges the two, and the off-screen mailbox-screen
 /// controls (search field, message list) are skipped.
-pub const FOCUS_ORDER: [Focus; 3] = [Focus::SearchField, Focus::Sidebar, Focus::MessageList];
+///
+/// The ring carries both pane-focusable controls the responsive layout
+/// may hide: the reducer's `focus_step` skips `Sidebar` when the layout
+/// hides it (compact/too-small) and skips `MailboxTitle` when the title
+/// is a plain header again (full mode, issue brnw) — the cycle always
+/// lands on something actually drawn.
+pub const FOCUS_ORDER: [Focus; 4] = [
+    Focus::SearchField,
+    Focus::Sidebar,
+    Focus::MailboxTitle,
+    Focus::MessageList,
+];
 
 impl Focus {
     pub fn next(self) -> Self {
@@ -70,6 +92,7 @@ impl Focus {
             | Focus::ThemePicker
             | Focus::AccountSwitcher
             | Focus::Help
+            | Focus::Mailboxes
             | Focus::Wizard => self,
             // The reader screen keeps its screen focus; the reducer's
             // `focus_step` redirects Tab to the reader's internal cursor
@@ -109,6 +132,7 @@ impl fmt::Display for Focus {
         match self {
             Focus::SearchField => write!(f, "search"),
             Focus::Sidebar => write!(f, "sidebar"),
+            Focus::MailboxTitle => write!(f, "title"),
             Focus::MessageList => write!(f, "list"),
             Focus::Reader => write!(f, "reader"),
             Focus::Composer => write!(f, "composer"),
@@ -116,6 +140,7 @@ impl fmt::Display for Focus {
             Focus::ThemePicker => write!(f, "themes"),
             Focus::AccountSwitcher => write!(f, "accounts"),
             Focus::Help => write!(f, "help"),
+            Focus::Mailboxes => write!(f, "mailboxes"),
             Focus::ErrorModal => write!(f, "modal"),
             Focus::Wizard => write!(f, "wizard"),
         }
@@ -160,7 +185,7 @@ mod tests {
         // The cycle is an invariant ring over the tab-reachable controls
         // (the search field is reachable only by click/`/`, and Tab inside
         // it steps out into the ring).
-        for f in [Focus::Sidebar, Focus::MessageList] {
+        for f in [Focus::Sidebar, Focus::MailboxTitle, Focus::MessageList] {
             assert_eq!(f.next().previous(), f);
             assert_eq!(f.previous().next(), f);
         }
@@ -172,6 +197,8 @@ mod tests {
         assert_eq!(Focus::Dialog.previous(), Focus::Dialog);
         assert_eq!(Focus::ThemePicker.next(), Focus::ThemePicker);
         assert_eq!(Focus::ThemePicker.previous(), Focus::ThemePicker);
+        assert_eq!(Focus::Mailboxes.next(), Focus::Mailboxes);
+        assert_eq!(Focus::Mailboxes.previous(), Focus::Mailboxes);
     }
 
     #[test]
