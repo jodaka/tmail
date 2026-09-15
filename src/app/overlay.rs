@@ -64,6 +64,11 @@ pub struct ErrorDialog {
     /// Whether the outcome is ambiguous (retrying may duplicate work, e.g.
     /// re-sending mail, plan §12).
     pub ambiguous: bool,
+    /// Additional failures that completed while this modal was already
+    /// open (issue 8859): queued into the dialog as an "and N more
+    /// failed" line instead of being dropped or replacing the visible
+    /// failure; each detail is logged at WARN.
+    pub more_failures: usize,
     /// First visible detail line (scroll offset, clamped by the reducer
     /// with the same layout math the renderer uses).
     pub scroll: usize,
