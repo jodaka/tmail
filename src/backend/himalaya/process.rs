@@ -23,6 +23,45 @@ pub(crate) struct ChildOutput {
     pub stderr: Vec<u8>,
 }
 
+/// How long the cancellation path waits for a SIGKILLed child to be
+/// reaped before giving up on it (immediate in practice; the bound only
+/// covers a child stuck in uninterruptible disk sleep).
+const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// SIGKILL the child's whole process group, falling back to the direct
+/// child when the group kill fails, and log whatever could not be
+/// killed (ticket 8s0g: the `kill(2)` result was silently ignored, so
+/// an `EPERM` left the tree running with nothing said).
+fn kill_child_tree(child: &mut tokio::process::Child, pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    // Negative pid targets the child's *process group* (the child was
+    // spawned with `process_group(0)`, so its group id is its pid): the
+    // SIGKILL reaches the child and everything it forked, closing every
+    // pipe write end so the readers above finish immediately (ticket
+    // 2b7m). No pid→pgid reuse race: the child is an unreaped zombie or
+    // alive at this point — we never `wait` before the kill — so the
+    // group it leads cannot have been recycled.
+    // SAFETY: kill(2) with an int pgid/signal; the group was created by
+    // this spawn and contains only our child tree.
+    let sent = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+    if sent == 0 {
+        return;
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        // The group is already gone (the child exited between spawn and
+        // cancellation): nothing left to kill.
+        tracing::debug!(pid, "cancelled child's process group is already gone");
+        return;
+    }
+    tracing::warn!(pid, %err, "process-group kill failed; killing the direct child");
+    if let Err(kill_err) = child.start_kill() {
+        tracing::warn!(pid, %kill_err, "direct-child kill failed too");
+    }
+}
+
 /// Run `program args` capturing stdout/stderr separately. stdin is null:
 /// Phase 2/3 operations are read-only. If `token` fires while the child
 /// runs, the child is SIGKILLed by pid and [`BackendError::Cancelled`] is
@@ -94,25 +133,35 @@ pub(crate) async fn run_with_stdin(
     tokio::select! {
         biased;
         _ = token.cancelled() => {
-            if let Some(pid) = pid {
-                // Negative pid targets the child's *process group* (the
-                // child was spawned with `process_group(0)`, so its group
-                // id is its pid): the SIGKILL reaches the child and
-                // everything it forked, closing every pipe write end so
-                // the readers below finish immediately (ticket 2b7m).
-                // SAFETY: kill(2) with an int pgid/signal; the group was
-                // created by this spawn and contains only our child tree.
-                unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
-            }
-            let _ = child.wait().await;
+            kill_child_tree(&mut child, pid);
+            // Abort, never await (ticket 8s0g): the kill is expected to
+            // close every pipe and let these tasks finish, but a pipe
+            // holder the kill could not reach (a D-state child, an
+            // EPERM'd group) would otherwise stall cancellation exactly
+            // when it must not. Aborting drops each future at its await
+            // point and releases the pipe; the buffered output is
+            // discarded anyway — a cancelled run reports `Cancelled`,
+            // never data.
             if let Some(task) = stdin_task {
-                let _ = task.await;
+                task.abort();
             }
             if let Some(task) = stdout_task {
-                let _ = task.await;
+                task.abort();
             }
             if let Some(task) = stderr_task {
-                let _ = task.await;
+                task.abort();
+            }
+            // The reap itself is bounded (ticket 8s0g): the SIGKILL
+            // above makes the exit immediate, so an expiry here can only
+            // mean the signal never reached the process (uninterruptible
+            // disk sleep). Dropping the wait future leaves the reaping
+            // to tokio's driver, and dropping `child` re-arms
+            // `kill_on_drop` for the direct child.
+            if tokio::time::timeout(REAP_GRACE, child.wait())
+                .await
+                .is_err()
+            {
+                tracing::warn!(pid, "cancelled child did not exit within the reap grace");
             }
             Err(BackendError::Cancelled)
         }
