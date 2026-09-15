@@ -176,6 +176,7 @@ fn no_effects_except_cache_stores(s: &mut AppState, effects: &[Effect]) {
         effects.iter().all(|e| matches!(
             e.kind,
             OperationKind::CacheListStore { .. }
+                | OperationKind::CacheListEvict { .. }
                 | OperationKind::CacheMailboxesStore { .. }
                 | OperationKind::CacheMessageStore { .. }
         )),
@@ -194,6 +195,7 @@ fn complete_cache_stores(s: &mut AppState, effects: &[Effect]) -> Vec<Effect> {
             matches!(
                 e.kind,
                 OperationKind::CacheListStore { .. }
+                    | OperationKind::CacheListEvict { .. }
                     | OperationKind::CacheMailboxesStore { .. }
                     | OperationKind::CacheMessageStore { .. }
             )

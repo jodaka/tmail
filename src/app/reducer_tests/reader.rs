@@ -41,8 +41,11 @@ fn reader_result_applies_and_marks_unread_read() {
     // The list still shows the message as unread: the UI updates only
     // after confirmation (plan §19 Phase 4 acceptance).
     assert!(!s.messages.items[1].is_read);
-    complete_done(&mut s, flag_id);
-    // Confirmation updates both the list row and the reader's snapshot.
+    // Confirmation updates both the list row and the reader's snapshot,
+    // and re-stores the corrected page into the on-disk cache (ticket
+    // kkaq) — the store is drained like every cache write.
+    let effects = complete_done(&mut s, flag_id);
+    no_effects_except_cache_stores(&mut s, &effects);
     assert!(s.messages.items[1].is_read);
     assert!(s.open_summary().unwrap().is_read);
     assert!(s.session.operations.is_empty());

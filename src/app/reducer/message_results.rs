@@ -223,9 +223,25 @@ pub(crate) fn message_moved(state: &mut AppState, locator: &MessageLocator) -> V
     state.clamp_list_positions();
     keep_selection_visible(state);
     state.set_status("Message moved");
-    // The visible context could be a mailbox page or search results
-    // (Phase 9); the re-sync follows whichever is open.
-    request_visible_page(state, state.messages.offset)
+    // The stale cached page must not resurrect the moved row on a warm
+    // start (ticket kkaq): the local post-move page cannot be stored
+    // truthfully (backend ids shift, so the re-sync below owns the next
+    // write), so the cached copy for this identity is evicted.
+    let mut effects = request_visible_page(state, state.messages.offset);
+    if let Some((mailbox, query)) = visible_list_identity(state) {
+        effects.push(
+            state
+                .session
+                .operations
+                .start_background(OperationKind::CacheListEvict {
+                    mailbox,
+                    query,
+                    offset: state.messages.offset,
+                    limit: state.messages.limit,
+                }),
+        );
+    }
+    effects
 }
 
 /// Reconcile one list row's attachment flag with a full message (ticket
@@ -339,6 +355,23 @@ pub(crate) fn visible_mailbox_page(state: &AppState) -> Option<&MailboxId> {
         match route {
             Route::Mailbox(route) => return Some(&route.mailbox_id),
             Route::Search(_) => return None,
+            Route::Message(_) | Route::Composer | Route::Wizard => {}
+        }
+    }
+    None
+}
+
+/// The cached-list identity of the visible list (`(mailbox, query)`), the
+/// same walk [`visible_mailbox_page`] does but shaped for the `Cache*`
+/// effects: a mailbox page caches under `query: None`, a search under its
+/// query (ticket haeb). `None` when the stack shows no list at all.
+pub(crate) fn visible_list_identity(state: &AppState) -> Option<(MailboxId, Option<String>)> {
+    for route in state.session.routes.iter().rev() {
+        match route {
+            Route::Mailbox(route) => return Some((route.mailbox_id.clone(), None)),
+            Route::Search(route) => {
+                return Some((route.mailbox_id.clone(), Some(route.query.clone())));
+            }
             Route::Message(_) | Route::Composer | Route::Wizard => {}
         }
     }
