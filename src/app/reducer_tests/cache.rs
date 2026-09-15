@@ -625,13 +625,67 @@ fn a_confirmed_move_evicts_the_cached_page() {
         mailbox,
         query,
         offset,
-        limit,
     } = &effect.kind
     else {
         unreachable!("filtered above");
     };
     assert_eq!(mailbox.0, "inbox");
     assert_eq!(query.as_deref(), None);
-    assert_eq!((*offset, *limit), (0, mock::PAGE_SIZE));
+    assert_eq!(*offset, 0);
     assert!(s.messages.items.iter().all(|m| m.id != target));
+}
+
+/// A background refresh whose page is identical to the displayed one
+/// stores nothing: the disk copy is the page that was last applied, so
+/// the write would churn the disk on every unchanged timer refresh
+/// (ticket kkaq).
+#[test]
+fn an_identical_refresh_stores_nothing() {
+    let mut s = state();
+    let page = s.messages.clone();
+    let req = PageRequest {
+        mailbox_id: inbox_id(),
+        offset: 0,
+        limit: mock::PAGE_SIZE,
+    };
+    let id = s.session.operations.start(OperationKind::LoadPage(req)).id;
+    let effects = reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Page(page)),
+        }),
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e.kind, OperationKind::CacheListStore { .. })),
+        "an identical page must not re-store, got {effects:?}"
+    );
+}
+
+/// The session preview maps are bounded (ticket kkaq): at the cap both
+/// `previews` and its request markers clear, so a long session cannot
+/// grow them without bound and rows re-fetch their snippets.
+#[test]
+fn session_previews_are_bounded() {
+    let mut s = state();
+    let base = mock::mock_page(&inbox_id(), 0, 1).items.remove(0);
+    for i in 0..crate::app::state::MAX_SESSION_PREVIEWS {
+        let mut row = base.clone();
+        row.id = MessageId(format!("p{i}"));
+        s.caches
+            .insert_preview(row.id.clone(), format!("snippet {i}"));
+    }
+    assert_eq!(
+        s.caches.previews.len(),
+        crate::app::state::MAX_SESSION_PREVIEWS
+    );
+    // One more distinct preview over the cap clears both maps…
+    s.caches
+        .insert_preview(MessageId(String::from("overflow")), String::from("snippet"));
+    // …the request markers with them…
+    assert!(s.caches.preview_requested.is_empty());
+    // …and the inserted snippet lands in the fresh map.
+    assert_eq!(s.caches.previews.len(), 1);
 }

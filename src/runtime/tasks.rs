@@ -448,14 +448,12 @@ async fn run_effect(
             mailbox,
             query,
             offset,
-            limit,
         } => {
             let mailbox = mailbox.clone();
             let query = query.clone();
             let offset = *offset;
-            let limit = *limit;
             run_cache_store(cache, move |cache| {
-                cache.evict(&mailbox, query.as_deref(), offset, limit)
+                cache.evict(&mailbox, query.as_deref(), offset)
             })
             .await;
             Some(Ok(OperationOutcome::Done))

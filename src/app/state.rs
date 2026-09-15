@@ -78,9 +78,13 @@ pub struct NotificationsState {
 
 impl NotificationsState {
     /// Mark `page` as clean (a background update's start or finish
-    /// boundary): everything on screen now is known mail.
+    /// boundary): everything on screen now is known mail. The set's
+    /// allocation is reused — the same page refreshes on every timer
+    /// firing, so a fresh `HashSet` per boundary would churn the
+    /// allocator for identical content (ticket kkaq).
     pub fn mark_clean(&mut self, page: &Page<MessageSummary>) {
-        self.clean = page.items.iter().map(|m| m.id.clone()).collect();
+        self.clean.clear();
+        self.clean.extend(page.items.iter().map(|m| m.id.clone()));
     }
 
     /// The leading run of messages in `page` whose ids are not in the clean
@@ -182,6 +186,14 @@ pub struct Settings {
     pub theme_index: usize,
 }
 
+/// Bound on the session preview maps (ticket kkaq): `previews` and its
+/// `preview_requested` markers grow with every row the user scrolls past,
+/// and a long session would keep thousands of snippets alive forever.
+/// At the cap both clear: visible rows simply re-fetch their snippets
+/// through the ordinary preview path (the map exists to avoid re-fetches,
+/// not to promise them).
+pub(crate) const MAX_SESSION_PREVIEWS: usize = 1024;
+
 /// Session-local caches: everything here exists to avoid re-fetching or
 /// re-building work the backend already produced. Cleared implicitly when
 /// the session ends. The on-disk page cache (ticket haeb) lives in the
@@ -213,6 +225,20 @@ pub struct CacheBundle {
     /// only `&AppState`; the app is single-threaded and no accessor
     /// re-enters while borrowing, so `RefCell` suffices.
     pub(crate) reader_doc: RefCell<Option<CachedReaderDoc>>,
+}
+
+impl CacheBundle {
+    /// Insert one session preview, keeping the map and its request
+    /// markers bounded (ticket kkaq): at [`MAX_SESSION_PREVIEWS`] both
+    /// clear, so a long session cannot grow the maps without bound, and
+    /// the visible rows simply re-fetch their snippets.
+    pub(crate) fn insert_preview(&mut self, id: MessageId, snippet: String) {
+        if self.previews.len() >= MAX_SESSION_PREVIEWS && !self.previews.contains_key(&id) {
+            self.previews.clear();
+            self.preview_requested.clear();
+        }
+        self.previews.insert(id, snippet);
+    }
 }
 
 /// Per-session UI bookkeeping: routes, focus, modals, clocks, in-flight

@@ -309,17 +309,24 @@ fn apply_visible_page(
     if origin == OperationOrigin::Background {
         effects.extend(notify_new_messages(state, &page));
     }
+    // An identical page changes nothing on disk either: the stored copy
+    // is the page that was last applied (every applied page is stored),
+    // so skipping the write saves a serialize + write on every timer
+    // refresh whose data has not moved (ticket kkaq).
+    let unchanged = page == state.messages;
     effects.extend(apply_page(state, page));
-    effects.push(
-        state
-            .session
-            .operations
-            .start_background(OperationKind::CacheListStore {
-                mailbox: mailbox.clone(),
-                query,
-                page: Box::new(state.messages.clone()),
-            }),
-    );
+    if !unchanged {
+        effects.push(
+            state
+                .session
+                .operations
+                .start_background(OperationKind::CacheListStore {
+                    mailbox: mailbox.clone(),
+                    query,
+                    page: Box::new(state.messages.clone()),
+                }),
+        );
+    }
     effects
 }
 

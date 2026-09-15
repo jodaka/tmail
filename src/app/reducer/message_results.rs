@@ -162,8 +162,7 @@ pub(crate) fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effe
         // it instead of re-fetching the message (ticket wxtx).
         state
             .caches
-            .previews
-            .insert(message_id.clone(), snippet.clone());
+            .insert_preview(message_id.clone(), snippet.clone());
         if let Some(Route::Message(route)) = state.session.routes.last_mut()
             && route.summary.id == message_id
             && route.summary.snippet.is_none()
@@ -226,7 +225,8 @@ pub(crate) fn message_moved(state: &mut AppState, locator: &MessageLocator) -> V
     // The stale cached page must not resurrect the moved row on a warm
     // start (ticket kkaq): the local post-move page cannot be stored
     // truthfully (backend ids shift, so the re-sync below owns the next
-    // write), so the cached copy for this identity is evicted.
+    // write), so the cached copy for this identity is evicted — every
+    // limit variant with it, since the file name carries none.
     let mut effects = request_visible_page(state, state.messages.offset);
     if let Some((mailbox, query)) = visible_list_identity(state) {
         effects.push(
@@ -237,7 +237,6 @@ pub(crate) fn message_moved(state: &mut AppState, locator: &MessageLocator) -> V
                     mailbox,
                     query,
                     offset: state.messages.offset,
-                    limit: state.messages.limit,
                 }),
         );
     }
@@ -500,8 +499,7 @@ pub(crate) fn complete_cache_preview_load(
                 Some(text) => {
                     state
                         .caches
-                        .previews
-                        .insert(summary.id.clone(), text.clone());
+                        .insert_preview(summary.id.clone(), text.clone());
                     if let Some(item) = state.messages.items.iter_mut().find(|s| s.id == summary.id)
                     {
                         item.snippet = Some(text);
@@ -569,8 +567,7 @@ pub(crate) fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effe
     if let Some(text) = crate::view::rich::preview_text(&message) {
         state
             .caches
-            .previews
-            .insert(message_id.clone(), text.clone());
+            .insert_preview(message_id.clone(), text.clone());
     }
     // The parsed message knows attachments better than the envelope did
     // (ticket r84f: IMAP envelopes carry no body structure, so the flag

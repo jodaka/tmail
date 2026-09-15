@@ -361,6 +361,7 @@ fn settle_cache_stores(s: &mut AppState, effects: Vec<Effect>) -> Vec<Effect> {
         matches!(
             kind,
             OperationKind::CacheListStore { .. }
+                | OperationKind::CacheListEvict { .. }
                 | OperationKind::CacheMailboxesStore { .. }
                 | OperationKind::CacheMessageStore { .. }
         )
