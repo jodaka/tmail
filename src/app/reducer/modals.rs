@@ -2,14 +2,14 @@
 //! Retry/Dismiss modal, the discard and send confirmations, the attachment
 //! dialog, and the theme picker — every overlay intercepts all input while
 //! open.
-use super::composer_flow::close_composer_route;
+use super::composer_flow::{close_composer_route, switch_mailbox};
 use crate::app::action::{Action, AttachmentBrowse};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::operation::{DraftRemovalReason, OperationFailure, OperationKind};
 use crate::app::overlay::{
-    AccountSwitcherDialog, ConfirmButton, ErrorDialog, HelpDialog, ModalButton, Overlay,
-    SwitchConfirmDialog, ThemePickerDialog,
+    AccountSwitcherDialog, ConfirmButton, ErrorDialog, HelpDialog, MailboxesDialog, ModalButton,
+    Overlay, SwitchConfirmDialog, ThemePickerDialog,
 };
 use crate::app::state::{AppState, Loadable};
 
@@ -72,6 +72,13 @@ pub(crate) fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<
             Action::BackendCompleted(_) => None,
             _ => Some(help_modal_reduce(state, action)),
         },
+        Some(Overlay::Mailboxes(_)) => match action {
+            // Results must land while the popup is open (a mailbox
+            // listing refresh in flight); the popup otherwise swallows
+            // everything.
+            Action::BackendCompleted(_) => None,
+            _ => Some(mailboxes_modal_reduce(state, action)),
+        },
         None => None,
     }
 }
@@ -105,6 +112,7 @@ pub(crate) fn open_help(state: &mut AppState) -> Vec<Effect> {
             Focus::MessageList
                 | Focus::Reader
                 | Focus::Sidebar
+                | Focus::MailboxTitle
                 | Focus::SearchField
                 | Focus::Composer
         )
@@ -115,6 +123,129 @@ pub(crate) fn open_help(state: &mut AppState) -> Vec<Effect> {
         previous_focus: state.session.focus,
     }));
     state.session.focus = Focus::Help;
+    Vec::new()
+}
+
+/// The Mailboxes popup (issue brnw), compact mode's sidebar stand-in:
+/// Enter on the focused mailbox-title button (or a click on it) opens it
+/// over the mailbox screen. The cursor starts on the mailbox the session
+/// displays — Enter on it closes without switching, the way the account
+/// switcher starts on the driving account. Never over the wizard (every
+/// key there is wizard-owned); while a mailbox listing is still loading
+/// the popup opens anyway and shows the same pending states the sidebar
+/// does.
+pub(crate) fn open_mailboxes_popup(state: &mut AppState) -> Vec<Effect> {
+    if state.session.wizard.is_some() {
+        return Vec::new();
+    }
+    let active = state.active_route().and_then(|r| r.mailbox_id()).cloned();
+    let len = state.mailboxes.as_loaded().map(Vec::len).unwrap_or(0);
+    let cursor = state
+        .mailboxes
+        .as_loaded()
+        .and_then(|mailboxes| {
+            mailboxes
+                .iter()
+                .position(|mailbox| Some(&mailbox.id) == active.as_ref())
+        })
+        .unwrap_or(0)
+        .min(len.saturating_sub(1));
+    // The scroll window opens with the cursor row on screen: a long
+    // mailbox list must not hide the mailbox the user is on.
+    let visible = crate::view::overlay::mailboxes_visible_rows(state.session.size).max(1);
+    let scroll = if cursor >= visible {
+        (cursor + 1 - visible).min(crate::view::overlay::mailboxes_max_scroll(
+            len,
+            state.session.size,
+        ))
+    } else {
+        0
+    };
+    state.session.overlay = Some(Overlay::Mailboxes(MailboxesDialog {
+        cursor,
+        scroll,
+        previous_focus: state.session.focus,
+    }));
+    state.session.focus = Focus::Mailboxes;
+    Vec::new()
+}
+
+/// Mailboxes popup handling (issue brnw). Up/Down move the cursor with
+/// the same clamped (non-wrapping) movement the account switcher uses.
+/// Enter on the displayed mailbox closes; Enter on another mailbox
+/// closes and switches (the sidebar stand-in's whole point). Esc closes
+/// without switching. Everything else is swallowed while the popup is
+/// open.
+pub(crate) fn mailboxes_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
+    // Viewport math comes from the renderer's layout, so the clamp the
+    // reducer computes always matches what is drawn.
+    let len = state.mailboxes.as_loaded().map(Vec::len).unwrap_or(0);
+    let visible = crate::view::overlay::mailboxes_visible_rows(state.session.size).max(1);
+    let max_scroll = crate::view::overlay::mailboxes_max_scroll(len, state.session.size);
+    let Some(Overlay::Mailboxes(dialog)) = state.session.overlay.as_mut() else {
+        return Vec::new();
+    };
+    // The listing may have refreshed while the popup was open: keep the
+    // cursor and scroll window inside it.
+    dialog.cursor = dialog.cursor.min(len.saturating_sub(1));
+    dialog.scroll = dialog.scroll.min(max_scroll);
+    match action {
+        Action::MoveUp | Action::MoveDown => {
+            let delta = if matches!(action, Action::MoveUp) {
+                -1
+            } else {
+                1
+            };
+            if len == 0 {
+                return Vec::new();
+            }
+            let next = (dialog.cursor as i64 + delta).clamp(0, len as i64 - 1) as usize;
+            dialog.cursor = next;
+            dialog.scroll = if next < dialog.scroll {
+                next
+            } else if next >= dialog.scroll + visible {
+                (next + 1 - visible).min(max_scroll)
+            } else {
+                dialog.scroll
+            };
+        }
+        Action::BackOrCancel => {
+            let focus = dialog.previous_focus;
+            state.session.overlay = None;
+            state.session.focus = focus;
+        }
+        Action::Activate => {
+            let cursor = dialog.cursor;
+            let focus = dialog.previous_focus;
+            let target = state
+                .mailboxes
+                .as_loaded()
+                .and_then(|mailboxes| mailboxes.get(cursor))
+                .map(|mailbox| mailbox.id.clone());
+            return match target {
+                // Enter on the displayed mailbox: close, nothing to do.
+                Some(id) if state.active_route().and_then(|r| r.mailbox_id()) == Some(&id) => {
+                    state.session.overlay = None;
+                    state.session.focus = focus;
+                    Vec::new()
+                }
+                // Enter on another mailbox: close, then switch. The
+                // switch replaces any open route (reader, search) — the
+                // mailbox route becomes the root, exactly what the
+                // sidebar's Enter does.
+                Some(id) => {
+                    state.session.overlay = None;
+                    state.session.focus = focus;
+                    switch_mailbox(state, &id)
+                }
+                // Empty or still-loading listing: the arrows and Enter
+                // are inert (the popup shows the pending state).
+                None => Vec::new(),
+            };
+        }
+        // Everything else is swallowed while the popup is open.
+        _ => {}
+    }
     Vec::new()
 }
 

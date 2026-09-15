@@ -111,12 +111,15 @@ fn wheel(state: &AppState, delta: i64) -> Option<Action> {
                 Action::MoveDown
             }
         }
-        // Wheeling the pickers does not preview/move — arrows only.
+        // Wheeling the pickers does not preview/move — arrows only. The
+        // mailbox-title button has no scrollable region (issue brnw).
         Focus::SearchField
         | Focus::Composer
+        | Focus::MailboxTitle
         | Focus::Dialog
         | Focus::ThemePicker
         | Focus::AccountSwitcher
+        | Focus::Mailboxes
         | Focus::Help
         // The wizard has no scrollable region yet (keyboard-first, ADR 0003).
         | Focus::Wizard => return None,
@@ -208,8 +211,16 @@ mod tests {
             assert_eq!(wheel(&state, 1), Some(Action::MoveDown), "{focus:?}");
             assert_eq!(wheel(&state, -1), Some(Action::MoveUp), "{focus:?}");
         }
-        // Editing foci: the wheel must not move carets.
-        for focus in [Focus::SearchField, Focus::Composer, Focus::Dialog] {
+        // Editing foci and pickers: the wheel must not move carets or
+        // previews (issue brnw: the title button has no scrollable
+        // region either).
+        for focus in [
+            Focus::SearchField,
+            Focus::Composer,
+            Focus::MailboxTitle,
+            Focus::Mailboxes,
+            Focus::Dialog,
+        ] {
             state.session.focus = focus;
             assert_eq!(wheel(&state, 1), None, "{focus:?}");
         }

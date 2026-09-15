@@ -109,6 +109,10 @@ pub enum ClickTarget {
     ComposeButton,
     /// A sidebar mailbox row (equivalent: arrows + Enter).
     Mailbox(usize),
+    /// The list head's mailbox-title button (issue brnw), a control only
+    /// the compact layout records: clicking it opens the Mailboxes popup
+    /// (equivalent: Enter on the focused title).
+    MailboxTitle,
     /// The topbar search field (equivalent: `/`).
     SearchField,
     /// A message-list row (equivalent: arrows + Enter).

@@ -26,6 +26,7 @@ pub(crate) fn click(state: &mut AppState, target: ClickTarget) -> Vec<Effect> {
     match target {
         ClickTarget::ComposeButton => reduce(state, Action::Compose),
         ClickTarget::Mailbox(index) => click_mailbox(state, index),
+        ClickTarget::MailboxTitle => click_mailbox_title(state),
         ClickTarget::SearchField => reduce(state, Action::OpenSearch),
         ClickTarget::MessageRow(index) => click_message_row(state, index),
         ClickTarget::ReaderLink(index) => click_reader_link(state, index),
@@ -99,6 +100,16 @@ pub(crate) fn click_mailbox(state: &mut AppState, index: usize) -> Vec<Effect> {
     }
     state.mailbox_selection = index;
     Vec::new()
+}
+
+/// Click the compact mode's mailbox-title button (issue brnw): focus it,
+/// then open the Mailboxes popup — the same path Enter takes. A button
+/// click presses it (the Compose button's convention), it does not
+/// select-and-wait. The renderer records the target only in compact
+/// mode, so a stale full-mode frame never triggers it.
+pub(crate) fn click_mailbox_title(state: &mut AppState) -> Vec<Effect> {
+    state.session.focus = Focus::MailboxTitle;
+    reduce(state, Action::Activate)
 }
 
 /// Click a message row: focus the list, select the row, and open it when

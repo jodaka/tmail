@@ -101,6 +101,10 @@ pub enum Overlay {
     /// The shortcuts help popup (user request): every active binding for
     /// the screen underneath, rendered from the keymap.
     Help(HelpDialog),
+    /// The Mailboxes popup (issue brnw): the compact-mode stand-in for the
+    /// sidebar — the same mailbox listing the sidebar draws, with the
+    /// same switching behavior.
+    Mailboxes(MailboxesDialog),
 }
 
 /// The runtime account switcher (ticket c0n0). The account list itself
@@ -140,6 +144,20 @@ pub struct SwitchConfirmDialog {
 /// custom `[tmail.keybindings]` config shows up here unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelpDialog {
+    /// Focus to restore when the popup closes.
+    pub previous_focus: Focus,
+}
+
+/// The Mailboxes popup (issue brnw), compact mode's sidebar stand-in. The
+/// mailbox listing itself lives in `AppState.mailboxes` — the same data
+/// the sidebar renders — so the dialog only tracks where the user is
+/// inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailboxesDialog {
+    /// Cursor into `AppState.mailboxes`.
+    pub cursor: usize,
+    /// First visible row when the mailbox list outgrows the popup.
+    pub scroll: usize,
     /// Focus to restore when the popup closes.
     pub previous_focus: Focus,
 }

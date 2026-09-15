@@ -227,6 +227,25 @@ fn tick(state: &mut AppState, now: chrono::DateTime<chrono::FixedOffset>) -> Vec
 
 fn resize(state: &mut AppState, width: u16, height: u16) -> Vec<Effect> {
     state.session.size = (width, height);
+    // A resize can hide the control that holds focus (issue brnw): the
+    // sidebar exists only in full mode, the mailbox-title button only in
+    // compact. Invisible focus moves to the message list — or back into
+    // the composer when the composer is on screen and the sidebar the
+    // composer's Tab bridge had parked focus on vanished.
+    let mode = crate::view::layout::mode_for(width, height);
+    match state.session.focus {
+        Focus::Sidebar if mode != crate::view::layout::LayoutMode::Full => {
+            state.session.focus = if matches!(state.active_route(), Some(Route::Composer)) {
+                Focus::Composer
+            } else {
+                Focus::MessageList
+            };
+        }
+        Focus::MailboxTitle if mode != crate::view::layout::LayoutMode::Compact => {
+            state.session.focus = Focus::MessageList;
+        }
+        _ => {}
+    }
     // Ticket kjfq: auto-sized pages track the terminal — the limit
     // is however many rows fit the list right now. A change re-loads
     // the visible page in the background (supersession collapses a

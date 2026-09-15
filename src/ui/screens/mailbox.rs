@@ -79,7 +79,7 @@ pub fn render(
     } else {
         rows.width
     };
-    render_head(frame, head, state, theme, now, scrolling);
+    render_head(frame, head, state, mode, theme, now, scrolling, hits);
     // Rows of the Drafts mailbox show the recipient in the sender column:
     // a draft's sender is always the user's own address, which reads as
     // noise. Matched on the row's mailbox id, so search results over the
@@ -198,13 +198,23 @@ fn list_load_in_flight(state: &AppState) -> bool {
     }
 }
 
+/// Render the list head: the mailbox title ("INBOX 4 unread"), the
+/// right-aligned page range, and the hairline under it. In full mode the
+/// title is a plain header (ticket fypg: no checkbox, not focusable —
+/// select-all stays Ctrl+A's job). In compact mode (issue brnw) the title
+/// is the mailbox switch button — the sidebar is hidden there, so the
+/// header carries the affordance: Tab focuses it, Enter opens the
+/// Mailboxes popup, and clicking it presses the button.
+#[allow(clippy::too_many_arguments)]
 fn render_head(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &AppState,
+    mode: LayoutMode,
     theme: &Theme,
     now: chrono::DateTime<chrono::FixedOffset>,
     scrolling: bool,
+    hits: &mut HitMap,
 ) {
     if area.height == 0 {
         return;
@@ -237,25 +247,31 @@ fn render_head(
     // Right-aligned range (mockup `.pane-range`).
     let range_w = range.width();
     let left_budget = width.saturating_sub(range_w + 2).max(10);
-    // The mailbox label is a plain header (ticket fypg): no checkbox, no
-    // click target, not focusable — select-all stays Ctrl+A's job. Three
-    // columns of padding set the label off the pane edge.
+    // Three columns of padding set the label off the pane edge.
     let title = text::clip(&format!("   {title}"), left_budget);
+    // The compact button: focused draws the accent fill (the standard
+    // button look, `Theme::button_style`), unfocused keeps the plain
+    // header so the pane never shouts.
+    let title_focused = mode == LayoutMode::Compact && state.session.focus == Focus::MailboxTitle;
+    let title_style = if title_focused {
+        theme.button_style(true, theme.accent)
+    } else {
+        Style::new()
+            .fg(theme.text)
+            .bg(theme.background)
+            .add_modifier(Modifier::BOLD)
+    };
+    let unread_style = if title_focused {
+        Style::new().fg(theme.background).bg(theme.accent)
+    } else {
+        Style::new().fg(theme.dim)
+    };
     let mut spans = Vec::new();
     if !title.is_empty() {
-        spans.push(Span::styled(
-            title,
-            Style::new()
-                .fg(theme.text)
-                .bg(theme.background)
-                .add_modifier(Modifier::BOLD),
-        ));
+        spans.push(Span::styled(&title, title_style));
     }
     if !unread.is_empty() {
-        spans.push(Span::styled(
-            format!("  {unread}"),
-            Style::new().fg(theme.dim),
-        ));
+        spans.push(Span::styled(format!("  {unread}"), unread_style));
     }
     if !range.is_empty() {
         // Right-align the range with the date/time column of the rows
@@ -275,6 +291,28 @@ fn render_head(
         );
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
+
+    // The compact click target covers the title and its unread counter —
+    // the button. Clicking presses it: focus, then the Mailboxes popup
+    // (the same path Enter takes, plan §10). Only compact records it: in
+    // full mode the header is not a button (ticket fypg).
+    if mode == LayoutMode::Compact {
+        let button_w = title.width()
+            + if unread.is_empty() {
+                0
+            } else {
+                2 + unread.width()
+            };
+        hits.push(
+            Rect {
+                x: area.x,
+                y: row.y,
+                width: button_w as u16,
+                height: 1,
+            },
+            ClickTarget::MailboxTitle,
+        );
+    }
 
     // Hairline under the header.
     let hairline = Rect {

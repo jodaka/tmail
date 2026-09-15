@@ -5,6 +5,7 @@ pub mod attachment_dialog;
 pub mod confirm_modal;
 pub mod error_modal;
 pub mod help;
+pub mod mailboxes_popup;
 pub mod sidebar;
 pub mod spinner;
 pub mod statusbar;
