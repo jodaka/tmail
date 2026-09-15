@@ -474,8 +474,13 @@ pub fn wizard_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
 
 fn wizard_action(state: &mut AppState, action: &WizardAction) -> Vec<Effect> {
     // The wizard is the only writer of its own state; take it out to
-    // satisfy the borrow checker across the step transitions.
-    let mut wizard = state.session.wizard.take().expect("wizard active");
+    // satisfy the borrow checker across the step transitions. The only
+    // entry point is `wizard_reduce` behind the `is_some()` intercept, so
+    // the slot is Some on every in-contract path; a miss is an
+    // out-of-contract dispatch and is swallowed, not panicked on.
+    let Some(mut wizard) = state.session.wizard.take() else {
+        return Vec::new();
+    };
 
     let effects = match action {
         WizardAction::Edit(edit) => {
