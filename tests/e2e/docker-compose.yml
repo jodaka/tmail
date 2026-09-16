@@ -1,0 +1,43 @@
+services:
+  greenmail:
+    image: greenmail/standalone:2.1.13
+    container_name: tmail-e2e-greenmail
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.smtp
+        -Dgreenmail.setup.test.imap
+        -Dgreenmail.hostname=0.0.0.0
+        -Dgreenmail.users=tmail:tmailtmail@testmailbox.com
+        -Dgreenmail.users.login=local_part
+    ports:
+      # Exposed to the host because tmail runs on the host (tests/e2e/README.md).
+      - "3025:3025"
+      - "3143:3143"
+
+  seed:
+    image: python:3.13-alpine
+    container_name: tmail-e2e-seed
+    depends_on:
+      - greenmail
+    volumes:
+      - ./seed_mailbox.py:/seed_mailbox.py:ro
+    command:
+      - python
+      - /seed_mailbox.py
+      - --host
+      - greenmail
+      - --port
+      - "3143"
+      - --username
+      - tmail
+      - --password
+      - tmailtmail
+      - --count
+      # Small enough that one auto-sized page shows every message: select-all
+      # (Ctrl+A) then covers the whole inbox deterministically.
+      - "12"
+      - --seed
+      - random
+      - --wait-seconds
+      - "30"
+    restart: "no"

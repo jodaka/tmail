@@ -6,3 +6,9 @@
 
 # Local himalaya/Tmail debug config (might hold credentials; never commit)
 config.toml
+
+# E2E harness (tests/e2e): local overrides, Python venv and pytest cache
+tests/e2e/.env
+tests/e2e/.venv/
+tests/e2e/.pytest_cache/
+tests/e2e/**/__pycache__/

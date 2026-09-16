@@ -1,0 +1,44 @@
+# Shared tmail + himalaya configuration for the E2E stack.
+#
+# ONE file backs both binaries: tmail loads it (TMAIL_CONFIG) and forwards
+# the same path to himalaya via `-c` (ADR 0001 finding 13). Himalaya 2.1.0
+# tolerates the unknown `[tmail]` root tables; the `[accounts.*]` block is
+# himalaya's own format.
+#
+# Server names are HOST paths: tmail runs on the host and reaches GreenMail
+# through the ports docker-compose.yml exposes on 127.0.0.1. The account
+# must match GreenMail's `-Dgreenmail.users` setting: login `tmail`
+# (login=local_part), password `tmailtmail`, address `tmail@testmailbox.com`.
+
+# ── Tmail-owned settings ────────────────────────────────────────────────────
+[tmail]
+account = "tmail"
+
+[tmail.mail]
+# No periodic background refresh during PTY tests; tests drive the app.
+refresh_interval_seconds = 0
+
+# ── Himalaya account (the format himalaya and the wizard write) ────────────
+[accounts.tmail]
+default = true
+email = "tmail@testmailbox.com"
+display-name = "Tmail E2E"
+
+# GreenMail test ports, cleartext: the `imap://` / `smtp://` schemes mean no
+# TLS, and STARTTLS stays off (GreenMail's test setup listens in the clear).
+# GreenMail's IMAP AUTHENTICATE supports XOAUTH2 only (no PLAIN/LOGIN, and
+# SASL-IR is rejected outright); it validates the access token through the
+# same password check, so the token is just the account password here. SMTP
+# below keeps PLAIN, which GreenMail's SMTP AUTH does support.
+imap.server = "imap://127.0.0.1:3143"
+imap.sasl.xoauth2.username = "tmail"
+imap.sasl.xoauth2.token.raw = "tmailtmail"
+
+smtp.server = "smtp://127.0.0.1:3025"
+smtp.sasl.plain.username = "tmail"
+smtp.sasl.plain.password.raw = "tmailtmail"
+
+# Semantic roles map to real mailbox names. GreenMail exposes its INBOX as
+# `Inbox` and creates no other folders until a client does; set the
+# sent/drafts/trash/archive aliases here once the tests create those folders.
+mailbox.alias.inbox = "Inbox"
