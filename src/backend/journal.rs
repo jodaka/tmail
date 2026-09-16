@@ -8,6 +8,11 @@
 //! The journal is exercised by backend implementations (the draft save is
 //! one backend operation per ADR 0002 consequences) and read back at
 //! startup to restore drafts (crash/restart acceptance, plan §19 Phase 6).
+//!
+//! Drafts are private by construction (ticket 3tp3) via
+//! [`crate::domain::private_fs`]: the directory is owner-only (`0700`)
+//! and entries `0600`, and entries written by an older version under a
+//! looser umask are repaired on the next read or write.
 
 use std::fs;
 use std::io;
@@ -16,6 +21,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::DraftSnapshot;
+use crate::domain::private_fs;
 
 /// Journal format version (ADR 0002: versioned from day one).
 const VERSION: u32 = 1;
@@ -39,12 +45,22 @@ pub struct JournalEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftJournal {
     dir: PathBuf,
+    /// The highest directory the journal owns: permission repair walks
+    /// from a file's parent up to (and including) this, never above it.
+    /// With an account scope it is the shared drafts container above the
+    /// per-account directory.
+    repair_root: PathBuf,
 }
 
 impl DraftJournal {
     /// Journal rooted at an explicit directory (tests, explicit config).
+    /// The directory is also the upper bound for permission repair:
+    /// nothing above it is ever touched.
     pub fn open(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            repair_root: dir.clone(),
+            dir,
+        }
     }
 
     /// The default journal directory, scoped per account (ticket c0n0):
@@ -91,7 +107,10 @@ impl DraftJournal {
         if scoped != root {
             Self::migrate_legacy(&root, &scoped);
         }
-        Self::open(scoped)
+        Self {
+            repair_root: root,
+            dir: scoped,
+        }
     }
 
     /// Move every draft file still directly in `root` into `scoped` (the
@@ -110,7 +129,7 @@ impl DraftJournal {
         let Ok(read_dir) = fs::read_dir(root) else {
             return; // No legacy directory: nothing to migrate.
         };
-        if let Err(err) = fs::create_dir_all(scoped) {
+        if let Err(err) = private_fs::create_dir_all(scoped) {
             tracing::warn!(
                 dir = %scoped.display(),
                 %err,
@@ -118,6 +137,7 @@ impl DraftJournal {
             );
             return;
         }
+        private_fs::restrict_dir_chain(root, scoped);
         let mut moved = 0usize;
         for entry in read_dir {
             let Ok(entry) = entry else {
@@ -135,7 +155,12 @@ impl DraftJournal {
                 continue;
             }
             match fs::rename(&path, &target) {
-                Ok(()) => moved += 1,
+                Ok(()) => {
+                    // A rename keeps the source mode, so a legacy entry
+                    // would stay world-readable in its new home.
+                    private_fs::restrict_file(&target);
+                    moved += 1;
+                }
                 Err(err) => tracing::warn!(
                     file = %path.display(),
                     %err,
@@ -247,7 +272,7 @@ impl DraftJournal {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            match fs::read(&path)
+            match private_fs::read(&self.repair_root, &path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<JournalEntry>(&bytes).ok())
                 .filter(|entry| entry.version == VERSION)
@@ -275,7 +300,7 @@ impl DraftJournal {
     }
 
     fn read(&self, local_id: &str) -> io::Result<Option<JournalEntry>> {
-        let bytes = match fs::read(self.file(local_id)?) {
+        let bytes = match private_fs::read(&self.repair_root, &self.file(local_id)?) {
             Ok(bytes) => bytes,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(err),
@@ -291,14 +316,15 @@ impl DraftJournal {
     /// two concurrent saves of the same draft (same pid, so serialized by
     /// the single-threaded runtime today) would otherwise share one name.
     fn write_atomic(&self, path: &Path, entry: &JournalEntry) -> io::Result<()> {
-        fs::create_dir_all(&self.dir)?;
+        private_fs::create_dir_all(&self.dir)?;
+        private_fs::restrict_dir_chain(&self.repair_root, &self.dir);
         let tmp = path.with_extension(format!(
             "json.tmp-{}-{}",
             std::process::id(),
             TMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         {
-            let mut file = fs::File::create(&tmp)?;
+            let mut file = private_fs::open(&tmp)?;
             serde_json::to_writer(&mut file, entry)?;
             file.sync_all()?;
         }
@@ -332,6 +358,22 @@ mod tests {
     fn journal() -> (DraftJournal, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().expect("temp dir");
         (DraftJournal::open(dir.path().to_path_buf()), dir)
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .expect("path exists")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    #[cfg(unix)]
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("chmod");
     }
 
     #[test]
@@ -491,5 +533,58 @@ mod tests {
             .filter(|name| name.contains(".tmp-"))
             .collect();
         assert!(leftovers.is_empty(), "tmp files left behind: {leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recorded_entries_and_their_directory_are_owner_only() {
+        let (j, _dir) = journal();
+        j.record(&snapshot("local-1", 1, "private"))
+            .expect("record");
+
+        assert_eq!(mode(&j.dir.join("local-1.json")), 0o600);
+        assert_eq!(mode(&j.dir), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reads_and_writes_repair_loose_modes_from_an_older_version() {
+        let (j, _dir) = journal();
+        j.record(&snapshot("local-1", 1, "one")).expect("record");
+        let path = j.dir.join("local-1.json");
+
+        // A journal written by a version that respected only the umask.
+        chmod(&j.dir, 0o755);
+        chmod(&path, 0o644);
+        j.record(&snapshot("local-1", 2, "two")).expect("record");
+        assert_eq!(mode(&path), 0o600, "write repaired the entry");
+        assert_eq!(mode(&j.dir), 0o700, "write repaired the directory");
+
+        chmod(&j.dir, 0o755);
+        chmod(&path, 0o644);
+        assert_eq!(j.load_all().expect("load").len(), 1);
+        assert_eq!(mode(&path), 0o600, "read repaired the entry");
+        assert_eq!(mode(&j.dir), 0o700, "read repaired the directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_files_land_private_in_the_account_scope() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let legacy = DraftJournal::open(dir.path().to_path_buf());
+        legacy
+            .record(&snapshot("local-1", 1, "legacy draft"))
+            .unwrap();
+        // The pre-switching layout lived in a loose root.
+        chmod(dir.path(), 0o755);
+        chmod(&dir.path().join("local-1.json"), 0o644);
+
+        let scoped = DraftJournal::open_scoped(dir.path().to_path_buf(), Some("a"));
+
+        let moved = scoped.dir.join("local-1.json");
+        assert!(moved.is_file(), "the legacy draft moved into the scope");
+        assert_eq!(mode(&moved), 0o600, "moved entry is owner-only");
+        assert_eq!(mode(&scoped.dir), 0o700, "scope directory is owner-only");
+        assert_eq!(mode(dir.path()), 0o700, "the drafts root is owner-only");
     }
 }

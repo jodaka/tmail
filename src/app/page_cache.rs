@@ -19,10 +19,11 @@
 //! [`CacheLimits`] (entry count and total bytes, from `[tmail.cache]`).
 //! The oldest modifications are evicted first.
 //!
-//! The cache is private by construction (ticket ty57): directories are
-//! created owner-only (`0700`) and files `0600`, and entries written by
-//! an older version under a looser umask are repaired on the next read or
-//! write — no other local user can list or read what was fetched.
+//! The cache is private by construction (ticket ty57) via
+//! [`crate::domain::private_fs`]: directories are created owner-only
+//! (`0700`) and files `0600`, and entries written by an older version
+//! under a looser umask are repaired on the next read or write — no other
+//! local user can list or read what was fetched.
 
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -30,6 +31,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::private_fs;
 use crate::domain::{Mailbox, MailboxId, Message, MessageSummary, Page};
 
 /// Version of the on-disk format; bumping it invalidates old caches.
@@ -208,7 +210,7 @@ impl PageCache {
         offset: usize,
         limit: usize,
     ) -> Option<Page<MessageSummary>> {
-        let bytes = self.read_cached(&self.path(mailbox, query, offset))?;
+        let bytes = private_fs::read(&self.repair_root, &self.path(mailbox, query, offset)).ok()?;
         let cached: CachedPage = serde_json::from_slice(&bytes).ok()?;
         if cached.version != CACHE_VERSION
             || cached.mailbox != mailbox.0
@@ -290,7 +292,7 @@ impl PageCache {
 
     /// Load the cached mailbox listing, or `None` when absent/unparsable.
     pub fn load_mailboxes(&self) -> Option<Vec<Mailbox>> {
-        let bytes = self.read_cached(&self.root.join("mailboxes.json"))?;
+        let bytes = private_fs::read(&self.repair_root, &self.root.join("mailboxes.json")).ok()?;
         let cached: CachedMailboxes = serde_json::from_slice(&bytes).ok()?;
         (cached.version == CACHE_VERSION).then_some(cached.mailboxes)
     }
@@ -321,7 +323,7 @@ impl PageCache {
     /// under the size caps.
     pub fn load_message(&self, mailbox: &MailboxId, id: &str) -> Option<Message> {
         let path = self.message_path(mailbox, id);
-        let bytes = self.read_cached(&path)?;
+        let bytes = private_fs::read(&self.repair_root, &path).ok()?;
         let cached: CachedMessage = serde_json::from_slice(&bytes).ok()?;
         if cached.version != CACHE_VERSION || cached.mailbox != mailbox.0 || cached.id != id {
             return None;
@@ -436,116 +438,22 @@ impl PageCache {
 
     fn write_bytes(&self, path: &Path, payload: &[u8]) {
         if let Some(parent) = path.parent() {
-            if let Err(err) = create_private_dir_all(parent) {
+            if let Err(err) = private_fs::create_dir_all(parent) {
                 tracing::debug!(%err, "cache: mkdir failed");
                 return;
             }
             // Directories an older version left behind may be looser than
             // what this process creates; fix them on the way past.
-            restrict_dir_chain(&self.repair_root, parent);
+            private_fs::restrict_dir_chain(&self.repair_root, parent);
         }
         let tmp = path.with_extension("json.tmp");
-        if write_private(&tmp, payload)
+        if private_fs::write(&tmp, payload)
             .and_then(|()| fs::rename(&tmp, path))
             .is_err()
         {
             tracing::debug!(path = %path.display(), "cache: write failed");
         }
     }
-
-    /// Read a cache file, repairing the file and its parent directories to
-    /// owner-only on the way: this is where an entry written by an older
-    /// version under a looser umask is fixed, so privacy never depends on
-    /// a full tree sweep at startup. A read never fails the caller, and a
-    /// failed repair never fails the read.
-    fn read_cached(&self, path: &Path) -> Option<Vec<u8>> {
-        let bytes = fs::read(path).ok()?;
-        restrict_file(path);
-        if let Some(parent) = path.parent() {
-            restrict_dir_chain(&self.repair_root, parent);
-        }
-        Some(bytes)
-    }
-}
-
-/// Create `dir` and any missing ancestor, owner-only on Unix. The mode
-/// applies to the directories this call creates; existing ancestors keep
-/// theirs and are repaired by [`restrict_dir_chain`] instead.
-fn create_private_dir_all(dir: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-    }
-    #[cfg(not(unix))]
-    {
-        fs::create_dir_all(dir)
-    }
-}
-
-/// Best-effort repair of a directory chain: `dir`, then each parent up to
-/// and including `repair_root`, is restricted to the owner. Nothing above
-/// `repair_root` is touched, and a path outside it stops the walk.
-fn restrict_dir_chain(repair_root: &Path, dir: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut current = Some(dir);
-        while let Some(path) = current {
-            if !path.starts_with(repair_root) {
-                break;
-            }
-            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
-            if path == repair_root {
-                break;
-            }
-            current = path.parent();
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (repair_root, dir);
-    }
-}
-
-/// Best-effort chmod of one cache file to owner-only.
-fn restrict_file(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
-}
-
-/// Write `payload` to `path`, created owner-only from the first byte and
-/// repaired when a crash left a looser temp file behind. The caller
-/// renames the result into place, so a failed write never becomes an
-/// entry the cache would serve.
-fn write_private(path: &Path, payload: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // `mode` applies only to a fresh file; a crash leftover keeps its
-        // old permissions, so set them explicitly.
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    }
-    file.write_all(payload)
 }
 
 #[cfg(test)]
