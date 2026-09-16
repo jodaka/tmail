@@ -265,7 +265,9 @@ async fn session(
         discoverer,
         // The credential test goes through the injected adapter, so the
         // manager never names a concrete backend (ticket 55t6).
-        Arc::new(HimalayaAccountTester::new("himalaya")),
+        Arc::new(HimalayaAccountTester::new(
+            tmail::backend::himalaya::PROGRAM,
+        )),
         page_cache,
         result_tx,
     );
@@ -335,9 +337,10 @@ fn load_validated_config(
     } else {
         issues
     };
-    if !tmail::backend::himalaya::executable_available("himalaya") {
-        issues.push(String::from(
-            "the himalaya executable was not found on PATH; install it or point PATH at it",
+    if !tmail::backend::himalaya::executable_available(tmail::backend::himalaya::PROGRAM) {
+        issues.push(format!(
+            "the {} executable was not found on PATH; install it or point PATH at it",
+            tmail::backend::himalaya::PROGRAM,
         ));
     }
     // The keymap is built here (not inside the config parser): conflicts

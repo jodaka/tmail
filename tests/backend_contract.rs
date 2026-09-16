@@ -269,7 +269,7 @@ fn json_error_on_stdout_becomes_command_error() {
     let result =
         block(backend(&fake, Some("probe")).list_messages(ctx(), page_request("INBOX", 0)));
     match result {
-        Err(BackendError::Command { code, detail }) => {
+        Err(BackendError::Command { code, detail, .. }) => {
             assert_eq!(code, Some(1));
             assert!(detail.contains("mailbox not found"), "detail: {detail}");
             assert!(detail.contains("maildir"), "sources included: {detail}");
@@ -284,7 +284,7 @@ fn stderr_only_error_becomes_command_error() {
     let result =
         block(backend(&fake, Some("probe")).list_messages(ctx(), page_request("INBOX", 0)));
     match result {
-        Err(BackendError::Command { code, detail }) => {
+        Err(BackendError::Command { code, detail, .. }) => {
             assert_eq!(code, Some(4));
             assert_eq!(detail, "boom");
         }
@@ -297,7 +297,7 @@ fn mailbox_list_error_is_typed_too() {
     let fake = FakeHimalaya::spawn("error-json", "ok");
     let result = block(backend(&fake, Some("probe")).list_mailboxes(ctx()));
     match result {
-        Err(BackendError::Command { code, detail }) => {
+        Err(BackendError::Command { code, detail, .. }) => {
             assert_eq!(code, Some(1));
             assert!(detail.contains("account not found"));
         }
@@ -369,10 +369,11 @@ fn cancel_during_mailbox_list_reports_cancelled_not_output() {
     });
 }
 
-/// Phase 12.4: a nonexistent executable surfaces as a typed I/O error
-/// (spawn failure), never a panic or a silent success.
+/// Phase 12.4: a nonexistent executable surfaces as a typed spawn error
+/// naming the configured program (issue 5ab7), never a panic or a silent
+/// success.
 #[test]
-fn missing_executable_is_a_typed_io_error() {
+fn missing_executable_is_a_typed_spawn_error() {
     let fake = FakeHimalaya::spawn_ok();
     let missing = fake
         .program()
@@ -386,10 +387,11 @@ fn missing_executable_is_a_typed_io_error() {
         aliases(&[]),
     );
     match block(backend.list_mailboxes(ctx())) {
-        Err(BackendError::Io(err)) => {
-            assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        Err(BackendError::Spawn { program, source }) => {
+            assert_eq!(program, missing.display().to_string());
+            assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
         }
-        other => panic!("expected Io, got {other:?}"),
+        other => panic!("expected Spawn, got {other:?}"),
     }
 }
 
@@ -402,7 +404,7 @@ fn child_killed_by_a_signal_is_typed_not_a_panic() {
     let result =
         block(backend(&fake, Some("probe")).list_messages(ctx(), page_request("INBOX", 0)));
     match result {
-        Err(BackendError::Command { code, detail }) => {
+        Err(BackendError::Command { code, detail, .. }) => {
             assert_eq!(code, None, "signal death carries no exit code");
             assert_eq!(detail, "no diagnostic output");
         }
@@ -468,7 +470,7 @@ fn message_read_failure_is_typed() {
     let result =
         block(backend(&fake, Some("probe")).get_message(ctx(), locator("INBOX", "env-404")));
     match result {
-        Err(BackendError::Command { code, detail }) => {
+        Err(BackendError::Command { code, detail, .. }) => {
             assert_eq!(code, Some(1));
             assert!(detail.contains("no such message"), "detail: {detail}");
         }
@@ -519,7 +521,7 @@ fn flag_failure_is_typed() {
     let result =
         block(backend(&fake, Some("probe")).set_read(ctx(), locator("INBOX", "env-1"), true));
     match result {
-        Err(BackendError::Command { code, detail }) => {
+        Err(BackendError::Command { code, detail, .. }) => {
             assert_eq!(code, Some(1));
             assert!(detail.contains("mailbox not found"), "detail: {detail}");
         }

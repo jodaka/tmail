@@ -642,11 +642,19 @@ fn operation_failure(effect: &Effect, err: BackendError) -> Option<OperationFail
         return None;
     }
     let (code, detail) = match &err {
-        BackendError::Command { code, detail } => (*code, detail.clone()),
+        BackendError::Command {
+            program,
+            code,
+            detail,
+        } => (*code, format!("`{program}` command failed: {detail}")),
         BackendError::InvalidOutput(detail) | BackendError::InvalidRequest(detail) => {
             (None, detail.clone())
         }
         BackendError::File(detail) => (None, detail.clone()),
+        BackendError::Spawn { program, source } => (
+            None,
+            format!("`{program}` executable could not be run: {source}"),
+        ),
         BackendError::Io(err) => (None, err.to_string()),
         BackendError::Cancelled => unreachable!("matched above"),
     };
@@ -708,6 +716,14 @@ mod tests {
         }
     }
 
+    fn command_error(code: Option<i32>, detail: &str) -> BackendError {
+        BackendError::Command {
+            program: String::from("fake-himalaya"),
+            code,
+            detail: detail.to_owned(),
+        }
+    }
+
     /// Fake backend: per-operation latency and optional failure, honoring
     /// cancellation the way the real adapter does.
     struct FakeBackend {
@@ -744,10 +760,7 @@ mod tests {
         async fn list_mailboxes(&self, req: RequestContext) -> BackendResult<Vec<Mailbox>> {
             tokio::select! {
                 _ = tokio::time::sleep(self.mailboxes_delay) => match &self.error {
-                    Some((code, detail)) => Err(BackendError::Command {
-                        code: *code,
-                        detail: detail.clone(),
-                    }),
+                    Some((code, detail)) => Err(command_error(*code, detail)),
                     None => Ok(Vec::new()),
                 },
                 _ = req.cancellation.cancelled() => Err(BackendError::Cancelled),
@@ -761,10 +774,7 @@ mod tests {
         ) -> BackendResult<Page<MessageSummary>> {
             tokio::select! {
                 _ = tokio::time::sleep(self.messages_delay) => match &self.error {
-                    Some((code, detail)) => Err(BackendError::Command {
-                        code: *code,
-                        detail: detail.clone(),
-                    }),
+                    Some((code, detail)) => Err(command_error(*code, detail)),
                     None => Ok(Page::empty(20)),
                 },
                 _ = req.cancellation.cancelled() => Err(BackendError::Cancelled),
@@ -778,10 +788,7 @@ mod tests {
         ) -> BackendResult<Page<MessageSummary>> {
             tokio::select! {
                 _ = tokio::time::sleep(self.messages_delay) => match &self.error {
-                    Some((code, detail)) => Err(BackendError::Command {
-                        code: *code,
-                        detail: detail.clone(),
-                    }),
+                    Some((code, detail)) => Err(command_error(*code, detail)),
                     None => Ok(Page::empty(20)),
                 },
                 _ = req.cancellation.cancelled() => Err(BackendError::Cancelled),

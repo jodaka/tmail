@@ -33,18 +33,28 @@ pub struct RequestContext {
 /// `anyhow` context at the app layer). Details are safe for display and
 /// logging after [`crate::domain::sanitize::sanitize`] runs — they contain
 /// exit codes and child diagnostics, never credentials.
+///
+/// The wording is backend-neutral (issue 5ab7): every variant names the
+/// failing program where a program name makes sense, so an alternative
+/// adapter inherits no concrete backend's vocabulary.
 #[derive(Debug, Error)]
 pub enum BackendError {
     /// The child process ran but exited unsuccessfully. ADR 0001 finding 1:
     /// with `--json`, himalaya reports errors as JSON on stdout with exit
     /// code 1, so the detail prefers that message and falls back to stderr.
-    #[error("himalaya command failed (exit {code:?}): {detail}")]
-    Command { code: Option<i32>, detail: String },
+    #[error("{program} command failed (exit {code:?}): {detail}")]
+    Command {
+        /// The executable the adapter ran — a name from the configuration,
+        /// not a backend name baked into the shared error type.
+        program: String,
+        code: Option<i32>,
+        detail: String,
+    },
 
     /// The child exited successfully but its output could not be turned into
     /// the expected shape (malformed, truncated, or non-UTF-8 JSON). Failing
     /// safely here is a Phase 2 acceptance requirement.
-    #[error("himalaya returned unusable output: {0}")]
+    #[error("backend returned unusable output: {0}")]
     InvalidOutput(String),
 
     /// A request the adapter cannot even translate (e.g. a zero page size).
@@ -57,8 +67,19 @@ pub enum BackendError {
     #[error("operation cancelled")]
     Cancelled,
 
-    /// The child process could not be spawned (missing executable, I/O).
-    #[error("himalaya executable could not be run: {0}")]
+    /// The child process could not even be spawned (missing executable,
+    /// permission, I/O). The configured program is named explicitly so an
+    /// alternative adapter inherits no concrete backend's vocabulary; the
+    /// wrapped `std::io::Error` keeps its kind for classification.
+    #[error("`{program}` executable could not be run: {source}")]
+    Spawn {
+        program: String,
+        source: std::io::Error,
+    },
+
+    /// An adapter-owned file operation failed (journal reads/writes, temp
+    /// files). Bare I/O without a program behind it.
+    #[error("backend I/O failure: {0}")]
     Io(#[from] std::io::Error),
 
     /// A file the user asked to attach could not be used. The detail names
@@ -79,6 +100,10 @@ pub trait MailBackend: Send + Sync {
     async fn list_mailboxes(&self, ctx: RequestContext) -> BackendResult<Vec<Mailbox>>;
 
     /// One explicit page of message summaries for a mailbox (plan §7/§16).
+    /// A backend that can compute a total SHOULD populate `Page::total`;
+    /// when it cannot (Himalaya's envelope listing does not), the page
+    /// degrades to next-availability (`Page::has_next`, plan §16) — no
+    /// shared-type change is needed for a totals-capable backend.
     async fn list_messages(
         &self,
         ctx: RequestContext,
