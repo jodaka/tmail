@@ -40,6 +40,12 @@ pub fn executable_available(program: &str) -> bool {
     crate::domain::paths::program_on_path_exists(program)
 }
 
+/// The default executable for the Himalaya adapter (issue 5ab7): one
+/// constant instead of scattered literals, so `from_config`, the startup
+/// check, and the wizard's credential test all name the same program and
+/// fake-program tests cannot drift from the real wiring.
+pub const PROGRAM: &str = "himalaya";
+
 /// How long the wizard's credential test may run before it fails
 /// (ADR 0003 §3.4: a 30 s timeout bounds a hung endpoint).
 const TEST_ACCOUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -103,6 +109,7 @@ async fn test_account_mailbox_names(
     let output = tokio::time::timeout(TEST_ACCOUNT_TIMEOUT, run)
         .await
         .map_err(|_| BackendError::Command {
+            program: program.to_owned(),
             code: None,
             detail: String::from(
                 "the connection test timed out after 30s (check the server settings)",
@@ -238,7 +245,7 @@ impl HimalayaCliBackend {
     /// Backend wired from the loaded Tmail configuration.
     pub fn from_config(config: &Config) -> Self {
         Self::new(
-            "himalaya",
+            PROGRAM,
             config.path.clone(),
             config.account.clone(),
             config.aliases.clone(),
@@ -1909,6 +1916,7 @@ mod send_tests {
 
     fn output(code: Option<i32>, stdout: &str, stderr: &str) -> process::ChildOutput {
         process::ChildOutput {
+            program: String::from("himalaya"),
             code,
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),

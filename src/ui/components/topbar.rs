@@ -87,12 +87,14 @@ pub fn render(
     }
 
     // Search field: bordered well, `/` prompt, query or placeholder.
+    // `search_x` is absolute; the width budget is computed relative to
+    // `area` (both offsets must not double-count the screen origin).
     let search_width = area.width.saturating_sub(28).clamp(12, 60);
     let search_x = area.x.saturating_add(24);
     let search_area = Rect {
         x: search_x,
         y: area.y,
-        width: search_width.min(area.width.saturating_sub(search_x + area.x + 18)),
+        width: search_width.min(area.width.saturating_sub(24 + 18)),
         height: 3,
     };
     if search_area.width >= 4 {

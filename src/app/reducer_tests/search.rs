@@ -386,18 +386,10 @@ fn background_refresh_failure_never_opens_the_modal() {
     timer(&mut s);
     no_effects(&tick(&mut s, 0));
     let effects = tick(&mut s, 60);
-    let (id, _) = find_page(&effects);
+    let (id, req) = find_page(&effects);
     reduce(
         &mut s,
-        failure(
-            id,
-            &OperationKind::LoadPage(PageRequest {
-                mailbox_id: inbox_id(),
-                offset: 0,
-                limit: 20,
-            }),
-            "connect refused",
-        ),
+        failure(id, &OperationKind::LoadPage(req.clone()), "connect refused"),
     );
     // No Retry/Dismiss modal for background work; the status line carries
     // the failure and the record suppresses repeats (Phase 9.6).
@@ -406,9 +398,28 @@ fn background_refresh_failure_never_opens_the_modal() {
         s.session.last_background_error.as_deref(),
         Some("connect refused")
     );
+    // Any further failure opening the same streak (identical or
+    // alternating detail) is silenced: the status line already carries
+    // the announcement; the timer will retry.
+    reduce(
+        &mut s,
+        failure(id, &OperationKind::LoadPage(req.clone()), "connect refused"),
+    );
     assert_eq!(
         s.session.status.message.as_deref(),
-        Some("Refresh failed — the timer will retry")
+        Some("Refresh failed — the timer will retry"),
+        "status unchanged after a repeating failure"
+    );
+    let effects = tick(&mut s, 120);
+    let (id2, req2) = find_page(&effects);
+    reduce(
+        &mut s,
+        failure(id2, &OperationKind::LoadPage(req2.clone()), "dns timeout"),
+    );
+    assert_eq!(
+        s.session.status.message.as_deref(),
+        Some("Refresh failed — the timer will retry"),
+        "an alternating error does not re-announce either"
     );
 }
 

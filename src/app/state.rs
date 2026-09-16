@@ -266,9 +266,11 @@ pub struct SessionState {
     /// Injected-clock timestamp of the last refresh (manual or automatic),
     /// the timer's arm point. `None` until the first tick arms it.
     pub last_refresh_at: Option<DateTime<FixedOffset>>,
-    /// The sanitized detail of the last *background* refresh failure
-    /// (Phase 9.6): repeated identical failures are suppressed in the
-    /// status line until a success or a manual refresh clears the record.
+    /// Sanitized detail of the last *background* refresh failure
+    /// (Phase 9.6): a failure announces the status once per failure
+    /// streak — every further failure opening the streak (identical or
+    /// alternating detail) stays in the log — until a success or a manual
+    /// refresh clears the record.
     pub last_background_error: Option<String>,
     /// Whether the terminal window currently has focus (CSI 1004 focus
     /// events, ticket b28p). New-mail notifications fire only while the

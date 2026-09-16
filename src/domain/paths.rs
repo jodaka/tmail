@@ -49,20 +49,37 @@ pub fn media_type_for(filename: &str) -> &'static str {
     }
 }
 
+/// Whether `path` resolves to an existing, executable file. Unix checks
+/// the execution permission bits (so a non-executable file cannot pass the
+/// startup check and fail later on first use); other platforms keep the
+/// is-a-file check, as there is no portable exec bit.
+fn executable_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.is_file()
+            && path
+                .metadata()
+                .map(|meta| meta.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
 /// Whether `program` resolves as an executable: a direct path (anything
-/// with a separator) must exist as a file; otherwise each `PATH` entry
-/// is searched. Shared by the config and backend layers, which both
-/// report a missing external program up front instead of on first use.
+/// with a separator) must exist as an executable file (issue 5ab7: a
+/// non-executable file is rejected here, not on first use); otherwise each
+/// `PATH` entry is searched. Shared by the config and backend layers, which
+/// both report a missing external program up front instead of on first use.
 pub fn program_on_path_exists(program: &str) -> bool {
     if program.contains('/') {
-        return Path::new(program).is_file();
+        return executable_file(Path::new(program));
     }
     std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths)
-                .map(|dir| dir.join(program))
-                .any(|candidate| candidate.is_file())
-        })
+        .map(|paths| std::env::split_paths(&paths).any(|dir| executable_file(&dir.join(program))))
         .unwrap_or(false)
 }
 
@@ -124,6 +141,26 @@ mod tests {
     fn without_home_nothing_expands() {
         let raw = Path::new("~/x");
         assert_eq!(expand_tilde(raw, None), raw);
+    }
+
+    #[test]
+    fn direct_paths_require_an_executable_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fake-program");
+        std::fs::File::create(&path).expect("touch");
+        // 0644: no execution bit — the start-up check must reject the file
+        // here instead of letting the first operation fail later.
+        assert!(!program_on_path_exists(path.to_str().unwrap()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod +x");
+        }
+        assert!(program_on_path_exists(path.to_str().unwrap()));
+        // Directories and missing paths never pass the direct-path check.
+        assert!(!program_on_path_exists(dir.path().to_str().unwrap()));
+        assert!(!program_on_path_exists("./no-such-tmail-program"));
     }
 
     #[test]

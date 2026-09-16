@@ -258,13 +258,23 @@ fn ctrl_c_quits_everywhere() {
 }
 
 #[test]
-fn ctrl_enter_sends_plain_enter_activates() {
-    let f = Focus::MessageList;
+fn ctrl_enter_only_sends_from_the_composer() {
+    // Composer: Ctrl+Enter sends (docs/shortcusts.md).
+    let f = Focus::Composer;
     assert_eq!(
         to_action(key(KeyCode::Enter, KeyModifiers::CONTROL), f),
         Some(Action::Send)
     );
-    assert_eq!(to_action(plain(KeyCode::Enter), f), Some(Action::Activate));
+    // Anywhere else the chord is inert: pressing it in the list, a dialog,
+    // or the search field must never deliver a draft.
+    for f in [Focus::MessageList, Focus::SearchField, Focus::Dialog] {
+        assert_eq!(
+            to_action(key(KeyCode::Enter, KeyModifiers::CONTROL), f),
+            None,
+            "{f:?}"
+        );
+        assert_eq!(to_action(plain(KeyCode::Enter), f), Some(Action::Activate));
+    }
 }
 
 // ── Composer (plan §19 Phase 6.1) ────────────────────────────────────────

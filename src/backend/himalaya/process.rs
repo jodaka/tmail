@@ -18,6 +18,10 @@ use tokio_util::sync::CancellationToken;
 
 /// Raw result of one child process run.
 pub(crate) struct ChildOutput {
+    /// The executable that was run, echoed into command failures so
+    /// [`BackendError::Command`] names the configured program (issue 5ab7)
+    /// instead of a backend name baked into the shared error type.
+    pub program: String,
     pub code: Option<i32>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -98,7 +102,14 @@ pub(crate) async fn run_with_stdin(
         // output readers below would block on EOF until that grandchild
         // exits on its own (observed as a 30s cancellation on CI).
         .process_group(0)
-        .spawn()?;
+        .spawn()
+        // Name the configured program here (issue 5ab7): the spawn failure
+        // is the user-facing "executable not found" case, and the bare
+        // "No such file or directory" alone tells nothing actionable.
+        .map_err(|source| BackendError::Spawn {
+            program: program.to_owned(),
+            source,
+        })?;
 
     // Write stdin from a dedicated task so a child that never reads cannot
     // block us either. The payload is owned so the writer task is 'static.
@@ -181,6 +192,7 @@ pub(crate) async fn run_with_stdin(
                 None => Vec::new(),
             };
             Ok(ChildOutput {
+                program: program.to_owned(),
                 code: status.code(),
                 stdout,
                 stderr,
@@ -238,6 +250,7 @@ pub(crate) async fn decode_on_pool<T: DeserializeOwned + Send + 'static>(
 /// stdout (ADR 0001 finding 1), then stderr, then a generic note.
 fn command_error(output: &ChildOutput) -> BackendError {
     BackendError::Command {
+        program: output.program.clone(),
         code: output.code,
         detail: error_detail(output),
     }

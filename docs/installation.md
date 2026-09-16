@@ -64,4 +64,12 @@ cargo run --release                          # himalaya's default config
 cargo run --release -- path/to/config.toml   # explicit config file
 TMAIL_CONFIG=path/to/config.toml cargo run --release
 tmail --configure                            # account setup wizard
+tmail --debug                                # verbose logging to /tmp/tmail/log/tmail.log (daily rotation)
 ```
+
+### Logging
+
+By default a release build logs nothing. Debug builds trace at `debug`
+level, and `tmail --debug` enables it in any build. Set `RUST_LOG` to
+override the filter explicitly. All output goes to a rotating file
+under `/tmp/tmail/log/` (never to the screen or the TUI).

@@ -483,6 +483,23 @@ fn archive_from_list_removes_row_and_resyncs_page() {
 }
 
 #[test]
+fn double_press_archive_coalesces_into_one_operation() {
+    // The second press must not spawn a second concurrent move of the
+    // same message: the registry coalesces the duplicate (the first
+    // press's move owns the work and its confirmation carries the
+    // re-sync).
+    let mut s = state();
+    s.selection = 0;
+    let (first, kind) = expect_kind(&reduce(&mut s, Action::Archive));
+    assert!(matches!(&kind, OperationKind::Archive(_)), "kind: {kind:?}");
+    assert!(reduce(&mut s, Action::Archive).is_empty(), "no duplicate");
+    assert_eq!(s.session.operations.len(), 1);
+    assert!(s.session.operations.get(first).is_some());
+    let (_, req) = find_page(&complete_done(&mut s, first));
+    assert_eq!(req.offset, 0, "the surviving move still re-syncs the page");
+}
+
+#[test]
 fn trash_closes_reader_and_removes_row() {
     let mut s = state();
     s.selection = 4;
