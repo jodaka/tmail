@@ -33,22 +33,27 @@ use crate::domain::{
 /// Failure handling for list-shaped results (mailbox pages and searches,
 /// Phase 9): a *foreground* failure opens the Retry/Dismiss modal; a
 /// *background* (timer) refresh failure never interrupts the user — the
-/// first failure lands in the status line, and repeated identical failures
-/// are suppressed until a success or a manual refresh clears the record
-/// (Phase 9.6).
+/// first failure of a failure *streak* lands in the status line, and every
+/// further failure opening the same streak is suppressed (identical or
+/// alternating: two different errors that alternate between runs would
+/// otherwise re-announce the status each time) until a success or a manual
+/// refresh clears the record (Phase 9.6).
 pub(crate) fn list_failure(
     state: &mut AppState,
     failure: OperationFailure,
     origin: OperationOrigin,
 ) {
     if origin == OperationOrigin::Background {
-        if state.session.last_background_error.as_deref() != Some(failure.detail.as_str()) {
+        if state.session.last_background_error.is_none() {
             tracing::info!(detail = %failure.detail, "background refresh failed");
             state.set_status("Refresh failed — the timer will retry");
-            state.session.last_background_error = Some(failure.detail.clone());
         } else {
-            tracing::debug!("identical background refresh failure; status unchanged");
+            tracing::debug!(
+                detail = %failure.detail,
+                "the failure streak is already announced; status unchanged"
+            );
         }
+        state.session.last_background_error = Some(failure.detail.clone());
         return;
     }
     // The last coherent page stays visible; the modal offers Retry/Dismiss
