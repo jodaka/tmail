@@ -29,7 +29,10 @@ pub struct Page<T> {
     pub items: Vec<T>,
     pub offset: usize,
     pub limit: usize,
-    /// `None` when the backend cannot provide a total (maildir, ADR 0001).
+    /// `None` when the backend cannot provide a total (maildir, ADR 0001;
+    /// himalaya's envelope listing cannot either). A totals-capable backend
+    /// (e.g. IMAP) populates it directly — `has_next` is then exact and no
+    /// trait change is required (issue 5ab7).
     pub total: Option<usize>,
 }
 

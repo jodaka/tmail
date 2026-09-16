@@ -75,6 +75,8 @@ pub(crate) fn envelope_list_argv(
 /// verified against the binary: lowercase keywords, space-separated
 /// values, `and`/`or` connectors, parentheses for grouping, and quoted
 /// values with `\"` escapes. There is no all-fields `text` predicate.
+/// Detection below (issue 5ab7) matches them case-insensitively, but the
+/// query itself is never rewritten — `From bob` travels as written.
 const SEARCH_PREDICATES: [&str; 10] = [
     "from", "to", "subject", "body", "flag", "not", "date", "after", "and", "or",
 ];
@@ -96,11 +98,18 @@ pub(crate) fn normalize_search_query(query: &str) -> String {
     // A keyword anywhere ahead of a value token means the user is writing
     // the DSL by hand. A keyword in final position is just a word being
     // searched (`hello from` → full text for the words, not a broken
-    // filter).
+    // filter). Keywords are matched case-insensitively (issue 5ab7) so a
+    // hand-written `From bob` passes through as the filter the user
+    // intended instead of a full-text phrase search; the query still
+    // travels to himalaya unchanged.
     let looks_like_dsl = tokens
         .iter()
         .take(tokens.len().saturating_sub(1))
-        .any(|token| SEARCH_PREDICATES.contains(token));
+        .any(|token| {
+            SEARCH_PREDICATES
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(token))
+        });
     if looks_like_dsl {
         return query.to_owned();
     }
@@ -442,6 +451,39 @@ mod tests {
         ] {
             assert_eq!(normalize_search_query(query), query);
         }
+    }
+
+    #[test]
+    fn capitalized_keywords_still_read_as_handwritten_dsl() {
+        // Issue 5ab7: detection was case-sensitive, so `From bob` was
+        // wrapped into an any-field phrase search — never what a user with
+        // a hand-written filter meant. Any keyword casing passes through
+        // unchanged.
+        for query in [
+            "From bob",
+            "FROM bob",
+            "Not from bob",
+            "from bob AND subject x",
+        ] {
+            assert_eq!(normalize_search_query(query), query);
+        }
+        // A capitalized keyword in final position is still just a word
+        // being searched.
+        assert_eq!(
+            normalize_search_query("hello From"),
+            "(from \"hello From\") or (subject \"hello From\") or (body \"hello From\")"
+        );
+    }
+
+    #[test]
+    fn empty_query_still_travels_as_the_final_argv_entry() {
+        // Characterization (issue 5ab7): an empty query is pushed as the
+        // final positional — argv with an empty final entry and argv with
+        // no entry at all are different shapes, and the himalaya behavior
+        // pinned here (2.1.0: the empty query matches everything) relies
+        // on the entry being present.
+        let argv = envelope_search_argv(None, None, "INBOX", "   ", 1, 20);
+        assert_eq!(argv.last().map(String::as_str), Some(""));
     }
 
     #[test]
