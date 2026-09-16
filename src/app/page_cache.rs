@@ -18,6 +18,11 @@
 //! [`MAX_FILES_PER_MAILBOX`] files; the viewed-message cache is capped by
 //! [`CacheLimits`] (entry count and total bytes, from `[tmail.cache]`).
 //! The oldest modifications are evicted first.
+//!
+//! The cache is private by construction (ticket ty57): directories are
+//! created owner-only (`0700`) and files `0600`, and entries written by
+//! an older version under a looser umask are repaired on the next read or
+//! write — no other local user can list or read what was fetched.
 
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -124,13 +129,25 @@ fn key_part(value: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct PageCache {
     root: PathBuf,
+    /// The highest directory the cache owns: permission repair walks from
+    /// a file's parent up to (and including) this, never above it. With
+    /// [`PageCache::open`] the caller-provided root is the boundary;
+    /// [`PageCache::open_default`] owns the `cache` container above the
+    /// per-account scopes as well.
+    repair_root: PathBuf,
     limits: CacheLimits,
 }
 
 impl PageCache {
     /// Cache rooted at an explicit directory (tests, explicit wiring).
+    /// The root is also the upper bound for permission repair: nothing
+    /// above it is ever touched.
     pub fn open(root: PathBuf, limits: CacheLimits) -> Self {
-        Self { root, limits }
+        Self {
+            repair_root: root.clone(),
+            root,
+            limits,
+        }
     }
 
     /// The default cache root, scoped to the driven account (or
@@ -158,10 +175,12 @@ impl PageCache {
         Some(Self::scoped(dir, account, limits))
     }
 
-    /// Root plus the account scope segment.
-    fn scoped(root: PathBuf, account: Option<&str>, limits: CacheLimits) -> Self {
+    /// Root plus the account scope segment. `container` (the shared
+    /// `cache` directory) is Tmail-owned too, so repair may restrict it.
+    fn scoped(container: PathBuf, account: Option<&str>, limits: CacheLimits) -> Self {
         Self {
-            root: root.join(key_part(account.unwrap_or("default"))),
+            root: container.join(key_part(account.unwrap_or("default"))),
+            repair_root: container,
             limits,
         }
     }
@@ -189,7 +208,7 @@ impl PageCache {
         offset: usize,
         limit: usize,
     ) -> Option<Page<MessageSummary>> {
-        let bytes = fs::read(self.path(mailbox, query, offset)).ok()?;
+        let bytes = self.read_cached(&self.path(mailbox, query, offset))?;
         let cached: CachedPage = serde_json::from_slice(&bytes).ok()?;
         if cached.version != CACHE_VERSION
             || cached.mailbox != mailbox.0
@@ -271,7 +290,7 @@ impl PageCache {
 
     /// Load the cached mailbox listing, or `None` when absent/unparsable.
     pub fn load_mailboxes(&self) -> Option<Vec<Mailbox>> {
-        let bytes = fs::read(self.root.join("mailboxes.json")).ok()?;
+        let bytes = self.read_cached(&self.root.join("mailboxes.json"))?;
         let cached: CachedMailboxes = serde_json::from_slice(&bytes).ok()?;
         (cached.version == CACHE_VERSION).then_some(cached.mailboxes)
     }
@@ -302,7 +321,7 @@ impl PageCache {
     /// under the size caps.
     pub fn load_message(&self, mailbox: &MailboxId, id: &str) -> Option<Message> {
         let path = self.message_path(mailbox, id);
-        let bytes = fs::read(&path).ok()?;
+        let bytes = self.read_cached(&path)?;
         let cached: CachedMessage = serde_json::from_slice(&bytes).ok()?;
         if cached.version != CACHE_VERSION || cached.mailbox != mailbox.0 || cached.id != id {
             return None;
@@ -416,20 +435,117 @@ impl PageCache {
     }
 
     fn write_bytes(&self, path: &Path, payload: &[u8]) {
-        if let Some(parent) = path.parent()
-            && let Err(err) = fs::create_dir_all(parent)
-        {
-            tracing::debug!(%err, "cache: mkdir failed");
-            return;
+        if let Some(parent) = path.parent() {
+            if let Err(err) = create_private_dir_all(parent) {
+                tracing::debug!(%err, "cache: mkdir failed");
+                return;
+            }
+            // Directories an older version left behind may be looser than
+            // what this process creates; fix them on the way past.
+            restrict_dir_chain(&self.repair_root, parent);
         }
         let tmp = path.with_extension("json.tmp");
-        if fs::write(&tmp, payload)
+        if write_private(&tmp, payload)
             .and_then(|()| fs::rename(&tmp, path))
             .is_err()
         {
             tracing::debug!(path = %path.display(), "cache: write failed");
         }
     }
+
+    /// Read a cache file, repairing the file and its parent directories to
+    /// owner-only on the way: this is where an entry written by an older
+    /// version under a looser umask is fixed, so privacy never depends on
+    /// a full tree sweep at startup. A read never fails the caller, and a
+    /// failed repair never fails the read.
+    fn read_cached(&self, path: &Path) -> Option<Vec<u8>> {
+        let bytes = fs::read(path).ok()?;
+        restrict_file(path);
+        if let Some(parent) = path.parent() {
+            restrict_dir_chain(&self.repair_root, parent);
+        }
+        Some(bytes)
+    }
+}
+
+/// Create `dir` and any missing ancestor, owner-only on Unix. The mode
+/// applies to the directories this call creates; existing ancestors keep
+/// theirs and are repaired by [`restrict_dir_chain`] instead.
+fn create_private_dir_all(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(dir)
+    }
+}
+
+/// Best-effort repair of a directory chain: `dir`, then each parent up to
+/// and including `repair_root`, is restricted to the owner. Nothing above
+/// `repair_root` is touched, and a path outside it stops the walk.
+fn restrict_dir_chain(repair_root: &Path, dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut current = Some(dir);
+        while let Some(path) = current {
+            if !path.starts_with(repair_root) {
+                break;
+            }
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+            if path == repair_root {
+                break;
+            }
+            current = path.parent();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (repair_root, dir);
+    }
+}
+
+/// Best-effort chmod of one cache file to owner-only.
+fn restrict_file(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+/// Write `payload` to `path`, created owner-only from the first byte and
+/// repaired when a crash left a looser temp file behind. The caller
+/// renames the result into place, so a failed write never becomes an
+/// entry the cache would serve.
+fn write_private(path: &Path, payload: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // `mode` applies only to a fresh file; a crash leftover keeps its
+        // old permissions, so set them explicitly.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(payload)
 }
 
 #[cfg(test)]
@@ -454,7 +570,7 @@ mod tests {
         }
     }
 
-    fn page(offset: usize) -> Page<MessageSummary> {
+    pub(super) fn page(offset: usize) -> Page<MessageSummary> {
         Page {
             items: vec![summary("m1", "Hello"), summary("m2", "There")],
             offset,
@@ -563,7 +679,7 @@ mod mailbox_message_tests {
     use super::*;
     use crate::domain::{MailboxRole, MessageId};
 
-    fn mailbox(name: &str) -> Mailbox {
+    pub(super) fn mailbox(name: &str) -> Mailbox {
         Mailbox {
             id: MailboxId(String::from("/root/maildir/INBOX")),
             name: String::from(name),
@@ -573,7 +689,7 @@ mod mailbox_message_tests {
         }
     }
 
-    fn message(subject: &str) -> Message {
+    pub(super) fn message(subject: &str) -> Message {
         Message {
             id: MessageId(String::from("env-1")),
             mailbox_id: MailboxId(String::from("/root/maildir/INBOX")),
@@ -725,5 +841,140 @@ mod mailbox_message_tests {
         let inbox = MailboxId(String::from("INBOX"));
         cache.store_message(&inbox, "big", &message("way beyond sixteen bytes"));
         assert!(cache.load_message(&inbox, "big").is_none());
+    }
+}
+
+/// Permissions of the on-disk cache (ticket ty57): the cache holds message
+/// summaries and full bodies, so only its owner may list or read it.
+#[cfg(all(test, unix))]
+mod permission_tests {
+    use super::mailbox_message_tests::{mailbox as sample_mailbox, message};
+    use super::tests::page;
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path)
+            .expect("cache path exists")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    fn assert_private_file(path: &Path) {
+        assert_eq!(mode(path), 0o600, "{} must be 0600", path.display());
+    }
+
+    /// The directory and every parent up to the cache root must be 0700.
+    fn assert_private_dirs(root: &Path, dir: &Path) {
+        let mut current = Some(dir);
+        while let Some(path) = current {
+            assert_eq!(mode(path), 0o700, "{} must be 0700", path.display());
+            if path == root {
+                break;
+            }
+            current = path.parent();
+        }
+    }
+
+    fn chmod(path: &Path, mode: u32) {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("chmod");
+    }
+
+    fn inbox_id() -> MailboxId {
+        MailboxId(String::from("/root/maildir/INBOX"))
+    }
+
+    fn mailbox_dir(cache: &PageCache, inbox: &MailboxId) -> PathBuf {
+        cache.root.join(key_part(&inbox.0))
+    }
+
+    fn message_dir(cache: &PageCache, inbox: &MailboxId) -> PathBuf {
+        cache.root.join("messages").join(key_part(&inbox.0))
+    }
+
+    #[test]
+    fn stored_entries_and_their_directories_are_owner_only() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
+        let inbox = inbox_id();
+
+        cache.store(&inbox, None, &page(0));
+        cache.store_mailboxes(&[sample_mailbox("INBOX")]);
+        cache.store_message(&inbox, "env-1", &message("Hello"));
+
+        assert_private_file(&cache.path(&inbox, None, 0));
+        assert_private_file(&cache.root.join("mailboxes.json"));
+        assert_private_file(&cache.message_path(&inbox, "env-1"));
+        assert_private_dirs(dir.path(), &cache.root);
+        assert_private_dirs(dir.path(), &mailbox_dir(&cache, &inbox));
+        assert_private_dirs(dir.path(), &message_dir(&cache, &inbox));
+    }
+
+    #[test]
+    fn the_shared_cache_container_is_repaired_too() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let container = dir.path().join("cache");
+        fs::create_dir_all(&container).expect("container");
+        chmod(&container, 0o755);
+        let cache = PageCache::scoped(container.clone(), Some("account"), CacheLimits::default());
+
+        cache.store(&inbox_id(), None, &page(0));
+
+        assert_eq!(mode(&container), 0o700, "cache container must be 0700");
+        assert_private_dirs(&container, &cache.root);
+    }
+
+    #[test]
+    fn writes_repair_loose_modes_from_an_older_version() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
+        let inbox = inbox_id();
+        cache.store(&inbox, None, &page(0));
+
+        // Simulate a cache written by a version that respected only the
+        // umask: 0755 directories, 0644 files.
+        chmod(&cache.root, 0o755);
+        chmod(&mailbox_dir(&cache, &inbox), 0o755);
+        let path = cache.path(&inbox, None, 0);
+        chmod(&path, 0o644);
+
+        cache.store(&inbox, None, &page(0));
+
+        assert_private_file(&path);
+        assert_private_dirs(dir.path(), &cache.root);
+        assert_private_dirs(dir.path(), &mailbox_dir(&cache, &inbox));
+    }
+
+    #[test]
+    fn reads_repair_loose_modes_from_an_older_version() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
+        let inbox = inbox_id();
+        cache.store(&inbox, None, &page(0));
+        cache.store_message(&inbox, "env-1", &message("Hello"));
+
+        let page_path = cache.path(&inbox, None, 0);
+        let message_path = cache.message_path(&inbox, "env-1");
+        for path in [&page_path, &message_path] {
+            chmod(path, 0o644);
+        }
+        let messages_root = cache.root.join("messages");
+        for dir in [
+            &cache.root,
+            &mailbox_dir(&cache, &inbox),
+            &messages_root,
+            &message_dir(&cache, &inbox),
+        ] {
+            chmod(dir, 0o755);
+        }
+
+        assert!(cache.load(&inbox, None, 0, 20).is_some(), "page hit");
+        assert!(cache.load_message(&inbox, "env-1").is_some(), "message hit");
+
+        assert_private_file(&page_path);
+        assert_private_file(&message_path);
+        assert_private_dirs(dir.path(), &mailbox_dir(&cache, &inbox));
+        assert_private_dirs(dir.path(), &message_dir(&cache, &inbox));
     }
 }
