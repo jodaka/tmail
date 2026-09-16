@@ -37,16 +37,19 @@ use tmail::ui::{RenderContext, Theme};
 /// (ADR 0003 §3.1), `--theme <name>` overrides the configured palette,
 /// and the positional argument is the config path. Any other `-`
 /// argument is a hard usage error. `--version` short-circuits the run
-/// (packagers probe it), so it composes with any other flags.
+/// (packagers probe it), so it composes with any other flags. `--debug`
+/// turns on file-level debug tracing regardless of build profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Invocation {
     configure: bool,
     config: Option<PathBuf>,
     theme: Option<String>,
     version: bool,
+    debug: bool,
 }
 
-const USAGE: &str = "usage: tmail [--version] [--configure [path]] [--theme <name>] [config.toml]";
+const USAGE: &str =
+    "usage: tmail [--version] [--configure [path]] [--theme <name>] [--debug] [config.toml]";
 
 fn parse_invocation() -> Result<Invocation, String> {
     parse_args(std::env::args().skip(1))
@@ -61,11 +64,13 @@ where
         config: None,
         theme: None,
         version: false,
+        debug: false,
     };
     let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--version" => invocation.version = true,
+            "--debug" => invocation.debug = true,
             "--configure" => {
                 invocation.configure = true;
                 // The optional path value: only when it does not look
@@ -106,9 +111,8 @@ fn set_positional(invocation: &mut Invocation, path: PathBuf) -> Result<(), Stri
 }
 
 fn main() -> ExitCode {
-    let _logging = logging::init();
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "tmail starting");
-
+    // Args come first: the `--debug` flag participates in the logging
+    // setup that follows.
     let invocation = match parse_invocation() {
         Ok(invocation) => invocation,
         Err(message) => {
@@ -116,6 +120,9 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    let _logging = logging::init(invocation.debug);
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "tmail starting");
 
     // Version probe before any runtime or config work: packagers and
     // users get a stable, side-effect-free answer even on a box with a
@@ -763,6 +770,7 @@ mod cli_tests {
         assert!(!invocation.configure);
         assert_eq!(invocation.config, None);
         assert_eq!(invocation.theme, None);
+        assert!(!invocation.debug);
     }
 
     #[test]
@@ -824,6 +832,21 @@ mod cli_tests {
     fn version_defaults_to_false() {
         assert!(!invocation(&[]).version);
         assert!(!invocation(&["--configure"]).version);
+    }
+
+    #[test]
+    fn debug_flag_is_recognized_in_any_position() {
+        let bare = invocation(&["--debug"]);
+        assert!(bare.debug);
+
+        let first = invocation(&["--debug", "--configure", "cfg.toml"]);
+        assert!(first.debug);
+        assert!(first.configure);
+        assert_eq!(first.config, Some(PathBuf::from("cfg.toml")));
+
+        let last = invocation(&["--configure", "--debug"]);
+        assert!(last.debug);
+        assert_eq!(last.config, None, "--debug takes no value");
     }
 
     #[test]

@@ -13,6 +13,7 @@ Design mockups were created in Open Design using GLM-5.3-Flash.
 ```sh
 tmail --configure            # set up your account in-app (will be started automatically if you don't have config)
 tmail                        # start reading mail
+tmail --debug                # start tmail with file debug logging (see below)
 ```
 
 See [docs/installation.md](docs/installation.md) for details.
