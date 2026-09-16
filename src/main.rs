@@ -676,7 +676,17 @@ async fn handle_effects(
             };
             drop(guard);
             let mouse = state.settings.mouse_capture;
-            let result = tmail::runtime::editor::run(program, body).await;
+            // The typed `anyhow` chain flattens to its display form at the
+            // reducer boundary (issue pjzr, plan §12); `{err:#}` carries the
+            // full context chain (file I/O, spawn, read-back) into the
+            // user-facing status.
+            let result = match tmail::runtime::editor::run(program, body).await {
+                Ok(content) => Ok(content),
+                Err(err) => {
+                    tracing::debug!(error = %err, "external editor failed");
+                    Err(format!("{err:#}"))
+                }
+            };
             // Step 7: restore the terminal even on editor failure —
             // unconditionally, before anything else runs. The fresh guard
             // repaints from scratch on the next draw.

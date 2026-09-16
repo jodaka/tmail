@@ -21,6 +21,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use io_pim_discovery::compose::client::DiscoveryComposeClientStd;
+use io_pim_discovery::compose::client::DiscoveryComposeClientStdError;
 use io_pim_discovery::compose::config::{
     DiscoveryConfigSource, DiscoveryEndpoint, DiscoverySecurity, DiscoveryService,
     DiscoveryServiceConfig,
@@ -28,6 +29,7 @@ use io_pim_discovery::compose::config::{
 use io_pim_discovery::compose::providers::DiscoveryKnownProvider;
 use io_pim_discovery::shared::dns::system_resolver;
 use pimalaya_stream::tls::Tls;
+use thiserror::Error;
 use url::Url;
 
 /// How long the composed discovery may run before mechanisms that are
@@ -172,17 +174,42 @@ pub struct DiscoveredService {
     pub username: Option<String>,
 }
 
+/// Typed discovery failures (issue pjzr): every break is a named variant
+/// with the underlying error chained as `#[source]`, so callers and logs
+/// get the full chain instead of a flattened `String`.
+#[derive(Debug, Error)]
+pub enum DiscoveryError {
+    /// The composed discovery broke. Only an invalid email fails the whole
+    /// compose; the wizard validates the address first, so a compose error
+    /// is a discoverer-level break, never hidden as an empty result
+    /// (review s843).
+    #[error("discovery failed: {source}")]
+    Compose {
+        /// The compose client's own error (`Email is missing the '@' …`).
+        source: DiscoveryComposeClientStdError,
+    },
+
+    /// The blocking-pool worker could not be joined (panicked or cancelled).
+    #[error("discovery worker failed to run")]
+    Worker(#[source] tokio::task::JoinError),
+
+    /// The compose did not answer within its deadline plus the
+    /// `spawn_blocking` join slack.
+    #[error("discovery did not answer in time (17s deadline)")]
+    Timeout,
+}
+
 /// Discovers IMAP/SMTP settings for an email address. Implementations
 /// must never block the async caller: the real one hops to a worker
 /// thread; fakes return canned data.
 #[async_trait::async_trait]
 pub trait EmailConfigDiscoverer: Send + Sync {
-    /// The ranked candidate list, or `Err` with a human-readable reason
-    /// when discovery itself broke. `Ok(empty)` strictly means "no
-    /// candidate mechanisms answered in time" (the wizard then offers
-    /// manual override) — so the wizard can tell the user *why* the
-    /// results are empty instead of conflating the two (review s843).
-    async fn discover(&self, email: &str) -> Result<Vec<DiscoveredService>, String>;
+    /// The ranked candidate list, or a typed [`DiscoveryError`] when
+    /// discovery itself broke. `Ok(empty)` strictly means "no candidate
+    /// mechanisms answered in time" (the wizard then offers manual
+    /// override) — so the wizard can tell the user *why* the results are
+    /// empty instead of conflating the two (review s843).
+    async fn discover(&self, email: &str) -> Result<Vec<DiscoveredService>, DiscoveryError>;
 }
 
 /// The real discoverer, wrapping `io-pim-discovery`'s blocking
@@ -191,7 +218,7 @@ pub struct PimDiscoverer;
 
 #[async_trait::async_trait]
 impl EmailConfigDiscoverer for PimDiscoverer {
-    async fn discover(&self, email: &str) -> Result<Vec<DiscoveredService>, String> {
+    async fn discover(&self, email: &str) -> Result<Vec<DiscoveredService>, DiscoveryError> {
         // The compose client blocks and spawns its own mechanism
         // threads, so it must leave the async reactor: run it on the
         // blocking pool. `compose_all_within` already bounds the wait
@@ -206,17 +233,15 @@ impl EmailConfigDiscoverer for PimDiscoverer {
         let handle = tokio::task::spawn_blocking(move || discover_blocking(&email));
         match tokio::time::timeout(DISCOVERY_DEADLINE + BLOCKING_JOIN_SLACK, handle).await {
             Ok(Ok(inner)) => inner,
-            Ok(Err(err)) => Err(format!("discovery worker failed to run: {err}")),
-            Err(_) => Err(String::from(
-                "discovery did not answer in time (17s deadline)",
-            )),
+            Ok(Err(err)) => Err(DiscoveryError::Worker(err)),
+            Err(_) => Err(DiscoveryError::Timeout),
         }
     }
 }
 
 /// Runs the blocking compose client to completion. Called from the
 /// blocking pool only.
-fn discover_blocking(email: &str) -> Result<Vec<DiscoveredService>, String> {
+fn discover_blocking(email: &str) -> Result<Vec<DiscoveredService>, DiscoveryError> {
     let dns = system_resolver().unwrap_or_else(|| DEFAULT_DNS_RESOLVER.clone());
     let client = DiscoveryComposeClientStd::new(dns, Tls::default());
     // Only the services himalaya can drive: IMAP incoming and SMTP
@@ -229,9 +254,9 @@ fn discover_blocking(email: &str) -> Result<Vec<DiscoveredService>, String> {
         // validates the address first, so a compose error is a
         // discoverer-level error surfaced as `Err`, never hidden as an
         // empty result (review s843).
-        Err(err) => {
-            tracing::warn!(error = %err, "discovery compose failed");
-            Err(format!("discovery failed: {err}"))
+        Err(source) => {
+            tracing::warn!(error = %source, "discovery compose failed");
+            Err(DiscoveryError::Compose { source })
         }
     }
 }
@@ -399,7 +424,7 @@ pub struct FakeDiscoverer;
 
 #[async_trait::async_trait]
 impl EmailConfigDiscoverer for FakeDiscoverer {
-    async fn discover(&self, _email: &str) -> Result<Vec<DiscoveredService>, String> {
+    async fn discover(&self, _email: &str) -> Result<Vec<DiscoveredService>, DiscoveryError> {
         Ok(vec![DiscoveredService {
             source: ConfigSource::Provider(Provider::Gmail),
             imap: ServerEndpoint {
@@ -425,6 +450,17 @@ mod tests {
         // Fires the LazyLock initializer at test time: an invalid const
         // URL is caught here, not on a user's first discovery run.
         assert_eq!(DEFAULT_DNS_RESOLVER.as_str(), "tcp://1.1.1.1:53");
+    }
+
+    #[test]
+    fn invalid_email_breaks_as_a_typed_compose_error() {
+        // The compose validates the address up front (before any
+        // mechanism or network work), so this runs offline. The failure
+        // is the typed `Compose` variant — issue pjzr: not a raw String.
+        let err = discover_blocking("not-an-email").expect_err("invalid email must fail");
+        assert!(matches!(err, DiscoveryError::Compose { .. }), "{err:?}");
+        let rendered = err.to_string();
+        assert!(rendered.starts_with("discovery failed: "), "{rendered}");
     }
 
     fn tcp(
