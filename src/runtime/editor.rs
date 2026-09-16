@@ -23,12 +23,13 @@ use anyhow::Context;
 /// Run `program` (argv; `program[0]` is the executable) over the draft
 /// body: write `body` into a secure temporary file, spawn the editor with
 /// the file as its final argument, wait for exit, and read the file back.
-/// `Ok` carries the edited text; `Err` carries a sanitized, display-safe
-/// reason. The temporary file lives in a private directory removed on
-/// return, success or failure.
-pub async fn run(program: &[String], body: &str) -> Result<String, String> {
+/// `Ok` carries the edited text; `Err` is an `anyhow` chain (issue pjzr)
+/// that keeps every `io::Error` source intact — only the *display* form is
+/// flattened at the reducer boundary. The temporary file lives in a
+/// private directory removed on return, success or failure.
+pub async fn run(program: &[String], body: &str) -> anyhow::Result<String> {
     let Some((argv0, args)) = program.split_first() else {
-        return Err(String::from("no editor is configured"));
+        anyhow::bail!("no editor is configured");
     };
 
     // Step 3: a private temporary directory (0o700) holding the body file
@@ -37,10 +38,9 @@ pub async fn run(program: &[String], body: &str) -> Result<String, String> {
     let dir = tempfile::Builder::new()
         .prefix("tmail-editor-")
         .tempdir()
-        .map_err(|err| format!("could not create a temporary directory: {err}"))?;
+        .context("could not create a temporary directory")?;
     let path = dir.path().join("body.txt");
-    write_secure(&path, body)
-        .map_err(|err| format!("could not write the temporary body file: {err}"))?;
+    write_secure(&path, body)?;
 
     // Steps 4/5: argv-only spawn (the path rides as the final argument) and
     // a wait for exit. `tokio::process` keeps the runtime — and any in-flight
@@ -50,16 +50,16 @@ pub async fn run(program: &[String], body: &str) -> Result<String, String> {
         .arg(&path)
         .status()
         .await
-        .map_err(|err| format!("could not run {argv0}: {err}"))?;
+        .with_context(|| format!("could not run {argv0}"))?;
     if !status.success() {
-        return Err(match status.code() {
+        anyhow::bail!(match status.code() {
             Some(code) => format!("editor exited with code {code}"),
             None => String::from("editor was terminated by a signal"),
         });
     }
 
     // Step 6: read the edited text back.
-    fs::read_to_string(&path).map_err(|err| format!("could not read the edited body back: {err}"))
+    fs::read_to_string(&path).context("could not read the edited body back")
 }
 
 /// Write `body` to `path` with owner-only permissions (plan §21: temporary
@@ -112,14 +112,26 @@ mod tests {
     async fn a_failing_editor_reports_and_imports_nothing() {
         let program = vec![String::from("false")];
         let err = run(&program, "body").await.expect_err("false exits 1");
-        assert!(err.contains("exited with code 1"), "{err}");
+        assert!(
+            err.to_string().contains("exited with code 1"),
+            "top-level display shows the exit: {err:#}"
+        );
     }
 
     #[tokio::test]
     async fn a_missing_editor_reports_instead_of_panicking() {
         let program = vec![String::from("no-such-editor-binary")];
         let err = run(&program, "body").await.expect_err("spawn fails");
-        assert!(err.contains("could not run"), "{err}");
+        assert!(
+            err.to_string().contains("could not run"),
+            "top-level display names the editor: {err:#}"
+        );
+        // The io::Error stays chained (issue pjzr), not flattened away:
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("No such file or directory"),
+            "source chain survives into the full display: {rendered}"
+        );
     }
 
     #[test]

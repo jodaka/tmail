@@ -364,7 +364,11 @@ async fn run_effect(
         // `Ok(empty)` strictly means "nothing found in time".
         OperationKind::DiscoverConfig { email } => match discoverer.discover(email).await {
             Ok(services) => Some(Ok(OperationOutcome::Discovered(services))),
-            Err(reason) => Some(Err(plain_failure(effect, &reason))),
+            // The typed discovery error is flattened to its display form at
+            // the modal boundary (plan §12: typed errors at the backend,
+            // display strings at the app layer); the source chain surfaces
+            // in logs above.
+            Err(err) => Some(Err(plain_failure(effect, &err.to_string()))),
         },
         // Wizard credential test (ADR 0003 §3.4): the injected tester runs
         // its credential path against a temporary 0600 config; the detail
