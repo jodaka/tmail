@@ -34,10 +34,12 @@ pub fn to_action(keymap: &KeyMap, key: KeyEvent, focus: Focus) -> Option<Action>
         focus,
         Focus::SearchField | Focus::Dialog | Focus::Composer | Focus::Wizard
     );
-    // Ctrl+Enter sends from anywhere (plan §10, as before); plain Enter is
+    // Ctrl+Enter sends — but only from the composer (docs/shortcusts.md
+    // advertises it there). Elsewhere it is inert: a stray chord in the
+    // search field or a dialog must never deliver a draft. Plain Enter is
     // the keymap's `activate` binding, so it stays rebindable. The
     // composer's body newline is the reducer's routing of Activate.
-    if key.code == KeyCode::Enter && ctrl {
+    if key.code == KeyCode::Enter && ctrl && focus == Focus::Composer {
         return Some(Action::Send);
     }
     // Text-entry foci consume their editing keys before any binding

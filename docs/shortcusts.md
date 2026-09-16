@@ -17,7 +17,7 @@ hints always follow the configured bindings.
 | Global | `c` | Compose |
 | Global | `Ctrl+R` | Manual refresh |
 | Global | `Ctrl+C` | Quit |
-| Global | `Ctrl+A` | Select all visible messages (or clear the selection) |
+| Message list | `Ctrl+A` | Select all visible messages (or clear the selection) — mail-list key, not global |
 | Global | `m` | Toggle mouse capture on/off (see [Mouse](#mouse)) |
 | Global | `t` | Cycle the theme: built-ins first, then `[tmail.themes.<name>]` |
 | Global | `Ctrl+G` | Account switcher: restart into another `[accounts.<name>]` (confirm first when work is in flight or the composer has unsaved edits) |
