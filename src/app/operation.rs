@@ -307,10 +307,11 @@ impl OperationKind {
     /// Whether `newer` supersedes `older`: a result for `older` must never
     /// mutate state once `newer` started. Mailbox loads supersede each
     /// other; page loads supersede page loads for the same mailbox; message
-    /// loads for the same mailbox supersede each other (only the newest
+    /// loads supersede the same message across mailboxes (only the newest
     /// opened message can win); repeated flag toggles on the same message
     /// supersede each other. Mutations that move mail never supersede — a
-    /// lost archive would be unrecoverable from state.
+    /// lost archive would be unrecoverable from state. (They instead
+    /// coalesce: see [`OperationKind::duplicates_of`].)
     fn supersedes(newer: &OperationKind, older: &OperationKind) -> bool {
         match (newer, older) {
             (OperationKind::LoadMailboxes, OperationKind::LoadMailboxes) => true,
@@ -318,12 +319,19 @@ impl OperationKind {
                 newer.mailbox_id == older.mailbox_id
             }
             // A new search of the same mailbox replaces the previous run:
-            // only the newest query's results can ever be shown.
+            // only the newest query's results can ever be shown. Same-query
+            // pagination *keeps* the older page (different offset: both
+            // pages may be wanted), and the apply-side currency check
+            // (`complete_search`) still guards by mailbox + query, so a
+            // superseded or stale page never lands on the wrong state.
             (OperationKind::Search(newer), OperationKind::Search(older)) => {
                 newer.mailbox_id == older.mailbox_id
             }
             (OperationKind::LoadMessage(newer), OperationKind::LoadMessage(older)) => {
-                newer.mailbox == older.mailbox
+                // Same message, even across mailboxes (the listed id may
+                // also exist elsewhere): only the newest fetch can win,
+                // so the registry holds one child per message.
+                newer.id == older.id
             }
             // Draft fetches likewise: only the newest Enter can win.
             (OperationKind::OpenDraft(newer), OperationKind::OpenDraft(older)) => {
@@ -445,6 +453,24 @@ impl OperationKind {
             // what it wrote.
             // Sends never supersede anything and are never superseded:
             // every delivery attempt must run to its classified outcome.
+            _ => false,
+        }
+    }
+
+    /// Whether `self` is a *duplicate* of an in-flight `older` operation:
+    /// the identical intent on the identical target. Only the move
+    /// mutations (Archive/Trash of one message) qualify: a double-press
+    /// spawns two concurrent backend moves for the same id, and after the
+    /// first one renames the maildir file the second fails confusingly
+    /// against the new id — the registry drops the duplicate instead
+    /// (idempotency for the user: the first press already owns the work).
+    /// Sends are excluded on purpose: every delivery attempt must run to
+    /// its classified outcome (a cancelled send's ambiguity is worse than
+    /// a risky duplicate detection).
+    fn duplicates_of(&self, older: &OperationKind) -> bool {
+        match (self, older) {
+            (OperationKind::Archive(newer), OperationKind::Archive(older))
+            | (OperationKind::Trash(newer), OperationKind::Trash(older)) => newer == older,
             _ => false,
         }
     }
@@ -616,6 +642,38 @@ impl OperationRegistry {
     /// background work (status line, never a modal — Phase 9.6).
     pub fn start_background(&mut self, kind: OperationKind) -> crate::app::effect::Effect {
         self.start_with_origin(kind, OperationOrigin::Background)
+    }
+
+    /// Start a foreground operation unless its identical intent is already
+    /// in flight (`Archive`/`Trash` of the same message, see
+    /// [`OperationKind::duplicates_of`]): a double-press must not spawn a
+    /// second concurrent mutation that can only fail. Returns `None` — and
+    /// leaves the registry untouched — for the coalesced duplicate.
+    pub fn start_unless_duplicate(
+        &mut self,
+        kind: OperationKind,
+    ) -> Option<crate::app::effect::Effect> {
+        self.try_start_with_origin(kind, OperationOrigin::Foreground)
+    }
+
+    fn try_start_with_origin(
+        &mut self,
+        kind: OperationKind,
+        origin: OperationOrigin,
+    ) -> Option<crate::app::effect::Effect> {
+        let Some(existing) = self
+            .entries
+            .values()
+            .find(|op| kind.duplicates_of(&op.kind))
+            .map(|op| op.id)
+        else {
+            return Some(self.start_with_origin(kind, origin));
+        };
+        tracing::debug!(
+            id = %existing,
+            "duplicate move request coalesced into the in-flight operation"
+        );
+        None
     }
 
     fn start_with_origin(
@@ -866,7 +924,7 @@ impl OperationRegistry {
 mod tests {
     use super::*;
     use crate::app::effect::Effect;
-    use crate::domain::MailboxId;
+    use crate::domain::{MailboxId, MessageId};
 
     fn page(mailbox: &str, offset: usize) -> OperationKind {
         OperationKind::LoadPage(PageRequest {
@@ -912,6 +970,76 @@ mod tests {
         assert!(registry.get(sent.id).is_some());
         // Both in flight; the later one is foreground.
         assert_eq!(registry.foreground().unwrap().id, sent.id);
+    }
+
+    fn locator(mailbox: &str, id: &str) -> MessageLocator {
+        MessageLocator {
+            mailbox: MailboxId(String::from(mailbox)),
+            id: MessageId(String::from(id)),
+            message_id: None,
+        }
+    }
+
+    #[test]
+    fn message_loads_supersede_the_same_id_across_mailboxes() {
+        // Only the newest opened message can win: the same listed id may
+        // exist in two mailboxes (maildir rename / role target), and the
+        // registry keeps one child per message.
+        let mut registry = OperationRegistry::default();
+        let older = registry.start(OperationKind::LoadMessage(locator("inbox", "m1")));
+        let newer = registry.start(OperationKind::LoadMessage(locator("archive", "m1")));
+        assert!(registry.get(older.id).is_none(), "older fetch cancelled");
+        assert!(registry.get(newer.id).is_some());
+        // A different message in flight is left alone.
+        let other = registry.start(OperationKind::LoadMessage(locator("inbox", "m2")));
+        assert!(registry.get(other.id).is_some());
+    }
+
+    #[test]
+    fn duplicate_archive_and_trash_requests_coalesce() {
+        // A double-press must not run the same move twice concurrently:
+        // the second backend run would fail confusingly after the maildir
+        // rename. The registry drops the duplicate and keeps the first.
+        let mut registry = OperationRegistry::default();
+        let first = registry
+            .start_unless_duplicate(OperationKind::Trash(locator("inbox", "m1")))
+            .expect("first owns the work");
+        assert!(registry.get(first.id).is_some());
+        assert!(
+            registry
+                .start_unless_duplicate(OperationKind::Trash(locator("inbox", "m1")))
+                .is_none(),
+            "identical duplicate coalesced"
+        );
+        assert!(
+            registry
+                .start_unless_duplicate(OperationKind::Archive(locator("inbox", "m1")))
+                .is_some(),
+            "a different move of the same message still runs"
+        );
+        assert!(
+            registry
+                .start_unless_duplicate(OperationKind::Trash(locator("inbox", "m2")))
+                .is_some(),
+            "the same move of another message still runs"
+        );
+        assert_eq!(registry.len(), 3);
+    }
+
+    #[test]
+    fn duplicate_requests_never_supersede_the_first_one() {
+        let mut registry = OperationRegistry::default();
+        let first = registry
+            .start_unless_duplicate(OperationKind::Archive(locator("inbox", "m1")))
+            .expect("in flight");
+        let token = registry.cancellation(first.id).unwrap();
+        assert!(
+            registry
+                .start_unless_duplicate(OperationKind::Archive(locator("inbox", "m1")))
+                .is_none()
+        );
+        assert!(registry.get(first.id).is_some());
+        assert!(!token.is_cancelled(), "the first move is untouched");
     }
 
     #[test]

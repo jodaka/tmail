@@ -140,9 +140,17 @@ pub(crate) fn bulk_or_single(
 ) -> Vec<Effect> {
     if let Some(locators) = bulk_targets(state) {
         state.set_status(bulk.replace("{count}", &locators.len().to_string()));
+        // start_unless_duplicate: archive/trash of the same message may
+        // not run twice concurrently — a double-press coalesces into the
+        // request already in flight (the registry keeps the first).
         return locators
             .into_iter()
-            .map(|locator| state.session.operations.start(make(locator)))
+            .filter_map(|locator| {
+                state
+                    .session
+                    .operations
+                    .start_unless_duplicate(make(locator))
+            })
             .collect();
     }
     if list_only && state.session.focus != Focus::MessageList {
@@ -151,7 +159,12 @@ pub(crate) fn bulk_or_single(
     match message_target(state) {
         Some(locator) => {
             state.set_status(single);
-            vec![state.session.operations.start(make(locator))]
+            state
+                .session
+                .operations
+                .start_unless_duplicate(make(locator))
+                .into_iter()
+                .collect()
         }
         None => Vec::new(),
     }
