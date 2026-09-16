@@ -364,8 +364,17 @@ fn write_document(path: &Path, doc: &DocumentMut, created: bool) -> Result<(), S
 /// target. Rename is atomic on the same filesystem, so the target is
 /// either the old or the new content — never a partial write. The temp
 /// file inherits restrictive defaults and is removed on any failure.
+///
+/// Like the draft journal, the temp name carries a process-unique counter
+/// on top of the pid: two concurrent saves within one process would
+/// otherwise share one name and race the rename.
 fn write_existing_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension(format!("toml.tmp-{}", std::process::id()));
+    static TMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "toml.tmp-{}-{}",
+        std::process::id(),
+        TMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let remove_tmp = |tmp: &Path| {
         let _ = std::fs::remove_file(tmp);
     };

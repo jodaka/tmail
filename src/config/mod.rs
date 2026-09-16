@@ -24,7 +24,7 @@ use crate::domain::paths::{expand_tilde, home_dir};
 use crate::domain::sanitize::sanitize;
 
 /// Default page size when the config does not provide a usable one
-/// (plan §16/§17: explicit pagination, default 20).
+/// (plan §16/§17: explicit pagination, default 50).
 /// Default `[tmail.mail].mail.page_size` for manual pagination (ticket kjfq).
 pub const DEFAULT_PAGE_SIZE: usize = 50;
 /// Default `[tmail.mail].mail.page_size_auto` (ticket kjfq): size pages to the
@@ -655,10 +655,10 @@ pub fn parse_with_account(
         config.account = default_account(&doc);
     }
     if let Some(account) = config.account.as_deref() {
-        let exists = doc
+        let entries = doc
             .get("accounts")
-            .and_then(|accounts| accounts.get(account))
-            .is_some();
+            .and_then(|accounts| accounts.get(account));
+        let exists = entries.is_some();
         if !exists {
             let selector = if account_override.is_some() {
                 "the requested account"
@@ -669,9 +669,9 @@ pub fn parse_with_account(
                 "{selector} selects {account:?} but [accounts.{account}] does not exist"
             ));
         }
-        config.aliases = aliases_for(&doc, account);
-        config.account_email = account_field(&doc, account, "email");
-        config.account_display_name = account_field(&doc, account, "display-name");
+        config.aliases = aliases_for(&doc, account, &mut issues);
+        config.account_email = account_field(&doc, account, "email", &mut issues);
+        config.account_display_name = account_field(&doc, account, "display-name", &mut issues);
     }
     (config, issues)
 }
@@ -1108,14 +1108,25 @@ fn parse_theme(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut Lo
 }
 
 fn parse_downloads_dir(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
-    let Some(value) = tmail
+    let Some(present) = tmail
         .and_then(|tmail| tmail.get("attachments"))
         .and_then(|attachments| attachments.get("downloads_dir"))
-        .and_then(toml::Value::as_str)
-        .filter(|value| !value.is_empty())
     else {
         return;
     };
+    // Never silent: a malformed value must be reported, not ignored.
+    let Some(value) = present.as_str() else {
+        issues.push(String::from(
+            "[tmail.attachments].downloads_dir must be a string",
+        ));
+        return;
+    };
+    if value.is_empty() {
+        issues.push(String::from(
+            "[tmail.attachments].downloads_dir must not be empty",
+        ));
+        return;
+    }
     let dir = PathBuf::from(value);
     match validate_downloads_dir(&dir) {
         Ok(()) => config.downloads_dir = Some(dir),
@@ -1174,30 +1185,58 @@ fn default_account(doc: &toml::Value) -> Option<String> {
     None
 }
 
-/// One string field of `[accounts.<account>]`.
-fn account_field(doc: &toml::Value, account: &str, field: &str) -> Option<String> {
-    doc.get("accounts")
+/// One string field of `[accounts.<account>]`. A non-string value is
+/// reported as a config issue and ignored, matching "forgiving in shape,
+/// never silent".
+fn account_field(
+    doc: &toml::Value,
+    account: &str,
+    field: &str,
+    issues: &mut LoadIssues,
+) -> Option<String> {
+    // An absent entry is not a problem (optional field); a present,
+    // non-string one is.
+    let present = doc
+        .get("accounts")
         .and_then(|accounts| accounts.get(account))
-        .and_then(|account| account.get(field))
-        .and_then(toml::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
+        .and_then(|account| account.get(field));
+    let value = present?;
+    match value.as_str().filter(|value| !value.is_empty()) {
+        Some(value) => Some(value.to_owned()),
+        None => {
+            issues.push(format!(
+                "[accounts.{account}].{field} must be a non-empty string"
+            ));
+            None
+        }
+    }
 }
 
-/// `[accounts.<account>.mailbox.alias]` entries, keeping only string values.
-fn aliases_for(doc: &toml::Value, account: &str) -> HashMap<String, String> {
+/// `[accounts.<account>.mailbox.alias]` entries, keeping only string
+/// values; non-string values are reported as config issues.
+fn aliases_for(
+    doc: &toml::Value,
+    account: &str,
+    issues: &mut LoadIssues,
+) -> HashMap<String, String> {
     doc.get("accounts")
         .and_then(|accounts| accounts.get(account))
         .and_then(|account| account.get("mailbox"))
         .and_then(|mailbox| mailbox.get("alias"))
-        .and_then(toml::Value::as_table)
+        .and_then(|alias| alias.as_table())
         .map(|table| {
-            table
-                .iter()
-                .filter_map(|(key, value)| {
-                    value.as_str().map(|value| (key.clone(), value.to_owned()))
-                })
-                .collect()
+            let mut aliases = HashMap::new();
+            for (key, value) in table {
+                match value.as_str() {
+                    Some(value) => {
+                        aliases.insert(key.clone(), value.to_owned());
+                    }
+                    None => issues.push(format!(
+                        "[accounts.{account}.mailbox.alias].{key} must be a string"
+                    )),
+                }
+            }
+            aliases
         })
         .unwrap_or_default()
 }
@@ -1264,6 +1303,76 @@ mod tests {
         let plain = dir.path().join("plain.toml");
         std::fs::write(&plain, "[tmail]\naccount = \"x\"\n").unwrap();
         assert!(list_accounts(&plain).is_empty());
+    }
+
+    #[test]
+    fn malformed_account_fields_and_aliases_are_reported_not_ignored() {
+        let text = r#"
+            [accounts.a]
+            email = 4
+            display-name = true
+
+            [accounts.a.mailbox.alias]
+            inbox = 7
+
+            [tmail]
+            account = "a"
+        "#;
+        let (config, issues) = parse_with_account(text, None, None);
+        assert_eq!(config.account_email, None);
+        assert_eq!(config.account_display_name, None);
+        assert!(config.aliases.is_empty());
+        for fragment in [
+            "[accounts.a].email must be a non-empty string",
+            "[accounts.a].display-name must be a non-empty string",
+            "[accounts.a.mailbox.alias].inbox must be a string",
+        ] {
+            assert!(
+                issues.iter().any(|issue| issue.contains(fragment)),
+                "missing {fragment:?} in {issues:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_downloads_dir_is_reported_not_ignored() {
+        let text = r#"
+            [accounts.a]
+            email = "a@example.org"
+
+            [tmail]
+            account = "a"
+
+            [tmail.attachments]
+            downloads_dir = 50
+        "#;
+        let (_, issues) = parse_with_account(text, None, None);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("downloads_dir must be a string")),
+            "issues: {issues:?}"
+        );
+
+        let (_, issues) = parse_with_issues(
+            r#"
+            [accounts.a]
+            email = "a@example.org"
+
+            [tmail]
+            account = "a"
+
+            [tmail.attachments]
+            downloads_dir = ""
+            "#,
+            None,
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("downloads_dir must not be empty")),
+            "issues: {issues:?}"
+        );
     }
 
     #[test]
