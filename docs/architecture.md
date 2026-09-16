@@ -3,7 +3,7 @@
 One page: the layers and the data flow, so a reader knows where to look.
 Every module carries its own detailed documentation in `//!` headers; this
 map is the level above source code. Test suites live in `tests/` (contract,
-integration, snapshots, pty smoke — see the README's Development section).
+integration, snapshots, pty smoke — see [development.md](development.md)).
 
 ## The loop
 
@@ -66,18 +66,28 @@ digraph g {
 
 6. **`domain/`** — transport-independent types both sides of the
    backend trait speak (`Message`, `MessageSummary`, `Mailbox`, `Page`,
-   `Draft`, `MessageLocator`, addresses). No I/O, no UI.
+   `Draft`, `MessageLocator`, addresses), plus the OS-facing helper
+   modules the layers share: `paths.rs` (path expansion, executability)
+   and `private_fs.rs` (owner-only storage). No UI.
 
 ## The slices
 
-- **`ui/`** — state → frame, strictly read-only. `mod.rs` is the render
-  entry; `layout.rs` owns the responsive geometry (full/compact/too-small)
-  that the reducer also consults, so scroll clamps and what is drawn can
-  never disagree; `screens/` (mailbox, reader, composer, wizard),
-  `components/` (chrome, dialogs, sidebar, bars), `theme.rs` (palettes +
-  runtime switching), `chrome.rs` (shared helpers), `rich.rs` (HTML →
-  spans, plan §13), `text.rs`, `dates.rs`. Mouse clicks translate through
-  rendered `HitMap`s (`input/mouse.rs`).
+- **`ui/`** — state → frame: `mod.rs` is the render entry, `screens/`
+  (mailbox, reader, composer, wizard) and `components/` (chrome, dialogs,
+  sidebar, bars) draw it, `chrome.rs` holds shared helpers. Mouse clicks
+  translate through rendered `HitMap`s (`input/mouse.rs`). Rendering does
+  not mutate application state, with one documented exception: the reader
+  memoizes its built document in `AppState::caches.reader_doc`
+  (`app/reader.rs::scroll_document`, a `RefCell` — see `app/state.rs`) so
+  frames do not re-parse the body.
+
+- **`view/`** — the shared view model: pure rendering-adjacent computation
+  imported by both `app` (reducer scroll/page bookkeeping) and `ui`
+  (drawing). `layout.rs` owns the responsive geometry
+  (full/compact/too-small) that the reducer also consults, so scroll
+  clamps and what is drawn can never disagree; `theme.rs` (palettes +
+  runtime switching), `rich.rs` (HTML → spans, plan §13), `text.rs`,
+  `dates.rs`, `overlay.rs`.
 
 - **`input/`** — translation from key/mouse events to `Action`s.
   `keymap.rs` is the single source of bindings (`[tmail.keybindings]` +
@@ -101,8 +111,9 @@ digraph g {
 
 - **I/O never enters the reducer.** File I/O lives in the wizard's
   operations, the draft journal, and the page cache (`app/page_cache.rs`).
-- **Sanitization before any user-visible or logged string** (`app/sanitize.rs`,
-  plan §12); secrets never reach logs or UI (`config/write.rs::SecretStorage`).
+- **Sanitization before any user-visible or logged string**
+  (`domain/sanitize.rs`, plan §12); secrets never reach logs or UI
+  (`config/write.rs::SecretStorage`).
 - **Terminal lifecycle stays in `runtime/terminal.rs`** (raw mode,
   alternate screen, panic-safe restore, editor suspend/reenter).
 - The external editor is the one synchronous effect: allowed to run only
