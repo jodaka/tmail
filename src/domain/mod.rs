@@ -9,6 +9,7 @@ pub mod message;
 pub mod operation;
 pub mod page;
 pub mod paths;
+pub mod private_fs;
 pub mod reply;
 pub mod sanitize;
 pub mod send;
