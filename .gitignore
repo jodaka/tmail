@@ -3,6 +3,7 @@
 .opencode
 .ruff_cache
 .kata.local.toml
+__pycache__/
 
 # Local himalaya/Tmail debug config (might hold credentials; never commit)
 config.toml
