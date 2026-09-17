@@ -256,6 +256,24 @@ async fn run_effect(
             )
             .await
         }
+        OperationKind::ArchiveBulk(locators) => {
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.archive_bulk(c, locators.clone()),
+                |_| OperationOutcome::Done,
+            )
+            .await
+        }
+        OperationKind::TrashBulk(locators) => {
+            run_call(
+                effect,
+                ctx,
+                move |c| backend.trash_bulk(c, locators.clone()),
+                |_| OperationOutcome::Done,
+            )
+            .await
+        }
         OperationKind::SaveDraft { draft } => {
             run_call(
                 effect,

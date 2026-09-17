@@ -43,11 +43,25 @@ fn reader_result_applies_and_marks_unread_read() {
     assert!(!s.messages.items[1].is_read);
     // Confirmation updates both the list row and the reader's snapshot,
     // and re-stores the corrected page into the on-disk cache (ticket
-    // kkaq) — the store is drained like every cache write.
+    // kkaq) — the store is drained like every cache write. Marking the
+    // unread row read also recounts the sidebar (ticket q0hc): the
+    // confirmation carries the cache store plus the chained background
+    // listing; both are drained and the registry ends up empty.
     let effects = complete_done(&mut s, flag_id);
-    no_effects_except_cache_stores(&mut s, &effects);
+    let (stores, listing): (Vec<_>, Vec<_>) = effects
+        .into_iter()
+        .partition(|e| matches!(e.kind, OperationKind::CacheListStore { .. }));
+    let listing: Vec<_> = listing
+        .into_iter()
+        .inspect(|e| {
+            assert_eq!(e.kind, OperationKind::LoadMailboxes, "the recount chain");
+        })
+        .collect();
+    assert_eq!(listing.len(), 1, "one recount for the read-flag change");
+    no_effects(&complete_cache_stores(&mut s, &stores));
     assert!(s.messages.items[1].is_read);
     assert!(s.open_summary().unwrap().is_read);
+    no_effects(&complete_done(&mut s, listing[0].id));
     assert!(s.session.operations.is_empty());
 }
 

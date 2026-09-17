@@ -428,21 +428,14 @@ impl MailBackend for HimalayaCliBackend {
         read: bool,
     ) -> BackendResult<()> {
         tracing::debug!(operation = %ctx.operation, read, count = locators.len(), "set_read_bulk");
-        let mut groups: std::collections::HashMap<&str, Vec<String>> =
-            std::collections::HashMap::new();
-        for locator in &locators {
-            groups
-                .entry(locator.mailbox.0.as_str())
-                .or_default()
-                .push(locator.id.0.clone());
-        }
+        let groups = grouped_mailbox_ids(&locators);
         for (mailbox, ids) in groups {
             let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
             let argv = command::flag_argv(
                 self.config_path.as_deref(),
                 self.account.as_deref(),
                 read,
-                mailbox,
+                &mailbox,
                 "seen",
                 &id_refs,
             );
@@ -478,10 +471,59 @@ impl MailBackend for HimalayaCliBackend {
             self.config_path.as_deref(),
             self.account.as_deref(),
             &locator.mailbox.0,
-            &locator.id.0,
+            [locator.id.0.as_str()].as_slice(),
         );
         let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
         process::decode_on_pool::<serde_json::Value>(output).await?;
+        Ok(())
+    }
+
+    /// Batched archive (ticket j9bq): the grouping mirrors
+    /// [`Self::set_read_bulk`] (locators grouped by mailbox; a bulk
+    /// selection is single-mailbox today) and one `message move`
+    /// invocation per group carries every id — one IMAP session, no
+    /// per-message login fanout.
+    async fn archive_bulk(
+        &self,
+        ctx: RequestContext,
+        locators: Vec<MessageLocator>,
+    ) -> BackendResult<()> {
+        tracing::debug!(operation = %ctx.operation, count = locators.len(), "archive_bulk");
+        let target = self
+            .verified_role_target(MailboxRole::Archive, "archive")
+            .map_err(BackendError::InvalidRequest)?;
+        for (mailbox, ids) in grouped_mailbox_ids(&locators) {
+            let argv = command::message_move_argv(
+                self.config_path.as_deref(),
+                self.account.as_deref(),
+                &mailbox,
+                &target,
+                &ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            );
+            let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
+            process::decode_on_pool::<serde_json::Value>(output).await?;
+        }
+        Ok(())
+    }
+
+    /// Batched trash (ticket j9bq): one trash-first `message delete`
+    /// invocation per mailbox group.
+    async fn trash_bulk(
+        &self,
+        ctx: RequestContext,
+        locators: Vec<MessageLocator>,
+    ) -> BackendResult<()> {
+        tracing::debug!(operation = %ctx.operation, count = locators.len(), "trash_bulk");
+        for (mailbox, ids) in grouped_mailbox_ids(&locators) {
+            let argv = command::message_delete_argv(
+                self.config_path.as_deref(),
+                self.account.as_deref(),
+                &mailbox,
+                &ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            );
+            let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
+            process::decode_on_pool::<serde_json::Value>(output).await?;
+        }
         Ok(())
     }
 
@@ -814,7 +856,7 @@ impl HimalayaCliBackend {
             self.account.as_deref(),
             &locator.mailbox.0,
             target,
-            &locator.id.0,
+            [locator.id.0.as_str()].as_slice(),
         );
         let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
         process::decode_on_pool::<serde_json::Value>(output).await?;
@@ -1470,6 +1512,24 @@ async fn list_envelope_ids_with_message_id(
         .collect()
 }
 
+/// Group a locator batch by mailbox (a bulk selection is single-mailbox
+/// today; grouping keeps that assumption local): one `(mailbox, ids)`
+/// entry per mailbox, message ids in arrival order. Shared by the batched
+/// read-flag, archive, and trash paths (tickets aavy/j9bq).
+fn grouped_mailbox_ids(locators: &[MessageLocator]) -> Vec<(String, Vec<String>)> {
+    let mut groups: std::collections::HashMap<&str, Vec<String>> = std::collections::HashMap::new();
+    for locator in locators {
+        groups
+            .entry(locator.mailbox.0.as_str())
+            .or_default()
+            .push(locator.id.0.clone());
+    }
+    groups
+        .into_iter()
+        .map(|(mailbox, ids)| (mailbox.to_string(), ids))
+        .collect()
+}
+
 /// Grouped CLI identity for the detached cleanup helpers, so the delete
 /// calls stay under clippy's argument budget and read as one unit.
 struct Cli {
@@ -1491,8 +1551,12 @@ async fn run_two_phase_delete(
     message_id: Option<&str>,
     cancellation: &tokio_util::sync::CancellationToken,
 ) {
-    let argv =
-        command::message_delete_argv(cli.config.as_deref(), cli.account.as_deref(), mailbox, id);
+    let argv = command::message_delete_argv(
+        cli.config.as_deref(),
+        cli.account.as_deref(),
+        mailbox,
+        [id].as_slice(),
+    );
     if let Err(err) = process::run(&cli.program, &argv, cancellation).await {
         if !matches!(err, BackendError::Cancelled) {
             tracing::warn!(old = %id, mailbox, %err, "draft copy could not be deleted");
@@ -1513,8 +1577,12 @@ async fn run_two_phase_delete(
     let bare = bare_message_id(message_id);
     let ids = list_envelope_ids_with_message_id(cli, trash, &bare, cancellation).await;
     for id in ids {
-        let argv =
-            command::message_delete_argv(cli.config.as_deref(), cli.account.as_deref(), trash, &id);
+        let argv = command::message_delete_argv(
+            cli.config.as_deref(),
+            cli.account.as_deref(),
+            trash,
+            [id.as_str()].as_slice(),
+        );
         match process::run(&cli.program, &argv, cancellation).await {
             Ok(_) => tracing::debug!(id = %id, "trashed draft copy purged"),
             Err(err) if !matches!(err, BackendError::Cancelled) => {

@@ -449,9 +449,34 @@ fn mark_unread_updates_list_and_route_after_confirmation() {
         s.messages.items[3].is_read,
         "not applied before confirmation"
     );
-    complete_done(&mut s, id);
+    let effects = complete_done(&mut s, id);
     assert!(!s.messages.items[3].is_read);
     assert!(!s.open_summary().unwrap().is_read);
+    // The sidebar's unread count changed with the flag (ticket q0hc): the
+    // confirmation chains the background listing recount.
+    assert!(
+        effects
+            .iter()
+            .any(|e| e.kind == OperationKind::LoadMailboxes),
+        "a LoadMailboxes effect after the read flag change"
+    );
+}
+
+#[test]
+fn star_flip_chains_no_mailbox_listing() {
+    // Starring never moves a message across the read/unread split: the
+    // sidebar recount would be pure overhead.
+    let mut s = state();
+    s.selection = 0;
+    let (id, kind) = expect_kind(&reduce(&mut s, Action::ToggleStar));
+    assert!(matches!(&kind, OperationKind::SetStarred { .. }));
+    let effects = complete_done(&mut s, id);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| e.kind == OperationKind::LoadMailboxes),
+        "no recount for a star flip"
+    );
 }
 
 #[test]
@@ -515,6 +540,25 @@ fn trash_closes_reader_and_removes_row() {
     assert!(matches!(s.open_message, Loadable::Idle));
     assert!(s.messages.items.iter().all(|m| m.id != target));
     assert_eq!(req.offset, 0);
+}
+
+#[test]
+fn confirmed_move_chains_a_mailbox_listing_for_the_counters() {
+    // Unread counts live only in the mailbox listing (q0hc): a confirmed
+    // move must chain a background listing so the sidebar recounts — the
+    // page re-sync alone never touches `state.mailboxes`.
+    let mut s = state();
+    s.selection = 1;
+    let (id, kind) = expect_kind(&reduce(&mut s, Action::Archive));
+    assert!(matches!(&kind, OperationKind::Archive(_)), "kind: {kind:?}");
+    let effects = complete_done(&mut s, id);
+    let listing = effects
+        .iter()
+        .find(|e| e.kind == OperationKind::LoadMailboxes)
+        .expect("a LoadMailboxes effect after the move");
+    // Started and registered (the runtime will fetch the fresh listing).
+    assert!(s.session.operations.get(listing.id).is_some());
+    assert!(s.session.operations.is_loading_mailboxes());
 }
 
 #[test]

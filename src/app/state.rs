@@ -38,6 +38,13 @@ impl<T> Loadable<T> {
             _ => None,
         }
     }
+
+    pub fn as_loaded_mut(&mut self) -> Option<&mut T> {
+        match self {
+            Loadable::Loaded(t) => Some(t),
+            _ => None,
+        }
+    }
 }
 
 /// What the reader's Tab cycle has focused inside one open message
@@ -541,6 +548,64 @@ impl AppState {
         self.mailboxes
             .as_loaded()
             .and_then(|ms| ms.get(self.mailbox_selection))
+    }
+
+    /// Optimistically shift one mailbox's sidebar counters (ticket ng42).
+    /// Confirmed completions only — the call sites never adjust on a
+    /// pending or failed operation, so no rollback bookkeeping exists. The
+    /// listing remains authoritative: the chained background recount
+    /// (`LoadMailboxes`) overwrites these local numbers with the truth.
+    /// `None` counts are never promoted into numbers, and an unknown
+    /// mailbox id leaves everything untouched. A `delta` of 0 is a no-op.
+    pub fn adjust_mailbox_counts(
+        &mut self,
+        mailbox_id: &crate::domain::MailboxId,
+        unread_delta: i64,
+        total_delta: i64,
+    ) {
+        // Saturating at zero: a stale count never goes negative while it
+        // waits for the authoritative listing.
+        let delta = |count: Option<u64>, d: i64| -> Option<u64> {
+            count.map(|current| {
+                let addition = u64::try_from(d).ok();
+                let subtraction = d.checked_neg().map(i64::unsigned_abs);
+                match (addition, subtraction) {
+                    (Some(d), _) => current.saturating_add(d),
+                    (_, Some(d)) => current.saturating_sub(d),
+                    // |d| cannot exceed i64::MAX; unreachable by construction.
+                    _ => current,
+                }
+            })
+        };
+        let Some(list) = self.mailboxes.as_loaded_mut() else {
+            return;
+        };
+        let Some(mailbox) = list.iter_mut().find(|m| &m.id == mailbox_id) else {
+            return;
+        };
+        // The Drafts folder's sidebar counter is the folder content —
+        // how many drafts there are (sidebar `render_folder_row`) —
+        // never an unread count: Gmail reports drafts as unread 0.
+        // A read flag inside Drafts adds/removes nothing that the
+        // counter displays, so its unread deltas are ignored.
+        let drafts_role = mailbox.role == Some(MailboxRole::Drafts);
+        if unread_delta != 0 && !drafts_role {
+            mailbox.unread_count = delta(mailbox.unread_count, unread_delta);
+        }
+        if total_delta != 0 {
+            mailbox.total_count = delta(mailbox.total_count, total_delta);
+        }
+    }
+
+    /// Optimistic Drafts-folder content counter (ticket ng42): the call
+    /// sites are the confirmed draft save (first push adds one) and the
+    /// draft removal (the sweep removes one). No-op when no `Drafts`-role
+    /// mailbox is loaded or its total is unknown.
+    pub fn adjust_drafts_count(&mut self, delta: i64) {
+        let Some(id) = self.drafts_mailbox().map(|m| m.id.clone()) else {
+            return;
+        };
+        self.adjust_mailbox_counts(&id, 0, delta);
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {

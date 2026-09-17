@@ -77,7 +77,7 @@ fn selection_survives_paging_but_not_mailbox_switch() {
 }
 
 #[test]
-fn bulk_archive_starts_one_operation_per_selected_message() {
+fn bulk_archive_is_one_batched_operation() {
     let mut s = state();
     s.session.focus = Focus::MessageList;
     s.selection = 0;
@@ -87,11 +87,14 @@ fn bulk_archive_starts_one_operation_per_selected_message() {
     let count = s.selected.len();
     assert_eq!(count, 2);
 
+    // Ticket j9bq: the whole selection travels as ONE ArchiveBulk
+    // operation — one backend session, never one process per message.
     let effects = reduce(&mut s, Action::Archive);
-    assert_eq!(effects.len(), count, "one operation per marked row");
-    for effect in &effects {
-        assert!(matches!(effect.kind, OperationKind::Archive(_)));
-    }
+    assert_eq!(effects.len(), 1, "one batched operation for the batch");
+    let OperationKind::ArchiveBulk(locators) = &effects[0].kind else {
+        panic!("expected ArchiveBulk, got {:?}", effects[0].kind);
+    };
+    assert_eq!(locators.len(), count, "every selected row in the batch");
     assert!(
         s.session
             .status
@@ -131,19 +134,20 @@ fn bulk_mark_read_is_one_batched_operation() {
 }
 
 #[test]
-fn bulk_trash_stays_one_operation_per_selected_message() {
+fn bulk_trash_is_one_batched_operation() {
     let mut s = state();
     s.session.focus = Focus::MessageList;
     no_effects(&reduce(&mut s, Action::SelectAll));
     let count = s.messages.items.len();
 
+    // Ticket j9bq: the whole selection travels as ONE TrashBulk
+    // operation — one backend session, never one process per message.
     let effects = reduce(&mut s, Action::Trash);
-    assert_eq!(effects.len(), count);
-    assert!(
-        effects
-            .iter()
-            .all(|e| matches!(e.kind, OperationKind::Trash(_)))
-    );
+    assert_eq!(effects.len(), 1, "one batched operation for the batch");
+    let OperationKind::TrashBulk(locators) = &effects[0].kind else {
+        panic!("expected TrashBulk, got {:?}", effects[0].kind);
+    };
+    assert_eq!(locators.len(), count, "every selected row in the batch");
 }
 
 #[test]
@@ -216,18 +220,17 @@ fn moved_messages_leave_the_selection() {
     let first = s.messages.items[0].id.clone();
 
     let effects = reduce(&mut s, Action::Archive);
-    assert_eq!(effects.len(), 2, "one operation per marked row");
-    // Complete the first move: its row leaves the selection, the other
-    // mark stays.
-    let first_id = effects[0].id;
-    let _ = complete_done(&mut s, first_id);
+    assert_eq!(effects.len(), 1, "one batched move for the batch");
+    // The batch confirmation: both rows leave the list and the selection.
+    let id = effects[0].id;
+    let _ = complete_done(&mut s, id);
     assert!(
         !s.selected.contains(&first),
         "the moved row is no longer marked"
     );
     assert!(
-        s.selection_active(),
-        "other marks survive a single move completion"
+        s.selected.is_empty(),
+        "every moved row left the selection with it"
     );
 }
 
@@ -254,12 +257,14 @@ fn bulk_button_click_dispatches_the_advertised_action() {
         &mut s,
         Action::Click(ClickTarget::BulkAction(BulkOp::Trash)),
     );
-    assert_eq!(effects.len(), expected);
-    assert!(
-        effects
-            .iter()
-            .all(|e| matches!(e.kind, OperationKind::Trash(_))),
-        "every selected row gets a trash operation"
+    assert_eq!(effects.len(), 1, "one batched move for the batch");
+    let OperationKind::TrashBulk(locators) = &effects[0].kind else {
+        panic!("expected TrashBulk, got {:?}", effects[0].kind);
+    };
+    assert_eq!(
+        locators.len(),
+        expected,
+        "every selected row travels in the batch"
     );
     // The click focused the list, so bulk semantics (not reader semantics)
     // applied.

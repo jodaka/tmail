@@ -171,6 +171,38 @@ pub trait MailBackend: Send + Sync {
     /// 5); permanently deletes when already in trash.
     async fn trash(&self, ctx: RequestContext, locator: MessageLocator) -> BackendResult<()>;
 
+    /// One archived batch over several messages (ticket j9bq): the whole
+    /// batch in one backend session, so a bulk archive never fans out
+    /// into one login per message. The default falls back to per-message
+    /// calls; adapters that can batch SHOULD override (the himalaya
+    /// adapter does). Failure is process-level: the backend applies what
+    /// it can before a failing id, and the outcome reports one failure
+    /// for the batch (the sidebar recount re-reads the truth). All
+    /// locators are expected to share a mailbox.
+    async fn archive_bulk(
+        &self,
+        ctx: RequestContext,
+        locators: Vec<MessageLocator>,
+    ) -> BackendResult<()> {
+        for locator in locators {
+            self.archive(ctx.clone(), locator).await?;
+        }
+        Ok(())
+    }
+
+    /// Batched trash (ticket j9bq): see [`Self::archive_bulk`]; the same
+    /// process-level failure semantics apply (himalaya stays trash-first).
+    async fn trash_bulk(
+        &self,
+        ctx: RequestContext,
+        locators: Vec<MessageLocator>,
+    ) -> BackendResult<()> {
+        for locator in locators {
+            self.trash(ctx.clone(), locator).await?;
+        }
+        Ok(())
+    }
+
     /// Persist one draft revision (plan §14, ADR 0002): record it in the
     /// crash-safe local journal first, then push it to the remote Drafts
     /// mailbox via add-then-delete replacement (the old remote copy is

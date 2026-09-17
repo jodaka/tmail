@@ -31,6 +31,7 @@ mod attachments;
 mod bulk;
 mod cache;
 mod composer;
+mod counters;
 mod drafts;
 mod list;
 mod mailboxes;

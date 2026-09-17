@@ -187,33 +187,37 @@ pub(crate) fn flag_argv(
     argv
 }
 
-/// `message move --from <source> --to <target> <id> --json`. `--to` accepts
-/// the resolved target mailbox name/id; archive resolution happens in the
+/// `message move --from <source> --to <target> <ids>... --json` (one
+/// invocation for the whole batch, ticket j9bq). `--to` accepts the
+/// resolved target mailbox name/id; archive resolution happens in the
 /// adapter (ADR 0001: semantic operations map inside the backend).
 pub(crate) fn message_move_argv(
     config: Option<&Path>,
     account: Option<&str>,
     source: &str,
     target: &str,
-    id: &str,
+    ids: &[&str],
 ) -> Vec<String> {
     let mut argv = global_flags(config, account);
-    args!(
-        argv, "message", "move", "--from", source, "--to", target, id, "--json"
-    );
+    args!(argv, "message", "move", "--from", source, "--to", target);
+    argv.extend(ids.iter().map(|id| String::from(*id)));
+    argv.push(String::from("--json"));
     argv
 }
 
-/// `message delete -m <mailbox> <id> --json` (trash-first, ADR 0001
-/// finding 5). Without `--json` the output is human text.
+/// `message delete -m <mailbox> <ids>... --json`, trash-first (ADR 0001
+/// finding 5); one invocation for the whole batch (ticket j9bq). Without
+/// `--json` the output is human text.
 pub(crate) fn message_delete_argv(
     config: Option<&Path>,
     account: Option<&str>,
     mailbox_id: &str,
-    id: &str,
+    ids: &[&str],
 ) -> Vec<String> {
     let mut argv = global_flags(config, account);
-    args!(argv, "message", "delete", "-m", mailbox_id, id, "--json");
+    args!(argv, "message", "delete", "-m", mailbox_id);
+    argv.extend(ids.iter().map(|id| String::from(*id)));
+    argv.push(String::from("--json"));
     argv
 }
 
@@ -573,7 +577,13 @@ mod tests {
 
     #[test]
     fn message_move_argv_uses_from_and_to() {
-        let argv = message_move_argv(None, None, "INBOX", "/root/maildir/Archive", "env-1");
+        let argv = message_move_argv(
+            None,
+            None,
+            "INBOX",
+            "/root/maildir/Archive",
+            ["env-1"].as_slice(),
+        );
         assert_eq!(
             argv,
             vec![
@@ -590,11 +600,52 @@ mod tests {
     }
 
     #[test]
+    fn message_move_argv_carries_every_id_in_one_invocation() {
+        // The batch is the point (ticket j9bq): one argv run, one IMAP
+        // session, no per-message fanout.
+        let argv = message_move_argv(
+            None,
+            None,
+            "INBOX",
+            "/root/maildir/Archive",
+            ["env-1", "env-2", "env-3"].as_slice(),
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "message",
+                "move",
+                "--from",
+                "INBOX",
+                "--to",
+                "/root/maildir/Archive",
+                "env-1",
+                "env-2",
+                "env-3",
+                "--json"
+            ]
+        );
+    }
+
+    #[test]
     fn message_delete_argv_is_exact() {
-        let argv = message_delete_argv(None, None, "INBOX", "env-1");
+        let argv = message_delete_argv(None, None, "INBOX", ["env-1"].as_slice());
         assert_eq!(
             argv,
             vec!["message", "delete", "-m", "INBOX", "env-1", "--json"]
+        );
+    }
+
+    #[test]
+    fn message_delete_argv_carries_every_id_in_one_invocation() {
+        // The batch is the point (ticket j9bq): one argv run, one IMAP
+        // session, no per-message fanout.
+        let argv = message_delete_argv(None, None, "INBOX", ["env-1", "env-2", "env-3"].as_slice());
+        assert_eq!(
+            argv,
+            vec![
+                "message", "delete", "-m", "INBOX", "env-1", "env-2", "env-3", "--json"
+            ]
         );
     }
 

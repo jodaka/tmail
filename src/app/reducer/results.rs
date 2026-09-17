@@ -4,8 +4,9 @@
 use super::actions::attachment_saved;
 use super::composer_flow::draft_save_effect;
 use super::message_results::{
-    FlagChange, apply_flag, apply_page, complete_cache_preview_load, mailboxes_loaded,
-    message_loaded, message_moved, preview_loaded, visible_list_identity, visible_mailbox_page,
+    FlagChange, apply_flag, apply_page, complete_cache_preview_load, locator_matches_summary,
+    mailboxes_loaded, message_loaded, message_moved, preview_loaded, visible_list_identity,
+    visible_mailbox_page,
 };
 use super::modals::open_error_modal;
 use super::navigation::{
@@ -173,7 +174,11 @@ pub(crate) fn backend_completed(state: &mut AppState, result: OperationResult) -
             FlagChange::Starred(starred),
         ),
         OperationKind::Archive(locator) | OperationKind::Trash(locator) => {
-            complete_move(state, result, &locator)
+            complete_move(state, result, std::slice::from_ref(&locator))
+        }
+        // One confirmation moves every locator of the batch (ticket j9bq).
+        OperationKind::ArchiveBulk(locators) | OperationKind::TrashBulk(locators) => {
+            complete_move(state, result, &locators)
         }
         OperationKind::SaveDraft { draft } => save_draft_completed(state, &draft, result),
         OperationKind::LoadDrafts => complete_load_drafts(state, result),
@@ -551,40 +556,94 @@ pub(crate) fn complete_flag(
     let id = result.id;
     match result.outcome {
         Ok(OperationOutcome::Done) => {
+            // Optimistic sidebar counters (ticket ng42): count the visible
+            // rows that actually flip BEFORE the flip, per the row's own
+            // mailbox — the same criterion the sidebar displays by. Rows
+            // the page does not show are not counted; the chained listing
+            // recount below stays their authoritative correction. A star
+            // flip never changes a count the sidebar shows.
+            let deltas = match change {
+                FlagChange::Read(read) => {
+                    let mut deltas: std::collections::HashMap<MailboxId, i64> =
+                        std::collections::HashMap::new();
+                    for locator in locators {
+                        let matches = |summary: &crate::domain::MessageSummary| {
+                            locator_matches_summary(locator, summary)
+                        };
+                        for summary in state
+                            .messages
+                            .items
+                            .iter()
+                            .filter(|s| matches(s) && s.is_read != read)
+                        {
+                            *deltas.entry(summary.mailbox_id.clone()).or_default() +=
+                                if read { -1 } else { 1 };
+                        }
+                    }
+                    Some(deltas)
+                }
+                FlagChange::Starred(_) => None,
+            };
             for locator in locators {
                 apply_flag(state, locator, change);
             }
+            let mut effects = Vec::new();
+            if let Some(deltas) = deltas {
+                for (mailbox_id, delta) in deltas {
+                    state.adjust_mailbox_counts(&mailbox_id, delta, 0);
+                }
+            }
             if let Some((mailbox, query)) = visible_list_identity(state) {
-                return vec![state.session.operations.start_background(
+                effects.push(state.session.operations.start_background(
                     OperationKind::CacheListStore {
                         mailbox,
                         query,
                         page: Box::new(state.messages.clone()),
                     },
-                )];
+                ));
             }
+            // The sidebar's unread count lives only in the mailbox
+            // listing (ticket q0hc): a read-flag change almost always
+            // moves a message across the read/unread split, so the
+            // page re-fit and local row flips are not enough — chain
+            // the background recount (a star flip never alters
+            // counts, so no listing for it). The discard/send
+            // cleanups follow the same background-start pattern so
+            // `Esc` can neither cancel the recount nor claim the
+            // foreground slot.
+            if matches!(change, FlagChange::Read(_)) {
+                effects.push(
+                    state
+                        .session
+                        .operations
+                        .start_background(OperationKind::LoadMailboxes),
+                );
+            }
+            effects
         }
         Ok(_) => {
             unexpected_payload(id, "flag");
+            Vec::new()
         }
         Err(failure) => {
             open_error_modal(state, failure);
+            Vec::new()
         }
     }
-    Vec::new()
 }
 
-/// Apply a confirmed archive/trash move. Nothing is removed locally on
-/// failure: the list/reader still show the message (plan §12 coherent
-/// failure state).
+/// Apply a confirmed archive/trash move (one locator for the single path,
+/// the whole selection for a batched bulk move, ticket j9bq). Nothing is
+/// removed locally on failure: the list/reader still show the message
+/// (plan §12 coherent failure state).
 pub(crate) fn complete_move(
     state: &mut AppState,
     result: OperationResult,
-    locator: &MessageLocator,
+    locators: &[MessageLocator],
 ) -> Vec<Effect> {
     let id = result.id;
     match result.outcome {
-        Ok(OperationOutcome::Done) => message_moved(state, locator),
+        Ok(OperationOutcome::Done) => message_moved(state, locators),
         Ok(_) => unexpected_payload(id, "move"),
         Err(failure) => open_error_modal(state, failure),
     }
@@ -614,43 +673,49 @@ pub(crate) fn complete_delete_draft(
 ) -> Vec<Effect> {
     let id = result.id;
     match result.outcome {
-        Ok(OperationOutcome::Done) => match reason {
-            // Confirmed discard: the sweep removed the draft from the
-            // backing store — refresh what the user sees: the visible
-            // page (the deleted draft's row leaves the list) and the
-            // mailbox listing (folder counts, e.g. `Drafts (6)`). The
-            // scoped backend delete awaits its sweep, so both listings
-            // now see a clean Drafts mailbox.
-            //
-            // A confirmed send resolves its draft the same way (ticket
-            // vgze): the sweep removed the Drafts copy, so the sidebar's
-            // content counter must recount too. The page refresh stays
-            // discard-only — the sent draft's row belongs to the composer
-            // context, not to the mailbox page now displayed.
-            DraftRemovalReason::Discard => {
-                // Both refreshes run in the background: the discard is
-                // done and its cleanup work must never sit in the
-                // foreground slot where `Esc` would cancel it into
-                // "loading mailboxes — cancelled".
-                let mut effects = vec![
+        // Optimistic Drafts counter (ticket ng42): the sweep removed the
+        // Drafts copy, so the sidebar's content counter drops one while
+        // the background listing recount chain below re-reads the truth.
+        Ok(OperationOutcome::Done) => {
+            state.adjust_drafts_count(-1);
+            match reason {
+                // Confirmed discard: the sweep removed the draft from the
+                // backing store — refresh what the user sees: the visible
+                // page (the deleted draft's row leaves the list) and the
+                // mailbox listing (folder counts, e.g. `Drafts (6)`). The
+                // scoped backend delete awaits its sweep, so both listings
+                // now see a clean Drafts mailbox.
+                //
+                // A confirmed send resolves its draft the same way (ticket
+                // vgze): the sweep removed the Drafts copy, so the sidebar's
+                // content counter must recount too. The page refresh stays
+                // discard-only — the sent draft's row belongs to the composer
+                // context, not to the mailbox page now displayed.
+                DraftRemovalReason::Discard => {
+                    // Both refreshes run in the background: the discard is
+                    // done and its cleanup work must never sit in the
+                    // foreground slot where `Esc` would cancel it into
+                    // "loading mailboxes — cancelled".
+                    let mut effects = vec![
+                        state
+                            .session
+                            .operations
+                            .start_background(OperationKind::LoadMailboxes),
+                    ];
+                    effects.extend(request_visible_page_background(
+                        state,
+                        state.messages.offset,
+                    ));
+                    effects
+                }
+                DraftRemovalReason::Sent => vec![
                     state
                         .session
                         .operations
                         .start_background(OperationKind::LoadMailboxes),
-                ];
-                effects.extend(request_visible_page_background(
-                    state,
-                    state.messages.offset,
-                ));
-                effects
+                ],
             }
-            DraftRemovalReason::Sent => vec![
-                state
-                    .session
-                    .operations
-                    .start_background(OperationKind::LoadMailboxes),
-            ],
-        },
+        }
         Ok(_) => unexpected_payload(id, "draft removal"),
         Err(failure) => match reason {
             DraftRemovalReason::Discard => open_error_modal(state, failure),
@@ -840,6 +905,12 @@ pub(crate) fn save_draft_completed(
                 composer
                     .draft
                     .confirm_saved(snapshot.revision, remote_id, state.session.clock);
+            // Optimistic Drafts counter (ticket ng42): the sidebar shows
+            // the folder content, and the first push added one copy; a
+            // replacement swap keeps the count.
+            if first_push {
+                state.adjust_drafts_count(1);
+            }
             if chain {
                 // Remain dirty and save again (plan §14): one follow-up
                 // save covering the newest revision. It supersedes nothing

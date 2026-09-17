@@ -75,6 +75,14 @@ pub enum OperationKind {
     Archive(MessageLocator),
     /// Move a message to trash (himalaya is trash-first).
     Trash(MessageLocator),
+    /// One batched archive of the whole selection (ticket j9bq): the
+    /// backend moves every locator in a single call, so a bulk archive
+    /// costs one IMAP session instead of one per message. Locators share
+    /// the mailbox the bulk action was pressed in.
+    ArchiveBulk(Vec<MessageLocator>),
+    /// One batched trash of the whole selection (ticket j9bq): see
+    /// [`OperationKind::ArchiveBulk`]; himalaya stays trash-first.
+    TrashBulk(Vec<MessageLocator>),
     /// Persist one draft revision (plan §14, ADR 0002): journal record +
     /// remote add-then-delete replacement. The snapshot freezes the exact
     /// revision saved, so a stale success can be detected and re-saved.
@@ -270,6 +278,8 @@ impl OperationKind {
             OperationKind::SetStarred { starred: false, .. } => "Unstarring",
             OperationKind::Archive(_) => "Archiving",
             OperationKind::Trash(_) => "Moving to trash",
+            OperationKind::ArchiveBulk(_) => "Archiving",
+            OperationKind::TrashBulk(_) => "Moving to trash",
             OperationKind::SaveDraft { .. } => "Saving draft",
             OperationKind::LoadDrafts => "Restoring drafts",
             OperationKind::DeleteDraft { reason, .. } => match reason {
@@ -471,6 +481,12 @@ impl OperationKind {
         match (self, older) {
             (OperationKind::Archive(newer), OperationKind::Archive(older))
             | (OperationKind::Trash(newer), OperationKind::Trash(older)) => newer == older,
+            // The bulk shapes coalesce the same way (ticket j9bq): a
+            // double-press of one bulk archive/trash must not re-run the
+            // backend move for messages whose ids already changed under
+            // the first run.
+            (OperationKind::ArchiveBulk(newer), OperationKind::ArchiveBulk(older))
+            | (OperationKind::TrashBulk(newer), OperationKind::TrashBulk(older)) => newer == older,
             _ => false,
         }
     }
