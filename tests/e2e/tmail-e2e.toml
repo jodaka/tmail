@@ -39,6 +39,11 @@ smtp.sasl.plain.username = "tmail"
 smtp.sasl.plain.password.raw = "tmailtmail"
 
 # Semantic roles map to real mailbox names. GreenMail exposes its INBOX as
-# `Inbox` and creates no other folders until a client does; set the
-# sent/drafts/trash/archive aliases here once the tests create those folders.
+# `Inbox` and creates no other folders until a client does; the E2E harness
+# creates Trash/Archive/Drafts/Sent before starting tmail (conftest.py), and
+# himalaya needs `mailbox.alias.trash` to make `message delete` trash-first.
 mailbox.alias.inbox = "Inbox"
+mailbox.alias.trash = "Trash"
+mailbox.alias.archive = "Archive"
+mailbox.alias.drafts = "Drafts"
+mailbox.alias.sent = "Sent"
