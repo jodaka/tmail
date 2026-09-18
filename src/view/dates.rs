@@ -39,8 +39,7 @@ mod tests {
     use chrono::TimeZone;
 
     fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<FixedOffset> {
-        FixedOffset::east_opt(3 * 3600)
-            .unwrap()
+        crate::domain::time::TZ_PLUS_3
             .with_ymd_and_hms(y, m, d, h, min, 0)
             .unwrap()
     }

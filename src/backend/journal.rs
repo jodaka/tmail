@@ -341,7 +341,7 @@ mod tests {
     fn snapshot(local_id: &str, revision: u64, body: &str) -> DraftSnapshot {
         DraftSnapshot {
             local_id: DraftId(String::from(local_id)),
-            message_id: Some(format!("<{local_id}@tmail.local>")),
+            message_id: Some(format!("<{local_id}{}>", crate::domain::MESSAGE_ID_SUFFIX)),
             in_reply_to: None,
             references: None,
             remote_id: None,

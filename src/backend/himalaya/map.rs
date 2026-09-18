@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, FixedOffset, TimeZone};
 
 use super::dto;
+use crate::domain::time;
 use crate::domain::{
     Address, Attachment, Mailbox, MailboxId, MailboxRole, Message, MessageHeaders, MessageId,
     MessageLocator, MessageSummary, Page,
@@ -78,7 +79,10 @@ fn map_envelope(dto: dto::EnvelopeDto, mailbox_id: &MailboxId) -> MessageSummary
         // `envelope list` carries no snippet (ADR 0001 finding 2); Tmail
         // fills it only once full messages are fetched (Phase 4+).
         snippet: None,
-        timestamp: dto.date.unwrap_or_else(epoch),
+        // Missing/absent Date header: the Unix epoch renders as a stable,
+        // obviously-old date instead of inventing "now" (ADR 0001
+        // finding 2).
+        timestamp: dto.date.unwrap_or_else(time::epoch),
         is_read: has_flag(&dto.flags, "\\Seen", "seen"),
         is_starred: has_flag(&dto.flags, "\\Flagged", "flagged"),
         has_attachments: dto.has_attachment.unwrap_or(false),
@@ -105,14 +109,6 @@ fn has_flag(flags: &[dto::FlagDto], raw: &str, iana: &str) -> bool {
     flags
         .iter()
         .any(|flag| flag.iana.as_deref() == Some(iana) || flag.raw.eq_ignore_ascii_case(raw))
-}
-
-fn epoch() -> DateTime<FixedOffset> {
-    // Fallback for a missing/absent Date header: the Unix epoch renders as
-    // a stable, obviously-old date instead of inventing "now".
-    DateTime::from_timestamp(0, 0)
-        .expect("epoch is valid")
-        .with_timezone(&FixedOffset::east_opt(0).expect("UTC offset is valid"))
 }
 
 /// Map a `message read` dump into one domain message (plan §7). Missing

@@ -1102,8 +1102,6 @@ mod tests {
     /// The envelope fallback timestamp (missing/unparseable Date) renders
     /// as an explicit unknown instead of 1970.
     fn fixed_epoch() -> chrono::DateTime<chrono::FixedOffset> {
-        chrono::DateTime::from_timestamp(0, 0)
-            .expect("epoch")
-            .with_timezone(&chrono::FixedOffset::east_opt(0).expect("utc"))
+        crate::domain::time::epoch()
     }
 }

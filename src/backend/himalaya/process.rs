@@ -291,10 +291,13 @@ fn nonempty_lossy(bytes: &[u8]) -> Option<String> {
 }
 
 /// Lossy, bounded preview for error messages; never panics on bad bytes.
+/// (Coincidentally the same 200 as `view::rich::MAX_PREVIEW_WIDTH`; that
+/// one caps list-row previews, this one caps process-output snippets in
+/// error details.)
 fn snippet(bytes: &[u8]) -> String {
-    const MAX: usize = 200;
-    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX)]);
-    if bytes.len() > MAX {
+    const MAX_SNIPPET_BYTES: usize = 200;
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_SNIPPET_BYTES)]);
+    if bytes.len() > MAX_SNIPPET_BYTES {
         format!("{text}…")
     } else {
         text.into_owned()

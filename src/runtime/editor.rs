@@ -77,7 +77,7 @@ fn write_secure(path: &Path, body: &str) -> anyhow::Result<()> {
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)
+            .mode(crate::domain::private_fs::OWNER_FILE_MODE)
             .open(path)
             .context("create temporary file")?
     };

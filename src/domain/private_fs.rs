@@ -11,6 +11,14 @@
 use std::fs;
 use std::path::Path;
 
+/// Owner-only file mode (`rw-------`): the one private-file mode every
+/// writer shares, named once so a looser literal cannot sneak in (ticket
+/// 7ayf).
+pub const OWNER_FILE_MODE: u32 = 0o600;
+
+/// Owner-only directory mode (`rwx------`) for private-storage ancestors.
+pub const OWNER_DIR_MODE: u32 = 0o700;
+
 /// Create `dir` and any missing ancestor, owner-only on Unix. The mode
 /// applies to the directories this call creates; existing ancestors keep
 /// theirs and are repaired by [`restrict_dir_chain`] instead.
@@ -20,7 +28,7 @@ pub fn create_dir_all(dir: &Path) -> std::io::Result<()> {
         use std::os::unix::fs::DirBuilderExt;
         fs::DirBuilder::new()
             .recursive(true)
-            .mode(0o700)
+            .mode(OWNER_DIR_MODE)
             .create(dir)
     }
     #[cfg(not(unix))]
@@ -41,7 +49,7 @@ pub fn restrict_dir_chain(repair_root: &Path, dir: &Path) {
             if !path.starts_with(repair_root) {
                 break;
             }
-            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(OWNER_DIR_MODE));
             if path == repair_root {
                 break;
             }
@@ -59,7 +67,7 @@ pub fn restrict_file(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(OWNER_FILE_MODE));
     }
     #[cfg(not(unix))]
     {
@@ -77,7 +85,7 @@ pub fn open(path: &Path) -> std::io::Result<fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(OWNER_FILE_MODE);
     }
     let file = options.open(path)?;
     #[cfg(unix)]
@@ -85,7 +93,7 @@ pub fn open(path: &Path) -> std::io::Result<fs::File> {
         use std::os::unix::fs::PermissionsExt;
         // `mode` applies only to a fresh file; an existing one keeps its
         // old permissions, so set them explicitly.
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.set_permissions(fs::Permissions::from_mode(OWNER_FILE_MODE))?;
     }
     Ok(file)
 }

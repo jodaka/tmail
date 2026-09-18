@@ -1118,9 +1118,7 @@ fn reader_handles_missing_fields() {
     summary.subject = String::new();
     summary.from = Vec::new();
     summary.to = Vec::new();
-    summary.timestamp = chrono::DateTime::from_timestamp(0, 0)
-        .expect("epoch")
-        .with_timezone(&chrono::FixedOffset::east_opt(0).expect("utc"));
+    summary.timestamp = tmail::domain::time::epoch();
     let message = Message {
         id: MessageId(String::from("m2")),
         mailbox_id: MailboxId(String::from("inbox")),

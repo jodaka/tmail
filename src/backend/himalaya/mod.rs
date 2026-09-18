@@ -79,7 +79,9 @@ async fn test_account_mailbox_names(
         {
             use std::os::unix::fs::PermissionsExt;
             temp.as_file()
-                .set_permissions(std::fs::Permissions::from_mode(0o600))
+                .set_permissions(std::fs::Permissions::from_mode(
+                    crate::domain::private_fs::OWNER_FILE_MODE,
+                ))
                 .map_err(|err| {
                     BackendError::File(format!("could not secure the test config: {err}"))
                 })?;

@@ -8,6 +8,7 @@
 
 use crate::app::route::{MailboxRoute, Route};
 use crate::app::state::{AppState, Loadable};
+use crate::domain::time::{MOCK_NOW_SECS, TZ_PLUS_3};
 use crate::domain::{
     Address, Mailbox, MailboxId, MailboxRole, Message, MessageHeaders, MessageId, MessageSummary,
     Page,
@@ -17,15 +18,10 @@ use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 /// Page size used by the mock fixtures (plan §17 default).
 pub const PAGE_SIZE: usize = 20;
 
-const TZ_PLUS_3: FixedOffset = match FixedOffset::east_opt(3 * 3600) {
-    Some(tz) => tz,
-    None => unreachable!(),
-};
-
 /// The mock "current time" the UI clock shows; message timestamps are
 /// authored relative to it. `2026-09-02 10:47:00 +03:00`.
 pub fn now() -> DateTime<FixedOffset> {
-    DateTime::from_timestamp(1_788_335_220, 0)
+    crate::domain::time::from_unix(MOCK_NOW_SECS)
         .expect("valid epoch")
         .with_timezone(&TZ_PLUS_3)
 }
