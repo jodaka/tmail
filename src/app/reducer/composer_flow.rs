@@ -1,6 +1,6 @@
 //! External editor (plan §14, Phase 11) and composer lifecycle: open,
 //! park, secure, leave, autosave, and the crash-safe draft plumbing.
-use super::navigation::{close_reader, request_page};
+use super::navigation::{close_reader, keep_mailbox_visible, request_page};
 use super::search_refresh::leave_search;
 use crate::app::action::SearchEdit;
 use crate::app::composer::ComposerState;
@@ -274,6 +274,8 @@ pub(crate) fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Ve
         .as_loaded()
         .and_then(|ms| ms.iter().position(|m| &m.id == mailbox_id))
         .unwrap_or(0);
+    // The switched mailbox (e.g. Drafts while composing) stays on screen.
+    keep_mailbox_visible(state);
     state.selection = 0;
     state.list_scroll = 0;
     state.session.focus = Focus::MessageList;

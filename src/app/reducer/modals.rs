@@ -107,21 +107,43 @@ pub(crate) fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<
     }
 }
 
-/// Help handling (user request): the popup is inert except for its own
-/// close keys — Esc, `?`, or `Ctrl+h` (whichever the user pressed) all
-/// close, restoring the focus underneath.
+/// Help handling (user request). The popup closes on Esc, `?`, or
+/// `Ctrl+h` — whichever the user pressed — restoring the focus underneath;
+/// the arrows (and the wheel's Move actions) scroll the entry table when
+/// it outgrows the terminal, clamped by the same layout math the renderer
+/// draws (ticket 6t30). Everything else is swallowed while open.
 pub(crate) fn help_modal_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
-    let Some(Overlay::Help(dialog)) = state.session.overlay.take() else {
+    // The table the popup shows: derived live from the keymap for the
+    // screen underneath, so a rebound config scrolls like the default one.
+    let len = match &state.session.overlay {
+        Some(Overlay::Help(dialog)) => state
+            .settings
+            .keymap
+            .help_entries(dialog.previous_focus)
+            .len(),
+        // Only the help popup routes here.
+        _ => return Vec::new(),
+    };
+    // Viewport math comes from the renderer's layout, so the clamp the
+    // reducer computes always matches what is drawn.
+    let visible = crate::view::overlay::help_visible_rows(state.session.size).max(1);
+    let max_scroll = crate::view::overlay::help_max_scroll(len, state.session.size);
+    let Some(Overlay::Help(dialog)) = state.session.overlay.as_mut() else {
         return Vec::new();
     };
+    dialog.scroll = dialog.scroll.min(max_scroll);
     match action {
+        Action::MoveUp => dialog.scroll = dialog.scroll.saturating_sub(1),
+        Action::MoveDown => dialog.scroll = (dialog.scroll + 1).min(max_scroll),
+        Action::PagePrevious => dialog.scroll = dialog.scroll.saturating_sub(visible),
+        Action::PageNext => dialog.scroll = (dialog.scroll + visible).min(max_scroll),
         Action::BackOrCancel | Action::OpenHelp | Action::Activate => {
-            state.session.focus = dialog.previous_focus;
+            let focus = dialog.previous_focus;
+            state.session.overlay = None;
+            state.session.focus = focus;
         }
-        _ => {
-            // Swallowed: restore the dialog (everything else is inert).
-            state.session.overlay = Some(Overlay::Help(dialog));
-        }
+        // Swallowed: everything else is inert while the popup is open.
+        _ => {}
     }
     Vec::new()
 }
@@ -144,6 +166,7 @@ pub(crate) fn open_help(state: &mut AppState) -> Vec<Effect> {
         return Vec::new();
     }
     state.session.overlay = Some(Overlay::Help(HelpDialog {
+        scroll: 0,
         previous_focus: state.session.focus,
     }));
     state.session.focus = Focus::Help;
@@ -461,7 +484,33 @@ pub(crate) fn attachment_dialog_reduce(state: &mut AppState, action: &Action) ->
                 AttachmentBrowse::Parent | AttachmentBrowse::Open => None,
             };
             if let Some(input) = pure {
-                dialog.browse(input);
+                if dialog.error.is_some() {
+                    // The wrapped error is on stage: the arrows scroll it
+                    // instead of moving the explorer (ticket 6t30 — the
+                    // detail used to be one clipped line). Enter and the
+                    // committed steps below start the next move and clear
+                    // the error.
+                    let viewport =
+                        crate::view::overlay::attachment_error_viewport(state.session.size).max(1);
+                    let detail = dialog.error.clone().expect("error on stage");
+                    let max = crate::view::overlay::attachment_error_max_scroll(
+                        &detail,
+                        state.session.size,
+                    );
+                    dialog.error_scroll = match input {
+                        ratatui_explorer::Input::Up => dialog.error_scroll.saturating_sub(1),
+                        ratatui_explorer::Input::Down => (dialog.error_scroll + 1).min(max),
+                        ratatui_explorer::Input::PageUp => {
+                            dialog.error_scroll.saturating_sub(viewport)
+                        }
+                        ratatui_explorer::Input::PageDown => {
+                            (dialog.error_scroll + viewport).min(max)
+                        }
+                        _ => dialog.error_scroll,
+                    };
+                } else {
+                    dialog.browse(input);
+                }
                 Vec::new()
             } else if let Some(path) = dialog.step_target(*browse == AttachmentBrowse::Parent) {
                 if dialog.listing {
@@ -469,6 +518,7 @@ pub(crate) fn attachment_dialog_reduce(state: &mut AppState, action: &Action) ->
                 } else {
                     dialog.listing = true;
                     dialog.error = None;
+                    dialog.error_scroll = 0;
                     vec![
                         state
                             .session
@@ -489,6 +539,7 @@ pub(crate) fn attachment_dialog_reduce(state: &mut AppState, action: &Action) ->
                     } else {
                         dialog.listing = true;
                         dialog.error = None;
+                        dialog.error_scroll = 0;
                         vec![
                             state
                                 .session
@@ -500,6 +551,7 @@ pub(crate) fn attachment_dialog_reduce(state: &mut AppState, action: &Action) ->
                 None => match dialog.selected_file() {
                     Some(file) => {
                         dialog.error = None;
+                        dialog.error_scroll = 0;
                         vec![
                             state
                                 .session
@@ -516,6 +568,23 @@ pub(crate) fn attachment_dialog_reduce(state: &mut AppState, action: &Action) ->
             let focus = dialog.previous_focus;
             state.session.overlay = None;
             state.session.focus = focus;
+            Vec::new()
+        }
+        // Wheel events arrive as Move actions: while the error is on
+        // stage they scroll it the same way the arrows do (otherwise the
+        // wheel is swallowed — the explorer has no cursor of its own).
+        Action::MoveUp | Action::MoveDown if dialog.error.is_some() => {
+            let max = crate::view::overlay::attachment_error_max_scroll(
+                dialog.error.as_deref().expect("error on stage"),
+                state.session.size,
+            );
+            let delta = if matches!(action, Action::MoveUp) {
+                -1
+            } else {
+                1
+            };
+            dialog.error_scroll =
+                (dialog.error_scroll as i64 + delta).clamp(0, max as i64) as usize;
             Vec::new()
         }
         // Everything else is swallowed while the dialog is open.

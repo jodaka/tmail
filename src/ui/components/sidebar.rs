@@ -46,8 +46,10 @@ pub fn render(
     // Mailbox list: backend-driven since Phase 2, so all loadable states
     // render safely (plan §16: empty results are valid). The backend hands
     // the listing folders-first, so the first label follows the blank
-    // separator row; visual rows and state indices diverge there, so `y`
-    // is counted separately from `i`.
+    // separator row. The window walks the sidebar's visual rows — mailbox
+    // rows plus the separator — from the same pure math the reducer keeps
+    // the cursor with (`sidebar_visual_row`/`sidebar_max_scroll`), so the
+    // drawn window and the bookkeeping cannot disagree (ticket 6t30).
     match &state.mailboxes {
         crate::app::state::Loadable::Loaded(mailboxes) if !mailboxes.is_empty() => {
             // While composing, the Drafts folder is the active one (the
@@ -56,17 +58,19 @@ pub fn render(
             let active_id = state.sidebar_active_mailbox_id();
             let bottom = rows.y + rows.height;
             let first_label = mailboxes.iter().position(|m| m.is_label());
-            let mut y = rows.y;
+            let scroll = state
+                .sidebar_scroll
+                .min(crate::view::layout::sidebar_max_scroll(
+                    mailboxes.len(),
+                    first_label,
+                    state.session.size,
+                ));
             for (i, mailbox) in mailboxes.iter().enumerate() {
-                if Some(i) == first_label && i > 0 {
-                    // The blank separator row: the sidebar's panel fill
-                    // already covers it, so nothing is drawn — the row is
-                    // simply skipped and stays unclickable.
-                    if y >= bottom {
-                        break;
-                    }
-                    y += 1;
+                let row = crate::view::layout::sidebar_visual_row(i, first_label);
+                if row < scroll {
+                    continue;
                 }
+                let y = rows.y + (row - scroll) as u16;
                 if y >= bottom {
                     break;
                 }
@@ -90,7 +94,6 @@ pub fn render(
                 // Clicking a folder selects it; clicking the selected one
                 // switches (arrows + Enter, plan §10).
                 hits.push(row_area, ClickTarget::Mailbox(i));
-                y += 1;
             }
         }
         crate::app::state::Loadable::Loaded(_) => {

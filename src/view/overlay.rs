@@ -176,6 +176,77 @@ pub fn mailboxes_max_scroll(mailbox_count: usize, size: (u16, u16)) -> usize {
     mailbox_count.saturating_sub(mailboxes_visible_rows(size))
 }
 
+/// Width of the attachment chooser for one terminal size: the width half
+/// of the dialog's `layout`, shared so the wrapped error detail the
+/// reducer scrolls is measured at exactly the width the renderer clips
+/// to (ticket 6t30).
+pub fn attachment_dialog_width(size: (u16, u16)) -> u16 {
+    (size.0 * 3 / 4).clamp(46, 96).min(size.0.max(1))
+}
+
+/// Rows the attachment chooser's error viewport shows at once (the status
+/// strip grows from one row to this while an error is displayed; the
+/// list above shrinks by the same amount and never drops below two
+/// rows). Ticket 6t30: a wrapped detail used to lose every line after
+/// the first.
+pub fn attachment_error_viewport(size: (u16, u16)) -> usize {
+    const MAX_ERROR_LINES: usize = 4;
+    let height = (size.1 * 3 / 4).clamp(12, 30).min(size.1.max(1)) as usize;
+    // Inside borders + margins: cwd row + [list] + error rows + blank row.
+    // At least one line shows even in a degenerate window; a larger
+    // terminal shows no more than MAX_ERROR_LINES at once.
+    height.saturating_sub(7).clamp(1, MAX_ERROR_LINES)
+}
+
+/// Wrapped lines of the chooser's error detail (the same width the
+/// renderer clips to), for the renderer and the reducer.
+pub fn attachment_error_lines(detail: &str, size: (u16, u16)) -> Vec<String> {
+    wrap(
+        detail,
+        attachment_dialog_width(size).saturating_sub(4).max(1) as usize,
+    )
+}
+
+/// Largest valid `error_scroll` for one attachment detail at `size` (what
+/// the reducer clamps against).
+pub fn attachment_error_max_scroll(detail: &str, size: (u16, u16)) -> usize {
+    let viewport = attachment_error_viewport(size);
+    attachment_error_lines(detail, size)
+        .len()
+        .saturating_sub(viewport)
+}
+
+/// Geometry of the shortcuts help popup (user request) for one terminal
+/// size and entry count. Same anatomy as the theme picker — height
+/// budgets the borders, the one-line margins, and the hint slot — but
+/// sized to the full entry table when it fits (the help is read, not
+/// navigated); a short terminal clamps the dialog and the overflow
+/// scrolls.
+pub fn help_layout(size: (u16, u16), entry_count: usize) -> PickerLayout {
+    let width = 46u16.min(size.0.max(1));
+    let height = (entry_count.min(1000) as u16)
+        .saturating_add(5)
+        .min(size.1.max(1));
+    let visible_rows = height.saturating_sub(5).max(1) as usize;
+    PickerLayout {
+        area: centered(size, width, height),
+        visible_rows,
+    }
+}
+
+/// Rows visible in the shortcuts help at `size` (what the reducer keeps
+/// the scroll offset inside), independent of the entry count.
+pub fn help_visible_rows(size: (u16, u16)) -> usize {
+    let height = size.1.max(1);
+    height.saturating_sub(5).max(1) as usize
+}
+
+/// Largest valid `scroll` for the help entry table at `size` (what the
+/// reducer clamps against).
+pub fn help_max_scroll(entry_count: usize, size: (u16, u16)) -> usize {
+    entry_count.saturating_sub(help_visible_rows(size))
+}
+
 /// Geometry of the account-switch confirm dialog (ticket c0n0): sized to
 /// its content, centered, never exceeding the terminal — like the error
 /// modal. `operations`/`unsaved` say which optional lines the dialog

@@ -2437,6 +2437,86 @@ fn selection_mode_status_bar_lists_the_bulk_buttons() {
     );
 }
 
+#[test]
+fn sidebar_scroll_shows_later_mailboxes_and_the_active_one() {
+    let mut state = mock_initial_state();
+    state.session.size = (152, 24); // full mode: 17 visible sidebar rows
+    let mut mailboxes = mock::mock_mailboxes();
+    // Twenty labels after the six system folders (the separator sits
+    // before the first label, visual row 6).
+    for n in 0..20 {
+        mailboxes.push(tmail::domain::Mailbox {
+            id: tmail::domain::MailboxId(format!("label{n}")),
+            name: format!("Label {n}"),
+            role: None,
+            unread_count: None,
+            total_count: None,
+        });
+    }
+    state.mailboxes = tmail::app::state::Loadable::Loaded(mailboxes);
+    state.session.focus = tmail::app::Focus::Sidebar;
+    // The reducer's window math on the 27-visual-row list: the cursor
+    // walked to the last mailbox and the window followed.
+    state.mailbox_selection = 25;
+    state.sidebar_scroll = 10;
+    let (buffer, hits) = draw_with_hits_at(&mut state, &[], 152, 24);
+    let text = text_of(&buffer);
+    assert!(
+        text.contains("Label 19"),
+        "the tail mailbox is drawn:\n{text}"
+    );
+    assert!(
+        !text.contains("Inbox"),
+        "the first folder scrolled off:\n{text}"
+    );
+    // The visible tail rows stay clickable where they are drawn.
+    let needle = "Label 19";
+    let needle_len = needle.len() as u16;
+    let (mut lx, mut ly) = (0u16, 0u16);
+    'label: for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width.saturating_sub(needle_len) {
+            let symbol: String = (0..needle_len)
+                .map(|dx| buffer[(x + dx, y)].symbol().chars().next().unwrap_or(' '))
+                .collect();
+            if symbol == needle {
+                lx = x;
+                ly = y;
+                break 'label;
+            }
+        }
+    }
+    assert_ne!(lx + ly, 0, "Label 19 drawn somewhere");
+    assert_eq!(
+        hits.hit_test(lx + 1, ly, false),
+        Some(tmail::app::action::ClickTarget::Mailbox(25)),
+        "the scrolled row answers clicks"
+    );
+}
+
+#[test]
+fn selection_note_persists_into_reader_and_composer() {
+    let mut state = mock_initial_state();
+    state.session.focus = tmail::app::Focus::MessageList;
+    // Select the page, then open a message: the reader keeps its own hint
+    // row and additionally announces the persistent marks (ticket 6t30).
+    let (buffer, _) =
+        draw_with_hits_at(&mut state, &[Action::SelectAll, Action::Activate], 152, 40);
+    let text = text_of(&buffer);
+    assert!(text.contains("selected"), "selection noted:\n{text}");
+    assert!(text.contains("back"), "reader hints survive:\n{text}");
+
+    // Back to the list, then compose: the note rides the composer hints.
+    let (buffer, _) = draw_with_hits_at(
+        &mut state,
+        &[Action::BackOrCancel, Action::Compose],
+        152,
+        40,
+    );
+    let text = text_of(&buffer);
+    assert!(text.contains("selected"), "marks survive compose:\n{text}");
+    assert!(text.contains("send"), "composer hints survive:\n{text}");
+}
+
 /// [`draw_with_hits`] after applying actions.
 fn draw_with_hits_at(
     state: &mut tmail::app::AppState,

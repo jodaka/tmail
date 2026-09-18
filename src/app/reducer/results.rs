@@ -1009,6 +1009,7 @@ pub(crate) fn attachment_validated(
             let detail = failure.detail.clone();
             if let Some(Overlay::AttachmentExplorer(dialog)) = state.session.overlay.as_mut() {
                 dialog.error = Some(detail);
+                dialog.error_scroll = 0;
             }
             Vec::new()
         }
@@ -1050,6 +1051,7 @@ pub(crate) fn attachment_listing_ready(
             if let Some(Overlay::AttachmentExplorer(dialog)) = state.session.overlay.as_mut() {
                 dialog.listing = false;
                 dialog.error = Some(detail);
+                dialog.error_scroll = 0;
             }
             Vec::new()
         }

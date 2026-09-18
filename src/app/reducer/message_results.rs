@@ -2,7 +2,8 @@
 //! focus, the loaded/moved message application, the mailbox listing and
 //! page application, and the list previews (ticket wxtx).
 use super::navigation::{
-    close_reader, keep_selection_visible, reader_scroll_bounds, request_page, request_visible_page,
+    close_reader, keep_mailbox_visible, keep_selection_visible, reader_scroll_bounds, request_page,
+    request_visible_page,
 };
 use super::results::unexpected_payload;
 use crate::app::effect::Effect;
@@ -364,6 +365,9 @@ pub(crate) fn refresh_sidebar_listing(state: &mut AppState, mailboxes: Vec<Mailb
         None => state.mailbox_selection,
     };
     state.clamp_mailbox_selection();
+    // The re-pointed cursor (possibly at a new index in the fresh
+    // enumeration) stays on screen.
+    keep_mailbox_visible(state);
 }
 
 /// Shared body of the mailbox application (plan §19 Phase 2): pick the
@@ -380,6 +384,7 @@ pub(crate) fn apply_mailbox_listing(state: &mut AppState, mailboxes: Vec<Mailbox
             let mailbox_id = mailboxes[index].id.clone();
             state.session.routes = vec![Route::Mailbox(MailboxRoute { mailbox_id })];
             state.mailbox_selection = index;
+            keep_mailbox_visible(state);
             state.selection = 0;
             state.list_scroll = 0;
             state.messages = Page::empty(state.messages.limit);

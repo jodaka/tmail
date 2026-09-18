@@ -17,9 +17,10 @@ use crate::ui::text;
 use crate::ui::theme::Theme;
 
 /// Dialog geometry for one terminal size: generous — a proper chooser —
-/// but always inside the terminal with a margin.
+/// but always inside the terminal with a margin. The width half is shared
+/// with `view::overlay` (the error viewport's wrap width, ticket 6t30).
 fn layout(size: (u16, u16)) -> Rect {
-    let width = (size.0 * 3 / 4).clamp(46, 96).min(size.0.max(1));
+    let width = crate::view::overlay::attachment_dialog_width(size);
     let height = (size.1 * 3 / 4).clamp(12, 30).min(size.1.max(1));
     centered(size, width, height)
 }
@@ -64,12 +65,18 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
     );
 
     // The listing itself, between the directory line and the bottom rows:
-    // one line each for cwd, status, and key hints.
+    // one line for cwd, then the status strip — one row for the
+    // listing/hint, the error's wrapped viewport when one is showing.
+    let status_rows = if dialog.error.is_some() {
+        crate::view::overlay::attachment_error_viewport(state.session.size) as u16
+    } else {
+        1
+    };
     let list = Rect {
         x: inner.x,
         y: inner.y + 1,
         width: inner.width,
-        height: inner.height.saturating_sub(3),
+        height: inner.height.saturating_sub(2 + status_rows).max(1),
     };
     if let Some(explorer) = dialog.explorer.as_ref() {
         frame.render_widget_ref(explorer.widget(), list);
@@ -83,34 +90,45 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
         );
     }
 
-    // Status row: the last failure, the in-flight listing, or the hint
-    // that Enter attaches the selected file. The status strip is one row,
-    // so a wrapped detail keeps its first line plus an ellipsis — the
-    // truncation is never silent (review s843).
-    let (status, style) = match (&dialog.error, dialog.listing) {
-        (Some(detail), _) => {
-            let mut wrapped = text::wrap(detail, inner_w).into_iter();
-            let mut first = wrapped.next().unwrap_or_default();
-            // More wrapped lines exist: never truncate them silently.
-            if wrapped.next().is_some() {
-                first.push('…');
-            }
-            (first, Style::new().fg(theme.warning))
-        }
-        (None, true) => (String::from("Listing…"), Style::new().fg(theme.dim)),
-        (None, false) => (
-            String::from("(↵ attaches the selected file)"),
-            Style::new().fg(theme.dim),
-        ),
-    };
-    render_status_line(
-        frame,
-        inner,
-        inner_w,
-        inner.height.saturating_sub(2) as usize,
-        status,
-        style,
-    );
+    // Status strip: the last failure, the in-flight listing, or the hint
+    // that Enter attaches the selected file. An error grows the strip
+    // into a scrollable viewport (ticket 6t30: a wrapped detail used to
+    // lose every line after the first) — the clamp is the shared math,
+    // the same offset the reducer moves.
+    let status_row = inner.height.saturating_sub(1 + status_rows);
+    if let Some(detail) = &dialog.error {
+        let lines = crate::view::overlay::attachment_error_lines(detail, state.session.size);
+        let scroll = dialog
+            .error_scroll
+            .min(crate::view::overlay::attachment_error_max_scroll(
+                detail,
+                state.session.size,
+            ));
+        let visible: Vec<Line<'_>> = lines
+            .into_iter()
+            .skip(scroll)
+            .take(status_rows as usize)
+            .map(|line| Line::from(Span::styled(line, Style::new().fg(theme.warning))))
+            .collect();
+        frame.render_widget(
+            Paragraph::new(visible),
+            Rect {
+                x: inner.x,
+                y: inner.y + status_row,
+                width: inner.width,
+                height: status_rows,
+            },
+        );
+    } else {
+        let (status, style) = match dialog.listing {
+            true => (String::from("Listing…"), Style::new().fg(theme.dim)),
+            false => (
+                String::from("(↵ attaches the selected file)"),
+                Style::new().fg(theme.dim),
+            ),
+        };
+        render_status_line(frame, inner, inner_w, status_row as usize, status, style);
+    }
 
     // The hint sits in the label slot one row below the content rect —
     // separated from it by the rect's last (blank) row, adjacent to the

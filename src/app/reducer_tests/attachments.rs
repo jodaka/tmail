@@ -1197,6 +1197,72 @@ fn failed_listing_keeps_the_chooser_open_with_the_detail() {
 }
 
 #[test]
+fn a_wrapped_error_scrolls_instead_of_clipping() {
+    let mut s = state();
+    let (_, id) = open_attach_dialog(&mut s);
+    let (_guard, dir) = chooser_dir();
+    land_listing(&mut s, id, &dir);
+    // Down twice: ../ → docs/ → notes.txt; submit it.
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
+    let detail = "abcdefghi ".repeat(100).trim_end().to_string();
+    reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Err(OperationFailure {
+                code: None,
+                detail: detail.clone(),
+                retry: Some(kind.retry_spec()),
+                ambiguous: false,
+            }),
+        }),
+    );
+    let max = crate::view::overlay::attachment_error_max_scroll(&detail, s.session.size);
+    assert!(max > 0, "fixture assumes more lines than the viewport");
+    // The arrows scroll the wrapped detail (the same clamp the renderer
+    // draws); the explorer selection underneath is untouched.
+    {
+        reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+        let dialog = match s.session.overlay.as_ref().unwrap() {
+            Overlay::AttachmentExplorer(dialog) => dialog,
+            _ => panic!("chooser open"),
+        };
+        assert_eq!(dialog.error_scroll, 1);
+    }
+    // Clamped at the last window.
+    for _ in 0..20 {
+        reduce(&mut s, Action::AttachmentBrowse(AttachmentBrowse::Down));
+    }
+    {
+        let dialog = match s.session.overlay.as_ref().unwrap() {
+            Overlay::AttachmentExplorer(dialog) => dialog,
+            _ => panic!("chooser open"),
+        };
+        assert_eq!(dialog.error_scroll, max);
+    }
+    // The wheel scrolls the on-stage detail the same way.
+    reduce(&mut s, Action::MoveUp);
+    {
+        let dialog = match s.session.overlay.as_ref().unwrap() {
+            Overlay::AttachmentExplorer(dialog) => dialog,
+            _ => panic!("chooser open"),
+        };
+        assert_eq!(dialog.error_scroll, max - 1);
+    }
+    // Enter (the selected file again) starts the next step and clears the
+    // error with the scroll window.
+    let _ = reduce(&mut s, Action::Activate);
+    let dialog = match s.session.overlay.as_ref().unwrap() {
+        Overlay::AttachmentExplorer(dialog) => dialog,
+        _ => panic!("chooser open"),
+    };
+    assert!(dialog.error.is_none());
+    assert_eq!(dialog.error_scroll, 0);
+}
+
+#[test]
 fn stale_results_are_dropped() {
     let mut s = state();
     // Esc while validating: the result must not attach anything.

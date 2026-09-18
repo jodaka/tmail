@@ -314,6 +314,12 @@ pub struct AppState {
     pub mailboxes: Loadable<Vec<Mailbox>>,
     /// Index into the loaded mailbox list: the sidebar selection.
     pub mailbox_selection: usize,
+    /// First visual sidebar row currently drawn, kept by the reducer so the
+    /// mailbox cursor stays on screen (ticket 6t30: a long mailbox list
+    /// used to clip past the bottom with no scroll window). Counts the
+    /// sidebar's visual rows — the blank separator before the label group
+    /// is one of them (`view::layout::sidebar_visual_row`).
+    pub sidebar_scroll: usize,
     /// The visible message page for the active route's mailbox.
     pub messages: Page<MessageSummary>,
     /// Index into `messages.items`; always valid or the list is empty.
@@ -353,6 +359,7 @@ impl AppState {
         Self {
             mailboxes: Loadable::Loading,
             mailbox_selection: 0,
+            sidebar_scroll: 0,
             messages: Page::empty(page_size.max(1)),
             selection: 0,
             selected: HashSet::new(),
