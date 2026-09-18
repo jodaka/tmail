@@ -998,7 +998,10 @@ fn parse_editor(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut L
 /// Resolve an editor value into an argv (Phase 11.4): `"builtin"` is the
 /// builtin editor (`None`); `"$EDITOR"` resolves from the environment;
 /// anything else is program + arguments split on whitespace, spawned
-/// directly — never a shell (plan §14 step 4).
+/// directly — never a shell (plan §14 step 4). This split *is* one half
+/// of the argv-only invariant [`validate_plain_command`] enforces: the
+/// grammar lives in these two places together, and a change (quoted
+/// paths, ticket hkmh) must land in both.
 pub fn resolve_editor_command(editor: &str) -> Option<Vec<String>> {
     match editor {
         "builtin" => None,
@@ -1036,16 +1039,36 @@ fn validate_editor_with(editor: &str, editor_env: Option<String>) -> Result<(), 
     validate_plain_command(editor, "the [tmail.composer].composer.editor setting")
 }
 
-/// One plain command line (editor setting, `password.cmd`): Tmail never
-/// spawns a shell (plan §14 step 4, ADR 0003 §3.2 W4), so shell
-/// metacharacters are rejected, and the program must exist — found as an
-/// absolute/local path or on PATH. Err carries a full user-facing message
-/// prefixed with `subject`.
+/// The punctuation an argv-only plain command may carry beyond Unicode
+/// alphanumerics and the whitespace separator: the characters real
+/// flags, paths, and secret commands need (`-`, `_`, `.`, `/`, `:`, `=`,
+/// `+`, `@`). Everything with shell meaning — globs, quotes, backslash,
+/// `$`, `~`, redirections, pipes, control characters — is refused, so a
+/// future grammar change (quoted paths, ticket hkmh) can only widen this
+/// set deliberately, on the record.
+const PLAIN_COMMAND_PUNCTUATION: [char; 8] = ['-', '_', '.', '/', ':', '=', '+', '@'];
+
+/// One plain command line (editor setting, `password.cmd`). Invariant
+/// (ticket x4gj): *argv-only* — the command splits on whitespace into a
+/// program plus arguments (see [`resolve_editor_command`]) and every
+/// argument is passed to the spawned process verbatim: no shell, no
+/// quoting, no expansion of any character. The check is an allowlist,
+/// not the old metacharacter denylist: characters outside Unicode
+/// alphanumerics, whitespace, and [`PLAIN_COMMAND_PUNCTUATION`] are
+/// refused, with the offending character named. A config the old
+/// denylist accepted with a glob, `~`, or `$HOME` now fails on purpose —
+/// argv-only spawn never honored those spellings, so accepting them
+/// would silently betray what the user wrote. The program must also
+/// exist — found as an absolute/local path or on PATH. Err carries a
+/// full user-facing message prefixed with `subject`.
 pub fn validate_plain_command(command: &str, subject: &str) -> Result<(), String> {
-    const FORBIDDEN: [char; 10] = ['|', '&', ';', '<', '>', '`', '$', '\\', '"', '\''];
-    if command.chars().any(|c| FORBIDDEN.contains(&c)) {
+    if let Some(ch) = command.chars().find(|ch| {
+        !ch.is_alphanumeric() && !ch.is_whitespace() && !PLAIN_COMMAND_PUNCTUATION.contains(ch)
+    }) {
         return Err(format!(
-            "{subject} must be a plain command without shell metacharacters"
+            "{subject} must be an argv-only command (program plus whitespace-separated \
+             arguments, spawned without a shell; no quoting, globs, or expansion): \
+             character {ch:?} is not allowed"
         ));
     }
     let Some(program) = command.split_whitespace().next() else {
@@ -1750,11 +1773,12 @@ mod tests {
                 .unwrap_err()
                 .contains("$EDITOR is not set")
         );
-        // Shell metacharacters are rejected: Tmail never spawns a shell.
+        // Quotes and other non-argv characters are rejected: the command
+        // is an argv-only line, spawned without a shell (ticket x4gj).
         assert!(
             validate_editor_with("nvim -c 'set nu'", None)
                 .unwrap_err()
-                .contains("metacharacters")
+                .contains("argv-only")
         );
         // A plain command must resolve.
         assert!(
@@ -1767,6 +1791,47 @@ mod tests {
             validate_editor_with("/definitely/missing/editor", None)
                 .unwrap_err()
                 .contains("does not exist")
+        );
+    }
+
+    /// The argv-only allowlist (ticket x4gj): the punctuation real flags,
+    /// paths, and secret commands need stays valid — a character-rule pass
+    /// then fails at the (nonexistent) program, not at a character — while
+    /// every shell-meaningful or grammar-reserved character is refused by
+    /// name, whatever the program.
+    #[test]
+    fn plain_command_allowlist_matches_the_argv_only_invariant() {
+        // Allowed shapes: the char rule passes, so the failure is the
+        // program lookup, not a character.
+        let subject = "the password command";
+        for command in [
+            "no-such-program-xyz -f",
+            "no-such-program-xyz show mail/gmail",
+            "no-such-program-xyz /usr/local/bin:opt --key=value",
+            "no-such-program-xyz read op://vault/tmail/a+b@c",
+        ] {
+            let err = validate_plain_command(command, subject)
+                .expect_err("program cannot exist: {command}");
+            assert!(err.contains("PATH"), "{command}: {err}");
+        }
+
+        // Refused characters, each named in the error: shell operators,
+        // substitution, expansion, globs, quoting, comments.
+        for bad in [
+            "'", "\"", "|", "&", ";", "<", ">", "$", "\\", "`", "*", "?", "~", "!", "#", "%", "(",
+            ")", "[", "]", "{", "}",
+        ] {
+            let command = format!("nvim arg{bad}more");
+            let err = validate_plain_command(&command, subject).expect_err("bad character");
+            assert!(err.contains("argv-only"), "{command}: {err}");
+            assert!(err.contains(bad), "{command}: {err}");
+        }
+
+        // Whitespace separates arguments; an entirely blank command is
+        // empty, not a character error.
+        assert_eq!(
+            validate_plain_command("   ", subject).unwrap_err(),
+            format!("{subject} is empty")
         );
     }
 
