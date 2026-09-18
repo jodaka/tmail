@@ -771,19 +771,17 @@ impl MailBackend for HimalayaCliBackend {
         let output = process::run(&self.program, &argv, &ctx.cancellation).await?;
         let dto: dto::AttachmentsDto = process::decode_on_pool(output).await?;
         let row = find_row(&dto, request.part_id)?;
+        // The backend is untrusted (ticket m89w): the row must name a file
+        // canonically inside the tempdir himalaya was pointed at — an
+        // absolute path, a `..` traversal, or a symlink out of the root
+        // would otherwise point Tmail at an arbitrary locally readable
+        // file that the saver then copies into the user's downloads
+        // directory.
         let source = row
             .path
             .as_deref()
-            .map(PathBuf::from)
-            .map(|path| {
-                // Relative paths resolve against the tempdir himalaya was
-                // pointed at; absolute ones pass through.
-                if path.is_absolute() {
-                    path
-                } else {
-                    temp.path().join(path)
-                }
-            })
+            .map(|raw| confined_source_path(raw, temp.path()))
+            .transpose()?
             .ok_or_else(|| {
                 BackendError::InvalidOutput(format!(
                     "attachment download row for part {} names no output path",
@@ -1291,6 +1289,61 @@ fn split_stem_ext(name: &str) -> (String, String) {
     }
 }
 
+/// Constrain the backend-reported attachment path to the Tmail-owned
+/// tempdir the download ran in (ticket m89w). The backend is untrusted:
+/// any path — absolute, `..` traversal, or a symlink pointing out of the
+/// root — would otherwise let a compromised or buggy backend point Tmail
+/// at an arbitrary locally readable file that the saver then copies into
+/// the user's downloads directory. Real himalaya echoes the absolute path
+/// of the file it wrote *into* the tempdir, so absoluteness alone is not
+/// the boundary: the row must canonically resolve — symlinks followed —
+/// to a regular file inside the canonical root. The resolved path is
+/// returned, so the subsequent read travels the same boundary-checked
+/// route the check validated.
+fn confined_source_path(raw: &str, root: &Path) -> BackendResult<PathBuf> {
+    confined_source_path_inner(raw, root, |path| std::fs::canonicalize(path))
+}
+
+/// [`confined_source_path`] with an injected canonicalize, so the
+/// containment logic is unit-testable (the real one is exercised end to
+/// end by the same tests on Unix).
+fn confined_source_path_inner(
+    raw: &str,
+    root: &Path,
+    canonicalize: impl Fn(&Path) -> std::io::Result<PathBuf>,
+) -> BackendResult<PathBuf> {
+    // Relative rows resolve against the tempdir himalaya was pointed at;
+    // absolute rows are taken as reported — the containment check below
+    // is the security boundary, not the path's shape.
+    let reported = PathBuf::from(raw);
+    let joined = if reported.is_absolute() {
+        reported
+    } else {
+        root.join(reported)
+    };
+    let resolved = canonicalize(&joined).map_err(|err| {
+        BackendError::InvalidOutput(format!(
+            "attachment download row names `{raw}`, which does not resolve inside the temporary download directory: {err}"
+        ))
+    })?;
+    // The root itself is canonicalized before the containment compare: on
+    // macOS the tempdir lives under a `/var → /private/var` symlink, so a
+    // raw-vs-canonical prefix check would misfire.
+    let root = canonicalize(root)
+        .map_err(|err| BackendError::File(format!("temporary download dir: {err}")))?;
+    if !resolved.starts_with(&root) {
+        return Err(BackendError::InvalidOutput(format!(
+            "attachment download row names `{raw}`, outside the temporary download directory"
+        )));
+    }
+    if !resolved.is_file() {
+        return Err(BackendError::InvalidOutput(format!(
+            "attachment download row names `{raw}`, which is not a regular file"
+        )));
+    }
+    Ok(resolved)
+}
+
 /// Validate one attachment source path (plan §15, Phase 8): expand `~` in
 /// Tmail (never a shell), then require an existing, regular, readable file
 /// within the acceptable size. Every refusal is detailed so the composer
@@ -1778,6 +1831,97 @@ mod attachment_tests {
         }
         let err = validate_attachment_source(&path).expect_err("unreadable");
         assert!(matches!(err, BackendError::File(_)));
+    }
+
+    /// The download source must live in the tempdir (ticket m89w): a
+    /// relative name inside the root is accepted and returned canonically,
+    /// including nested rows. Real himalaya reports its download as an
+    /// absolute path, so an absolute row *inside* the root is the
+    /// legitimate contract and is accepted the same way.
+    #[test]
+    fn confined_source_accepts_names_inside_the_root() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        std::fs::write(dir.path().join("report.pdf"), b"%PDF").expect("write fixture");
+        let source = confined_source_path("report.pdf", dir.path()).expect("relative inside");
+        assert!(source.starts_with(dir.path().canonicalize().expect("canonical root")));
+        assert!(source.ends_with("report.pdf"));
+
+        std::fs::create_dir(dir.path().join("sub")).expect("mkdir");
+        std::fs::write(dir.path().join("sub/a.bin"), b"x").expect("write fixture");
+        let source = confined_source_path("sub/a.bin", dir.path()).expect("nested inside");
+        assert!(source.ends_with("sub/a.bin"));
+
+        let absolute = dir.path().join("report.pdf");
+        let source = confined_source_path(&absolute.display().to_string(), dir.path())
+            .expect("absolute inside");
+        assert!(source.ends_with("report.pdf"));
+    }
+
+    /// Any path that canonically resolves outside the tempdir is refused
+    /// (ticket m89w): the backend must not be able to aim Tmail at, say,
+    /// `/etc/passwd` and have it copied into the downloads directory.
+    #[test]
+    fn confined_source_rejects_paths_outside_the_root() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let err = confined_source_path("/etc/passwd", dir.path()).expect_err("absolute outside");
+        match err {
+            BackendError::InvalidOutput(detail) => {
+                assert!(detail.contains("/etc/passwd"), "{detail}");
+                assert!(detail.contains("outside"), "{detail}");
+            }
+            other => panic!("expected InvalidOutput, got {other:?}"),
+        }
+    }
+
+    /// A `..` traversal (legal-looking relative) resolves out of the root
+    /// and is refused (ticket m89w).
+    #[test]
+    fn confined_source_rejects_dotdot_traversal() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let outside = tempfile::TempDir::new().expect("outside dir");
+        std::fs::write(outside.path().join("escape.txt"), b"x").expect("write fixture");
+        let err = confined_source_path("../escape.txt", dir.path()).expect_err("traversal");
+        assert!(matches!(err, BackendError::InvalidOutput(_)));
+    }
+
+    /// A symlink inside the root that points outside resolves out of the
+    /// root under canonicalize and is refused (ticket m89w).
+    #[cfg(unix)]
+    #[test]
+    fn confined_source_rejects_symlinks_out_of_the_root() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let outside = tempfile::TempDir::new().expect("outside dir");
+        std::fs::write(outside.path().join("target.txt"), b"x").expect("write fixture");
+        std::os::unix::fs::symlink(
+            outside.path().join("target.txt"),
+            dir.path().join("link.pdf"),
+        )
+        .expect("symlink");
+        let err = confined_source_path("link.pdf", dir.path()).expect_err("symlink escape");
+        assert!(matches!(err, BackendError::InvalidOutput(_)));
+    }
+
+    /// Missing and non-file rows are refused with clear errors even when
+    /// they are contained (ticket m89w).
+    #[test]
+    fn confined_source_refuses_missing_and_non_file_paths() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let err = confined_source_path("missing.pdf", dir.path()).expect_err("missing");
+        match err {
+            BackendError::InvalidOutput(detail) => {
+                assert!(detail.contains("missing.pdf"), "{detail}");
+                assert!(detail.contains("does not resolve"), "{detail}");
+            }
+            other => panic!("expected InvalidOutput, got {other:?}"),
+        }
+        std::fs::create_dir(dir.path().join("subdir")).expect("mkdir");
+        let err = confined_source_path("subdir", dir.path()).expect_err("directory");
+        match err {
+            BackendError::InvalidOutput(detail) => {
+                assert!(detail.contains("regular file"), "{detail}");
+            }
+            other => panic!("expected InvalidOutput, got {other:?}"),
+        }
     }
 
     #[test]
