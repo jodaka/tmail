@@ -43,7 +43,7 @@ pub const AUTOSAVE_DELAY_MAX_MS: u64 = 600_000;
 
 /// The theme names Tmail knows (plan §17/§18): the dark reference theme and
 /// a light variant.
-pub const THEME_NAMES: [&str; 2] = ["default", "light"];
+pub const THEME_NAMES: [&str; 3] = ["default", "light", "nord"];
 
 /// The `[tmail.theme]` color tokens a user may override (ticket wrs7), as
 /// hex strings like `"#4e86dd"`. Kept beside the config parser because the

@@ -420,7 +420,7 @@ fn message_spans<'a>(
     };
     let icon = Span::styled(format!("{symbol} "), style);
     // Bar in the marker column (mockup `.folder.active` bar): marks the
-    // focused row while the list holds focus. White over the marker fill.
+    // focused row while the list holds focus. marker_bar over the marker fill.
     let marker = if selected && focused {
         Span::styled("▎", Style::new().fg(theme.marker_bar).bg(bg))
     } else {

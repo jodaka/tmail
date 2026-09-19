@@ -115,6 +115,9 @@ pub enum ClickTarget {
     MailboxTitle,
     /// The topbar search field (equivalent: `/`).
     SearchField,
+    /// The topbar's account line under the brand: clicking it opens the
+    /// account switcher (equivalent: `Ctrl+G`).
+    AccountButton,
     /// A message-list row (equivalent: arrows + Enter).
     MessageRow(usize),
     /// A link in the reader body (ticket hc9n): the first click focuses it,
@@ -196,7 +199,7 @@ pub enum Action {
     /// flag; the runtime applies the capture mode.
     ToggleMouseCapture,
     /// `t` (ticket k5ba): open the theme picker over the current screen —
-    /// a small list of the two built-ins plus every `[tmail.themes.<name>]`
+    /// a small list of the three built-ins plus every `[tmail.themes.<name>]`
     /// from the config. Arrows preview the highlighted palette at once,
     /// Enter keeps it, Esc restores the opening palette. Session-only;
     /// the config file is never rewritten.

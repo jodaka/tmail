@@ -185,7 +185,7 @@ pub struct Settings {
     /// terminal's native text selection works untouched.
     pub mouse_capture: bool,
     /// Runtime-switchable themes (ticket z0s4): `(name, palette)` in cycle
-    /// order — the two built-ins plus every `[tmail.themes.<name>]` table,
+    /// order — the three built-ins plus every `[tmail.themes.<name>]` table,
     /// precomputed at startup. `t` cycles the list; the shared config
     /// file is never rewritten, so switching is session-only.
     pub themes: Vec<(String, Theme)>,

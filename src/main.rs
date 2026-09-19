@@ -386,7 +386,7 @@ fn seed_state(
     requested_theme: Option<&str>,
 ) -> anyhow::Result<AppState> {
     let mut state = AppState::initial(config.mail.page_size);
-    // Runtime-switchable theme list (ticket z0s4): the two built-ins —
+    // Runtime-switchable theme list (ticket z0s4): the three built-ins —
     // the `[tmail.theme]` selection with its color overrides (ticket wrs7)
     // landing on the startup entry — plus every `[tmail.themes.<name>]`
     // table. NO_COLOR wins over all of it (plan §18): every palette

@@ -23,7 +23,7 @@ any other file are ignored.**
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `[tmail].account` | string | none | Name of the `[accounts.<name>]` table Tmail drives (forwarded to himalaya as `-a`). When absent, Tmail uses the account himalaya itself would pick: the one with `default = true`, else the sole account. **If set, the name must match an existing `[accounts.<name>]` table or startup fails.** With several accounts, `Ctrl+G` switches at runtime (see [Features](features.md#account-switching)). |
-| `[tmail].mouse` | bool | `false` | **Mouse support (off by default).** When `true`, Tmail enables terminal mouse capture and you can click mailboxes, message rows, the search field, the Compose button, links and attachment chips in the reader, composer controls, and modal buttons, and scroll with the wheel. See [Mouse](features.md#mouse) for exact behavior. Capture changes what terminal text selection does, so it is opt-in. |
+| `[tmail].mouse` | bool | `false` | **Mouse support (off by default).** When `true`, Tmail enables terminal mouse capture and you can click mailboxes, message rows, the search field and account line, the Compose button, links and attachment chips in the reader, composer controls, and modal buttons, and scroll with the wheel. See [Mouse](features.md#mouse) for exact behavior. Capture changes what terminal text selection does, so it is opt-in. |
 | `[tmail].view_mode` | string | `"compact"` | Message-list density. `"compact"` (default) draws one line per message; `"comfortable"` splits consecutive messages with a faint horizontal separator, so each message takes two lines — fewer messages fit on screen, with more negative space between rows. |
 | `[tmail].status_timeout` | integer | `0` | Seconds a status message stays up in the bottom-right corner before it fades into the background (over the last 0.3 s) and clears. `0` keeps a message until the next one replaces it. |
 | `[tmail].notifications` | string | `"off"` | New-mail notifications for the periodic background refresh (ticket b28p). `"off"` stays silent; `"bell"` rings the terminal bell (`\x07`); `"on"` shows a desktop notification through `notify-rust` (a single message names its sender and subject, several list the count). Only mail that arrived since the previous background update notifies, and only while the terminal window is unfocused — active users are never interrupted. |
@@ -33,8 +33,8 @@ any other file are ignored.**
 | `[tmail.composer].editor` | string | `"builtin"` | `"builtin"`, `"$EDITOR"` (resolved from the environment), or a plain command like `nvim` (program + arguments, **no shell metacharacters** — Tmail never spawns a shell). The external-editor flow itself ships in Phase 11; the value is validated at startup either way. |
 | `[tmail.composer].autosave_delay_ms` | integer | `2000` | Draft autosave debounce for the builtin editor. Accepted range: 100–600000. |
 | `[tmail.attachments].downloads_dir` | string | `$HOME/Downloads` | Directory used by *save attachment*. Must be absolute or start with `~/` (Tmail expands `~` itself, never via a shell). May not exist yet; must not be an existing file. |
-| `[tmail.theme].name` | string | `"default"` | Theme name: `"default"` (dark) or `"light"` (ticket wrs7). Set the `NO_COLOR` environment variable (non-empty) to render without any colors at all — it also ignores theme overrides. |
-| `[tmail.themes.<name>]` | table | none | Extra named themes for runtime switching (ticket z0s4): same color tokens as `[tmail.theme]` (no `name` key — the table's name is the theme's name), values are hex colors applied over the dark reference palette. Press `t` in Tmail to pick one from the theme dialog: built-ins first, then these alphabetically by name. A theme named `default` or `light` replaces that built-in. Switching is session-only — the config file is never rewritten. |
+| `[tmail.theme].name` | string | `"default"` | Theme name: `"default"` (dark), `"light"` (paper), or `"nord"` (ticket wrs7). Set the `NO_COLOR` environment variable (non-empty) to render without any colors at all — it also ignores theme overrides. |
+| `[tmail.themes.<name>]` | table | none | Extra named themes for runtime switching (ticket z0s4): same color tokens as `[tmail.theme]` (no `name` key — the table's name is the theme's name), values are hex colors applied over the dark reference palette. Press `t` in Tmail to pick one from the theme dialog: built-ins first, then these alphabetically by name. A theme reusing a built-in name (`default`, `light`, `nord`) replaces that built-in. Switching is session-only — the config file is never rewritten. |
 | `[tmail.keybindings.<context>]` | table of key lists | built-in defaults | Reassign, extend, or unbind keyboard shortcuts per context — `global`, `list`, `reader` (the context column of the [shortcut docs](shortcusts.md)). An action's list **replaces** its default keys; an empty list unbinds the action. Key syntax: `+`-joined `ctrl`/`alt` modifiers then a named key (`esc`, `enter`, `tab`, `backtab`, `backspace`, `delete`, `home`, `end`, `pageup`, `pagedown`, `up`, `down`, `left`, `right`, `space`, `f1`–`f12`), a glyph (`↑ ↓ ← → ⌫ ↵`), or any single character (`j`, `?`, `]`; `"S"` is the shifted character). A key already bound to another action in the same context is refused with a startup warning; the escape hatches (`cancel`, `activate`, `focus_next`, `focus_previous`, `quit`) always keep at least one binding. The full annotated default list ships in `config.example.toml`. |
 | `[tmail.ui].clock` | bool | `false` | Show the date/time clock in the top-right corner (ticket w7f5). Off by default. |
 | `[tmail.cache].max_messages` | integer | `50` | How many viewed messages to keep in Tmail's on-disk cache (ticket haeb) so previously opened mail renders instantly. Least-recently-used entries are evicted first; `0` disables message caching. |
@@ -45,7 +45,8 @@ Config example is available in `config.example.toml`.
 ## Theming
 
 Pick a built-in theme with `[tmail.theme].name` (`"default"` for the dark
-reference look, `"light"` for a paper variant), and fine-tune any of the
+reference look, `"light"` for the paper variant, `"nord"` for the Nord
+palette), and fine-tune any of the
 semantic color tokens right in the same file with hex colors:
 
 ```toml
@@ -76,15 +77,14 @@ press `t` in Tmail to open the theme picker at runtime (built-ins first,
 then yours alphabetically by name):
 
 ```toml
-[tmail.themes.nord]
-background = "#2e3440"
-accent = "#88c0d0"
-text = "#eceff4"
-
 [tmail.themes.warm]
 background = "#262220"
 accent = "#e0916c"
 ```
+
+A user theme may also shadow a built-in name — for example
+`[tmail.themes.nord]` replaces the built-in Nord palette with your tuned
+version of it.
 
 The picker is a small dialog listing every theme: `↑`/`↓` move the
 highlight, and the highlighted theme **previews at once** — the whole
@@ -92,9 +92,10 @@ screen recolors while you navigate. `Enter` keeps the previewed palette
 (the status line names it); `Esc` closes the dialog and restores the
 palette you started with.
 
-Unspecified tokens keep the dark reference values; a theme named
-`default` or `light` replaces that built-in in the dialog. Switching is
-session-only — the shared config file is never rewritten.
+Unspecified tokens keep the dark reference values; a theme reusing a
+built-in name (`default`, `light`, `nord`) replaces that built-in in the
+dialog. Switching is session-only — the shared config file is never
+rewritten.
 
 ## Startup validation
 

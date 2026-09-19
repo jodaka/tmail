@@ -77,13 +77,30 @@ pub fn render(
             width: area.width.min(22),
             height: 1,
         };
+        let shown = text::truncate(&account, account_area.width as usize);
         frame.render_widget(
             Paragraph::new(Span::styled(
-                text::truncate(&account, account_area.width as usize),
+                shown.clone(),
                 Style::new().fg(theme.label_dim),
             )),
             account_area,
         );
+        // The line is a button: clicking it opens the account switcher,
+        // `Ctrl+G`'s job. The hit covers only the label drawn (truncated
+        // to the widget's width), so clicks past the text fall through
+        // to whatever sits beneath.
+        let label_w = shown.width() as u16;
+        if label_w > 0 {
+            hits.push(
+                Rect {
+                    x: account_area.x,
+                    y: account_area.y,
+                    width: label_w,
+                    height: 1,
+                },
+                ClickTarget::AccountButton,
+            );
+        }
     }
 
     // Search field: bordered well, `/` prompt, query or placeholder.
@@ -192,10 +209,19 @@ pub fn render(
 mod tests {
     use super::*;
     use crate::app::mock::mock_initial_state;
+    use crate::input::mouse::HitMap;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     fn draw(width: u16, clock: &str, message: Option<&str>) -> ratatui::buffer::Buffer {
+        draw_hits(width, clock, message).0
+    }
+
+    fn draw_hits(
+        width: u16,
+        clock: &str,
+        message: Option<&str>,
+    ) -> (ratatui::buffer::Buffer, HitMap) {
         let mut state = mock_initial_state();
         state.session.status.message = message.map(String::from);
         let backend = TestBackend::new(width, 4);
@@ -213,7 +239,7 @@ mod tests {
                 )
             })
             .expect("draw");
-        terminal.backend().buffer().clone()
+        (terminal.backend().buffer().clone(), hits)
     }
 
     #[test]
@@ -237,5 +263,50 @@ mod tests {
             .map(|x| buffer[(x, 1)].symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(row.contains("10:47"), "clock drawn at the boundary: {row}");
+    }
+
+    #[test]
+    fn the_account_line_click_opens_the_switcher() {
+        // The mock fixture carries no accounts; give it one so the
+        // label renders an account button (row 2 is the account line).
+        let (buffer, hits) = {
+            let mut state = mock_initial_state();
+            state.settings.accounts = vec![crate::config::AccountEntry {
+                name: String::from("personal"),
+                email: Some(String::from("personal@example.org")),
+                display_name: None,
+                is_default: true,
+            }];
+            state.settings.account_name = Some(String::from("personal"));
+            let backend = TestBackend::new(80, 4);
+            let mut terminal = Terminal::new(backend).expect("test backend");
+            let mut hits = HitMap::default();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        frame.area(),
+                        &state,
+                        &Theme::default_dark(),
+                        "",
+                        &mut hits,
+                    )
+                })
+                .expect("draw");
+            (terminal.backend().buffer().clone(), hits)
+        };
+        // The email label renders where expected and is clickable.
+        let account_line: String = (0..22)
+            .map(|x| buffer[(x, 2)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            account_line.contains("personal@example.org"),
+            "account label drawn: {account_line:?}"
+        );
+        assert_eq!(hits.hit_test(2, 2, false), Some(ClickTarget::AccountButton));
+        // Past the label's width the click is no longer the account
+        // button: the real content beneath (the 3-row-tall search well)
+        // takes the click.
+        assert_eq!(hits.hit_test(25, 2, false), Some(ClickTarget::SearchField));
     }
 }

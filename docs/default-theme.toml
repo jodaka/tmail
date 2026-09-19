@@ -52,10 +52,10 @@ accent = "#75c0f9"
 # Selected/active row fill: the gold highlight behind the cursor row in
 # the message list, the active folder in the sidebar, and the picker's
 # cursor row.
-marker = "#deb661"
-# Left edge bar of the selected/active rows: the white `▎` marker drawn
+marker = "#f4b765"
+# Left edge bar of the selected/active rows: the `▎` marker drawn
 # over the `marker` fill.
-marker_bar = "#ffffff"
+marker_bar = "#e5e4e4"
 # Selected row / active folder fill: the background behind the highlighted
 # list row or the folder the cursor sits on.
 accent_bg = "#141821"

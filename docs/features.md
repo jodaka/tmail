@@ -144,6 +144,8 @@ capture at any time. With it enabled:
 - **Mailbox title (compact)** — opens the Mailboxes popup (see below).
 - **Compose button** — opens the composer (same as `c`).
 - **Search field** — focuses it (same as `/`).
+- **Account line (topbar)** — opens the account switcher (same as
+  `Ctrl+G`).
 - **Links (reader)** — first click focuses the link; clicking the focused
   link opens it in the system browser (same as Tab + `Enter`).
 - **Attachment chips (reader)** — first click focuses the chip; clicking

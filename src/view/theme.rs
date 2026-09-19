@@ -46,7 +46,7 @@ pub struct Theme {
     /// picker's cursor row.
     pub marker: Color,
     /// Left edge bar of the selected/active rows (mockup `.folder.active`):
-    /// the `▎` marker column, drawn white over the `marker` fill.
+    /// the `▎` marker column, drawn over the `marker` fill.
     pub marker_bar: Color,
     /// Selected row / active folder fill (`--accent-bg`).
     pub accent_bg: Color,
@@ -79,8 +79,8 @@ impl Theme {
             accent2: Color::Rgb(0x83, 0xBD, 0x63),
             accent3: Color::Rgb(0x75, 0xC0, 0xF9),
             accent: Color::Rgb(0x75, 0xC0, 0xF9),
-            marker: Color::Rgb(0xDE, 0xB6, 0x61),
-            marker_bar: Color::Rgb(0xFF, 0xFF, 0xFF),
+            marker: Color::Rgb(0xF4, 0xB7, 0x65),
+            marker_bar: Color::Rgb(0xE5, 0xE4, 0xE4),
             accent_bg: Color::Rgb(0x14, 0x18, 0x21),
             bulk_selected_bg: Color::Rgb(0x46, 0x35, 0x1B),
             warning: Color::Rgb(0xFC, 0xA3, 0x11),
@@ -96,11 +96,12 @@ impl Theme {
     pub fn from_name(name: &str) -> Self {
         match name {
             "light" => Self::default_light(),
+            "nord" => Self::default_nord(),
             _ => Self::default_dark(),
         }
     }
 
-    /// Runtime-switchable theme list (ticket z0s4): the two built-ins —
+    /// Runtime-switchable theme list (ticket z0s4): the three built-ins —
     /// with the `[tmail.theme]` color overrides applied to the startup
     /// theme — plus every `[tmail.themes.<name>]` user theme built over
     /// the dark reference palette. A user theme shadowing a built-in name
@@ -146,6 +147,17 @@ impl Theme {
                 with(
                     Theme::default_light(),
                     if startup_name == "light" {
+                        startup_overrides
+                    } else {
+                        &[]
+                    },
+                ),
+            ),
+            (
+                String::from("nord"),
+                with(
+                    Theme::default_nord(),
+                    if startup_name == "nord" {
                         startup_overrides
                     } else {
                         &[]
@@ -198,32 +210,66 @@ impl Theme {
         true
     }
 
-    /// The light variant (ticket wrs7): the reference palette inverted to
-    /// a paper background, with darkened accent/warning/error hues so
-    /// contrast stays readable.
+    /// The light variant (ticket wrs7): an authentic paper-editor palette
+    /// — the editor background/foreground, line-number grays, and the
+    /// selection blue carried straight from the source palette, with
+    /// warning/error/status hues darkened just enough to stay readable on
+    /// paper.
     pub fn default_light() -> Self {
         Self {
-            background: Color::Rgb(0xF6, 0xF5, 0xF1),
-            surface: Color::Rgb(0xEC, 0xEB, 0xE5),
-            border: Color::Rgb(0xC9, 0xC7, 0xBE),
-            text: Color::Rgb(0x24, 0x26, 0x2E),
-            text_soft: Color::Rgb(0x3E, 0x41, 0x4B),
-            muted: Color::Rgb(0x5C, 0x5F, 0x6A),
-            dim: Color::Rgb(0x74, 0x77, 0x82),
-            snippet: Color::Rgb(0x94, 0x97, 0xA1),
+            background: Color::Rgb(0xF8, 0xF8, 0xF8),
+            surface: Color::Rgb(0xEB, 0xED, 0xEF),
+            border: Color::Rgb(0xC3, 0xC7, 0xCD),
+            text: Color::Rgb(0x35, 0x35, 0x35),
+            text_soft: Color::Rgb(0x53, 0x53, 0x53),
+            muted: Color::Rgb(0x6B, 0x6E, 0x74),
+            dim: Color::Rgb(0x8A, 0x8E, 0x96),
+            snippet: Color::Rgb(0xBB, 0xBB, 0xBB),
             // The paper chrome: a slightly darker panel against the page.
-            sidebar_bg: Color::Rgb(0xE9, 0xE7, 0xE0),
-            label_dim: Color::Rgb(0x9B, 0x9E, 0xA7),
-            accent2: Color::Rgb(0x55, 0x7F, 0x36),
+            sidebar_bg: Color::Rgb(0xEC, 0xEE, 0xF0),
+            label_dim: Color::Rgb(0xA9, 0xAE, 0xB6),
+            accent2: Color::Rgb(0x10, 0xA5, 0x67),
             accent3: Color::Rgb(0x2F, 0x7F, 0xD0),
-            accent: Color::Rgb(0x2D, 0x63, 0xB8),
-            marker: Color::Rgb(0xDE, 0xB6, 0x61),
+            accent: Color::Rgb(0x38, 0x6A, 0xC3),
+            marker: Color::Rgb(0x38, 0x6A, 0xC3),
             marker_bar: Color::Rgb(0xFF, 0xFF, 0xFF),
-            accent_bg: Color::Rgb(0xDC, 0xE6, 0xF7),
-            bulk_selected_bg: Color::Rgb(0xF7, 0xE8, 0xC8),
-            warning: Color::Rgb(0x9A, 0x6B, 0x1A),
-            error: Color::Rgb(0xB3, 0x36, 0x2A),
-            selection: Color::Rgb(0xD8, 0xDF, 0xEE),
+            accent_bg: Color::Rgb(0xCA, 0xE9, 0xF9),
+            bulk_selected_bg: Color::Rgb(0xF4, 0xDB, 0xBA),
+            warning: Color::Rgb(0xA5, 0x82, 0x00),
+            error: Color::Rgb(0xD0, 0x20, 0x00),
+            selection: Color::Rgb(0xAB, 0xDF, 0xFA),
+            unread: Modifier::BOLD,
+        }
+    }
+
+    /// The Nord variant: the authentic Nord palette (nord0–nord13
+    /// references) — the editor shade ladder carries the official colors
+    /// unchanged, the aurora hues supply accents, and the nord13 yellow
+    /// doubles as the selected-row fill with the dark nord0 over it as
+    /// the marker bar.
+    pub fn default_nord() -> Self {
+        Self {
+            background: Color::Rgb(0x2E, 0x34, 0x40),
+            surface: Color::Rgb(0x3B, 0x42, 0x52),
+            border: Color::Rgb(0x43, 0x4C, 0x5E),
+            text: Color::Rgb(0xD8, 0xDE, 0xE9),
+            text_soft: Color::Rgb(0x9C, 0xA6, 0xB8),
+            muted: Color::Rgb(0x61, 0x6E, 0x88),
+            dim: Color::Rgb(0x56, 0x62, 0x79),
+            snippet: Color::Rgb(0x4C, 0x56, 0x6A),
+            // The panel strip: between the page and the wells.
+            sidebar_bg: Color::Rgb(0x33, 0x3B, 0x4A),
+            label_dim: Color::Rgb(0x4B, 0x56, 0x6A),
+            accent2: Color::Rgb(0xA3, 0xBE, 0x8C),
+            accent3: Color::Rgb(0x81, 0xA1, 0xC1),
+            accent: Color::Rgb(0x88, 0xC0, 0xD0),
+            marker: Color::Rgb(0xEB, 0xCB, 0x8B),
+            marker_bar: Color::Rgb(0x2E, 0x34, 0x40),
+            accent_bg: Color::Rgb(0x43, 0x4C, 0x5E),
+            bulk_selected_bg: Color::Rgb(0x5D, 0x5A, 0x53),
+            warning: Color::Rgb(0xEB, 0xCB, 0x8B),
+            error: Color::Rgb(0xBF, 0x61, 0x6A),
+            selection: Color::Rgb(0x4C, 0x56, 0x6A),
             unread: Modifier::BOLD,
         }
     }
@@ -446,14 +492,15 @@ mod theme_list_tests {
 
     #[test]
     fn builtins_come_first_and_the_startup_theme_is_selected() {
-        let (list, index) = Theme::theme_list("light", &[], &[]);
+        let (list, index) = Theme::theme_list("nord", &[], &[]);
         assert_eq!(
             list.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
-            vec!["default", "light"]
+            vec!["default", "light", "nord"]
         );
-        assert_eq!(index, 1);
+        assert_eq!(index, 2);
         assert_eq!(list[0].1, Theme::default_dark());
         assert_eq!(list[1].1, Theme::default_light());
+        assert_eq!(list[2].1, Theme::default_nord());
     }
 
     #[test]
@@ -469,31 +516,38 @@ mod theme_list_tests {
     #[test]
     fn user_themes_append_over_the_dark_reference() {
         let users = vec![
-            user("nord", &[("background", "#2e3440"), ("accent", "#88c0d0")]),
             user("solar", &[("accent", "#b58900")]),
+            user("warm", &[("background", "#262220")]),
         ];
         let (list, index) = Theme::theme_list("default", &[], &users);
         let names: Vec<_> = list.iter().map(|(n, _)| n.as_str()).collect();
         // List order follows the config parser's table iteration order
         // (alphabetical); these names are already sorted.
-        assert_eq!(names, vec!["default", "light", "nord", "solar"]);
+        assert_eq!(names, vec!["default", "light", "nord", "solar", "warm"]);
         assert_eq!(index, 0);
         // Unspecified tokens keep the dark reference values.
-        assert_eq!(list[2].1.background, Color::Rgb(0x2e, 0x34, 0x40));
-        assert_eq!(list[2].1.accent, Color::Rgb(0x88, 0xc0, 0xd0));
-        assert_eq!(list[2].1.text, Theme::default_dark().text);
         assert_eq!(list[3].1.accent, Color::Rgb(0xb5, 0x89, 0x00));
+        assert_eq!(list[4].1.background, Color::Rgb(0x26, 0x22, 0x20));
+        // The built-in Nord stays untouched by them.
+        assert_eq!(list[2].1, Theme::default_nord());
     }
 
     #[test]
     fn a_user_theme_shadowing_a_builtin_replaces_it_in_place() {
-        let users = vec![user("default", &[("background", "#101014")])];
+        // The nord user table replaces the built-in in its slot, and the
+        // unspecified tokens still fall back to the dark reference.
+        let users = vec![
+            user("default", &[("background", "#101014")]),
+            user("nord", &[("accent", "#aabbcc")]),
+        ];
         let (list, index) = Theme::theme_list("default", &[], &users);
         let names: Vec<_> = list.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, vec!["default", "light"]);
+        assert_eq!(names, vec!["default", "light", "nord"]);
         assert_eq!(index, 0, "the shadowed builtin stays the startup slot");
         assert_eq!(list[0].1.background, Color::Rgb(0x10, 0x10, 0x14));
         assert_eq!(list[0].1.accent, Theme::default_dark().accent);
+        // Slot order is preserved: nord keeps its position in the list.
+        assert_eq!(list[2].1.accent, Color::Rgb(0xaa, 0xbb, 0xcc));
     }
 
     #[test]

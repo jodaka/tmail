@@ -28,6 +28,7 @@ pub(crate) fn click(state: &mut AppState, target: ClickTarget) -> Vec<Effect> {
         ClickTarget::Mailbox(index) => click_mailbox(state, index),
         ClickTarget::MailboxTitle => click_mailbox_title(state),
         ClickTarget::SearchField => reduce(state, Action::OpenSearch),
+        ClickTarget::AccountButton => reduce(state, Action::OpenAccountSwitcher),
         ClickTarget::MessageRow(index) => click_message_row(state, index),
         ClickTarget::ReaderLink(index) => click_reader_link(state, index),
         ClickTarget::ReaderAttachment(index) => click_reader_attachment(state, index),

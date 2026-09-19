@@ -217,3 +217,20 @@ fn backend_results_land_while_the_switcher_is_open() {
         panic!("the switcher must stay open");
     };
 }
+
+#[test]
+fn clicking_the_account_line_opens_the_switcher() {
+    // The topbar's account line records ClickTarget::AccountButton; the
+    // click lands on the same path Ctrl+G feeds, so the mouse user gets
+    // the same popup with the cursor on the current account.
+    let mut s = seeded(&["personal", "work"]);
+    no_effects(&reduce(
+        &mut s,
+        Action::Click(crate::app::action::ClickTarget::AccountButton),
+    ));
+    let Some(Overlay::AccountSwitcher(dialog)) = &s.session.overlay else {
+        panic!("switcher did not open: {:?}", s.session.overlay);
+    };
+    assert_eq!(dialog.cursor, 0);
+    assert_eq!(s.session.focus, Focus::AccountSwitcher);
+}
