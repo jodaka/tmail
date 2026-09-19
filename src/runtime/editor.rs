@@ -138,9 +138,11 @@ mod tests {
     fn temporary_files_are_owner_only() {
         let path = std::env::temp_dir().join("tmail-editor-perm-test");
         write_secure(&path, "x").expect("write");
-        let meta = fs::metadata(&path).expect("file exists");
+        // Metadata only inspects POSIX modes; on Windows the write itself
+        // is the best-achievable check.
         #[cfg(unix)]
         {
+            let meta = fs::metadata(&path).expect("file exists");
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         }

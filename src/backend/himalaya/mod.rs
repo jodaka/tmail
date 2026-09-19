@@ -1747,6 +1747,7 @@ mod role_target_tests {
 #[cfg(test)]
 mod attachment_tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn temp_file(name: &str, contents: &[u8]) -> (tempfile::TempDir, PathBuf) {
@@ -1820,6 +1821,9 @@ mod attachment_tests {
     }
 
     #[test]
+    // Non-root-solvable permissions semantics are POSIX-only; on Windows
+    // the file stays readable and the test premise cannot hold.
+    #[cfg(unix)]
     fn unreadable_files_are_rejected() {
         let (_dir, path) = temp_file("secret.bin", b"x");
         let mut perms = std::fs::metadata(&path).unwrap().permissions();

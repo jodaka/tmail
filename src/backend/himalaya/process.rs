@@ -32,10 +32,11 @@ pub(crate) struct ChildOutput {
 /// covers a child stuck in uninterruptible disk sleep).
 const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// SIGKILL the child's whole process group, falling back to the direct
-/// child when the group kill fails, and log whatever could not be
-/// killed (ticket 8s0g: the `kill(2)` result was silently ignored, so
-/// an `EPERM` left the tree running with nothing said).
+/// Terminate the child (and ideally its whole tree) on cancellation, and
+/// log whatever could not be killed (ticket 8s0g: the `kill(2)` result was
+/// silently ignored, so an `EPERM` left the tree running with nothing
+/// said).
+#[cfg(unix)]
 fn kill_child_tree(child: &mut tokio::process::Child, pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
@@ -66,6 +67,23 @@ fn kill_child_tree(child: &mut tokio::process::Child, pid: Option<u32>) {
     }
 }
 
+/// Windows fallback: there is no `process_group(0)` equivalent wired up
+/// here yet, so cancellation kills the direct himalaya child only (`start_
+/// kill` → `TerminateProcess`). A grandchild held alive by the child would
+/// keep any shared pipe ends open; readers notice EOF only after it exits,
+/// so cancellation there is bounded by the grandchild's lifetime — the
+/// `REAP_GRACE`-then-abort path below still guarantees non-blocking
+/// cancellation (Windows port, issue y90w).
+#[cfg(not(unix))]
+fn kill_child_tree(child: &mut tokio::process::Child, pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    if let Err(kill_err) = child.start_kill() {
+        tracing::warn!(pid, %kill_err, "direct-child kill failed");
+    }
+}
+
 /// Run `program args` capturing stdout/stderr separately. stdin is null:
 /// Phase 2/3 operations are read-only. If `token` fires while the child
 /// runs, the child is SIGKILLed by pid and [`BackendError::Cancelled`] is
@@ -87,7 +105,8 @@ pub(crate) async fn run_with_stdin(
     token: &CancellationToken,
 ) -> BackendResult<ChildOutput> {
     tracing::debug!(program, args = ?args, stdin = input.is_some(), "spawning himalaya");
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(match input {
             Some(_) => Stdio::piped(),
@@ -95,13 +114,17 @@ pub(crate) async fn run_with_stdin(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        // Own process group (ticket 2b7m): cancellation can then kill the
-        // whole tree. Killing only the direct child would leave any
-        // grandchild it forked alive *holding the pipe write ends*, and the
-        // output readers below would block on EOF until that grandchild
-        // exits on its own (observed as a 30s cancellation on CI).
-        .process_group(0)
+        .kill_on_drop(true);
+    // Own process group (ticket 2b7m): cancellation can then kill the
+    // whole tree. Killing only the direct child would leave any
+    // grandchild it forked alive *holding the pipe write ends*, and the
+    // output readers below would block on EOF until that grandchild
+    // exits on its own (observed as a 30s cancellation on CI).
+    // Unix-only: tokio's `process_group` has no Windows equivalent yet;
+    // see the `#[cfg(not(unix))]` note on `kill_child_tree`.
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
         .spawn()
         // Name the configured program here (issue 5ab7): the spawn failure
         // is the user-facing "executable not found" case, and the bare

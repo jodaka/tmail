@@ -701,7 +701,10 @@ imap.server = \"imaps://imap.example.com:993\"
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
         }
 
+        #[cfg(unix)]
         let report = save_account(&path, &gmail_raw_draft("gmail")).expect("save succeeds");
+        #[cfg(not(unix))]
+        save_account(&path, &gmail_raw_draft("gmail")).expect("save succeeds");
 
         #[cfg(unix)]
         assert!(
