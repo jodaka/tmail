@@ -170,6 +170,9 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package
+        # windows-latest defaults `run:` to pwsh; force the bash the
+        # `set`/`tar` script was written for.
+        shell: bash
         run: |
           set -euo pipefail
           name="${{ matrix.binary || 'tmail' }}"
