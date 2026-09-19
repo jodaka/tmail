@@ -1867,10 +1867,20 @@ mod attachment_tests {
     #[test]
     fn confined_source_rejects_paths_outside_the_root() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let err = confined_source_path("/etc/passwd", dir.path()).expect_err("absolute outside");
+        // The row must exist so canonicalize resolves it and the
+        // containment compare can render the "outside" verdict (a
+        // nonexistent absolute path produces the "does not resolve"
+        // verdict instead; that shape is covered by
+        // `refuses_missing_and_non_file_paths`).
+        let outside = if cfg!(windows) {
+            r"C:\Windows\System32\drivers\etc\hosts"
+        } else {
+            "/etc/passwd"
+        };
+        let err = confined_source_path(outside, dir.path()).expect_err("absolute outside");
         match err {
             BackendError::InvalidOutput(detail) => {
-                assert!(detail.contains("/etc/passwd"), "{detail}");
+                assert!(detail.contains(outside), "{detail}");
                 assert!(detail.contains("outside"), "{detail}");
             }
             other => panic!("expected InvalidOutput, got {other:?}"),

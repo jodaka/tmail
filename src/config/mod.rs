@@ -495,13 +495,18 @@ pub fn accounts_present(path: &Path) -> bool {
 /// Well-known himalaya config locations, in preference order. Only paths
 /// that exist are candidates.
 fn default_candidates() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = crate::domain::paths::home_dir() else {
         return Vec::new();
     };
-    vec![
-        home.join(".config/himalaya/config.toml"),
-        home.join("Library/Application Support/himalaya/config.toml"),
-    ]
+    let mut candidates = vec![home.join(".config/himalaya/config.toml")];
+    if cfg!(target_os = "macos") {
+        candidates.push(home.join("Library/Application Support/himalaya/config.toml"));
+    } else if cfg!(windows) {
+        // What the `dirs` conventions (and thus himalaya) resolve
+        // `%APPDATA%` to.
+        candidates.push(home.join("AppData/Roaming/himalaya/config.toml"));
+    }
+    candidates
 }
 
 /// Parse the shared TOML into a [`Config`], tolerating any Himalaya content.
@@ -1162,7 +1167,9 @@ fn parse_downloads_dir(tmail: Option<&toml::Value>, config: &mut Config, issues:
 /// missing directory is fine — the save path creates it on demand.
 fn validate_downloads_dir(dir: &Path) -> Result<(), String> {
     let text = dir.to_string_lossy();
-    if !text.starts_with('/') && !text.starts_with('~') {
+    // Absolute by the platform's own rules (`/…`, `~/…`, or a Windows
+    // drive-absolute `C:\…`).
+    if !text.starts_with('~') && !dir.is_absolute() {
         return Err(format!(
             "{value:?} must be an absolute path or start with ~/ (expanded in Tmail, never via a shell)",
             value = text

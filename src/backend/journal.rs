@@ -78,10 +78,12 @@ impl DraftJournal {
         let drafts = if let Some(dir) = std::env::var_os("TMAIL_DATA_DIR") {
             PathBuf::from(dir).join("drafts")
         } else {
-            let home = std::env::var_os("HOME")?;
-            let mut dir = PathBuf::from(home);
+            let home = crate::domain::paths::home_dir()?;
+            let mut dir = home;
             dir.push(if cfg!(target_os = "macos") {
                 "Library/Application Support"
+            } else if cfg!(windows) {
+                "AppData/Roaming"
             } else {
                 ".local/share"
             });

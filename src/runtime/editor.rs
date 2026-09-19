@@ -127,9 +127,13 @@ mod tests {
             "top-level display names the editor: {err:#}"
         );
         // The io::Error stays chained (issue pjzr), not flattened away:
+        // Windows wording for a missing executable differs from the
+        // POSIX ENOENT string, so either spelling proves the chain.
         let rendered = format!("{err:#}");
         assert!(
-            rendered.contains("No such file or directory"),
+            rendered.contains("No such file or directory")
+                || rendered.contains("program not found")
+                || rendered.contains("cannot find"),
             "source chain survives into the full display: {rendered}"
         );
     }

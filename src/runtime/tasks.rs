@@ -639,7 +639,7 @@ fn build_attachment_explorer(
 ) -> Result<ratatui_explorer::FileExplorer, String> {
     let target = path
         .map(std::path::Path::to_path_buf)
-        .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+        .or_else(crate::domain::paths::home_dir)
         .filter(|dir| dir.is_dir())
         .or_else(|| std::env::current_dir().ok())
         .filter(|dir| dir.is_dir())
