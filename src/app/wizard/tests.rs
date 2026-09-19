@@ -503,8 +503,9 @@ fn storage_mode_toggle_switches_the_secret_field_and_validates_the_command() {
     no_effects(&effects);
     assert!(wizard(&state).last_error.is_some());
 
-    // Command mode validates the program exists and rejects shell
-    // metacharacters (Tmail never spawns a shell).
+    // Command mode validates the program exists and rejects anything
+    // beyond the argv-only allowlist (Tmail never spawns a shell,
+    // ticket x4gj).
     wizard_mut(&mut state).credentials.storage_mode = StorageMode::Command;
     wizard_mut(&mut state).credentials.command = TextField::new("pass show mail/gmail; rm -rf /");
     let effects = act(&mut state, WizardAction::SubmitCredentials);
@@ -514,7 +515,7 @@ fn storage_mode_toggle_switches_the_secret_field_and_validates_the_command() {
             .last_error
             .as_deref()
             .unwrap_or_default()
-            .contains("without shell metacharacters")
+            .contains("argv-only")
     );
 
     // A missing program is reported the same way the editor is.

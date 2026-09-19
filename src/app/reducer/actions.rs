@@ -42,6 +42,7 @@ pub(crate) fn archive_message(state: &mut AppState) -> Vec<Effect> {
         "Archiving…",
         false,
         OperationKind::Archive,
+        OperationKind::ArchiveBulk,
     )
 }
 
@@ -52,6 +53,7 @@ pub(crate) fn trash_message(state: &mut AppState) -> Vec<Effect> {
         "Moving to trash…",
         false,
         OperationKind::Trash,
+        OperationKind::TrashBulk,
     )
 }
 
@@ -123,34 +125,30 @@ pub(crate) fn toggle_star(state: &mut AppState) -> Vec<Effect> {
     })]
 }
 
-/// The shared "bulk in selection mode, else the focused row" skeleton of
-/// the move operations (ticket p0s3): builds one [`OperationKind`] per
-/// target from `make`, and forms the status message — `bulk` templates one
-/// `{count}` plural in bulk mode, `single` is the fixed phrase for one
-/// message. `list_only` keeps the single path from firing over the reader
-/// (archive/trash are list shortcuts today); the bulk path always implies
-/// list focus. Bulk mark read/unread bypasses this skeleton: they start
-/// one batched operation instead (ticket aavy).
+/// The bulk skeleton of the move operations (ticket p0s3). The bulk path
+/// starts ONE batched operation (ticket j9bq): the whole selection in a
+/// single backend call, mirroring the batched read flags (ticket aavy) —
+/// N per-message effects would spawn N concurrent himalaya processes.
+/// The single path stays one op for the focused row; `make_bulk` wraps
+/// every locator of the selection.
 pub(crate) fn bulk_or_single(
     state: &mut AppState,
     bulk: &str,
     single: &str,
     list_only: bool,
     make: impl Fn(MessageLocator) -> OperationKind,
+    make_bulk: impl Fn(Vec<MessageLocator>) -> OperationKind,
 ) -> Vec<Effect> {
     if let Some(locators) = bulk_targets(state) {
         state.set_status(bulk.replace("{count}", &locators.len().to_string()));
-        // start_unless_duplicate: archive/trash of the same message may
-        // not run twice concurrently — a double-press coalesces into the
-        // request already in flight (the registry keeps the first).
-        return locators
+        // start_unless_duplicate: a repeated bulk move of the same
+        // selection coalesces into the request already in flight (the
+        // registry keeps the first).
+        return state
+            .session
+            .operations
+            .start_unless_duplicate(make_bulk(locators))
             .into_iter()
-            .filter_map(|locator| {
-                state
-                    .session
-                    .operations
-                    .start_unless_duplicate(make(locator))
-            })
             .collect();
     }
     if list_only && state.session.focus != Focus::MessageList {

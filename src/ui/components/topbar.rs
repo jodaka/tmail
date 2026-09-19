@@ -136,11 +136,16 @@ pub fn render(
     // default). Both would collide, so the message wins its row.
     let status_message = state.session.status.message.as_deref();
     // The search well may end deep into the row: the message clips in
-    // front of it, never over it.
+    // front of it, never over it. The budget prefers 10 columns but is
+    // clipped to the row (minus the placement's one-column right pad) so
+    // the right-aligned arithmetic below can never underflow — narrow
+    // bars stay safe even though the too-small screen currently keeps
+    // this bar at 90+ columns (ticket 6t30).
     let message_budget = area
         .width
         .saturating_sub(search_x - area.x + search_width + 4)
-        .max(10) as usize;
+        .max(10)
+        .min(area.width.saturating_sub(1)) as usize;
     if let Some(message) = status_message {
         let message = text::truncate(message, message_budget);
         let width = message.width() as u16;
@@ -158,7 +163,9 @@ pub fn render(
                 },
             );
         }
-    } else if !clock.is_empty() && clock.width() < area.width as usize {
+    } else if !clock.is_empty() && clock.width() + 2 <= area.width as usize {
+        // The placement subtracts a two-column right pad; the guard must
+        // require it or `x` underflows on narrow bars (ticket 6t30).
         let clock_area = Rect {
             x: area.x + area.width - clock.width() as u16 - 2,
             y: area.y.saturating_add(1),
@@ -179,4 +186,56 @@ pub fn render(
         height: 1,
     };
     chrome::hairline(frame, hairline_area, HairlineSide::Bottom, theme);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::mock::mock_initial_state;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn draw(width: u16, clock: &str, message: Option<&str>) -> ratatui::buffer::Buffer {
+        let mut state = mock_initial_state();
+        state.session.status.message = message.map(String::from);
+        let backend = TestBackend::new(width, 4);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        let mut hits = HitMap::default();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    &state,
+                    &Theme::default_dark(),
+                    clock,
+                    &mut hits,
+                )
+            })
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn narrow_bars_never_panic_on_the_right_slots() {
+        // The message placement subtracts `width + 1` from the right edge;
+        // a budget claiming more than the row underflowed before the clip
+        // (ticket 6t30 — currently unreachable because the too-small screen
+        // keeps this bar at 90+ columns, hardened anyway).
+        let _ = draw(3, "", Some("a very wide status message"));
+        let _ = draw(10, "", Some("a very wide status message"));
+        let _ = draw(60, "", Some("a very wide status message"));
+    }
+
+    #[test]
+    fn clock_requires_its_two_column_right_pad() {
+        // One column of slack: the clock is skipped, not underflowed.
+        let _ = draw(6, "10:47", None);
+        // At the boundary it draws, right-aligned.
+        let buffer = draw(7, "10:47", None);
+        let row: String = (0..7)
+            .map(|x| buffer[(x, 1)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(row.contains("10:47"), "clock drawn at the boundary: {row}");
+    }
 }

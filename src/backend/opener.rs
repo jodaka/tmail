@@ -1,13 +1,17 @@
 //! Platform open-with adapters (plan §15, Phase 8.5): open a saved
 //! attachment, or a link from an HTML body (ticket hc9n), with the OS
-//! handler — `open` on macOS, `xdg-open` on Linux. The opener program is
+//! handler — `open` on macOS, `xdg-open` on Linux, `cmd /C start` on
+//! Windows. The opener program is
 //! spawned directly by argv, one target per invocation; a shell is never
-//! involved, so paths with spaces or special characters stay intact. On
+//! involved in target resolution, so paths with spaces or special
+//! characters stay intact (Windows `start` goes through `cmd`, which
+//! resolves the target it is handed, never interpolating it). On
 //! other platforms there is no opener in v1: the request fails with a
 //! clear, typed error instead of guessing.
 
 use std::io;
 use std::path::Path;
+use std::process::Stdio;
 
 /// Opens a file or a web link with the platform's handler.
 ///
@@ -36,7 +40,8 @@ pub trait PathOpener: Send + Sync {
 pub struct SystemOpener;
 
 /// No opener on the platform: v1 refuses rather than guessing (macOS
-/// `open` and Linux `xdg-open` are the only supported handlers).
+/// `open`, Linux `xdg-open`, and Windows `start` are the supported
+/// handlers).
 fn no_opener() -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
@@ -54,10 +59,7 @@ impl PathOpener for SystemOpener {
         // tokio's child is reaped by the runtime's orphan reaper when the
         // handle drops, so a quickly-exiting `open`/`xdg-open` leaves no
         // zombie behind.
-        tokio::process::Command::new(program)
-            .arg(path)
-            .spawn()
-            .map(|_| ())
+        spawn_opener(program, &[path.as_os_str().to_owned()]).await
     }
 
     async fn open_url(&self, url: &str) -> io::Result<()> {
@@ -72,11 +74,43 @@ impl PathOpener for SystemOpener {
         };
         // The URL travels as a single argv entry (no shell), so query
         // strings and fragments reach the browser byte-for-byte.
-        tokio::process::Command::new(program)
-            .arg(url)
-            .spawn()
-            .map(|_| ())
+        spawn_opener(program, &[std::ffi::OsString::from(url)]).await
     }
+}
+
+/// Spawn the platform opener with the target as the trailing argument
+/// (never a shell string on Unix). Windows is the one exception where a
+/// shell *builtin* is required: `start` is not a program, so it rides on
+/// `cmd /C start "" <target>`, the empty title guard keeping a
+/// quoted/first-quoted target from being swallowed as the window title
+/// (Windows port, issue y90w).
+async fn spawn_opener(program: &'static str, args: &[std::ffi::OsString]) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        // `program` (the Unix opener name) is only carried for the
+        // Unix branch below.
+        let _ = program;
+        let mut command = tokio::process::Command::new("cmd");
+        command.arg("/C").arg("start").arg("").args(args);
+        spawn_reaped(&mut command).await
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut command = tokio::process::Command::new(program);
+        command.arg(&args[0]);
+        spawn_reaped(&mut command).await
+    }
+}
+
+/// Spawn with all three stdio detached: the opener outlives Tmail in
+/// every sense the user cares about, so nothing here needs the pipes.
+async fn spawn_reaped(command: &mut tokio::process::Command) -> io::Result<()> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
 
 /// The opener program for the current platform (plan §15).
@@ -91,8 +125,16 @@ fn opener_program() -> Option<&'static str> {
     Some("xdg-open")
 }
 
+/// The opener program for the current platform (plan §15). On Windows the
+/// name is only a marker for the availability check: the actual spawn
+/// rides `cmd /C start` (see [`spawn_opener`]).
+#[cfg(target_os = "windows")]
+fn opener_program() -> Option<&'static str> {
+    Some("cmd")
+}
+
 /// No opener on other platforms in v1: refusing beats guessing.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn opener_program() -> Option<&'static str> {
     None
 }

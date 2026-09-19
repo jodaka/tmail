@@ -143,6 +143,54 @@ pub fn reader_width(size: (u16, u16)) -> usize {
         .max(MIN_READER_WIDTH)
 }
 
+/// Rows visible in the sidebar pane at `size` (the body region under the
+/// top bar, above the status bar — the sidebar and the list pane share
+/// the same body rectangle). The blank separator row before the label
+/// group is one of them: the sidebar's scroll window counts visual rows,
+/// separator included, so the bookkeeping matches what is drawn (ticket
+/// 6t30). `0` means the sidebar is not drawn (compact/too small).
+pub fn sidebar_visible_rows(size: (u16, u16)) -> usize {
+    list_rect(size)
+        .filter(|(_, mode)| *mode == LayoutMode::Full)
+        .map_or(0, |(list, _)| list.height as usize)
+}
+
+/// The visual row a mailbox occupies: the blank separator row the label
+/// group reserves sits in the visual sequence before the first label, so
+/// mailboxes from there on shift down by one (the renderer's window and
+/// the reducer's cursor bookkeeping share this, ticket 6t30).
+pub fn sidebar_visual_row(mailbox_index: usize, first_label: Option<usize>) -> usize {
+    match first_label {
+        Some(first) if first > 0 && mailbox_index >= first => mailbox_index + 1,
+        _ => mailbox_index,
+    }
+}
+
+/// Total visual rows the sidebar draws for `mailbox_count` mailboxes:
+/// every mailbox plus the one separator row, when a label group follows
+/// other rows.
+pub fn sidebar_total_rows(mailbox_count: usize, first_label: Option<usize>) -> usize {
+    if mailbox_count == 0 {
+        return 0;
+    }
+    sidebar_visual_row(mailbox_count - 1, first_label) + 1
+}
+
+/// Largest valid `sidebar_scroll` for `mailbox_count` at `size` (what the
+/// reducer clamps against): the last visual window of the row sequence.
+/// `0` when the sidebar is not drawn.
+pub fn sidebar_max_scroll(
+    mailbox_count: usize,
+    first_label: Option<usize>,
+    size: (u16, u16),
+) -> usize {
+    let visible = sidebar_visible_rows(size);
+    if visible == 0 {
+        return 0;
+    }
+    sidebar_total_rows(mailbox_count, first_label).saturating_sub(visible)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +232,44 @@ mod tests {
         assert_eq!(messages_visible((152, 40), ViewMode::Comfortable), 15);
         assert_eq!(messages_visible((100, 30), ViewMode::Comfortable), 10);
         assert_eq!(messages_visible((80, 15), ViewMode::Comfortable), 0);
+    }
+
+    #[test]
+    fn sidebar_rows_count_the_separator() {
+        // Reference terminal: 40 − topbar 4 − statusbar 3 = 33 rows.
+        assert_eq!(sidebar_visible_rows((152, 40)), 33);
+        // No sidebar in compact/too-small sizes.
+        assert_eq!(sidebar_visible_rows((100, 30)), 0);
+        assert_eq!(sidebar_visible_rows((80, 15)), 0);
+    }
+
+    #[test]
+    fn sidebar_visual_rows_shift_after_the_separator() {
+        // Folders first (indices 0..2), first label at index 2: the
+        // separator occupies visual row 2, labels shift down by one.
+        let first_label = Some(2);
+        assert_eq!(sidebar_visual_row(0, first_label), 0);
+        assert_eq!(sidebar_visual_row(1, first_label), 1);
+        assert_eq!(sidebar_visual_row(2, first_label), 3);
+        assert_eq!(sidebar_visual_row(4, first_label), 5);
+        // The separator only exists when a label group follows other
+        // rows: a first-label mailbox at index 0 draws no separator.
+        assert_eq!(sidebar_visual_row(0, Some(0)), 0);
+        assert_eq!(sidebar_total_rows(3, Some(0)), 3);
+        // Labels only, or no labels at all, keep mailboxes contiguous.
+        assert_eq!(sidebar_total_rows(3, None), 3);
+        assert_eq!(sidebar_total_rows(4, first_label), 5);
+        assert_eq!(sidebar_total_rows(0, None), 0);
+    }
+
+    #[test]
+    fn sidebar_max_scroll_walks_the_visual_rows() {
+        let first_label = Some(2);
+        // 4 mailboxes → 5 visual rows; 33 visible → no scrolling.
+        assert_eq!(sidebar_max_scroll(4, first_label, (152, 40)), 0);
+        // 40 mailboxes → 41 visual rows; the last window starts at 8.
+        assert_eq!(sidebar_max_scroll(40, first_label, (152, 40)), 8);
+        // Degenerate sizes clamp to 0.
+        assert_eq!(sidebar_max_scroll(4, first_label, (80, 15)), 0);
     }
 }

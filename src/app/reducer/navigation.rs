@@ -138,6 +138,7 @@ pub(crate) fn move_selection(state: &mut AppState, delta: i64) -> Vec<Effect> {
             }
             let next = state.mailbox_selection as i64 + delta;
             state.mailbox_selection = next.clamp(0, len as i64 - 1) as usize;
+            keep_mailbox_visible(state);
         }
         Focus::SearchField => {
             // Cursor movement inside the field is a render concern for now;
@@ -226,6 +227,35 @@ pub(crate) fn keep_selection_visible(state: &mut AppState) {
     }
     // A shrunken or replaced page must never leave the window past the end.
     state.clamp_list_positions();
+}
+
+/// Shift `sidebar_scroll` so the mailbox cursor stays on screen. The
+/// window walks the sidebar's visual rows — mailbox rows plus the blank
+/// separator before the label group — from the same pure layout math the
+/// renderer draws, so the bookkeeping and the frame cannot disagree
+/// (ticket 6t30).
+pub(crate) fn keep_mailbox_visible(state: &mut AppState) {
+    let Some(mailboxes) = state.mailboxes.as_loaded() else {
+        state.sidebar_scroll = 0;
+        return;
+    };
+    let first_label = mailboxes.iter().position(|m| m.is_label());
+    let visible = crate::view::layout::sidebar_visible_rows(state.session.size).max(1);
+    let cursor_row = crate::view::layout::sidebar_visual_row(state.mailbox_selection, first_label);
+    if cursor_row < state.sidebar_scroll {
+        state.sidebar_scroll = cursor_row;
+    } else if cursor_row >= state.sidebar_scroll + visible {
+        state.sidebar_scroll = cursor_row + 1 - visible;
+    }
+    // A shrunken terminal or a fresh enumeration must never leave the
+    // window past the end.
+    state.sidebar_scroll = state
+        .sidebar_scroll
+        .min(crate::view::layout::sidebar_max_scroll(
+            mailboxes.len(),
+            first_label,
+            state.session.size,
+        ));
 }
 
 pub(crate) fn change_page(state: &mut AppState, delta: i64) -> Vec<Effect> {
@@ -669,6 +699,7 @@ pub(crate) fn open_attachment_dialog(state: &mut AppState) -> Vec<Effect> {
             explorer: None,
             listing: true,
             error: None,
+            error_scroll: 0,
             previous_focus: state.session.focus,
         },
     )));

@@ -709,6 +709,16 @@ fn first_push_recounts_the_drafts_folder() {
             .any(|e| e.kind == OperationKind::LoadMailboxes),
         "folder counts go stale without the recount, got {effects:?}"
     );
+    // The optimistic counter (ticket ng42): the sidebar's Drafts content
+    // count keeps up immediately, without waiting for the listing.
+    let drafts = s
+        .mailboxes
+        .as_loaded()
+        .unwrap()
+        .iter()
+        .find(|m| m.role == Some(MailboxRole::Drafts))
+        .unwrap();
+    assert_eq!(drafts.total_count, Some(4), "first push grew the count");
 }
 
 /// A replacement save swaps copies one-for-one: the Drafts count is
@@ -727,6 +737,14 @@ fn replacement_save_never_recounts_the_drafts_folder() {
     let (id2, snapshot2) = expect_save(&tick(&mut s, 4));
     assert_eq!(snapshot2.remote_id, Some(MessageId(String::from("copy-1"))));
     no_effects(&complete_save_ok(&mut s, id2, snapshot2.revision, "copy-2"));
+    let drafts = s
+        .mailboxes
+        .as_loaded()
+        .unwrap()
+        .iter()
+        .find(|m| m.role == Some(MailboxRole::Drafts))
+        .unwrap();
+    assert_eq!(drafts.total_count, Some(4), "the swap keeps the count");
 }
 
 #[test]
@@ -753,7 +771,18 @@ fn sent_draft_recounts_the_drafts_folder() {
             .any(|e| e.kind == OperationKind::LoadMailboxes),
         "the folder count must recount after the sweep, got {effects:?}"
     );
+    // The optimistic counter (ticket ng42): the swept copy left the
+    // Drafts folder, so the displayed content count drops one.
+    let drafts = s
+        .mailboxes
+        .as_loaded()
+        .unwrap()
+        .iter()
+        .find(|m| m.role == Some(MailboxRole::Drafts))
+        .unwrap();
+    assert_eq!(drafts.total_count, Some(2), "the sweep shrank the count");
 }
+
 #[test]
 fn failed_sent_cleanup_skips_the_recount() {
     let mut s = state();

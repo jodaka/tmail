@@ -209,7 +209,10 @@ impl Draft {
             let salt = fastrand::u32(..);
             self.local_id = Some(DraftId(format!("local-{stamp}-{salt:08x}")));
             if self.message_id.is_none() {
-                self.message_id = Some(format!("<{stamp}.{salt:08x}.draft@tmail.local>"));
+                self.message_id = Some(format!(
+                    "<{stamp}.{salt:08x}.draft{}>",
+                    crate::domain::MESSAGE_ID_SUFFIX
+                ));
             }
         }
         self.snapshot()
@@ -304,9 +307,8 @@ mod tests {
     use crate::domain::{Address, MailboxId, MessageHeaders};
 
     fn at(secs: i64) -> DateTime<FixedOffset> {
-        DateTime::from_timestamp(1_788_335_220 + secs, 0)
+        crate::domain::time::from_unix(crate::domain::time::MOCK_NOW_SECS + secs)
             .expect("valid epoch")
-            .with_timezone(&FixedOffset::east_opt(0).expect("utc"))
     }
 
     /// A draft copy as `message read` maps it: tmail-addressed fields,
@@ -417,12 +419,9 @@ mod tests {
         let salt = id.rsplit('-').next().expect("salt");
         assert_eq!(salt.len(), 8, "8 hex chars: {id}");
         assert!(salt.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
-        assert!(
-            first
-                .message_id
-                .as_deref()
-                .is_some_and(|mid| mid.ends_with(".draft@tmail.local>"))
-        );
+        assert!(first.message_id.as_deref().is_some_and(|mid| {
+            mid.ends_with(&format!(".draft{}>", crate::domain::MESSAGE_ID_SUFFIX))
+        }));
     }
 
     #[test]

@@ -2,7 +2,8 @@
 //! focus, the loaded/moved message application, the mailbox listing and
 //! page application, and the list previews (ticket wxtx).
 use super::navigation::{
-    close_reader, keep_selection_visible, reader_scroll_bounds, request_page, request_visible_page,
+    close_reader, keep_mailbox_visible, keep_selection_visible, reader_scroll_bounds, request_page,
+    request_visible_page,
 };
 use super::results::unexpected_payload;
 use crate::app::effect::Effect;
@@ -29,6 +30,13 @@ pub(crate) fn locator_matches_summary(
             .is_some_and(|mid| summary.message_id.as_ref() == Some(mid))
 }
 
+/// Local flag application after a confirmed flag operation (ticket ng42):
+/// the list row and the reader's summary snapshot update together so the
+/// next `Esc` does not resurrect stale metadata. `delta_mailbox`/`delta`
+/// compute the sidebar-counter impact of every visible row that actually
+/// flips — used by [`super::results::complete_flag`] to adjust
+/// optimistically; rows the sidebar cannot see are healed by the chained
+/// listing recount, which stays authoritative.
 pub(crate) fn apply_flag(state: &mut AppState, locator: &MessageLocator, change: FlagChange) {
     let matches =
         |summary: &crate::domain::MessageSummary| locator_matches_summary(locator, summary);
@@ -195,34 +203,63 @@ pub(crate) fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effe
     effects
 }
 
-/// A confirmed move (archive/trash): drop the row from the displayed page,
-/// keep the selection index on what took its place, close the reader if it
-/// was showing the moved message, and re-sync the page in the background so
-/// pagination stays truthful (maildir ids change on move, ADR 0001 finding
-/// 4; the reload re-resolves the selection by identity).
-pub(crate) fn message_moved(state: &mut AppState, locator: &MessageLocator) -> Vec<Effect> {
-    let matches =
-        |summary: &crate::domain::MessageSummary| locator_matches_summary(locator, summary);
+/// A confirmed move (archive/trash; one locator for the single path, the
+/// whole selection for a batched bulk move, ticket j9bq): drop the rows
+/// from the displayed page, keep the selection index on what took their
+/// place, close the reader if it was showing a moved message, and re-sync
+/// the page in the background so pagination stays truthful (maildir ids
+/// change on move, ADR 0001 finding 4; the reload re-resolves the
+/// selection by identity).
+pub(crate) fn message_moved(state: &mut AppState, locators: &[MessageLocator]) -> Vec<Effect> {
+    let matches = |summary: &crate::domain::MessageSummary| {
+        locators
+            .iter()
+            .any(|locator| locator_matches_summary(locator, summary))
+    };
     // Close the reader when it was showing the moved message.
     if matches!(state.active_route(), Some(Route::Message(route)) if matches(&route.summary)) {
         close_reader(state);
     }
     // A moved row leaves the bulk selection with it (ticket p0s3): only
     // the moved ids are pruned, selections on other pages stay.
-    let moved_ids: Vec<_> = state
-        .messages
-        .items
-        .iter()
-        .filter(|s| matches(s))
-        .map(|s| s.id.clone())
-        .collect();
+    // Optimistic sidebar counters (ticket ng42), by the moved row's own
+    // folder: an unread row leaves the source folder's unread count; the
+    // Drafts folder's counter is its content total, so every row leaving
+    // it shrinks the total by one regardless of read state (the non-Drafts
+    // folder's total is not displayed and stays untouched). Rows the page
+    // does not show are healed by the chained listing recount below.
+    let moved_rows: Vec<_> = state.messages.items.iter().filter(|s| matches(s)).collect();
+    let is_drafts_folder = |id: &MailboxId| {
+        state.mailboxes.as_loaded().is_some_and(|list| {
+            list.iter()
+                .any(|m| &m.id == id && m.role == Some(MailboxRole::Drafts))
+        })
+    };
+    let mut deltas: std::collections::HashMap<MailboxId, (i64, i64)> =
+        std::collections::HashMap::new();
+    for summary in &moved_rows {
+        let entry = deltas.entry(summary.mailbox_id.clone()).or_insert((0, 0));
+        if is_drafts_folder(&summary.mailbox_id) {
+            entry.1 -= 1;
+        } else if !summary.is_read {
+            entry.0 -= 1;
+        }
+    }
+    let moved_ids: Vec<_> = moved_rows.iter().map(|s| s.id.clone()).collect();
     state.messages.items.retain(|summary| !matches(summary));
     for id in moved_ids {
         state.selected.remove(&id);
     }
+    for (mailbox_id, (unread, total)) in deltas {
+        state.adjust_mailbox_counts(&mailbox_id, unread, total);
+    }
     state.clamp_list_positions();
     keep_selection_visible(state);
-    state.set_status("Message moved");
+    let status = match locators.len() {
+        1 => "Message moved".to_string(),
+        n => format!("{n} messages moved"),
+    };
+    state.set_status(status);
     // The stale cached page must not resurrect the moved row on a warm
     // start (ticket kkaq): the local post-move page cannot be stored
     // truthfully (backend ids shift, so the re-sync below owns the next
@@ -241,6 +278,22 @@ pub(crate) fn message_moved(state: &mut AppState, locator: &MessageLocator) -> V
                 }),
         );
     }
+    // The unread/content counters in the sidebar live only in the mailbox
+    // listing — a page re-fetch never touches them — so a confirmed move
+    // that leaves the mailbox (a new unread in Trash, one less unread in
+    // Inbox) must chain a listing, as the draft-discard cleanup does
+    // (`complete_delete_draft`). Background-started: the move is done and
+    // the recount must never sit in the foreground slot where `Esc` would
+    // cancel it into "loading mailboxes — cancelled". A bulk move
+    // completing several messages starts one listing per result;
+    // consecutive `LoadMailboxes` starts supersede each other, so only
+    // the last one runs.
+    effects.push(
+        state
+            .session
+            .operations
+            .start_background(OperationKind::LoadMailboxes),
+    );
     effects
 }
 
@@ -312,6 +365,9 @@ pub(crate) fn refresh_sidebar_listing(state: &mut AppState, mailboxes: Vec<Mailb
         None => state.mailbox_selection,
     };
     state.clamp_mailbox_selection();
+    // The re-pointed cursor (possibly at a new index in the fresh
+    // enumeration) stays on screen.
+    keep_mailbox_visible(state);
 }
 
 /// Shared body of the mailbox application (plan §19 Phase 2): pick the
@@ -328,6 +384,7 @@ pub(crate) fn apply_mailbox_listing(state: &mut AppState, mailboxes: Vec<Mailbox
             let mailbox_id = mailboxes[index].id.clone();
             state.session.routes = vec![Route::Mailbox(MailboxRoute { mailbox_id })];
             state.mailbox_selection = index;
+            keep_mailbox_visible(state);
             state.selection = 0;
             state.list_scroll = 0;
             state.messages = Page::empty(state.messages.limit);

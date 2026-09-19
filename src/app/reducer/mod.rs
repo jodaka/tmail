@@ -265,6 +265,7 @@ fn resize(state: &mut AppState, width: u16, height: u16) -> Vec<Effect> {
     // A smaller window may have pushed the selection off screen.
     keep_selection_visible(state);
     clamp_reader_scroll(state);
+    keep_mailbox_visible(state);
     effects
 }
 

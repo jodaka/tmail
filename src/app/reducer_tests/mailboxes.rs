@@ -3,6 +3,7 @@
 //! the list head's mailbox title carries the mailbox switcher instead.
 
 use super::*;
+use crate::app::reducer::message_results::refresh_sidebar_listing;
 
 fn compact_state() -> AppState {
     let mut s = state();
@@ -42,6 +43,69 @@ fn full_tab_still_reaches_the_sidebar_not_the_title() {
     s.session.focus = Focus::SearchField;
     reduce(&mut s, Action::FocusNext);
     assert_eq!(s.session.focus, Focus::Sidebar);
+}
+
+#[test]
+fn sidebar_arrows_scroll_a_long_mailbox_list() {
+    let mut s = state();
+    s.session.size = (152, 24); // full mode: 24 − 7 chrome = 17 visible rows
+    let mut mailboxes = mock::mock_mailboxes();
+    // Twenty labels after the six system folders: the blank separator
+    // sits before the first label (visual row 6).
+    for n in 0..20 {
+        mailboxes.push(Mailbox {
+            id: MailboxId(format!("label{n}")),
+            name: format!("Label {n}"),
+            role: None,
+            unread_count: None,
+            total_count: None,
+        });
+    }
+    s.mailboxes = Loadable::Loaded(mailboxes);
+    s.session.focus = Focus::Sidebar;
+    // Walk the cursor to the last mailbox: 26 mailboxes + 1 separator =
+    // 27 visual rows, so the 17-row window keeps the cursor on screen.
+    for _ in 0..25 {
+        reduce(&mut s, Action::MoveDown);
+    }
+    assert_eq!(s.mailbox_selection, 25);
+    assert_eq!(s.sidebar_scroll, 10, "the window follows the cursor");
+    // Walk back up: the top of the list is revealed again.
+    for _ in 0..25 {
+        reduce(&mut s, Action::MoveUp);
+    }
+    assert_eq!(s.mailbox_selection, 0);
+    assert_eq!(s.sidebar_scroll, 0);
+}
+
+#[test]
+fn sidebar_scroll_clamps_when_the_listing_shrinks() {
+    let mut s = state();
+    s.session.size = (152, 24);
+    let mut mailboxes = mock::mock_mailboxes();
+    for n in 0..20 {
+        mailboxes.push(Mailbox {
+            id: MailboxId(format!("label{n}")),
+            name: format!("Label {n}"),
+            role: None,
+            unread_count: None,
+            total_count: None,
+        });
+    }
+    s.mailboxes = Loadable::Loaded(mailboxes);
+    s.session.focus = Focus::Sidebar;
+    for _ in 0..25 {
+        reduce(&mut s, Action::MoveDown);
+    }
+    assert_eq!(s.sidebar_scroll, 10);
+    // A fresh enumeration drops every label: the window follows the
+    // re-pointed cursor into the folders instead of pointing past them.
+    refresh_sidebar_listing(&mut s, mock::mock_mailboxes());
+    assert!(
+        s.sidebar_scroll <= 1,
+        "no stale window: {}",
+        s.sidebar_scroll
+    );
 }
 
 #[test]

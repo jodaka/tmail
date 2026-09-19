@@ -390,7 +390,7 @@ fn write_existing_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
             let mode = std::fs::metadata(path)
                 .ok()
                 .map(|meta| meta.permissions().mode() & 0o777)
-                .unwrap_or(0o600);
+                .unwrap_or(crate::domain::private_fs::OWNER_FILE_MODE);
             file.set_permissions(std::fs::Permissions::from_mode(mode))
                 .map_err(|err| format!("could not set config file permissions: {err}"))?;
         }
@@ -418,7 +418,7 @@ fn open_new_private_file(path: &Path) -> Result<std::fs::File, String> {
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o600)
+        .mode(crate::domain::private_fs::OWNER_FILE_MODE)
         .open(path)
         .map_err(|err| format!("could not create config file: {err}"))
 }
@@ -701,7 +701,10 @@ imap.server = \"imaps://imap.example.com:993\"
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
         }
 
+        #[cfg(unix)]
         let report = save_account(&path, &gmail_raw_draft("gmail")).expect("save succeeds");
+        #[cfg(not(unix))]
+        save_account(&path, &gmail_raw_draft("gmail")).expect("save succeeds");
 
         #[cfg(unix)]
         assert!(

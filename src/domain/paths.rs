@@ -12,9 +12,14 @@ use std::path::{Path, PathBuf};
 /// acceptable size"). 25 MiB — deliberately conservative for mail.
 pub const MAX_DRAFT_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
 
-/// The user's home directory (`HOME`), when set.
+/// The user's home directory: `$HOME`, or `$USERPROFILE` on platforms
+/// where GitHub runners and stock shells never set `HOME` (Windows port,
+/// issue y90w). Empty values are treated as unset.
 pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
 }
 
 /// Best-effort media type for a filename (send side, plan §15: the MIME
@@ -75,7 +80,9 @@ fn executable_file(path: &Path) -> bool {
 /// `PATH` entry is searched. Shared by the config and backend layers, which
 /// both report a missing external program up front instead of on first use.
 pub fn program_on_path_exists(program: &str) -> bool {
-    if program.contains('/') {
+    // Any separator (both conventions: Unix `/` and Windows `\`) means a
+    // direct path, not a bare program name to search on `PATH`.
+    if program.contains('/') || program.contains('\\') {
         return executable_file(Path::new(program));
     }
     std::env::var_os("PATH")
@@ -148,8 +155,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("fake-program");
         std::fs::File::create(&path).expect("touch");
-        // 0644: no execution bit — the start-up check must reject the file
-        // here instead of letting the first operation fail later.
+        // Unix: 0644, no execution bit — the start-up check must reject
+        // the file here instead of letting the first operation fail
+        // later. Windows has no exec bit, so a plain existing file is
+        // accepted there and only the positive check can hold.
+        #[cfg(unix)]
         assert!(!program_on_path_exists(path.to_str().unwrap()));
         #[cfg(unix)]
         {

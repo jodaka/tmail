@@ -543,3 +543,30 @@ fn help_lists_the_active_bindings_of_the_screen_underneath() {
             .any(|(label, keys)| label == "Trash" && keys == "d, Del")
     );
 }
+
+#[test]
+fn help_scrolls_a_table_taller_than_the_terminal() {
+    let mut s = state();
+    // A short terminal clamps the popup: 20 rows − 5 chrome = 15 entries.
+    s.session.size = (152, 20);
+    no_effects(&reduce(&mut s, Action::OpenHelp));
+    let total = s.settings.keymap.help_entries(Focus::MessageList).len();
+    assert!(total > 15, "fixture assumes a taller table");
+    // The arrows scroll to the last window and clamp there.
+    for _ in 0..total {
+        reduce(&mut s, Action::MoveDown);
+    }
+    let Some(Overlay::Help(dialog)) = &s.session.overlay else {
+        panic!("help overlay");
+    };
+    assert_eq!(dialog.scroll, total - 15, "the tail is reachable");
+    // Left/Right page a viewport at a time, without wrapping past the ends.
+    reduce(&mut s, Action::PagePrevious);
+    reduce(&mut s, Action::PagePrevious);
+    let Some(Overlay::Help(dialog)) = &s.session.overlay else {
+        panic!("help overlay");
+    };
+    assert_eq!(dialog.scroll, (total - 15).saturating_sub(30));
+    // The list underneath never moved (the popup owns the arrows).
+    assert_eq!(s.selection, 0);
+}

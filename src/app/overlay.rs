@@ -149,6 +149,10 @@ pub struct SwitchConfirmDialog {
 /// custom `[tmail.keybindings]` config shows up here unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelpDialog {
+    /// First visible entry row (scroll offset, clamped by the reducer
+    /// with the same layout math the renderer uses — ticket 6t30: a
+    /// table taller than the terminal used to be silently clipped).
+    pub scroll: usize,
     /// Focus to restore when the popup closes.
     pub previous_focus: Focus,
 }
@@ -184,6 +188,11 @@ pub struct AttachmentFileDialog {
     /// Detail of the last failed listing or attachment validation;
     /// cleared when the next step starts.
     pub error: Option<String>,
+    /// First visible line of the wrapped error detail (scroll offset,
+    /// clamped by the reducer with the same layout math the renderer
+    /// uses; ticket 6t30 — the detail used to lose every line after the
+    /// first).
+    pub error_scroll: usize,
     /// Focus to restore when the dialog closes (always the composer).
     pub previous_focus: Focus,
 }

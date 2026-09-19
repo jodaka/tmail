@@ -1,5 +1,17 @@
 # Installation
 
+## Prebuilt binaries
+
+Grab `tmail-v<version>-<target>.tar.gz` from the GitHub releases, then
+extract the binary next to somewhere on `PATH`:
+
+- `aarch64-apple-darwin` / `x86_64-apple-darwin` — macOS
+- `x86_64-unknown-linux-gnu` / `-musl` — Linux
+- `x86_64-pc-windows-msvc` — Windows (`tar xzf`, then run `.\tmail.exe`;
+  SmartScreen may warn about the unsigned binary on first launch)
+
+`SHA256SUMS-v<version>.txt` carries the checksum of every asset.
+
 ## Homebrew
 
 Tap and install (the tap formula is synced from `Formula/tmail.rb` on every
@@ -26,6 +38,10 @@ dependency has platform-specific installers.
    dnf copr enable atim/himalaya && dnf install himalaya     # Fedora / RHEL / CentOS
    nix profile install github:pimalaya/himalaya              # Nix with flakes
 
+   # Windows
+   # prebuilt x86_64 zip from the pimalaya/himalaya releases
+   # (unzip himalaya-v*.zip and add it to PATH), or:
+
    # any platform with Rust
    cargo install --locked --git https://github.com/pimalaya/himalaya.git
 
@@ -50,9 +66,20 @@ dependency has platform-specific installers.
 3. Run it (`cargo run --release` from the checkout, or copy the binary
    anywhere):
 
+5. Or grab a prebuilt binary from the GitHub releases instead of
+   building: `tmail-v<version>-<target>.tar.gz` where target is
+   `aarch64-apple-darwin` or `x86_64-apple-darwin` (macOS),
+   `x86_64-unknown-linux-gnu` / `-musl` (Linux), or
+   `x86_64-pc-windows-msvc` (Windows: unpack with `tar xzf`, then run
+   `.\tmail.exe`; SmartScreen may warn about the unsigned binary on
+   first launch). SHA checksums are published alongside (`SHA256SUMS`).
+
 ## Requirements
 
-- macOS (required) / Linux (supported); Windows is out of scope
+- macOS / Linux / Windows (all supported). Windows CI runs fmt, clippy,
+  and the full test suite; the interactive pty smoke suite remains
+  Unix-only, so end-to-end terminal behavior there is exercised by the
+  test suite rather than a scripted terminal session.
 - Stable Rust (2024 edition)
 - `himalaya` CLI v2.x installed and on `PATH` (Tmail checks at startup and
   refuses to start with an actionable error if it is missing)
@@ -64,7 +91,12 @@ cargo run --release                          # himalaya's default config
 cargo run --release -- path/to/config.toml   # explicit config file
 TMAIL_CONFIG=path/to/config.toml cargo run --release
 tmail --configure                            # account setup wizard
-tmail --debug                                # verbose logging to /tmp/tmail/log/tmail.log (daily rotation)
+tmail --debug                                # verbose logging; all output
+                                             # goes to a rotating file under
+                                             # the system temp dir (on
+                                             # macOS/Linux: /tmp/tmail/log,
+                                             # on Windows: %TEMP%\tmail\log),
+                                             # daily rotation
 ```
 
 ### Logging

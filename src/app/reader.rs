@@ -151,6 +151,14 @@ const HEADER_PAD: &str = "  ";
 /// Body indent (mockup `.m-text` `padding-left: 2ch`).
 const INDENT: &str = "  ";
 
+/// Columns the scrollable body keeps free at the right panel edge (ticket
+/// ytqd): one for the scrollbar rail and one blank padding column, so the
+/// last symbol of a long line ends short of the rail instead of running
+/// under it. Reserved unconditionally — the document wraps once per width,
+/// so a rail appearing mid-scroll never reflows the text. The fixed header
+/// never scrolls and keeps the full width.
+const SCROLLBAR_RESERVE: usize = 2;
+
 /// Wrap a fixed-header field in the panel's side padding, truncating the
 /// content to keep the whole line inside the panel width.
 fn padded_field(content: &str, width: usize) -> String {
@@ -249,10 +257,14 @@ pub(crate) fn scroll_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
     // Missing bodies render explicit placeholders (plan §19 Phase 4).
     // While the message loads there is nothing to lay out: the pane
     // spinner takes over (ticket m3by), so the document length stays 0.
+    // The wrap width stays `SCROLLBAR_RESERVE` short of the panel edge
+    // (ticket ytqd): the indent renders first, so the body itself wraps
+    // `INDENT + SCROLLBAR_RESERVE` in from the right rail.
     let body: Vec<RichLine> = match &state.open_message {
-        Loadable::Loaded(message) => {
-            crate::view::rich::body_lines(message, w.saturating_sub(INDENT.len()))
-        }
+        Loadable::Loaded(message) => crate::view::rich::body_lines(
+            message,
+            w.saturating_sub(INDENT.len() + SCROLLBAR_RESERVE),
+        ),
         Loadable::Failed(detail) => vec![RichLine::from_plain(format!(
             "(message could not be loaded — {})",
             first_line(detail)
@@ -295,7 +307,13 @@ pub(crate) fn scroll_lines(state: &AppState, width: usize) -> Vec<ReaderLine> {
             let mime = attachment.mime_type.as_deref().unwrap_or("unknown type");
             let marker = if index == selected { "▸ " } else { "  " };
             lines.push(ReaderLine::Chip {
-                text: text::truncate(&format!("{INDENT}{marker}[ {name} · {mime} · {size} ]"), w),
+                // Chips ride in the scrollable body, so they keep the same
+                // scrollbar reserve (ticket ytqd) and never lose their
+                // closing bracket under the rail.
+                text: text::truncate(
+                    &format!("{INDENT}{marker}[ {name} · {mime} · {size} ]"),
+                    w.saturating_sub(SCROLLBAR_RESERVE),
+                ),
                 selected: index == selected,
                 // The default target is not focus: only the Tab cursor
                 // paints the button fill.
@@ -777,6 +795,69 @@ mod tests {
         );
     }
 
+    /// The scrollable body wraps `SCROLLBAR_RESERVE` (rail + padding,
+    /// ticket ytqd) short of the panel width: a visible scrollbar rail
+    /// takes the last column and the last symbol of a long line ends one
+    /// blank column short of it instead of running under the rail.
+    #[test]
+    fn body_wraps_short_of_the_scrollbar_rail() {
+        let mut state = loaded_state();
+        if let Loadable::Loaded(message) = &mut state.open_message {
+            // One unbroken token: `wrap` hard-chunks it into exactly
+            // budget-width lines, so the geometry is deterministic.
+            message.plain_body = Some(format!("{}\n", "x".repeat(200)));
+        }
+        let width = 40;
+        let lines = scroll_lines(&state, width);
+        let budget = width - SCROLLBAR_RESERVE;
+        let rich: Vec<&ReaderLine> = lines
+            .iter()
+            .filter(|l| matches!(l, ReaderLine::Rich(_)))
+            .collect();
+        assert!(
+            rich.iter().all(|l| l.text().width() <= budget),
+            "body lines must stop short of the rail: {:?}",
+            rich.iter().map(|l| l.text().width()).collect::<Vec<_>>()
+        );
+        // The budget actually binds: the chunks fill it exactly, so the
+        // padding is real geometry, not dead headroom.
+        assert!(
+            rich.iter().any(|l| l.text().width() == budget),
+            "no line reaches the wrap budget: {:?}",
+            rich.iter().map(|l| l.text().width()).collect::<Vec<_>>()
+        );
+    }
+
+    /// A long attachment chip keeps the same scrollbar reserve (ticket
+    /// ytqd): it truncates within the budget, so its last symbol renders
+    /// short of the rail instead of under it.
+    #[test]
+    fn attachment_chips_wrap_short_of_the_scrollbar_rail() {
+        let mut state = loaded_state();
+        if let Loadable::Loaded(message) = &mut state.open_message {
+            message.attachments = vec![Attachment {
+                name: Some("a-very-long-attachment-name-that-will-not-fit.png".into()),
+                mime_type: Some(String::from("image/png")),
+                size: Some(2_048),
+                part_id: 3,
+            }];
+        }
+        let width = 40;
+        let lines = scroll_lines(&state, width);
+        let chips: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| match l {
+                ReaderLine::Chip { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chips.len(), 1);
+        assert!(chips[0].width() <= width - SCROLLBAR_RESERVE, "{chips:?}");
+        // Truncated, so the ellipsis is the last visible symbol — inside
+        // the budget, never under the rail.
+        assert!(chips[0].ends_with('…'), "{chips:?}");
+    }
+
     #[test]
     fn content_count_matches_document() {
         let state = loaded_state();
@@ -1021,8 +1102,6 @@ mod tests {
     /// The envelope fallback timestamp (missing/unparseable Date) renders
     /// as an explicit unknown instead of 1970.
     fn fixed_epoch() -> chrono::DateTime<chrono::FixedOffset> {
-        chrono::DateTime::from_timestamp(0, 0)
-            .expect("epoch")
-            .with_timezone(&chrono::FixedOffset::east_opt(0).expect("utc"))
+        crate::domain::time::epoch()
     }
 }

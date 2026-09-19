@@ -77,7 +77,7 @@ fn write_secure(path: &Path, body: &str) -> anyhow::Result<()> {
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)
+            .mode(crate::domain::private_fs::OWNER_FILE_MODE)
             .open(path)
             .context("create temporary file")?
     };
@@ -127,9 +127,13 @@ mod tests {
             "top-level display names the editor: {err:#}"
         );
         // The io::Error stays chained (issue pjzr), not flattened away:
+        // Windows wording for a missing executable differs from the
+        // POSIX ENOENT string, so either spelling proves the chain.
         let rendered = format!("{err:#}");
         assert!(
-            rendered.contains("No such file or directory"),
+            rendered.contains("No such file or directory")
+                || rendered.contains("program not found")
+                || rendered.contains("cannot find"),
             "source chain survives into the full display: {rendered}"
         );
     }
@@ -138,9 +142,11 @@ mod tests {
     fn temporary_files_are_owner_only() {
         let path = std::env::temp_dir().join("tmail-editor-perm-test");
         write_secure(&path, "x").expect("write");
-        let meta = fs::metadata(&path).expect("file exists");
+        // Metadata only inspects POSIX modes; on Windows the write itself
+        // is the best-achievable check.
         #[cfg(unix)]
         {
+            let meta = fs::metadata(&path).expect("file exists");
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         }

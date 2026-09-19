@@ -124,8 +124,12 @@ fn render_fields(
         if cursor.y + 2 > cursor.bottom {
             break;
         }
+        // The To row reserves exactly the width of the Cc/Bcc toggles that
+        // will actually be drawn: nothing once both fields are revealed,
+        // where the old fixed 16 shaved the To value for nothing (ticket
+        // 6t30).
         let reserved = if field == ComposerField::To {
-            16 // room for "[Cc] [Bcc] "
+            toggles_width(composer, focused, theme)
         } else {
             0
         };
@@ -446,6 +450,16 @@ fn field_row<'a>(
     (label_spans, value_spans)
 }
 
+/// The exact width the visible Cc/Bcc toggles occupy on the To row (both
+/// fields revealed → none). Focus only restyles a toggle, never resizes
+/// it, so the width is stable across focus.
+fn toggles_width(composer: &ComposerState, focused: bool, theme: &Theme) -> usize {
+    toggle_spans(composer, focused, theme)
+        .iter()
+        .map(|s| s.content.width())
+        .sum()
+}
+
 /// `Cc`/`Bcc` buttons on the To row; hidden while their field is revealed.
 /// The focused one gets the badge fill (mockup `.field-extra button`).
 fn toggle_spans<'a>(composer: &'a ComposerState, focused: bool, theme: &'a Theme) -> Vec<Span<'a>> {
@@ -529,4 +543,28 @@ fn draft_status(composer: &ComposerState) -> Option<(String, bool)> {
     draft
         .saved_at
         .map(|at| (format!("Draft saved · {}", at.format("%H:%M")), false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn to_row_reserves_only_the_visible_toggles() {
+        let theme = Theme::default_dark();
+        let mut composer = ComposerState::new();
+        // Both hidden: both buttons ride the To row.
+        assert_eq!(
+            toggles_width(&composer, false, &theme),
+            " [Cc]  [Bcc] ".width()
+        );
+        // One revealed: only the surviving toggle reserves width.
+        composer.show_cc = true;
+        assert_eq!(toggles_width(&composer, false, &theme), " [Bcc] ".width());
+        // Both revealed: nothing to reserve — the To value gets the full
+        // row (the old fixed 16 shaved it here for nothing, ticket 6t30).
+        composer.show_bcc = true;
+        assert_eq!(toggles_width(&composer, false, &theme), 0);
+    }
 }

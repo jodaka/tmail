@@ -2,6 +2,11 @@
 //!
 //! Ids are opaque backend strings; no meaning is parsed from them.
 
+/// Domain suffix of Message-IDs tmail synthesizes itself (draft copies,
+/// journal fixtures): `.local` is reserved by RFC 6762, so the address can
+/// never collide with — or be confused for — a real routable host.
+pub const MESSAGE_ID_SUFFIX: &str = "@tmail.local";
+
 pub mod address;
 pub mod draft;
 pub mod mailbox;
@@ -13,6 +18,7 @@ pub mod private_fs;
 pub mod reply;
 pub mod sanitize;
 pub mod send;
+pub mod time;
 pub mod url;
 
 pub use address::Address;

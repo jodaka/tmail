@@ -78,10 +78,12 @@ impl DraftJournal {
         let drafts = if let Some(dir) = std::env::var_os("TMAIL_DATA_DIR") {
             PathBuf::from(dir).join("drafts")
         } else {
-            let home = std::env::var_os("HOME")?;
-            let mut dir = PathBuf::from(home);
+            let home = crate::domain::paths::home_dir()?;
+            let mut dir = home;
             dir.push(if cfg!(target_os = "macos") {
                 "Library/Application Support"
+            } else if cfg!(windows) {
+                "AppData/Roaming"
             } else {
                 ".local/share"
             });
@@ -341,7 +343,7 @@ mod tests {
     fn snapshot(local_id: &str, revision: u64, body: &str) -> DraftSnapshot {
         DraftSnapshot {
             local_id: DraftId(String::from(local_id)),
-            message_id: Some(format!("<{local_id}@tmail.local>")),
+            message_id: Some(format!("<{local_id}{}>", crate::domain::MESSAGE_ID_SUFFIX)),
             in_reply_to: None,
             references: None,
             remote_id: None,

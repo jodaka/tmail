@@ -124,7 +124,10 @@ fn render_body(
     let scrolling = total > viewport;
     // A visible scrollbar reserves its column: body text clips one column
     // short so text and scrollbar never overlap. When the message fits,
-    // the full width is used and no scrollbar is drawn.
+    // the full width is used and no scrollbar is drawn. The document
+    // itself wraps `SCROLLBAR_RESERVE` (rail + padding, ticket ytqd) short
+    // of the panel width, so a rail never hides the last symbol of a long
+    // line — the clip below is only a safety net.
     let text_width = chrome::scrollbar_content_width(body_area.width, total, viewport) as usize;
     let links = &doc.links;
     let focus = state.reader_focus;

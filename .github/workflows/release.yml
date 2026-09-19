@@ -139,6 +139,13 @@ jobs:
             os: ubuntu-latest
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+          # Windows port (issue sd7v): msvc ABI — no extra tools, the
+          # windows-latest runner ships MSVC. The tar.gz stays tar.gz:
+          # Windows 10+ ships bsdtar, so
+          # `tar xzf tmail-v*.tar.gz && .\tmail.exe` works everywhere.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            binary: tmail.exe
     runs-on: ${{ matrix.os }}
     env:
       VERSION: ${{ needs.bump.outputs.version }}
@@ -163,11 +170,15 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package
+        # windows-latest defaults `run:` to pwsh; force the bash the
+        # `set`/`tar` script was written for.
+        shell: bash
         run: |
           set -euo pipefail
-          binary="target/${{ matrix.target }}/release/tmail"
+          name="${{ matrix.binary || 'tmail' }}"
+          binary="target/${{ matrix.target }}/release/$name"
           test -x "$binary" || { echo "::error::release binary missing: $binary"; exit 1; }
-          tar czf "tmail-v${VERSION}-${{ matrix.target }}.tar.gz" -C "$(dirname "$binary")" tmail
+          tar czf "tmail-v${VERSION}-${{ matrix.target }}.tar.gz" -C "$(dirname "$binary")" "$name"
 
       - uses: actions/upload-artifact@v7
         with:

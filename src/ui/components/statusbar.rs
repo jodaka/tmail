@@ -98,6 +98,18 @@ pub fn render(
     let reader = matches!(state.active_route(), Some(Route::Message(_)));
     let composer = matches!(state.active_route(), Some(Route::Composer));
     let selection_mode = state.selection_active() && !reader && !composer;
+    // Marks persist into the reader and the composer (they clear only when
+    // the screen is left), so the bar still announces that a selection
+    // exists there — without replacing the screen's own hint row with the
+    // bulk buttons (ticket 6t30). The list screen keeps the full bar.
+    let selection_note = if !selection_mode && state.selection_active() {
+        Some(format!(
+            "  {} selected ·",
+            state.visible_selected_count().max(state.selected.len())
+        ))
+    } else {
+        None
+    };
     let mut spans: Vec<Span<'_>> = Vec::new();
     if selection_mode {
         let count = format!(
@@ -155,6 +167,9 @@ pub fn render(
             hint_row(keymap, None, "cancel", "save & leave"),
             (Some("^↵"), "send"),
         ];
+        if let Some(note) = &selection_note {
+            spans.push(selection_note_span(note, theme));
+        }
         push_hints(theme, &mut spans, &hints);
     } else if reader {
         let context = Some(Context::Reader);
@@ -180,6 +195,9 @@ pub fn render(
         {
             hints.push(hint_row(keymap, context, "save_attachment", "save"));
             hints.push(hint_row(keymap, context, "open_attachment", "open"));
+        }
+        if let Some(note) = &selection_note {
+            spans.push(selection_note_span(note, theme));
         }
         push_hints(theme, &mut spans, &hints);
     } else {
@@ -223,6 +241,18 @@ fn hint_row<'a>(
     label: &'a str,
 ) -> (Option<&'a str>, &'a str) {
     (keymap.hint(context, action), label)
+}
+
+/// The `N selected ·` marker, styled like the count on the list's bulk bar
+/// (the same selection it reports; ticket 6t30).
+fn selection_note_span<'a>(note: &'a str, theme: &'a Theme) -> Span<'a> {
+    Span::styled(
+        note.to_owned(),
+        Style::new()
+            .fg(theme.accent)
+            .bg(theme.sidebar_bg)
+            .add_modifier(ratatui::style::Modifier::BOLD),
+    )
 }
 
 fn push_hints(theme: &Theme, spans: &mut Vec<Span<'_>>, hints: &[(Option<&str>, &str)]) {

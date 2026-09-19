@@ -165,10 +165,12 @@ impl PageCache {
                 limits,
             ));
         }
-        let home = std::env::var_os("HOME")?;
-        let mut dir = PathBuf::from(home);
+        let home = crate::domain::paths::home_dir()?;
+        let mut dir = home;
         dir.push(if cfg!(target_os = "macos") {
             "Library/Application Support"
+        } else if cfg!(windows) {
+            "AppData/Roaming"
         } else {
             ".local/share"
         });

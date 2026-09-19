@@ -163,17 +163,21 @@ pub fn render(
     ]);
     frame.render_widget(Paragraph::new(buttons), row(y, 1));
     // Click targets for the two buttons (plan §10): Tab + Enter reaches
-    // the same states. The click path ignores Retry when the failure
-    // carries no retry intent (the dimmed button).
-    hits.push(
-        Rect {
-            x: inner_x,
-            y,
-            width: "[ Retry ]".width() as u16,
-            height: 1,
-        },
-        ClickTarget::ErrorButton(ModalButton::Retry),
-    );
+    // the same states. A dimmed Retry (no retry intent) is not a click
+    // target at all: nothing on it answers a click, not even a hover
+    // (the reducer's dimmed-Retry guard stays as the backstop; ticket
+    // 6t30).
+    if dialog.retry.is_some() {
+        hits.push(
+            Rect {
+                x: inner_x,
+                y,
+                width: "[ Retry ]".width() as u16,
+                height: 1,
+            },
+            ClickTarget::ErrorButton(ModalButton::Retry),
+        );
+    }
     hits.push(
         Rect {
             x: inner_x + ("[ Retry ]".width() + 3) as u16,
@@ -200,6 +204,10 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::mock::mock_initial_state;
+    use crate::app::operation::{OperationKind, RetrySpec};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn dialog(detail: &str) -> ErrorDialog {
         ErrorDialog {
@@ -212,6 +220,47 @@ mod tests {
             button: ModalButton::Dismiss,
             previous_focus: crate::app::focus::Focus::MessageList,
         }
+    }
+
+    fn retryable_dialog(detail: &str) -> ErrorDialog {
+        ErrorDialog {
+            retry: Some(RetrySpec {
+                kind: OperationKind::LoadMailboxes,
+            }),
+            ..dialog(detail)
+        }
+    }
+
+    fn state_with(dialog: ErrorDialog) -> crate::app::state::AppState {
+        let mut state = mock_initial_state();
+        state.session.overlay = Some(Overlay::Error(dialog));
+        state
+    }
+
+    fn rendered(state: &crate::app::state::AppState) -> (ratatui::buffer::Buffer, HitMap) {
+        let backend = TestBackend::new(152, 40);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        let theme = Theme::default_dark();
+        let mut hits = HitMap::default();
+        terminal
+            .draw(|frame| render(frame, state, &theme, &mut hits))
+            .expect("draw");
+        (terminal.backend().buffer().clone(), hits)
+    }
+
+    /// Top-left cell of `needle` (9 columns) in the buffer.
+    fn locate(buffer: &ratatui::buffer::Buffer, needle: &str) -> (u16, u16) {
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width.saturating_sub(9) {
+                let symbol: String = (0..9)
+                    .map(|dx| buffer[(x + dx, y)].symbol().chars().next().unwrap_or(' '))
+                    .collect();
+                if symbol == needle {
+                    return (x, y);
+                }
+            }
+        }
+        panic!("{needle} not drawn");
     }
 
     #[test]
@@ -258,5 +307,26 @@ mod tests {
         let detail = "word ".repeat(200);
         let over = max_scroll(&dialog(detail.trim_end()), (152, 40));
         assert!(over > 0);
+    }
+
+    #[test]
+    fn dimmed_retry_answers_no_click() {
+        // A failure without retry intent draws the dimmed Retry but must
+        // not offer a click target (ticket 6t30).
+        let state = state_with(dialog("boom"));
+        let (buffer, hits) = rendered(&state);
+        let (bx, by) = locate(&buffer, "[ Retry ]");
+        assert_eq!(hits.hit_test(bx, by, true), None);
+    }
+
+    #[test]
+    fn retryable_dialog_answers_retry_clicks() {
+        let state = state_with(retryable_dialog("boom"));
+        let (buffer, hits) = rendered(&state);
+        let (bx, by) = locate(&buffer, "[ Retry ]");
+        assert_eq!(
+            hits.hit_test(bx, by, true),
+            Some(ClickTarget::ErrorButton(ModalButton::Retry)),
+        );
     }
 }
