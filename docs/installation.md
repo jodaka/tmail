@@ -38,15 +38,20 @@ dependency has platform-specific installers.
    dnf copr enable atim/himalaya && dnf install himalaya     # Fedora / RHEL / CentOS
    nix profile install github:pimalaya/himalaya              # Nix with flakes
 
+   # Debian / Ubuntu (no distro package): the install script pulls the
+   # right prebuilt.
+   curl -sSL https://raw.githubusercontent.com/pimalaya/himalaya/master/install.sh \
+     | sudo PREFIX=/usr/local sh
+   # or without sudo:  ... | PREFIX=$HOME/.local sh   (needs ~/.local/bin on PATH)
+   # or grab himalaya-v<version>.tar.gz from the pimalaya/himalaya releases
+   # and move the binary to /usr/local/bin.
+
    # Windows
    # prebuilt x86_64 zip from the pimalaya/himalaya releases
    # (unzip himalaya-v*.zip and add it to PATH), or:
 
    # any platform with Rust
    cargo install --locked --git https://github.com/pimalaya/himalaya.git
-
-   # any Linux, prebuilt binary from GitHub releases
-   curl -sSL https://raw.githubusercontent.com/pimalaya/himalaya/master/install.sh | PREFIX=~/.local sh
    ```
 
    The Homebrew and distro builds compile with himalaya's default features
@@ -66,7 +71,7 @@ dependency has platform-specific installers.
 3. Run it (`cargo run --release` from the checkout, or copy the binary
    anywhere):
 
-5. Or grab a prebuilt binary from the GitHub releases instead of
+4. Or grab a prebuilt binary from the GitHub releases instead of
    building: `tmail-v<version>-<target>.tar.gz` where target is
    `aarch64-apple-darwin` or `x86_64-apple-darwin` (macOS),
    `x86_64-unknown-linux-gnu` / `-musl` (Linux), or
