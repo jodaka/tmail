@@ -6,7 +6,7 @@ Grab `tmail-v<version>-<target>.tar.gz` from the GitHub releases, then
 extract the binary next to somewhere on `PATH`:
 
 - `aarch64-apple-darwin` / `x86_64-apple-darwin` — macOS
-- `x86_64-unknown-linux-gnu` / `-musl` — Linux
+- `x86_64-unknown-linux-gnu` / `-musl`, `aarch64-unknown-linux-gnu` / `-musl` — Linux
 - `x86_64-pc-windows-msvc` — Windows (`tar xzf`, then run `.\tmail.exe`;
   SmartScreen may warn about the unsigned binary on first launch)
 
@@ -74,7 +74,8 @@ dependency has platform-specific installers.
 4. Or grab a prebuilt binary from the GitHub releases instead of
    building: `tmail-v<version>-<target>.tar.gz` where target is
    `aarch64-apple-darwin` or `x86_64-apple-darwin` (macOS),
-   `x86_64-unknown-linux-gnu` / `-musl` (Linux), or
+   `x86_64-unknown-linux-gnu` / `-musl` or `aarch64-unknown-linux-gnu` /
+   `-musl` (Linux), or
    `x86_64-pc-windows-msvc` (Windows: unpack with `tar xzf`, then run
    `.\tmail.exe`; SmartScreen may warn about the unsigned binary on
    first launch). SHA checksums are published alongside (`SHA256SUMS`).

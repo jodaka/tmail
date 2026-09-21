@@ -139,6 +139,10 @@ jobs:
             os: ubuntu-latest
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
           # Windows port (issue sd7v): msvc ABI — no extra tools, the
           # windows-latest runner ships MSVC. The tar.gz stays tar.gz:
           # Windows 10+ ships bsdtar, so
@@ -163,7 +167,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Install musl linker
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+        if: endsWith(matrix.target, '-musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build
@@ -295,7 +299,7 @@ jobs:
 
           triple = re.compile(
               r'tmail-v[^"]*-(aarch64-apple-darwin|x86_64-apple-darwin'
-              r'|x86_64-unknown-linux-gnu)\.tar\.gz"'
+              r'|x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu)\.tar\.gz"'
           )
           sha = re.compile(r'^(\s*sha256 ")([0-9a-f]{64})(")$')
           lines = text.split("\n")
@@ -312,8 +316,8 @@ jobs:
                   lines[i] = f'{match.group(1)}{sums[asset]}{match.group(3)}'
                   patched += 1
                   pending = None
-          if patched != 3:
-              sys.exit(f"expected 3 sha256 lines, patched {patched}")
+          if patched != 4:
+              sys.exit(f"expected 4 sha256 lines, patched {patched}")
 
           with open(path, "w") as f:
               f.write("\n".join(lines))

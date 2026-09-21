@@ -26,6 +26,10 @@ class Tmail < Formula
       url "https://github.com/jodaka/tmail/releases/download/v#{version}/tmail-v#{version}-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "12c2c3a5ec6273b1096c2b0433e8ac73ee7b6e91a32d7fc426e282574299777e"
     end
+    on_arm do
+      url "https://github.com/jodaka/tmail/releases/download/v#{version}/tmail-v#{version}-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    end
   end
 
   def install
