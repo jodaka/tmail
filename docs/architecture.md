@@ -11,25 +11,24 @@ Elm-style: the reducer computes state transitions and never touches I/O.
 Effects and async results flow around it as data.
 
 ```mermaid
-digraph g {
-  rankdir=LR;
-  events [label="runtime::events\n(keys, mouse, tick, resize)"];
-  results [label="runtime::tasks\n(OperationManager)\nchannel"];
-  reducer [label="app::reducer\n(I/O-free)"];
-  state [label="app::state\nAppState"];
-  manager [label="OperationManager\nspawn+cancel per Effect"];
-  backend [label="backend::MailBackend\n(trait)"];
-  frame [label="ui::render"];
-  events -> reducer [label="Action"];
-  results -> reducer [label="Action::BackendCompleted\n/ EditorFinished"];
-  reducer -> state [label="mutations"];
-  reducer -> manager [label="Effect"];
-  manager -> backend [label="argv-only child\n+ CancellationToken"];
-  accessops [label="external editor\n(runtime::editor)\nplatform open\n(backend::opener)\ndiscovery\n(discovery)"];
-  manager -> accessops;
-  state -> frame [label="read"];
-  backend -> results [label="OperationResult"];
-}
+flowchart LR
+    events["runtime::events<br/>(keys, mouse, tick, resize)"]
+    results["runtime::tasks<br/>(OperationManager)<br/>channel"]
+    reducer["app::reducer<br/>(I/O-free)"]
+    state["app::state<br/>AppState"]
+    manager["OperationManager<br/>spawn+cancel per Effect"]
+    backend["backend::MailBackend<br/>(trait)"]
+    frame["ui::render"]
+    accessops["external editor<br/>(runtime::editor)<br/>platform open<br/>(backend::opener)<br/>discovery<br/>(discovery)"]
+
+    events -->|Action| reducer
+    results -->|Action::BackendCompleted<br/>/ EditorFinished| reducer
+    reducer -->|mutations| state
+    reducer -->|Effect| manager
+    manager -->|argv-only child<br/>+ CancellationToken| backend
+    manager --> accessops
+    state -->|read| frame
+    backend -->|OperationResult| results
 ```
 
 1. **`src/main.rs`** — wiring and the event loop only: build config →
