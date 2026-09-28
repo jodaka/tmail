@@ -26,7 +26,7 @@ pub use draft::{
     Draft, DraftAttachment, DraftId, DraftSaveState, DraftSnapshot, RestoredDraft,
     draft_from_message,
 };
-pub use mailbox::{Mailbox, MailboxId, MailboxRole};
+pub use mailbox::{Mailbox, MailboxId, MailboxRole, TestedMailbox};
 pub use message::{
     Attachment, AttachmentRequest, Message, MessageHeaders, MessageId, MessageLocator,
     MessageSummary, bare_message_id, bracketed_message_id,

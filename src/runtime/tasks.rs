@@ -396,13 +396,44 @@ async fn run_effect(
                 Ok(mailboxes) => Some(Ok(OperationOutcome::TestAccountCompleted { mailboxes })),
                 Err(err) => operation_failure(effect, err).map(Err),
             }
-        }
-        // Wizard save (ADR 0003 §3.6): the format-preserving merge runs
-        // here (file I/O on the blocking pool), keeping the reducer
-        // I/O-free and the runtime loop unblocked.
-        OperationKind::SaveAccount { path, draft } => {
+        } // Wizard save (ADR 0003 §3.6): server-side provisioning first
+        // (issue txps) — the missing special folders are created best
+        // effort and only the server-confirmed ones join the alias
+        // table — then the format-preserving merge runs on the blocking
+        // pool (file I/O), keeping the reducer I/O-free and the runtime
+        // loop unblocked.
+        OperationKind::SaveAccount {
+            path,
+            draft,
+            create,
+        } => {
             let path = path.clone();
-            let draft = draft.as_ref().clone();
+            let mut draft = draft.as_ref().clone();
+            let create = create.clone();
+            let confirmed = if create.is_empty() {
+                Vec::new()
+            } else {
+                let names: Vec<String> = create.iter().map(|(_, name)| name.clone()).collect();
+                match tester
+                    .ensure_mailboxes(&draft, &names, ctx.cancellation.clone())
+                    .await
+                {
+                    Ok(confirmed) => confirmed,
+                    // A cancelled provisioning aborts the save the same
+                    // way the test does; any other failure degrades to
+                    // "none created" and the save proceeds without the
+                    // extra aliases.
+                    Err(err) => return operation_failure(effect, err).map(Err),
+                }
+            };
+            let created_mailboxes = confirmed.clone();
+            for (role, name) in &create {
+                if confirmed.iter().any(|item| item == name)
+                    && !draft.aliases.iter().any(|(key, _)| key == role)
+                {
+                    draft.aliases.push((role.clone(), name.clone()));
+                }
+            }
             match tokio::task::spawn_blocking(move || {
                 crate::config::write::save_account(&path, &draft)
             })
@@ -412,6 +443,7 @@ async fn run_effect(
                     path: report.path,
                     created: report.created,
                     permissions_warning: report.permissions_warning,
+                    created_mailboxes,
                 })),
                 Ok(Err(detail)) => Some(Err(plain_failure(effect, &detail))),
                 Err(err) => Some(Err(plain_failure(
@@ -704,6 +736,15 @@ impl AccountTester for InertTester {
     async fn test_account(
         &self,
         _draft: &crate::config::write::DraftAccount,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> crate::backend::BackendResult<Vec<crate::domain::TestedMailbox>> {
+        Err(BackendError::InvalidRequest(String::from("unused")))
+    }
+
+    async fn ensure_mailboxes(
+        &self,
+        _draft: &crate::config::write::DraftAccount,
+        _names: &[String],
         _cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::backend::BackendResult<Vec<String>> {
         Err(BackendError::InvalidRequest(String::from("unused")))

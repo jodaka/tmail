@@ -3445,7 +3445,12 @@ fn drive_to_testing(
         state,
         Action::BackendCompleted(OperationResult {
             id: test_id,
-            outcome: Ok(tmail::app::OperationOutcome::TestAccountCompleted { mailboxes }),
+            outcome: Ok(tmail::app::OperationOutcome::TestAccountCompleted {
+                mailboxes: mailboxes
+                    .into_iter()
+                    .map(|name| tmail::domain::TestedMailbox { name, role: None })
+                    .collect(),
+            }),
         }),
     );
     test_id
@@ -3507,7 +3512,10 @@ fn wizard_saved_screen_reports_the_path_and_permissions() {
         Action::BackendCompleted(OperationResult {
             id: test_id,
             outcome: Ok(tmail::app::OperationOutcome::TestAccountCompleted {
-                mailboxes: vec![String::from("INBOX")],
+                mailboxes: vec![tmail::domain::TestedMailbox {
+                    name: String::from("INBOX"),
+                    role: None,
+                }],
             }),
         }),
     );
@@ -3519,6 +3527,7 @@ fn wizard_saved_screen_reports_the_path_and_permissions() {
             path: std::path::PathBuf::from("/tmp/himalaya/config.toml"),
             created: true,
             permissions_warning: None,
+            created_mailboxes: Vec::new(),
         }),
     })];
     let text = text_of(&buffer_after(&mut state, &actions, 80, 24));

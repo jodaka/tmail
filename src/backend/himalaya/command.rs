@@ -33,6 +33,31 @@ pub(crate) fn mailbox_list_argv(
     argv
 }
 
+/// `imap list -A --json` (ADR 0003 §3.4, wizard credential test): the
+/// IMAP-specific listing whose rows carry every name attribute the
+/// server reported — the RFC 6154 SPECIAL-USE attributes the shared
+/// `mailbox list` output intentionally omits. `--all` reads LIST rather
+/// than LSUB so unsubscribed special folders (a fresh Drafts the user
+/// never subscribed to is common) still resolve their roles.
+pub(crate) fn imap_list_argv(config: Option<&Path>, account: Option<&str>) -> Vec<String> {
+    let mut argv = global_flags(config, account);
+    args!(argv, "imap", "list", "--all", "--json");
+    argv
+}
+
+/// `imap create <mailbox>` (issue txps): provisions a missing special
+/// folder so the alias table can point at a mailbox that exists.
+/// Success is the exit status; the output is human text.
+pub(crate) fn imap_create_argv(
+    config: Option<&Path>,
+    account: Option<&str>,
+    mailbox: &str,
+) -> Vec<String> {
+    let mut argv = global_flags(config, account);
+    args!(argv, "imap", "create", mailbox);
+    argv
+}
+
 /// Shared shape of `envelope {list,search} -m <mailbox> -p <page>
 /// -s <size> --json`: the two calls differ only in the subcommand word and
 /// (for search) the trailing query.
@@ -309,6 +334,41 @@ mod tests {
                 "list",
                 "--json",
                 "--counts"
+            ]
+        );
+    }
+
+    #[test]
+    fn imap_list_argv_is_exact() {
+        let argv = imap_list_argv(Some(Path::new("/tmp/cfg.toml")), Some("probe"));
+        assert_eq!(
+            argv,
+            vec![
+                "-c",
+                "/tmp/cfg.toml",
+                "-a",
+                "probe",
+                "imap",
+                "list",
+                "--all",
+                "--json"
+            ]
+        );
+    }
+
+    #[test]
+    fn imap_create_argv_is_exact() {
+        let argv = imap_create_argv(Some(Path::new("/tmp/cfg.toml")), Some("probe"), "Trash");
+        assert_eq!(
+            argv,
+            vec![
+                "-c",
+                "/tmp/cfg.toml",
+                "-a",
+                "probe",
+                "imap",
+                "create",
+                "Trash"
             ]
         );
     }

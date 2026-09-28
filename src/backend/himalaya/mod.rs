@@ -50,24 +50,18 @@ pub const PROGRAM: &str = "himalaya";
 /// (ADR 0003 §3.4: a 30 s timeout bounds a hung endpoint).
 const TEST_ACCOUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// The wizard credential test (ADR 0003 §3.4): writes `draft` into a
-/// fresh temporary 0600 config file, runs `himalaya -c <temp> mailbox
-/// list -a <account> --json` through the same process plumbing as every
-/// other backend call, and returns the mailbox names. The temp file is
-/// deleted in all outcomes (guarded `NamedTempFile` drop); nothing
-/// containing the credential is ever written to the real config.
-async fn test_account_mailbox_names(
-    program: &str,
+/// Writes `draft` into a fresh temporary 0600 config file for the
+/// wizard's server-touching operations (ADR 0003 §3.4). The file exists
+/// only after the mode is 0600 (on unix, tempfile already creates it
+/// 0600; re-asserted defensively) and before any secret is placed
+/// inside. The tempfile work hops to the blocking pool — the
+/// single-threaded runtime never waits on a disk (plan §3). The guard
+/// deletes it on drop.
+async fn temp_draft_config(
     draft: &crate::config::write::DraftAccount,
-    cancellation: tokio_util::sync::CancellationToken,
-) -> BackendResult<Vec<String>> {
-    // Guarded creation: the file exists only after the mode is 0600 (on
-    // unix, tempfile already creates it 0600; re-assert defensively)
-    // and before any secret is placed inside. The tempfile work hops to
-    // the blocking pool — the single-threaded runtime never waits on a
-    // disk (plan §3).
+) -> BackendResult<tempfile::NamedTempFile> {
     let fragment = crate::config::write::draft_account_fragment(draft);
-    let temp = tokio::task::spawn_blocking(move || -> BackendResult<tempfile::NamedTempFile> {
+    tokio::task::spawn_blocking(move || -> BackendResult<tempfile::NamedTempFile> {
         let temp = tempfile::Builder::new()
             .prefix("tmail-wizard-")
             .suffix(".toml")
@@ -99,31 +93,153 @@ async fn test_account_mailbox_names(
         BackendError::Io(std::io::Error::other(format!(
             "test config task failed: {join}"
         )))
-    })??;
+    })?
+}
+
+/// The wizard credential test (ADR 0003 §3.4): writes `draft` into a
+/// fresh temporary 0600 config file, runs `himalaya -c <temp> mailbox
+/// list -a <account> --json` through the same process plumbing as every
+/// other backend call, and returns the mailbox names, each tagged with
+/// the role the server itself attributed (issue m0wh). The temp file is
+/// deleted in all outcomes (guarded `NamedTempFile` drop); nothing
+/// containing the credential is ever written to the real config.
+async fn test_account_mailbox_names(
+    program: &str,
+    draft: &crate::config::write::DraftAccount,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> BackendResult<Vec<crate::domain::TestedMailbox>> {
+    let temp = temp_draft_config(draft).await?;
 
     let path = temp.path().to_path_buf();
+    // One overall 30 s budget for both listings (ADR 0003 §3.4): the
+    // special-use read below gets whatever the credential test left, so
+    // the whole test still bounds a hung endpoint at 30 s.
+    let deadline = tokio::time::Instant::now() + TEST_ACCOUNT_TIMEOUT;
+
     let argv = command::mailbox_list_argv(Some(&path), Some(&draft.name), false);
 
     // The timeout wraps the run: on `Elapsed` the run future is dropped,
     // which kills the child (`kill_on_drop`), and the temp file drops
     // right after — nothing lingers in either failure mode.
     let run = process::run(program, &argv, &cancellation);
-    let output = tokio::time::timeout(TEST_ACCOUNT_TIMEOUT, run)
-        .await
-        .map_err(|_| BackendError::Command {
-            program: program.to_owned(),
-            code: None,
-            detail: String::from(
-                "the connection test timed out after 30s (check the server settings)",
-            ),
-        })??;
+    let output =
+        tokio::time::timeout_at(deadline, run)
+            .await
+            .map_err(|_| BackendError::Command {
+                program: program.to_owned(),
+                code: None,
+                detail: String::from(
+                    "the connection test timed out after 30s (check the server settings)",
+                ),
+            })??;
 
-    let dto: dto::MailboxesDto = process::decode_on_pool(output).await?;
-    // Drop the temp file (deleting it) before reporting.
-    drop(temp);
-    Ok(map::mailboxes(dto, &HashMap::new())
+    let listing: dto::MailboxesDto = process::decode_on_pool(output).await?;
+    let names: Vec<String> = listing
+        .mailboxes
         .into_iter()
         .map(|mailbox| mailbox.name)
+        .collect();
+
+    // The server's own word about its special folders (issue m0wh):
+    // `imap list -A --json` carries the RFC 6154 SPECIAL-USE attributes
+    // the shared listing deliberately omits, so localized or lookalike
+    // folder names still resolve. Best effort by design — an `imap`
+    // subcommand the binary lacks, a non-IMAP draft, or a server without
+    // SPECIAL-USE support must degrade to the name heuristics, never
+    // fail a test that already passed — but a user's `Esc` (cancellation)
+    // still aborts the whole test.
+    let special = match tokio::time::timeout_at(
+        deadline,
+        process::run(
+            program,
+            &command::imap_list_argv(Some(&path), Some(&draft.name)),
+            &cancellation,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(output)) => process::decode_on_pool::<dto::ImapMailboxesDto>(output)
+            .await
+            .map(Some)
+            .unwrap_or_else(|err| {
+                tracing::debug!(error = %err, "special-use listing unusable; name heuristics apply");
+                None
+            }),
+        Ok(Err(err)) if matches!(err, BackendError::Cancelled) => return Err(err),
+        Ok(Err(err)) => {
+            tracing::debug!(error = %err, "special-use listing failed; name heuristics apply");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("special-use listing exceeded the test deadline; name heuristics apply");
+            None
+        }
+    };
+
+    // Drop the temp file (deleting it) before reporting.
+    drop(temp);
+    let tested = map::tested_mailboxes(names, special.unwrap_or(dto::ImapMailboxesDto::default()));
+    Ok(tested)
+}
+
+/// The missing-special-mailbox provisioning (issue txps): creates the
+/// named folders against the temp 0600 config — one bounded `imap
+/// create` per name, best effort — then verifies against a fresh
+/// shared listing and returns the subset of `names` the account
+/// actually exposes afterwards. One overall 30 s budget; a cancelled
+/// token aborts, everything else degrades to "not created".
+async fn ensure_mailbox_names(
+    program: &str,
+    draft: &crate::config::write::DraftAccount,
+    names: &[String],
+    cancellation: tokio_util::sync::CancellationToken,
+) -> BackendResult<Vec<String>> {
+    let temp = temp_draft_config(draft).await?;
+    let path = temp.path().to_path_buf();
+    let deadline = tokio::time::Instant::now() + TEST_ACCOUNT_TIMEOUT;
+
+    for name in names {
+        let argv = command::imap_create_argv(Some(&path), Some(&draft.name), name);
+        let run = process::run(program, &argv, &cancellation);
+        match tokio::time::timeout_at(deadline, run).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) if matches!(err, BackendError::Cancelled) => return Err(err),
+            Ok(Err(err)) => {
+                // "already exists" and every other refusal degrade the
+                // same way: the verification listing decides below.
+                tracing::debug!(name = %name, error = %err, "mailbox create refused");
+            }
+            Err(_) => {
+                tracing::debug!(name = %name, "mailbox create exceeded the deadline");
+                break;
+            }
+        }
+    }
+
+    // Only a folder the shared listing confirms becomes an alias: the
+    // alias must point at an addressable mailbox.
+    let argv = command::mailbox_list_argv(Some(&path), Some(&draft.name), false);
+    let run = process::run(program, &argv, &cancellation);
+    let output =
+        tokio::time::timeout_at(deadline, run)
+            .await
+            .map_err(|_| BackendError::Command {
+                program: program.to_owned(),
+                code: None,
+                detail: String::from("the mailbox verification timed out after 30s"),
+            })??;
+    let listing: dto::MailboxesDto = process::decode_on_pool(output).await?;
+    drop(temp);
+
+    let listed: Vec<String> = listing
+        .mailboxes
+        .into_iter()
+        .map(|mailbox| mailbox.name)
+        .collect();
+    Ok(names
+        .iter()
+        .filter(|name| listed.iter().any(|item| item.eq_ignore_ascii_case(name)))
+        .cloned()
         .collect())
 }
 
@@ -152,8 +268,17 @@ impl AccountTester for HimalayaAccountTester {
         &self,
         draft: &crate::config::write::DraftAccount,
         cancellation: tokio_util::sync::CancellationToken,
-    ) -> BackendResult<Vec<String>> {
+    ) -> BackendResult<Vec<crate::domain::TestedMailbox>> {
         test_account_mailbox_names(&self.program, draft, cancellation).await
+    }
+
+    async fn ensure_mailboxes(
+        &self,
+        draft: &crate::config::write::DraftAccount,
+        names: &[String],
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> BackendResult<Vec<String>> {
+        ensure_mailbox_names(&self.program, draft, names, cancellation).await
     }
 }
 

@@ -149,10 +149,14 @@ pub enum OperationKind {
     /// Merge the confirmed draft account into the resolved config file
     /// (ADR 0003 §3.6): format-preserving toml_edit edit, fresh files
     /// created 0600. Runs in the manager (file I/O) so the reducer stays
-    /// I/O-free.
+    /// I/O-free. `create` carries the `(role, folder)` pairs for the
+    /// special mailboxes the server lacks (issue txps): the manager
+    /// provisions them first (best effort) and only the ones the server
+    /// confirms join the draft's alias table.
     SaveAccount {
         path: std::path::PathBuf,
         draft: Box<crate::app::wizard::DraftAccountConfig>,
+        create: Vec<(String, String)>,
     },
     /// Deliver one new-mail notification (`[tmail].notifications`, ticket
     /// b28p). No mail travels; the manager delivers it without blocking
@@ -556,18 +560,22 @@ pub enum OperationOutcome {
     /// Ranked discovery candidates for the wizard's email address
     /// (ADR 0003 §3.3); empty means nothing was found in time.
     Discovered(Vec<crate::discovery::DiscoveredService>),
-    /// The wizard's credential test passed (ADR 0003 §3.4): the mailbox
-    /// names the draft account can list.
+    /// The wizard's credential test passed (ADR 0003 §3.4): the mailboxes
+    /// the draft account can list, each tagged with the role the server
+    /// itself attributed (RFC 6154 SPECIAL-USE on IMAP) when it did.
     TestAccountCompleted {
-        mailboxes: Vec<String>,
+        mailboxes: Vec<crate::domain::TestedMailbox>,
     },
     /// The wizard account was merged into the config file (ADR 0003
     /// §3.6): the file path, whether it was freshly created, and the
     /// permissions warning when the file was group/world-readable.
+    /// `created_mailboxes` lists the special folders the server did not
+    /// have and the manager provisioned before the save (issue txps).
     AccountSaved {
         path: std::path::PathBuf,
         created: bool,
         permissions_warning: Option<String>,
+        created_mailboxes: Vec<String>,
     },
     /// One cached page of summaries (ticket haeb): served off disk by the
     /// manager, applied by the reducer only in a cold context.

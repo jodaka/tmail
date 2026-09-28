@@ -126,6 +126,35 @@ impl FakeHimalaya {
         Self::spawn_script_attachment("ok", "ok", "ok", "ok", "ok", attachment_mode, SCRIPT)
     }
 
+    /// The fake with a dedicated `imap list` behavior mode (`ok`
+    /// | `special` | `error-json` | `slow`), for the wizard credential
+    /// test's SPECIAL-USE read (issue m0wh). The default `ok` mode
+    /// answers the shared shape without any special attributes.
+    pub fn spawn_imap(imap_mode: &'static str) -> Self {
+        Self::spawn_script_imap("ok", "ok", "ok", "ok", imap_mode)
+    }
+
+    /// [`Self::spawn_script_attachment`] with the `imap list` mode set
+    /// explicitly.
+    pub fn spawn_script_imap(
+        mailbox_mode: &'static str,
+        envelope_mode: &'static str,
+        message_mode: &'static str,
+        flag_mode: &'static str,
+        imap_mode: &'static str,
+    ) -> Self {
+        Self::spawn_script_full(
+            mailbox_mode,
+            envelope_mode,
+            message_mode,
+            flag_mode,
+            "ok",
+            "ok",
+            imap_mode,
+            SCRIPT,
+        )
+    }
+
     /// The lowest-level constructor: every subcommand mode explicit.
     pub fn spawn_script_attachment(
         mailbox_mode: &'static str,
@@ -134,6 +163,36 @@ impl FakeHimalaya {
         flag_mode: &'static str,
         send_mode: &'static str,
         attachment_mode: &'static str,
+        script_template: &str,
+    ) -> Self {
+        Self::spawn_script_full(
+            mailbox_mode,
+            envelope_mode,
+            message_mode,
+            flag_mode,
+            send_mode,
+            attachment_mode,
+            "ok",
+            script_template,
+        )
+    }
+
+    /// Every mode explicit, `imap list` included. The default `ok` mode
+    /// answers the shared least-common-denominator shape (names only,
+    /// no SPECIAL-USE), mirroring a healthy himalaya against a server
+    /// that advertises no RFC 6154 attributes. The eight plain string
+    /// modes are the shape callers already speak (one per fake
+    /// subcommand); a modes struct would add ceremony without a second
+    /// user, so the lint is waived on this test-double constructor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_script_full(
+        mailbox_mode: &'static str,
+        envelope_mode: &'static str,
+        message_mode: &'static str,
+        flag_mode: &'static str,
+        send_mode: &'static str,
+        attachment_mode: &'static str,
+        imap_mode: &'static str,
         script_template: &str,
     ) -> Self {
         let dir = TempDir::new().expect("temp dir");
@@ -150,7 +209,8 @@ impl FakeHimalaya {
             .replace("@MESSAGE_MODE@", message_mode)
             .replace("@FLAG_MODE@", flag_mode)
             .replace("@SEND_MODE@", send_mode)
-            .replace("@ATTACHMENT_MODE@", attachment_mode);
+            .replace("@ATTACHMENT_MODE@", attachment_mode)
+            .replace("@IMAP_MODE@", imap_mode);
 
         let mut file = fs::File::create(&program).expect("write fake script");
         file.write_all(script.as_bytes())
@@ -241,8 +301,8 @@ cat >> "$STDIN_RECORD"
 rmdir "$STDIN_RECORD.lock"
 
 # Identify the subcommand anywhere in argv (global flags like `-c` come
-# first on real invocations). For `message`, the operation is the word that
-# follows (read/move/delete).
+# first on real invocations). For `message`, `attachment` and `imap`, the
+# operation is the word that follows (read/move/delete, download, list/create).
 SUB=""
 OP=""
 prev=""
@@ -250,6 +310,7 @@ for a in "$@"; do
   case "$prev" in
     message) OP="$a" ;;
     attachment) OP="$a" ;;
+    imap) OP="$a" ;;
   esac
   case "$a" in
     mailbox) SUB="mailbox" ;;
@@ -257,14 +318,86 @@ for a in "$@"; do
     message) SUB="message" ;;
     flag) SUB="flag" ;;
     attachment) SUB="attachment" ;;
+    imap) SUB="imap" ;;
   esac
   prev="$a"
 done
 
+# The provisioning state (issue txps): every successful `imap create`
+# appends the folder name, and the shared `mailbox list` reflects the
+# union, mimicking a live server.
+CREATED_LOG="$ARGV_LOG.created"
+
+if [ "$SUB" = "imap" ] && [ "$OP" = "create" ]; then
+  case "@IMAP_MODE@" in
+    error-json)
+      printf '%s' '{"error":"mailbox already exists","sources":["imap"]}'
+      exit 1
+      ;;
+    slow)
+      sleep 30 &
+      wait
+      ;;
+    *)
+      NAME=""
+      p2=""
+      for a in "$@"; do
+        case "$p2" in
+          create) NAME="$a" ;;
+        esac
+        p2="$a"
+      done
+      while ! mkdir "$CREATED_LOG.lock" 2>/dev/null; do sleep 0.01; done
+      printf '%s\n' "$NAME" >> "$CREATED_LOG"
+      rmdir "$CREATED_LOG.lock"
+      printf '%s' '{"action":"created"}'
+      ;;
+  esac
+  exit 0
+fi
+
+if [ "$SUB" = "imap" ]; then
+  case "@IMAP_MODE@" in
+    ok)
+      # The shared least-common-denominator shape: names, no SPECIAL-USE
+      # attributes (a server that never advertises RFC 6154).
+      printf '%s' '{"mailboxes":[{"name":"INBOX","delimiter":"/","attributes":["\\HasNoChildren"]},{"name":"Archive","delimiter":"/","attributes":["\\HasNoChildren"]},{"name":"Sent","delimiter":"/","attributes":["\\HasNoChildren"]}]}'
+      ;;
+    special)
+      # Localized special folders carrying their RFC 6154 attributes —
+      # the failure class from the report (issue m0wh): no name
+      # candidate list can match these, only the server's own word can.
+      printf '%s' '{"mailboxes":[{"name":"INBOX","delimiter":"/","attributes":["\\HasNoChildren"]},{"name":"Odstraněné","delimiter":"/","attributes":["\\HasNoChildren","\\Trash"]},{"name":"Koncepty","delimiter":"/","attributes":["\\HasNoChildren","\\Drafts"]},{"name":"Odeslané","delimiter":"/","attributes":["\\HasNoChildren","\\Sent"]}]}'
+      ;;
+    error-json)
+      printf '%s' '{"error":"no imap backend","sources":["config"]}'
+      exit 1
+      ;;
+    slow)
+      sleep 30 &
+      wait
+      ;;
+  esac
+  exit 0
+fi
+
 if [ "$SUB" = "mailbox" ]; then
   case "@MAILBOX_MODE@" in
     ok)
-      printf '%s' '{"mailboxes":[{"id":"/root/maildir/INBOX","name":"INBOX","total":null,"unread":null},{"id":"/root/maildir/Archive","name":"Archive","total":null,"unread":null},{"id":"Sent","name":"Sent"}]}'
+      # The base listing plus every folder a previous `imap create`
+      # provisioned (the state lives next to the argv log).
+      BASE='{"mailboxes":[{"id":"/root/maildir/INBOX","name":"INBOX","total":null,"unread":null},{"id":"/root/maildir/Archive","name":"Archive","total":null,"unread":null},{"id":"Sent","name":"Sent"}'
+      if [ -f "$CREATED_LOG" ]; then
+        while IFS= read -r n; do
+          [ -n "$n" ] && BASE="$BASE,{\"id\":\"$n\",\"name\":\"$n\",\"total\":null,\"unread\":null}"
+        done < "$CREATED_LOG"
+      fi
+      printf '%s%s' "$BASE" ']}'
+      ;;
+    special)
+      # Localized special folders, no attributes (the shared listing
+      # never carries them) — pairs with the `imap list` special mode.
+      printf '%s' '{"mailboxes":[{"id":"INBOX","name":"INBOX"},{"id":"Odstraněné","name":"Odstraněné"},{"id":"Koncepty","name":"Koncepty"},{"id":"Odeslané","name":"Odeslané"}]}'
       ;;
     error-json)
       printf '%s' '{"error":"account not found","sources":["config"]}'

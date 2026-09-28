@@ -379,6 +379,72 @@ fn name_role(name: &str) -> Option<MailboxRole> {
     }
 }
 
+/// Resolve a role from an IMAP LIST row's name attributes (ADR 0003
+/// §3.4, issue m0wh): the server's own RFC 6154 `SPECIAL-USE` word,
+/// spelled `"\Trash"`, `"\Sent"`, …. One leading backslash is stripped
+/// (himalaya serialises the escape) and the match is case-insensitive,
+/// mirroring himalaya's own `MailboxRole::parse`. Non-special attributes
+/// (`\HasNoChildren`, `\Noselect`, a server's `\XExtension`) resolve to
+/// nothing, and the first attributed row in the listing wins — a
+/// contradiction between two rows claiming one role is a server bug
+/// Tmail cannot arbitrate beyond first-wins.
+pub(crate) fn attribute_role(attributes: &[String]) -> Option<MailboxRole> {
+    attributes.iter().find_map(|raw| {
+        match raw.trim_start_matches('\\').to_ascii_lowercase().as_str() {
+            "inbox" => Some(MailboxRole::Inbox),
+            "sent" => Some(MailboxRole::Sent),
+            "drafts" => Some(MailboxRole::Drafts),
+            "archive" => Some(MailboxRole::Archive),
+            "trash" => Some(MailboxRole::Trash),
+            "junk" | "spam" => Some(MailboxRole::Spam),
+            _ => None,
+        }
+    })
+}
+
+/// Tag the shared listing's mailboxes with the roles their SPECIAL-USE
+/// attributes claim: the wizard's alias derivation (issue m0wh). One
+/// role is claimed at most once per listing (first attributed row
+/// wins), so a server echoing `\Sent` on two folders still yields one
+/// alias. Rows of the attribute listing the shared listing does not
+/// carry (unsubscribed or `\Noselect` mailboxes) are skipped: an alias
+/// must point at an addressable mailbox.
+pub(crate) fn tested_mailboxes(
+    names: Vec<String>,
+    special: dto::ImapMailboxesDto,
+) -> Vec<crate::domain::TestedMailbox> {
+    let mut claimed: Vec<MailboxRole> = Vec::new();
+    let mut roles: HashMap<String, MailboxRole> = HashMap::new();
+    for row in special.mailboxes {
+        if let Some(role) = attribute_role(&row.attributes).filter(|role| {
+            if claimed.contains(role) {
+                false
+            } else {
+                claimed.push(*role);
+                true
+            }
+        }) {
+            roles.insert(row.name, role);
+        }
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            // The two listings spell names alike for IMAP (both route
+            // through `Mailbox::Inbox → "Inbox"` normalization); the
+            // case-insensitive fallback covers a server that spells the
+            // reserved INBOX differently between the two commands.
+            let role = roles.remove(&name).or_else(|| {
+                roles
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(&name))
+                    .map(|(_, role)| *role)
+            });
+            crate::domain::TestedMailbox { name, role }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,6 +522,72 @@ mod tests {
             role_of("Archive", "/root/maildir/Archive", &map),
             Some(MailboxRole::Trash)
         );
+    }
+
+    #[test]
+    fn imap_attributes_resolve_the_special_use_roles() {
+        // Real wire spellings (captured live on a localized server,
+        // issue m0wh): the JSON escape means the string carries one
+        // leading backslash, mixed-case attributes included.
+        let special: dto::ImapMailboxesDto = serde_json::from_str(
+            r#"{"mailboxes":[
+                {"name":"Inbox","delimiter":"/","attributes":["\\Marked","\\HasNoChildren"]},
+                {"name":"Удаленные","delimiter":"/","attributes":["\\Marked","\\HasNoChildren","\\Trash"]},
+                {"name":"Черновики","delimiter":"/","attributes":["\\Marked","\\HasNoChildren","\\Drafts"]},
+                {"name":"Отправленные","delimiter":"/","attributes":["\\HasNoChildren","\\Sent"]},
+                {"name":"Нежелательная почта","delimiter":"/","attributes":["\\HasNoChildren","\\Junk"]}
+            ]}"#,
+        )
+        .expect("special listing parses");
+        let names: Vec<String> = vec![
+            "Inbox".into(),
+            "Удаленные".into(),
+            "Черновики".into(),
+            "Отправленные".into(),
+            "Нежелательная почта".into(),
+        ];
+
+        let tested = tested_mailboxes(names, special);
+
+        assert_eq!(tested[0].role, None, "no attribute claims Inbox");
+        assert_eq!(tested[1].role, Some(MailboxRole::Trash));
+        assert_eq!(tested[2].role, Some(MailboxRole::Drafts));
+        assert_eq!(tested[3].role, Some(MailboxRole::Sent));
+        assert_eq!(tested[4].role, Some(MailboxRole::Spam));
+    }
+
+    #[test]
+    fn special_use_rows_missing_from_the_shared_listing_are_dropped() {
+        // An alias must point at an addressable mailbox, so an
+        // attribute row the shared listing does not carry is skipped.
+        let special: dto::ImapMailboxesDto = serde_json::from_str(
+            r#"{"mailboxes":[
+                {"name":"Одиночка","delimiter":"/","attributes":["\\Trash"]}
+            ]}"#,
+        )
+        .expect("special listing parses");
+
+        let tested = tested_mailboxes(vec!["INBOX".into()], special);
+
+        assert_eq!(tested.len(), 1);
+        assert_eq!(tested[0].name, "INBOX");
+        assert_eq!(tested[0].role, None);
+    }
+
+    #[test]
+    fn doubly_attributed_roles_claim_once() {
+        let special: dto::ImapMailboxesDto = serde_json::from_str(
+            r#"{"mailboxes":[
+                {"name":"Trash A","delimiter":"/","attributes":["\\Trash"]},
+                {"name":"Trash B","delimiter":"/","attributes":["\\Trash"]}
+            ]}"#,
+        )
+        .expect("special listing parses");
+
+        let tested = tested_mailboxes(vec!["Trash A".into(), "Trash B".into()], special);
+
+        assert_eq!(tested[0].role, Some(MailboxRole::Trash));
+        assert_eq!(tested[1].role, None, "one role per listing");
     }
 
     #[test]

@@ -26,6 +26,17 @@ pub struct Mailbox {
     pub total_count: Option<u64>,
 }
 
+/// One mailbox of the wizard credential-test listing (ADR 0003 §3.4):
+/// the name the backend addresses it by, plus the role the server
+/// itself attributed — RFC 6154 `SPECIAL-USE` attributes on IMAP, the
+/// fixed system ids elsewhere, and `None` when the backend knows
+/// nothing (the wizard then falls back to name heuristics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestedMailbox {
+    pub name: String,
+    pub role: Option<MailboxRole>,
+}
+
 impl Mailbox {
     /// True when this mailbox is a user label rather than a system folder:
     /// no resolved role, and not under Gmail's reserved `[Gmail]/` IMAP

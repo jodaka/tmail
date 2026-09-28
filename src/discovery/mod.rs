@@ -15,7 +15,7 @@
 
 mod alias;
 
-pub use alias::{ALIAS_ROLES, derive_aliases};
+pub use alias::{ALIAS_ROLES, canonical_name, derive_aliases, missing_special_roles};
 
 use std::collections::BTreeSet;
 use std::time::Duration;

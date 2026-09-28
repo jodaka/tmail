@@ -27,9 +27,19 @@ entry is found. The flow:
    list` against a temporary owner-only config file. Nothing containing
    the credential is written to the real config until the test passes.
 6. **Aliases** — the special-folder roles (`inbox`, `sent`, `drafts`,
-   `trash`, `archive`) are derived from the tested mailbox listing (a
-   Gmail preset plus generic name heuristics), shown for confirmation,
-   and saved.
+   `trash`, `junk`, `archive`) are derived from the tested mailbox
+   listing, shown for confirmation, and saved. On IMAP the server's own
+   RFC 6154 `SPECIAL-USE` attributes (read with a second `himalaya imap
+   list` against the same temporary config) decide authoritatively, so
+   localized special folders — "Удаленные", "Papierkorb", … — resolve
+   without hand-editing; a Gmail preset and generic name heuristics
+   (case-insensitive) serve as fallbacks.
+7. **Provisioning** — when the server has no folder for a role at all
+   (a bare Dovecot lists `Inbox` alone), the confirm screen shows the
+   canonical folders the wizard will create (`Sent`, `Drafts`, `Trash`,
+   `Junk`, `Archive`), and the save provisions them best effort before
+   merging the account — only folders the server confirms join the
+   alias table.
 
 The account is merged into the shared config file with
 format-preserving edits: existing accounts, `[tmail]` tables, comments

@@ -25,7 +25,9 @@ use crate::app::state::AppState;
 use crate::config::write::{DraftAccount, SecretStorage};
 use crate::discovery::{
     ConfigSource, DiscoveredService, Provider, Security, ServerEndpoint, derive_aliases,
+    missing_special_roles,
 };
+use crate::domain::TestedMailbox;
 
 /// The wizard draft the operations carry (ADR 0003 §3.7): the writer's
 /// account shape plus nothing else — secrets ride boxed and are
@@ -230,13 +232,24 @@ pub struct CredentialStep {
 /// W6/W7: the save confirmation data and the result of the save.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmStep {
-    pub mailbox_names: Vec<String>,
+    /// The credential-test listing: mailbox names tagged with the roles
+    /// the server itself attributed (RFC 6154 SPECIAL-USE), the input
+    /// the alias derivation consumes.
+    pub mailboxes: Vec<TestedMailbox>,
     pub aliases: Vec<(String, String)>,
+    /// The special folders the listing could not resolve, paired with
+    /// the canonical name the server will be asked to create at save
+    /// time (issue txps). Rendered on W6 as the provisioning preview.
+    pub create_missing: Vec<(String, String)>,
     pub account_name: String,
     pub name_choice: Option<NameChoice>,
     pub name_choice_index: usize,
     pub saved_path: Option<PathBuf>,
     pub saved_created: bool,
+    /// The special folders actually provisioned during the save (issue
+    /// txps) — the server-confirmed subset of `create_missing`, shown
+    /// on W7.
+    pub saved_created_mailboxes: Vec<String>,
     /// The writer's warning for the just-saved file (shared-readable
     /// config + `password.raw`), shown on W7.
     pub permissions_warning: Option<String>,
@@ -301,13 +314,15 @@ impl WizardState {
                 credentials_index: 0,
             },
             confirm: ConfirmStep {
-                mailbox_names: Vec::new(),
+                mailboxes: Vec::new(),
                 aliases: Vec::new(),
+                create_missing: Vec::new(),
                 account_name: String::new(),
                 name_choice: None,
                 name_choice_index: 0,
                 saved_path: None,
                 saved_created: false,
+                saved_created_mailboxes: Vec::new(),
                 permissions_warning: None,
             },
             last_error: None,
@@ -906,6 +921,10 @@ fn confirm_save(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> {
     let effect = state.session.operations.start(OperationKind::SaveAccount {
         path,
         draft: Box::new(draft),
+        // Server-side provisioning for the special folders the listing
+        // could not resolve (issue txps); the manager adds the
+        // server-confirmed subset to the draft's alias table.
+        create: wizard.confirm.create_missing.clone(),
     });
     wizard.in_flight = Some(effect.id);
     vec![effect]
@@ -1017,9 +1036,8 @@ fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effec
             OperationKind::TestAccount { .. },
             Ok(OperationOutcome::TestAccountCompleted { mailboxes }),
         ) => {
-            wizard.confirm.mailbox_names = mailboxes.clone();
-            wizard.confirm.aliases =
-                derive_aliases(&wizard.confirm.mailbox_names, wizard.provider());
+            wizard.confirm.mailboxes = mailboxes.clone();
+            wizard.confirm.aliases = derive_aliases(&wizard.confirm.mailboxes, wizard.provider());
             prepare_confirm(wizard);
             wizard.step = WizardStep::Confirm;
             Vec::new()
@@ -1037,11 +1055,13 @@ fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effec
                 path,
                 created,
                 permissions_warning,
+                created_mailboxes,
             }),
         ) => {
             wizard.confirm.saved_path = Some(path.clone());
             wizard.confirm.saved_created = *created;
             wizard.confirm.permissions_warning = permissions_warning.clone();
+            wizard.confirm.saved_created_mailboxes = created_mailboxes.clone();
             wizard.step = WizardStep::Saved;
             Vec::new()
         }
@@ -1055,7 +1075,8 @@ fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effec
 }
 
 /// Computes the W6 confirmation data (ADR 0003 §3.6): the account name
-/// (collision-suffix suggestion), the derived alias preview, and the
+/// (collision-suffix suggestion), the derived alias preview, the
+/// missing-special-folder provisioning preview (issue txps), and the
 /// `default` decision.
 fn prepare_confirm(wizard: &mut WizardState) {
     if wizard.confirm.account_name.is_empty() {
@@ -1063,6 +1084,8 @@ fn prepare_confirm(wizard: &mut WizardState) {
         let domain = email.split('@').nth(1).unwrap_or("");
         wizard.confirm.account_name = crate::config::write::sanitize_account_name(domain);
     }
+    wizard.confirm.create_missing =
+        missing_special_roles(&wizard.confirm.mailboxes, wizard.provider());
     let collides = wizard
         .config
         .existing_names

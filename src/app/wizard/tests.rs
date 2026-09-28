@@ -10,6 +10,7 @@ use crate::app::mock::mock_initial_state;
 use crate::app::operation::OperationFailure;
 use crate::app::reducer::reduce;
 use crate::discovery::{ConfigSource, Provider, Security, ServerEndpoint};
+use crate::domain::{MailboxRole, TestedMailbox};
 
 fn state() -> AppState {
     let mut state = mock_initial_state();
@@ -100,16 +101,46 @@ fn discovered(services: Vec<DiscoveredService>) -> OperationOutcome {
 }
 
 fn test_ok(names: &[&str]) -> OperationOutcome {
+    test_ok_tagged(names, &[])
+}
+
+/// `TestAccountCompleted` with names, optionally tagged with the
+/// roles the server attributed (RFC 6154 SPECIAL-USE spellings: the
+/// `mailbox.alias` role keys).
+fn test_ok_tagged(names: &[&str], roles: &[(&str, &str)]) -> OperationOutcome {
     OperationOutcome::TestAccountCompleted {
-        mailboxes: names.iter().map(|name| name.to_string()).collect(),
+        mailboxes: names
+            .iter()
+            .map(|name| TestedMailbox {
+                name: name.to_string(),
+                role: roles
+                    .iter()
+                    .find(|(_, attributed)| attributed == name)
+                    .map(|(role, _)| match *role {
+                        "inbox" => MailboxRole::Inbox,
+                        "sent" => MailboxRole::Sent,
+                        "drafts" => MailboxRole::Drafts,
+                        "trash" => MailboxRole::Trash,
+                        "junk" => MailboxRole::Spam,
+                        _ => MailboxRole::Archive,
+                    }),
+            })
+            .collect(),
     }
 }
 
 fn account_saved(path: &str, created: bool) -> OperationOutcome {
+    account_saved_provisioned(path, created, &[])
+}
+
+/// `AccountSaved` with the special folders the server actually
+/// provisioned during the save (issue txps).
+fn account_saved_provisioned(path: &str, created: bool, provisioned: &[&str]) -> OperationOutcome {
     OperationOutcome::AccountSaved {
         path: std::path::PathBuf::from(path),
         created,
         permissions_warning: None,
+        created_mailboxes: provisioned.iter().map(|name| name.to_string()).collect(),
     }
 }
 
@@ -194,6 +225,114 @@ fn dismiss_ends_the_session_in_both_modes() {
     assert!(
         first_run.session.quit_requested,
         "the session must end for the restart"
+    );
+}
+
+#[test]
+fn missing_special_folders_are_queued_for_creation_and_saved() {
+    // The bare-Dovecot class (issue txps): a server with Inbox alone.
+    // W6 previews the canonical folders it will create, ConfirmSave
+    // carries them, and the save reports what was actually provisioned.
+    let mut state = state();
+    wizard_mut(&mut state).email.address = TextField::new("info@klinoteka.ru");
+    let effects = act(&mut state, WizardAction::SubmitEmail);
+    let mut generic = gmail_service();
+    generic.source = ConfigSource::Rfc6186;
+    generic.provider = None;
+    generic.imap.url = String::from("imaps://mail.klinoteka.ru:993");
+    complete(&mut state, &effects, discovered(vec![generic]));
+    act(&mut state, WizardAction::SelectService);
+    act(&mut state, WizardAction::SubmitCredentials);
+    wizard_mut(&mut state).credentials.password = TextField::secret("pw");
+    let effects = act(&mut state, WizardAction::SubmitCredentials);
+    complete(&mut state, &effects, test_ok(&["Inbox"]));
+    assert_eq!(wizard(&state).step, WizardStep::Confirm);
+
+    // The provisioning preview, priority-ordered, inbox never offered.
+    assert_eq!(
+        wizard(&state).confirm.create_missing,
+        vec![
+            (String::from("sent"), String::from("Sent")),
+            (String::from("drafts"), String::from("Drafts")),
+            (String::from("trash"), String::from("Trash")),
+            (String::from("junk"), String::from("Junk")),
+            (String::from("archive"), String::from("Archive")),
+        ]
+    );
+
+    let effects = act(&mut state, WizardAction::ConfirmSave);
+    let OperationKind::SaveAccount { create, .. } = &effects.first().expect("save effect").kind
+    else {
+        panic!("expected a SaveAccount effect");
+    };
+    assert_eq!(
+        create,
+        &wizard(&state).confirm.create_missing,
+        "the queued pairs ride the save effect"
+    );
+
+    complete(
+        &mut state,
+        &effects,
+        account_saved_provisioned(
+            "/tmp/config.toml",
+            true,
+            &["Sent", "Drafts", "Trash", "Junk", "Archive"],
+        ),
+    );
+    assert_eq!(wizard(&state).step, WizardStep::Saved);
+    assert_eq!(
+        wizard(&state).confirm.saved_created_mailboxes,
+        vec![
+            String::from("Sent"),
+            String::from("Drafts"),
+            String::from("Trash"),
+            String::from("Junk"),
+            String::from("Archive"),
+        ]
+    );
+}
+
+#[test]
+fn special_use_attributes_drive_the_alias_derivation() {
+    // The reported failure class (issue m0wh): a server whose special
+    // folders carry localized names no candidate list knows. The
+    // credential test tags each mailbox with the role the server itself
+    // attributed (RFC 6154 SPECIAL-USE), and W6 derives the alias table
+    // from those roles, so delete/drafts work without hand-editing.
+    let mut state = state();
+    wizard_mut(&mut state).email.address = TextField::new("u@example.com");
+    let effects = act(&mut state, WizardAction::SubmitEmail);
+    let mut generic = gmail_service();
+    generic.source = ConfigSource::Rfc6186;
+    generic.provider = None;
+    generic.imap.url = String::from("imaps://imap.example.com:993");
+    complete(&mut state, &effects, discovered(vec![generic]));
+    act(&mut state, WizardAction::SelectService);
+    act(&mut state, WizardAction::SubmitCredentials);
+    wizard_mut(&mut state).credentials.password = TextField::secret("pw");
+    let effects = act(&mut state, WizardAction::SubmitCredentials);
+    complete(
+        &mut state,
+        &effects,
+        test_ok_tagged(
+            &["INBOX", "Odeslané", "Koncepty", "Odstraněné"],
+            &[
+                ("trash", "Odstraněné"),
+                ("drafts", "Koncepty"),
+                ("sent", "Odeslané"),
+            ],
+        ),
+    );
+    assert_eq!(wizard(&state).step, WizardStep::Confirm);
+    assert_eq!(
+        wizard(&state).confirm.aliases,
+        vec![
+            (String::from("inbox"), String::from("INBOX")),
+            (String::from("sent"), String::from("Odeslané")),
+            (String::from("drafts"), String::from("Koncepty")),
+            (String::from("trash"), String::from("Odstraněné")),
+        ]
     );
 }
 

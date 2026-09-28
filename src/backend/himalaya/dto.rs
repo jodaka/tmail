@@ -30,6 +30,28 @@ pub(crate) struct MailboxDto {
     pub unread: Option<u64>,
 }
 
+/// `imap list --json` (schema: himalaya-imap-list.json), the
+/// protocol-specific listing the shared `mailbox list` deliberately
+/// keeps out: it carries the RFC 3501 `delimiter` plus every name
+/// attribute the server reported, RFC 6154 `SPECIAL-USE` included
+/// (`"\Trash"`, `"\Drafts"`, `"\HasNoChildren"`, …). The wizard reads
+/// it to resolve the special-folder roles authoritatively, so aliases
+/// work on servers with localized or lookalike folder names.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct ImapMailboxesDto {
+    #[serde(default)]
+    pub mailboxes: Vec<ImapMailboxDto>,
+}
+
+/// One IMAP listing row. Attributes are the server's own spellings;
+/// unknown or unparsable entries are simply left unparsed upstream.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ImapMailboxDto {
+    pub name: String,
+    #[serde(default)]
+    pub attributes: Vec<String>,
+}
+
 /// `envelope list --json` (schema: himalaya-envelope-list.json).
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct EnvelopesDto {

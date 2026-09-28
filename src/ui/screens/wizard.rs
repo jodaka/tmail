@@ -621,9 +621,11 @@ fn render_confirm(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme
             && wizard.credentials.storage_mode == StorageMode::Raw,
     );
     let error_height = u16::from(wizard.last_error.is_some());
+    let create_height = u16::from(!wizard.confirm.create_missing.is_empty());
     let content_height = 8
         + 1
         + (wizard.confirm.aliases.len() as u16 + 1)
+        + create_height
         + 1
         + choice_height
         + warning_height
@@ -675,6 +677,25 @@ fn render_confirm(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme
         }
     }
 
+    // Missing-special-folder provisioning (issue txps): the server is
+    // asked to create the canonical folders during the save, so the
+    // consent is explicit here on the confirm screen.
+    if !wizard.confirm.create_missing.is_empty() {
+        let names: Vec<String> = wizard
+            .confirm
+            .create_missing
+            .iter()
+            .map(|(_, name)| name.clone())
+            .collect();
+        intro(
+            frame,
+            column,
+            &mut y,
+            theme,
+            &format!("will create on the server: {}", names.join(", ")),
+        );
+    }
+
     // Name-collision choice (ADR 0003 §3.6): replace by default, or save
     // under the -2 suffix.
     if let Some(choice) = &wizard.confirm.name_choice {
@@ -721,7 +742,8 @@ fn render_saved(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme: 
         .unwrap_or_else(|| String::from("-"));
     let warning_height = u16::from(wizard.confirm.permissions_warning.is_some());
     let created_height = u16::from(wizard.confirm.saved_created);
-    let content_height = 1 + created_height + warning_height + 1 + 1;
+    let provisioned_height = u16::from(!wizard.confirm.saved_created_mailboxes.is_empty());
+    let content_height = 1 + created_height + provisioned_height + warning_height + 1 + 1;
     let mut y = centered_y(column, content_height);
 
     intro(
@@ -738,6 +760,18 @@ fn render_saved(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme: 
             &mut y,
             theme,
             "The config file was created with permissions 0600.",
+        );
+    }
+    if !wizard.confirm.saved_created_mailboxes.is_empty() {
+        intro(
+            frame,
+            column,
+            &mut y,
+            theme,
+            &format!(
+                "Created folders: {}.",
+                wizard.confirm.saved_created_mailboxes.join(", ")
+            ),
         );
     }
     if let Some(warning) = &wizard.confirm.permissions_warning {

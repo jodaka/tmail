@@ -1314,8 +1314,9 @@ fn wizard_test_account_runs_the_real_plumbing_and_cleans_up() {
 
     match outcome.expect("the test succeeds") {
         OperationOutcome::TestAccountCompleted { mailboxes } => {
+            let names: Vec<String> = mailboxes.iter().map(|m| m.name.clone()).collect();
             assert_eq!(
-                mailboxes,
+                names,
                 vec![
                     String::from("INBOX"),
                     String::from("Archive"),
@@ -1323,14 +1324,19 @@ fn wizard_test_account_runs_the_real_plumbing_and_cleans_up() {
                 ],
                 "the canned listing from the fake himalaya"
             );
+            assert!(
+                mailboxes.iter().all(|m| m.role.is_none()),
+                "the default fake reports no SPECIAL-USE attributes: {mailboxes:?}"
+            );
         }
         other => panic!("expected a TestAccountCompleted payload, got {other:?}"),
     }
 
     // The invocation used a temporary 0600 config (not the fake's stub
-    // config), the draft account name, and the plain mailbox list argv.
+    // config), the draft account name, and the plain mailbox list argv —
+    // followed by the best-effort SPECIAL-USE read (issue m0wh).
     let invocations = fake.argv();
-    assert_eq!(invocations.len(), 1, "exactly one himalaya run");
+    assert_eq!(invocations.len(), 2, "mailbox list, then imap list");
     let argv = &invocations[0];
     assert_eq!(argv[0], "-c");
     let temp_config = PathBuf::from(&argv[1]);
@@ -1352,10 +1358,69 @@ fn wizard_test_account_runs_the_real_plumbing_and_cleans_up() {
             "--json".to_string()
         ]
     );
+    assert_eq!(
+        &invocations[1],
+        &[
+            "-c".to_string(),
+            temp_config.display().to_string(),
+            "-a".to_string(),
+            "gmail".to_string(),
+            "imap".to_string(),
+            "list".to_string(),
+            "--all".to_string(),
+            "--json".to_string(),
+        ],
+        "the special-use read shares the temp config"
+    );
     assert!(
         !temp_config.exists(),
         "the temp config is deleted after the run (no credential left behind)"
     );
+}
+
+#[test]
+fn wizard_test_account_carries_the_server_reported_special_use() {
+    // The failure class from the report (issue m0wh): localized special
+    // folders no name candidate list knows. The fake's `imap list` rows
+    // carry the RFC 6154 attributes, and the payload surfaces the roles.
+    let fake = FakeHimalaya::spawn_script_imap("special", "ok", "ok", "ok", "special");
+    let outcome = run_test_account(&fake, wizard_draft("gmail"), CancellationToken::new());
+
+    match outcome.expect("the test succeeds") {
+        OperationOutcome::TestAccountCompleted { mailboxes } => {
+            let roles: Vec<(String, String)> = mailboxes
+                .iter()
+                .filter_map(|m| m.role.map(|role| (role, m.name.clone())))
+                .map(|(role, name)| (format!("{role:?}"), name))
+                .collect();
+            assert!(
+                roles.contains(&("Trash".to_string(), "Odstraněné".to_string())),
+                "the server-attributed trash must reach the payload: {roles:?}"
+            );
+            assert!(
+                roles.contains(&("Drafts".to_string(), "Koncepty".to_string())),
+                "the server-attributed drafts must reach the payload: {roles:?}"
+            );
+        }
+        other => panic!("expected a TestAccountCompleted payload, got {other:?}"),
+    }
+}
+
+#[test]
+fn wizard_test_account_survives_a_failed_special_use_read() {
+    // An older himalaya binary without the `imap` subcommand (or a
+    // server without SPECIAL-USE) must not fail a test that already
+    // passed: the roles degrade to None and name heuristics apply.
+    let fake = FakeHimalaya::spawn_imap("error-json");
+    let outcome = run_test_account(&fake, wizard_draft("gmail"), CancellationToken::new());
+
+    match outcome.expect("the test succeeds") {
+        OperationOutcome::TestAccountCompleted { mailboxes } => {
+            assert_eq!(mailboxes.len(), 3);
+            assert!(mailboxes.iter().all(|m| m.role.is_none()));
+        }
+        other => panic!("expected a TestAccountCompleted payload, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1442,6 +1507,7 @@ fn wizard_save_account_operation_reports_the_saved_file() {
             kind: OperationKind::SaveAccount {
                 path: path.clone(),
                 draft: Box::new(draft),
+                create: Vec::new(),
             },
         };
         let ctx = RequestContext {
@@ -1455,10 +1521,12 @@ fn wizard_save_account_operation_reports_the_saved_file() {
                 path: saved,
                 created,
                 permissions_warning,
+                created_mailboxes,
             } => {
                 assert_eq!(saved, path);
                 assert!(created);
                 assert_eq!(permissions_warning, None);
+                assert!(created_mailboxes.is_empty(), "nothing requested");
             }
             other => panic!("expected AccountSaved, got {other:?}"),
         }
@@ -1468,6 +1536,91 @@ fn wizard_save_account_operation_reports_the_saved_file() {
     let text = std::fs::read_to_string(dir.path().join("config.toml")).expect("written");
     assert!(text.contains("[accounts.gmail]"));
     assert!(text.contains("imap.sasl.plain.password.raw"));
+}
+
+#[test]
+fn wizard_save_account_provisions_missing_special_mailboxes() {
+    // The bare-Dovecot class (issue txps): the listing had Inbox only,
+    // so the confirm step queues canonical folders for creation. The
+    // manager creates them first (the fake records every success) and
+    // only the server-confirmed names join the alias table.
+    let fake = FakeHimalaya::spawn("ok", "ok");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let mut draft = wizard_draft("gmail");
+    draft.aliases = vec![
+        (String::from("inbox"), String::from("INBOX")),
+        (String::from("archive"), String::from("Archive")),
+        (String::from("sent"), String::from("Sent")),
+    ];
+
+    block(async move {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let manager = OperationManager::new(
+            std::sync::Arc::new(backend(&fake, Some("probe"))),
+            std::sync::Arc::new(tmail::backend::SystemOpener),
+            std::sync::Arc::new(tmail::backend::SystemNotifier),
+            std::sync::Arc::new(tmail::discovery::FakeDiscoverer),
+            std::sync::Arc::new(tmail::backend::himalaya::HimalayaAccountTester::new(
+                fake.program().display().to_string(),
+            )),
+            None,
+            tx,
+        );
+        let effect = Effect {
+            id: OperationId(80),
+            kind: OperationKind::SaveAccount {
+                path: path.clone(),
+                draft: Box::new(draft),
+                create: vec![
+                    (String::from("drafts"), String::from("Drafts")),
+                    (String::from("trash"), String::from("Trash")),
+                ],
+            },
+        };
+        let ctx = RequestContext {
+            operation: effect.id,
+            cancellation: CancellationToken::new(),
+        };
+        manager.launch(effect, ctx);
+        let result = rx.recv().await.expect("result");
+        match result.outcome.expect("save succeeds") {
+            OperationOutcome::AccountSaved {
+                created_mailboxes, ..
+            } => {
+                assert_eq!(
+                    created_mailboxes,
+                    vec![String::from("Drafts"), String::from("Trash")],
+                    "the server-confirmed creations ride the outcome"
+                );
+            }
+            other => panic!("expected AccountSaved, got {other:?}"),
+        }
+
+        // The provisioning really ran: `imap create` per queued name,
+        // then the verification listing.
+        let invocations = fake.argv();
+        let creates: Vec<&Vec<String>> = invocations
+            .iter()
+            .filter(|argv| argv.contains(&String::from("create")))
+            .collect();
+        assert_eq!(creates.len(), 2, "one create per queued folder");
+        let verification = invocations
+            .iter()
+            .find(|argv| {
+                argv.contains(&String::from("list")) && !argv.contains(&String::from("imap"))
+            })
+            .expect("the verification listing ran");
+        assert!(
+            verification.contains(&String::from("mailbox")),
+            "the verification uses the shared listing: {verification:?}"
+        );
+    });
+
+    // The saved account carries aliases for the provisioned folders.
+    let text = std::fs::read_to_string(dir.path().join("config.toml")).expect("written");
+    assert!(text.contains("mailbox.alias.drafts = \"Drafts\""), "{text}");
+    assert!(text.contains("mailbox.alias.trash = \"Trash\""), "{text}");
 }
 
 // ── Bulk mark read (ticket aavy) ──────────────────────────────────────────
