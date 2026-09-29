@@ -84,7 +84,7 @@ fn complete_background(
 /// The single `Notify` effect's request.
 fn expect_notify(effects: &[Effect]) -> NotifyRequest {
     let (_, kind) = effect_parts(effects);
-    let OperationKind::Notify { request } = kind else {
+    let OperationKind::Notify(request) = kind else {
         panic!("expected a Notify effect, got {kind:?}");
     };
     request

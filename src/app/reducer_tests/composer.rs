@@ -1,6 +1,7 @@
 //! Reducer tests: composer domain.
 
 use super::*;
+use crate::app::operation::{DraftOperation, MailOperation, PlatformOperation};
 use std::sync::Arc;
 
 #[test]
@@ -287,10 +288,15 @@ fn saving_revision_n_cannot_mark_revision_n_plus_1_clean() {
     // copy count changed.
     assert_eq!(chained.len(), 2);
     let (id2, snap2) = match &chained[0].kind {
-        OperationKind::SaveDraft { draft } => (chained[0].id, (**draft).clone()),
+        OperationKind::Draft(DraftOperation::SaveDraft { draft }) => {
+            (chained[0].id, (**draft).clone())
+        }
         other => panic!("expected a chained SaveDraft, got {other:?}"),
     };
-    assert_eq!(chained[1].kind, OperationKind::LoadMailboxes);
+    assert_eq!(
+        chained[1].kind,
+        OperationKind::Mail(MailOperation::LoadMailboxes)
+    );
     assert_eq!(
         snap2.revision, 2,
         "the chained save covers the newest revision"
@@ -328,9 +334,9 @@ fn draft_save_failure_opens_retry_modal_and_retains_content() {
         &mut s,
         failure(
             id,
-            &OperationKind::SaveDraft {
+            &OperationKind::Draft(DraftOperation::SaveDraft {
                 draft: Arc::new(snapshot.clone()),
-            },
+            }),
             "imap down",
         ),
     );
@@ -370,9 +376,9 @@ fn dismiss_after_failure_keeps_the_draft_awaiting_retry_or_edit() {
         &mut s,
         failure(
             id,
-            &OperationKind::SaveDraft {
+            &OperationKind::Draft(DraftOperation::SaveDraft {
                 draft: Arc::new(snapshot),
-            },
+            }),
             "imap down",
         ),
     );
@@ -418,9 +424,9 @@ fn stale_failure_does_not_cancel_a_scheduled_save() {
         &mut s,
         failure(
             id1,
-            &OperationKind::SaveDraft {
+            &OperationKind::Draft(DraftOperation::SaveDraft {
                 draft: Arc::new(snap1.clone()),
-            },
+            }),
             "boom",
         ),
     );
@@ -627,10 +633,10 @@ fn confirmed_discard_deletes_local_and_remote_state() {
     reduce(&mut s, Action::FocusNext); // Discard button
     let effects = reduce(&mut s, Action::Activate);
     let (id, kind) = effect_parts(&effects);
-    let crate::app::operation::OperationKind::DeleteDraft {
+    let crate::app::operation::OperationKind::Draft(DraftOperation::DeleteDraft {
         draft,
         reason: DraftRemovalReason::Discard,
-    } = &kind
+    }) = &kind
     else {
         panic!("expected DeleteDraft, got {kind:?}");
     };
@@ -676,7 +682,10 @@ fn discard_cancels_an_in_flight_save_of_the_same_draft() {
     );
     assert!(s.session.operations.get(save_id).is_none());
     let (delete_id, kind) = effect_parts(&effects);
-    assert!(matches!(kind, OperationKind::DeleteDraft { .. }));
+    assert!(matches!(
+        kind,
+        OperationKind::Draft(DraftOperation::DeleteDraft { .. })
+    ));
     assert!(s.session.operations.get(delete_id).is_some());
     // The cancelled save's (suppressed) result can never apply.
     reduce(
@@ -719,7 +728,10 @@ fn discard_of_a_never_saved_draft_still_needs_confirmation() {
     reduce(&mut s, Action::FocusNext);
     let effects = reduce(&mut s, Action::Activate);
     let (_, kind) = effect_parts(&effects);
-    assert!(matches!(kind, OperationKind::DeleteDraft { .. }));
+    assert!(matches!(
+        kind,
+        OperationKind::Draft(DraftOperation::DeleteDraft { .. })
+    ));
     assert!(s.session.composer.is_none());
 }
 
@@ -755,10 +767,13 @@ fn edit_external_saves_the_draft_first_and_flags_the_composer() {
     let effects = edit_external(&mut s);
     // The forced save (step 1) rides ahead of the editor effect.
     assert_eq!(effects.len(), 2);
-    assert!(matches!(effects[0].kind, OperationKind::SaveDraft { .. }));
+    assert!(matches!(
+        effects[0].kind,
+        OperationKind::Draft(DraftOperation::SaveDraft { .. })
+    ));
     assert!(matches!(
         effects[1].kind,
-        OperationKind::EditExternally { .. }
+        OperationKind::Platform(PlatformOperation::EditExternally { .. })
     ));
     // No background autosave is promised while the editor owns the file.
     assert!(s.session.composer.as_ref().unwrap().external_editing);
@@ -773,7 +788,7 @@ fn edit_external_with_a_clean_draft_only_starts_the_editor() {
     assert_eq!(effects.len(), 1, "only the editor effect");
     assert!(matches!(
         effects[0].kind,
-        OperationKind::EditExternally { .. }
+        OperationKind::Platform(PlatformOperation::EditExternally { .. })
     ));
 }
 
@@ -798,7 +813,10 @@ fn no_autosave_while_the_external_editor_owns_the_file() {
     tick(&mut s, 0);
     reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
     let effects = edit_external(&mut s);
-    assert!(matches!(effects[0].kind, OperationKind::SaveDraft { .. }));
+    assert!(matches!(
+        effects[0].kind,
+        OperationKind::Draft(DraftOperation::SaveDraft { .. })
+    ));
     // A dirty edit during the editor session would normally re-arm the
     // autosave; ticks must not save while the editor owns the file.
     reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('y')));

@@ -8,7 +8,7 @@ use crate::app::action::SearchEdit;
 use crate::app::composer::ComposerState;
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
-use crate::app::operation::{OperationId, OperationKind};
+use crate::app::operation::{DraftOperation, OperationId, OperationKind, PlatformOperation};
 use crate::app::overlay::{ConfirmButton, DiscardDialog, Overlay};
 use crate::app::route::{MailboxRoute, Route};
 use crate::app::state::{AppState, Loadable};
@@ -51,12 +51,9 @@ pub(crate) fn edit_externally(state: &mut AppState) -> Vec<Effect> {
     if let Some(composer) = state.session.composer.as_mut() {
         composer.external_editing = true;
     }
-    effects.push(
-        state
-            .session
-            .operations
-            .start(OperationKind::EditExternally { program, body }),
-    );
+    effects.push(state.session.operations.start(OperationKind::Platform(
+        PlatformOperation::EditExternally { program, body },
+    )));
     effects
 }
 
@@ -140,7 +137,12 @@ pub(crate) fn load_drafts(state: &mut AppState) -> Vec<Effect> {
     if state.session.operations.is_loading_drafts() {
         return Vec::new();
     }
-    vec![state.session.operations.start(OperationKind::LoadDrafts)]
+    vec![
+        state
+            .session
+            .operations
+            .start(OperationKind::Draft(DraftOperation::LoadDrafts)),
+    ]
 }
 
 /// Open the confirm-discard dialog (plan §14: discard only after explicit
@@ -229,9 +231,14 @@ pub(crate) fn autosave_tick(
         "debounce elapsed; saving draft"
     );
     let snapshot = composer.draft.start_save(now);
-    vec![state.session.operations.start(OperationKind::SaveDraft {
-        draft: Arc::new(snapshot),
-    })]
+    vec![
+        state
+            .session
+            .operations
+            .start(OperationKind::Draft(DraftOperation::SaveDraft {
+                draft: Arc::new(snapshot),
+            })),
+    ]
 }
 
 /// Start a save of the current draft revision right away (forced saves:
@@ -244,9 +251,14 @@ pub(crate) fn draft_save_effect(state: &mut AppState) -> Option<Effect> {
         return None;
     }
     let snapshot = composer.draft.start_save(now);
-    Some(state.session.operations.start(OperationKind::SaveDraft {
-        draft: Arc::new(snapshot),
-    }))
+    Some(
+        state
+            .session
+            .operations
+            .start(OperationKind::Draft(DraftOperation::SaveDraft {
+                draft: Arc::new(snapshot),
+            })),
+    )
 }
 
 pub(crate) fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Vec<Effect> {

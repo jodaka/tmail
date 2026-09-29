@@ -5,7 +5,7 @@ use super::navigation::composer_open;
 use crate::app::composer::ComposerState;
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
-use crate::app::operation::OperationKind;
+use crate::app::operation::{MailOperation, OperationKind};
 use crate::app::route::Route;
 use crate::app::state::AppState;
 
@@ -131,7 +131,10 @@ pub(crate) fn seed_from_list(
         state
             .session
             .operations
-            .start(OperationKind::SeedComposer { locator, kind }),
+            .start(OperationKind::Mail(MailOperation::SeedComposer {
+                locator,
+                kind,
+            })),
     ]
 }
 

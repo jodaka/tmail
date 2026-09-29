@@ -4,7 +4,9 @@
 //! adds spinner + Retry/Dismiss modal render checks (plan §19 Phase 3).
 
 use tmail::app::mock::{self, mock_initial_state};
-use tmail::app::operation::{OperationFailure, OperationKind, OperationResult};
+use tmail::app::operation::{
+    MailOperation, OperationFailure, OperationKind, OperationResult, PlatformOperation,
+};
 use tmail::app::{Action, reducer};
 use tmail::input::mouse::HitMap;
 use tmail::ui::{RenderContext, Theme, dates, render};
@@ -721,14 +723,18 @@ fn error_modal_renders_summary_code_buttons_and_sanitized_detail() {
         [effect] => (
             effect.id,
             match &effect.kind {
-                OperationKind::LoadPage(request) => request.clone(),
+                OperationKind::Mail(MailOperation::LoadPage(request)) => request.clone(),
                 other => panic!("unexpected kind {other:?}"),
             },
         ),
         other => panic!("expected one effect, got {other:?}"),
     };
     let detail = "himalaya exited: password = \"███████\" token=██████ connect refused";
-    let actions = vec![sanitized_failure(id, OperationKind::LoadPage(req), detail)];
+    let actions = vec![sanitized_failure(
+        id,
+        OperationKind::Mail(MailOperation::LoadPage(req)),
+        detail,
+    )];
     let text = draw_after(&mut state, &actions, 152, 40);
 
     // Title from the operation summary; exit code; both buttons; detail.
@@ -795,13 +801,13 @@ fn error_modal_detail_scrolls() {
         [effect] => (
             effect.id,
             match &effect.kind {
-                OperationKind::LoadPage(request) => request.clone(),
+                OperationKind::Mail(MailOperation::LoadPage(request)) => request.clone(),
                 other => panic!("unexpected kind {other:?}"),
             },
         ),
         other => panic!("expected one effect, got {other:?}"),
     };
-    let kind = OperationKind::LoadPage(req);
+    let kind = OperationKind::Mail(MailOperation::LoadPage(req));
     let lines: Vec<String> = (0..60).map(|i| format!("detail-line-{i:02}")).collect();
     let actions = vec![
         sanitized_failure(id, kind, &lines.join("\n")),
@@ -841,7 +847,7 @@ fn ambiguous_failure_shows_duplicate_warning() {
         [effect] => (
             effect.id,
             match &effect.kind {
-                OperationKind::LoadPage(request) => request.clone(),
+                OperationKind::Mail(MailOperation::LoadPage(request)) => request.clone(),
                 other => panic!("unexpected kind {other:?}"),
             },
         ),
@@ -852,7 +858,7 @@ fn ambiguous_failure_shows_duplicate_warning() {
         outcome: Err(OperationFailure {
             code: Some(1),
             detail: String::from("SMTP DATA failed: reached unexpected EOF"),
-            retry: Some(OperationKind::LoadPage(req).retry_spec()),
+            retry: Some(OperationKind::Mail(MailOperation::LoadPage(req)).retry_spec()),
             ambiguous: true,
         }),
     });
@@ -1085,7 +1091,7 @@ fn reader_link_click_focuses_then_opens() {
     assert!(
         matches!(
             &effect.kind,
-            OperationKind::OpenUrl { url } if url == "https://example.org/x"
+            OperationKind::Platform(PlatformOperation::OpenUrl { url }) if url == "https://example.org/x"
         ),
         "kind: {:?}",
         effect.kind
@@ -1329,7 +1335,7 @@ fn search_results_render_query_head_and_empty_note() {
     let search_id = match effects.as_slice() {
         [effect] => {
             assert!(
-                matches!(effect.kind, OperationKind::Search(_)),
+                matches!(effect.kind, OperationKind::Mail(MailOperation::Search(_))),
                 "expected a Search operation"
             );
             effect.id
@@ -1677,7 +1683,7 @@ fn hit_map_records_modal_buttons_and_blocks_click_through() {
         outcome: Err(OperationFailure {
             code: Some(1),
             detail: String::from("short detail"),
-            retry: Some(OperationKind::LoadMailboxes.retry_spec()),
+            retry: Some(OperationKind::Mail(MailOperation::LoadMailboxes).retry_spec()),
             ambiguous: false,
         }),
     });

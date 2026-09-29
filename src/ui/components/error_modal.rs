@@ -199,7 +199,7 @@ pub fn render(
 mod tests {
     use super::*;
     use crate::app::mock::mock_initial_state;
-    use crate::app::operation::{OperationKind, RetrySpec};
+    use crate::app::operation::{MailOperation, OperationKind, RetrySpec};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -219,7 +219,7 @@ mod tests {
     fn retryable_dialog(detail: &str) -> ErrorDialog {
         ErrorDialog {
             retry: Some(RetrySpec {
-                kind: OperationKind::LoadMailboxes,
+                kind: OperationKind::Mail(MailOperation::LoadMailboxes),
             }),
             ..dialog(detail)
         }

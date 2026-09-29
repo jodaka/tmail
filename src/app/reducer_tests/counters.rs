@@ -5,6 +5,7 @@
 //! count.
 
 use super::*;
+use crate::app::operation::MailOperation;
 use crate::app::reducer::message_results::message_moved;
 use crate::domain::MessageLocator;
 
@@ -60,7 +61,10 @@ fn mark_read_drops_the_unread_count_immediately() {
     assert!(!s.selected_message().unwrap().is_read);
     let before = inbox_unread(&s);
     let (id, kind) = expect_kind(&reduce(&mut s, Action::MarkRead));
-    assert!(matches!(&kind, OperationKind::SetRead { read: true, .. }));
+    assert!(matches!(
+        &kind,
+        OperationKind::Mail(MailOperation::SetRead { read: true, .. })
+    ));
     let _ = complete_done(&mut s, id);
     assert_eq!(inbox_unread(&s), before - 1, "mark read = one less unread");
 }
@@ -72,7 +76,10 @@ fn mark_unread_raises_the_unread_count_immediately() {
     assert!(s.selected_message().unwrap().is_read);
     let before = inbox_unread(&s);
     let (id, kind) = expect_kind(&reduce(&mut s, Action::MarkUnread));
-    assert!(matches!(&kind, OperationKind::SetRead { read: false, .. }));
+    assert!(matches!(
+        &kind,
+        OperationKind::Mail(MailOperation::SetRead { read: false, .. })
+    ));
     let _ = complete_done(&mut s, id);
     assert_eq!(inbox_unread(&s), before + 1, "mark unread = one more");
 }

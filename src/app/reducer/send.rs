@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::composer_flow::close_composer_route;
 use super::modals::open_error_modal;
 use crate::app::effect::Effect;
-use crate::app::operation::{DraftRemovalReason, OperationFailure, OperationKind};
+use crate::app::operation::{DraftOperation, DraftRemovalReason, OperationFailure, OperationKind};
 use crate::app::route::Route;
 use crate::app::state::AppState;
 use crate::domain::sanitize::sanitize;
@@ -69,9 +69,14 @@ pub(crate) fn send_from_composer(state: &mut AppState) -> Vec<Effect> {
         composer.sending = true;
     }
     state.set_status("Sending…");
-    vec![state.session.operations.start(OperationKind::Send {
-        message: Arc::new(message),
-    })]
+    vec![
+        state
+            .session
+            .operations
+            .start(OperationKind::Draft(DraftOperation::Send {
+                message: Arc::new(message),
+            })),
+    ]
 }
 
 /// Apply a classified send outcome (plan §12). Only [`SendOutcome::Sent`]
@@ -102,7 +107,7 @@ pub(crate) fn send_completed(
                         detail
                     }
                 },
-                retry: Some(OperationKind::Send { message }.retry_spec()),
+                retry: Some(OperationKind::Draft(DraftOperation::Send { message }).retry_spec()),
                 ambiguous: other.is_ambiguous(),
             };
             // The specific send status must survive the modal opening
@@ -135,10 +140,12 @@ pub(crate) fn confirm_send(state: &mut AppState) -> Vec<Effect> {
         .map(|composer| composer.draft.snapshot());
     close_composer_route(state);
     match snapshot {
-        Some(snapshot) => vec![state.session.operations.start(OperationKind::DeleteDraft {
-            draft: Arc::new(snapshot),
-            reason: DraftRemovalReason::Sent,
-        })],
+        Some(snapshot) => vec![state.session.operations.start(OperationKind::Draft(
+            DraftOperation::DeleteDraft {
+                draft: Arc::new(snapshot),
+                reason: DraftRemovalReason::Sent,
+            },
+        ))],
         None => {
             tracing::debug!("send confirmed without a draft to resolve");
             Vec::new()

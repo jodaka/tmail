@@ -11,220 +11,56 @@
 //! killed on cancellation (Phase 3.2).
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::{
-    DraftSnapshot, Mailbox, MailboxId, Message, MessageId, MessageLocator, MessageSummary,
-    OutboundMessage, Page, PageRequest, RestoredDraft, SearchRequest, SendOutcome,
+    Mailbox, Message, MessageId, MessageSummary, Page, PageRequest, RestoredDraft, SearchRequest,
+    SendOutcome,
 };
 
 pub use crate::domain::operation::OperationId;
 
-/// The typed intent of one backend operation (plan §5: "Effects launch
-/// typed backend requests").
+mod account;
+mod cache;
+mod draft;
+mod files;
+mod mail;
+mod platform;
+
+pub use account::AccountOperation;
+pub use cache::CacheOperation;
+pub use draft::{DraftOperation, DraftRemovalReason};
+pub use files::FileOperation;
+pub use mail::{MailOperation, SeedKind};
+pub use platform::PlatformOperation;
+
+/// The typed intent of one operation (plan §5: "Effects launch typed
+/// backend requests"). A family tag around the domain-specific operation
+/// enums (issue ceh0): reads and mutations live in [`MailOperation`],
+/// draft/send work in [`DraftOperation`], attachment files in
+/// [`FileOperation`], desktop handoffs in [`PlatformOperation`], wizard
+/// work in [`AccountOperation`], notifications in [`NotifyRequest`], and
+/// cache I/O in [`CacheOperation`]. A new feature adds a variant to one
+/// family — with its summary/supersession/cancellation rules right
+/// beside it — instead of expanding a central catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationKind {
-    /// Fetch the mailbox listing.
-    LoadMailboxes,
-    /// Fetch one page of message summaries.
-    LoadPage(PageRequest),
-    /// Fetch one page of search results (plan §16/§19 Phase 9): the query
-    /// travels unchanged, scoped to the mailbox the search was launched
-    /// from. Results shape like `LoadPage`.
-    Search(SearchRequest),
-    /// Fetch one full message (plan §19 Phase 4: reader).
-    LoadMessage(MessageLocator),
-    /// Fetch one draft copy from the Drafts mailbox to reopen it in the
-    /// composer (plan §14): same backend call as `LoadMessage`, different
-    /// consumer — the fetched message becomes a `Draft` instead of a
-    /// reader document.
-    OpenDraft(MessageLocator),
-    /// Fetch one full message purely for the list's faded body preview
-    /// (ticket wxtx): background work that fills `MessageSummary.snippet`
-    /// and the message cache. Independent of every other operation — no
-    /// supersession — and never surfaced: failures are logged only.
-    Preview(MessageLocator),
-    /// Fetch one full message from the list to seed a composer draft
-    /// (reply/reply-all/forward from NORMAL, user request): the same
-    /// read path as `LoadMessage`, and the reducer turns the fetched
-    /// copy into a seeded draft per `seed`. Supersedes its own kind for
-    /// the same locator: only the newest intent may open the composer.
-    SeedComposer {
-        locator: MessageLocator,
-        kind: SeedKind,
-    },
-    /// Mark a message read (`read: true`) or unread.
-    SetRead { locator: MessageLocator, read: bool },
-    /// One batched read-flag change over the whole selection (ticket
-    /// aavy): the backend applies every locator in a single call, so a
-    /// bulk mark costs one IMAP session instead of one per message. The
-    /// locators share the mailbox the bulk action was pressed in.
-    SetReadBulk {
-        locators: Vec<MessageLocator>,
-        read: bool,
-    },
-    /// Star (`starred: true`) or unstar a message.
-    SetStarred {
-        locator: MessageLocator,
-        starred: bool,
-    },
-    /// Move a message to the archive mailbox (target resolved by the
-    /// adapter, ADR 0001).
-    Archive(MessageLocator),
-    /// Move a message to trash (himalaya is trash-first).
-    Trash(MessageLocator),
-    /// One batched archive of the whole selection (ticket j9bq): the
-    /// backend moves every locator in a single call, so a bulk archive
-    /// costs one IMAP session instead of one per message. Locators share
-    /// the mailbox the bulk action was pressed in.
-    ArchiveBulk(Vec<MessageLocator>),
-    /// One batched trash of the whole selection (ticket j9bq): see
-    /// [`OperationKind::ArchiveBulk`]; himalaya stays trash-first.
-    TrashBulk(Vec<MessageLocator>),
-    /// Persist one draft revision (plan §14, ADR 0002): journal record +
-    /// remote add-then-delete replacement. The snapshot freezes the exact
-    /// revision saved, so a stale success can be detected and re-saved.
-    /// Shared (`Arc`, issue 6m97): boxed out of the enum's inline size,
-    /// and refcounted so the registry's kind/retry clones and every
-    /// launch copy the payload by reference count — never a deep body
-    /// copy. The backend call consumes its own owned copy.
-    SaveDraft { draft: Arc<DraftSnapshot> },
-    /// Restore drafts from the crash-safe journal at startup (ADR 0002
-    /// §D.5).
-    LoadDrafts,
-    /// Delete a draft everywhere (journal + remote). `Discard` follows a
-    /// confirmed discard (plan §14) and opens the modal on failure;
-    /// `Sent` is the tmail-send cleanup (ADR 0002: best-effort — delivery
-    /// is already confirmed, so a failure must never claim one). Shared
-    /// snapshot, as with `SaveDraft`.
-    DeleteDraft {
-        draft: Arc<DraftSnapshot>,
-        reason: DraftRemovalReason,
-    },
-    /// Deliver one serialized message through the Himalaya stdin contract
-    /// (plan §14, Phase 7). The message is frozen at send time; retries
-    /// replay the exact bytes under a new operation id. Shared, as with
-    /// the draft payloads.
-    Send { message: Arc<OutboundMessage> },
-    /// Validate one composer attachment source (plan §15, Phase 8): the
-    /// path as typed (`~` unexpanded); the backend expands and checks it.
-    /// No bytes travel — only the resulting metadata.
-    ReadAttachment { path: std::path::PathBuf },
-    /// List one directory for the attachment file chooser (plan §15,
-    /// ticket 95x0): builds the explorer state for the target directory.
-    /// `None` opens the chooser in the user's home directory (fallback:
-    /// the working directory). Filesystem work in the manager keeps the
-    /// reducer I/O-free.
-    ListAttachmentFiles { path: Option<std::path::PathBuf> },
-    /// Save one incoming attachment to disk (plan §15, Phase 8.4). The
-    /// request freezes the target message, part, name, and directory;
-    /// retries replay it verbatim. `open_after` chains the platform
-    /// opener on the saved path (Phase 8.5).
-    SaveAttachment {
-        request: crate::domain::AttachmentRequest,
-        open_after: bool,
-    },
-    /// Open a saved file with the platform handler (`open`/`xdg-open`,
-    /// plan §15, Phase 8.5): spawned directly, never through a shell.
-    OpenPath { path: std::path::PathBuf },
-    /// Open a link from an HTML body in the platform browser (ticket
-    /// hc9n): spawned directly, never through a shell, and only for the
-    /// web schemes the opener policy accepts.
-    OpenUrl { url: String },
-    /// Hand the draft body to the configured external editor (plan §14,
-    /// Phase 11): the runtime suspends the TUI, spawns `program` (argv
-    /// only, no shell) on a secure temporary file, and waits for exit.
-    /// Boxed strings keep the variant small.
-    EditExternally { program: Vec<String>, body: String },
-    /// Discover IMAP/SMTP settings for an email address with the
-    /// io-pim-discovery adapter (ADR 0003 §3.3). Runs on a worker thread,
-    /// bounded by the adapter's deadline; POP/JMAP results never appear.
-    DiscoverConfig { email: String },
-    /// Validate the wizard's draft account with a real `himalaya mailbox
-    /// list` against a temporary 0600 config file (ADR 0003 §3.4). The
-    /// real config is untouched; the temp file is deleted in all
-    /// outcomes. Boxed: the draft carries the credentials.
-    TestAccount {
-        draft: Box<crate::app::wizard::DraftAccountConfig>,
-    },
-    /// Merge the confirmed draft account into the resolved config file
-    /// (ADR 0003 §3.6): format-preserving toml_edit edit, fresh files
-    /// created 0600. Runs in the manager (file I/O) so the reducer stays
-    /// I/O-free. `create` carries the `(role, folder)` pairs for the
-    /// special mailboxes the server lacks (issue txps): the manager
-    /// provisions them first (best effort) and only the ones the server
-    /// confirms join the draft's alias table.
-    SaveAccount {
-        path: std::path::PathBuf,
-        draft: Box<crate::app::wizard::DraftAccountConfig>,
-        create: Vec<(String, String)>,
-    },
-    /// Deliver one new-mail notification (`[tmail].notifications`, ticket
-    /// b28p). No mail travels; the manager delivers it without blocking
-    /// the UI loop (the desktop path on the blocking pool).
-    Notify { request: NotifyRequest },
-    /// Serve one cached page of summaries (ticket haeb, off-thread I/O):
-    /// a cache hit renders the rows instantly and a fresh load follows
-    /// (background when `fresh_background_on_hit`, foreground otherwise);
-    /// a miss starts the fresh load in the foreground. Runs on the
-    /// blocking pool in the manager — the reducer never touches disk.
-    CacheListLoad {
-        mailbox: MailboxId,
-        query: Option<String>,
-        offset: usize,
-        limit: usize,
-        fresh_background_on_hit: bool,
-    },
-    /// Persist one page of summaries (ticket haeb, off-thread I/O). A
-    /// store result carries nothing to apply: the cache is an
-    /// optimization, never a source of truth. Shared (`Arc`, issue
-    /// cbkz): the store path (effect -> manager -> serialization)
-    /// travels by reference count, never a deep page copy.
-    CacheListStore {
-        mailbox: MailboxId,
-        query: Option<String>,
-        page: Arc<Page<MessageSummary>>,
-    },
-    /// Drop one cached page (ticket kkaq): after a confirmed move the
-    /// stored copy lists a message that left the mailbox, and the local
-    /// post-move page cannot be stored truthfully (backend ids shift, so
-    /// the follow-up re-sync owns the next write). Evicting makes a warm
-    /// start re-fetch instead of resurrecting the moved row. The file name
-    /// carries no limit, so one identity (mailbox + query + offset)
-    /// evicts every limit variant.
-    CacheListEvict {
-        mailbox: MailboxId,
-        query: Option<String>,
-        offset: usize,
-    },
-    /// Serve the cached mailbox listing (ticket haeb, off-thread I/O): a
-    /// hit renders the sidebar instantly and the fresh listing still
-    /// loads in the background.
-    CacheMailboxesLoad,
-    /// Persist the mailbox listing (ticket haeb, off-thread I/O).
-    CacheMailboxesStore { mailboxes: Vec<Mailbox> },
-    /// Serve one cached full message for the reader (ticket haeb,
-    /// off-thread I/O): a hit renders the body instantly and a silent
-    /// background convergence fetch follows; a miss keeps the spinner and
-    /// loads in the foreground.
-    CacheMessageLoad { locator: MessageLocator },
-    /// Serve one cached full message for a list preview (ticket wxtx,
-    /// off-thread I/O): a hit fills the row's snippet without any fetch;
-    /// a miss may start a background preview fetch within the rolling
-    /// window.
-    CachePreviewLoad { locator: MessageLocator },
-    /// Persist one full message (ticket haeb, off-thread I/O). Best
-    /// effort: the result carries nothing to apply. Shared (`Arc`, ticket
-    /// pa64): the effect must not deep-copy a possibly multi-megabyte body
-    /// on its way to the store.
-    CacheMessageStore {
-        mailbox: MailboxId,
-        id: String,
-        message: Arc<Message>,
-    },
+    /// Mail reads and mutations: the list, the reader, flags, and moves.
+    Mail(MailOperation),
+    /// Drafts: autosave/push, journal restore, discard/sent cleanup, send.
+    Draft(DraftOperation),
+    /// Attachment files: source validation, chooser listing, saving.
+    Files(FileOperation),
+    /// Desktop handoffs: platform open, browser, external editor.
+    Platform(PlatformOperation),
+    /// The configuration wizard: discovery, credential test, save.
+    Account(AccountOperation),
+    /// New-mail notification (bell or desktop).
+    Notify(NotifyRequest),
+    /// Summary/message/mailbox cache I/O (off-thread, never the reducer).
+    Cache(CacheOperation),
 }
 
 /// One new-mail notification (`[tmail].notifications`, ticket b28p): the
@@ -244,283 +80,132 @@ pub enum NotifyRequest {
     },
 }
 
-/// Why a draft is being removed (Phase 7.6): it selects the failure UX.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DraftRemovalReason {
-    /// Confirmed discard (plan §14): failures open Retry/Dismiss.
-    Discard,
-    /// Tmail-send cleanup (ADR 0002 consequences): best-effort, logged only.
-    Sent,
-}
+impl NotifyRequest {
+    /// Human-readable label for the status bar and error modal.
+    pub(crate) fn summary(&self) -> &'static str {
+        "Notifying"
+    }
 
-/// Which draft a list-initiated [`OperationKind::SeedComposer`] opens
-/// (user request): the reply variants seed from the fetched message's
-/// headers/body the same way the reader's reply does; forward quotes it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SeedKind {
-    /// Reply to the sender.
-    Reply,
-    /// Reply to sender and every recipient (the account address excluded,
-    /// plan §14 Phase 7.5).
-    ReplyAll,
-    /// Forward the message unseeded of recipients.
-    Forward,
+    /// Notifications never supersede anything (plan §11): a lost chime or
+    /// banner is nothing to recover.
+    pub(crate) fn supersedes(_newer: &NotifyRequest, _older: &NotifyRequest) -> bool {
+        false
+    }
+
+    /// No notification coalesces duplicates.
+    pub(crate) fn duplicates_of(&self, _older: &NotifyRequest) -> bool {
+        false
+    }
+
+    /// Whether `Esc` may cancel the operation (plan §11): yes — the
+    /// delivery is best-effort and a failure is logged, never modaled.
+    pub(crate) fn is_cancellable(&self) -> bool {
+        true
+    }
+
+    /// No notification runs a mail-backend child (issue 1v38): the bell
+    /// is a byte to stdout, the desktop path goes to `notify-rust`.
+    pub(crate) fn uses_backend_process(&self) -> bool {
+        false
+    }
 }
 
 impl OperationKind {
     /// Human-readable label for the status bar and error modal.
     pub fn summary(&self) -> &'static str {
         match self {
-            OperationKind::LoadMailboxes => "Loading mailboxes",
-            OperationKind::LoadPage(_) => "Loading messages",
-            OperationKind::Search(_) => "Searching",
-            OperationKind::LoadMessage(_) => "Loading message",
-            OperationKind::OpenDraft(_) => "Opening draft",
-            OperationKind::Preview(_) => "Fetching preview",
-            OperationKind::SeedComposer { kind, .. } => match kind {
-                SeedKind::Reply => "Replying",
-                SeedKind::ReplyAll => "Replying all",
-                SeedKind::Forward => "Forwarding",
-            },
-            OperationKind::SetRead { read: true, .. } => "Marking read",
-            OperationKind::SetRead { read: false, .. } => "Marking unread",
-            OperationKind::SetReadBulk { read: true, .. } => "Marking read",
-            OperationKind::SetReadBulk { read: false, .. } => "Marking unread",
-            OperationKind::SetStarred { starred: true, .. } => "Starring",
-            OperationKind::SetStarred { starred: false, .. } => "Unstarring",
-            OperationKind::Archive(_) => "Archiving",
-            OperationKind::Trash(_) => "Moving to trash",
-            OperationKind::ArchiveBulk(_) => "Archiving",
-            OperationKind::TrashBulk(_) => "Moving to trash",
-            OperationKind::SaveDraft { .. } => "Saving draft",
-            OperationKind::LoadDrafts => "Restoring drafts",
-            OperationKind::DeleteDraft { reason, .. } => match reason {
-                DraftRemovalReason::Discard => "Discarding draft",
-                DraftRemovalReason::Sent => "Cleaning up sent draft",
-            },
-            OperationKind::Send { .. } => "Sending message",
-            OperationKind::ReadAttachment { .. } => "Checking file",
-            OperationKind::ListAttachmentFiles { .. } => "Listing files",
-            OperationKind::SaveAttachment { .. } => "Saving attachment",
-            OperationKind::OpenPath { .. } => "Opening attachment",
-            OperationKind::OpenUrl { .. } => "Opening link",
-            OperationKind::EditExternally { .. } => "Editing externally",
-            OperationKind::DiscoverConfig { .. } => "Detecting settings",
-            OperationKind::TestAccount { .. } => "Testing account",
-            OperationKind::SaveAccount { .. } => "Saving account",
-            OperationKind::Notify { .. } => "Notifying",
-            OperationKind::CacheListLoad { .. }
-            | OperationKind::CacheMailboxesLoad
-            | OperationKind::CacheMessageLoad { .. }
-            | OperationKind::CachePreviewLoad { .. } => "Reading cache",
-            OperationKind::CacheListStore { .. }
-            | OperationKind::CacheListEvict { .. }
-            | OperationKind::CacheMailboxesStore { .. }
-            | OperationKind::CacheMessageStore { .. } => "Caching",
+            OperationKind::Mail(op) => op.summary(),
+            OperationKind::Draft(op) => op.summary(),
+            OperationKind::Files(op) => op.summary(),
+            OperationKind::Platform(op) => op.summary(),
+            OperationKind::Account(op) => op.summary(),
+            OperationKind::Notify(request) => request.summary(),
+            OperationKind::Cache(op) => op.summary(),
         }
     }
 
     /// The typed intent to store for a later retry (plan §12: "Store a
-    /// serializable/cloneable `RetrySpec`, not a closure").
+    /// serializable/cloneable `RetrySpec`, not a closure"). Retrying
+    /// creates a *new* [`OperationId`]; the intent itself is replayed
+    /// unchanged.
     pub fn retry_spec(&self) -> RetrySpec {
         RetrySpec { kind: self.clone() }
     }
 
-    /// Whether `newer` supersedes `older`: a result for `older` must never
-    /// mutate state once `newer` started. Mailbox loads supersede each
-    /// other; page loads supersede page loads for the same mailbox; message
-    /// loads supersede the same message across mailboxes (only the newest
-    /// opened message can win); repeated flag toggles on the same message
-    /// supersede each other. Mutations that move mail never supersede — a
-    /// lost archive would be unrecoverable from state. (They instead
-    /// coalesce: see [`OperationKind::duplicates_of`].)
+    /// Whether `newer` supersedes `older`: a result for `older` must
+    /// never mutate state once `newer` started. Only same-family
+    /// operations can supersede each other, and each family owns its own
+    /// rules; cross-family results simply never apply over one another.
     fn supersedes(newer: &OperationKind, older: &OperationKind) -> bool {
         match (newer, older) {
-            (OperationKind::LoadMailboxes, OperationKind::LoadMailboxes) => true,
-            (OperationKind::LoadPage(newer), OperationKind::LoadPage(older)) => {
-                newer.mailbox_id == older.mailbox_id
+            (OperationKind::Mail(newer), OperationKind::Mail(older)) => {
+                MailOperation::supersedes(newer, older)
             }
-            // A new search of the same mailbox replaces the previous run:
-            // only the newest query's results can ever be shown. Same-query
-            // pagination *keeps* the older page (different offset: both
-            // pages may be wanted), and the apply-side currency check
-            // (`complete_search`) still guards by mailbox + query, so a
-            // superseded or stale page never lands on the wrong state.
-            (OperationKind::Search(newer), OperationKind::Search(older)) => {
-                newer.mailbox_id == older.mailbox_id
+            (OperationKind::Draft(newer), OperationKind::Draft(older)) => {
+                DraftOperation::supersedes(newer, older)
             }
-            (OperationKind::LoadMessage(newer), OperationKind::LoadMessage(older)) => {
-                // Same message, even across mailboxes (the listed id may
-                // also exist elsewhere): only the newest fetch can win,
-                // so the registry holds one child per message.
-                newer.id == older.id
+            (OperationKind::Files(newer), OperationKind::Files(older)) => {
+                FileOperation::supersedes(newer, older)
             }
-            // Draft fetches likewise: only the newest Enter can win.
-            (OperationKind::OpenDraft(newer), OperationKind::OpenDraft(older)) => {
-                newer.mailbox == older.mailbox
+            (OperationKind::Account(newer), OperationKind::Account(older)) => {
+                AccountOperation::supersedes(newer, older)
             }
-            // List-initiated reply/forward seeds: the last pressed key wins
-            // (the composer is one-shot; an older fetch must not open it).
-            (
-                OperationKind::SeedComposer { locator: newer, .. },
-                OperationKind::SeedComposer { locator: older, .. },
-            ) => newer.id == older.id,
-            (
-                OperationKind::SetRead { locator: newer, .. },
-                OperationKind::SetRead { locator: older, .. },
-            )
-            | (
-                OperationKind::SetStarred { locator: newer, .. },
-                OperationKind::SetStarred { locator: older, .. },
-            ) => newer.id == older.id,
-            // A newer save of the same draft supersedes an older one: only
-            // the newest revision may ever be pushed (plan §14 coalescing,
-            // ADR 0002 §D.2). Restores and discards likewise supersede
-            // their own kind.
-            (
-                OperationKind::SaveDraft { draft: newer },
-                OperationKind::SaveDraft { draft: older },
-            ) => newer.local_id == older.local_id,
-            (OperationKind::LoadDrafts, OperationKind::LoadDrafts) => true,
-            (
-                OperationKind::DeleteDraft { draft: newer, .. },
-                OperationKind::DeleteDraft { draft: older, .. },
-            ) => newer.local_id == older.local_id,
-            // A repeated validation of the same entry supersedes the one in
-            // flight: only the newest submit can win.
-            (
-                OperationKind::ReadAttachment { path: newer },
-                OperationKind::ReadAttachment { path: older },
-            ) => newer == older,
-            // A newer directory listing supersedes the one in flight:
-            // navigation keeps moving, only the newest target can land.
-            (
-                OperationKind::ListAttachmentFiles { path: newer },
-                OperationKind::ListAttachmentFiles { path: older },
-            ) => newer == older,
-            // Wizard work supersedes its own kind: a re-run discovery (`r`)
-            // or a retried credential test replaces the still-running
-            // previous attempt (ADR 0003 §3.2).
-            (
-                OperationKind::DiscoverConfig { email: newer },
-                OperationKind::DiscoverConfig { email: older },
-            ) => newer == older,
-            (OperationKind::TestAccount { .. }, OperationKind::TestAccount { .. }) => true,
-            // Cache work supersedes its own identity: only the newest
-            // read or write of a page/message/listing can matter (the
-            // cache is advisory; a dropped older store just keeps the
-            // previous copy on disk).
-            (
-                OperationKind::CacheListLoad {
-                    mailbox: newer_mailbox,
-                    query: newer_query,
-                    ..
-                },
-                OperationKind::CacheListLoad {
-                    mailbox: older_mailbox,
-                    query: older_query,
-                    ..
-                },
-            )
-            | (
-                OperationKind::CacheListStore {
-                    mailbox: newer_mailbox,
-                    query: newer_query,
-                    ..
-                },
-                OperationKind::CacheListStore {
-                    mailbox: older_mailbox,
-                    query: older_query,
-                    ..
-                },
-            )
-            | (
-                OperationKind::CacheListEvict {
-                    mailbox: newer_mailbox,
-                    query: newer_query,
-                    ..
-                },
-                OperationKind::CacheListEvict {
-                    mailbox: older_mailbox,
-                    query: older_query,
-                    ..
-                },
-            ) => newer_mailbox == older_mailbox && newer_query == older_query,
-            (OperationKind::CacheMailboxesLoad, OperationKind::CacheMailboxesLoad)
-            | (
-                OperationKind::CacheMailboxesStore { .. },
-                OperationKind::CacheMailboxesStore { .. },
-            ) => true,
-            (
-                OperationKind::CacheMessageLoad { locator: newer },
-                OperationKind::CacheMessageLoad { locator: older },
-            )
-            | (
-                OperationKind::CachePreviewLoad { locator: newer },
-                OperationKind::CachePreviewLoad { locator: older },
-            ) => newer.mailbox == older.mailbox && newer.id == older.id,
-            (
-                OperationKind::CacheMessageStore {
-                    mailbox: newer_mailbox,
-                    id: newer_id,
-                    ..
-                },
-                OperationKind::CacheMessageStore {
-                    mailbox: older_mailbox,
-                    id: older_id,
-                    ..
-                },
-            ) => newer_mailbox == older_mailbox && newer_id == older_id,
-            // Saves never supersede: a confirmed save must report exactly
-            // what it wrote.
-            // Sends never supersede anything and are never superseded:
-            // every delivery attempt must run to its classified outcome.
+            (OperationKind::Platform(newer), OperationKind::Platform(older)) => {
+                PlatformOperation::supersedes(newer, older)
+            }
+            (OperationKind::Notify(newer), OperationKind::Notify(older)) => {
+                NotifyRequest::supersedes(newer, older)
+            }
+            (OperationKind::Cache(newer), OperationKind::Cache(older)) => {
+                CacheOperation::supersedes(newer, older)
+            }
             _ => false,
         }
     }
 
     /// Whether `self` is a *duplicate* of an in-flight `older` operation:
-    /// the identical intent on the identical target. Only the move
-    /// mutations (Archive/Trash of one message) qualify: a double-press
-    /// spawns two concurrent backend moves for the same id, and after the
-    /// first one renames the maildir file the second fails confusingly
-    /// against the new id — the registry drops the duplicate instead
-    /// (idempotency for the user: the first press already owns the work).
-    /// Sends are excluded on purpose: every delivery attempt must run to
-    /// its classified outcome (a cancelled send's ambiguity is worse than
-    /// a risky duplicate detection).
+    /// the identical intent on the identical target. Same-family only,
+    /// delegated to the family; only the mail family has coalescing rules
+    /// (the move mutations, ticket j9bq).
     fn duplicates_of(&self, older: &OperationKind) -> bool {
         match (self, older) {
-            (OperationKind::Archive(newer), OperationKind::Archive(older))
-            | (OperationKind::Trash(newer), OperationKind::Trash(older)) => newer == older,
-            // The bulk shapes coalesce the same way (ticket j9bq): a
-            // double-press of one bulk archive/trash must not re-run the
-            // backend move for messages whose ids already changed under
-            // the first run.
-            (OperationKind::ArchiveBulk(newer), OperationKind::ArchiveBulk(older))
-            | (OperationKind::TrashBulk(newer), OperationKind::TrashBulk(older)) => newer == older,
+            (OperationKind::Mail(newer), OperationKind::Mail(older)) => newer.duplicates_of(older),
+            (OperationKind::Draft(newer), OperationKind::Draft(older)) => {
+                newer.duplicates_of(older)
+            }
+            (OperationKind::Files(newer), OperationKind::Files(older)) => {
+                newer.duplicates_of(older)
+            }
+            (OperationKind::Platform(newer), OperationKind::Platform(older)) => {
+                newer.duplicates_of(older)
+            }
+            (OperationKind::Account(newer), OperationKind::Account(older)) => {
+                newer.duplicates_of(older)
+            }
+            (OperationKind::Notify(newer), OperationKind::Notify(older)) => {
+                newer.duplicates_of(older)
+            }
+            (OperationKind::Cache(newer), OperationKind::Cache(older)) => {
+                newer.duplicates_of(older)
+            }
             _ => false,
         }
     }
 
     /// Whether `Esc` may cancel this operation (plan §11: "cancel the
-    /// currently foregrounded cancellable operation"). Sends and opens are
-    /// never cancellable: killing himalaya mid-DATA leaves the delivery
-    /// state unknown while the suppressed `Cancelled` result could claim
-    /// neither failure nor success — exactly the ambiguity plan §12 forbids
-    /// hiding (an already-spawned handler app, or an already-launched
-    /// browser, is likewise let alone). The external editor is likewise
-    /// untouchable: it owns the terminal and the body file until it exits
-    /// (plan §14 step 5). The user can still leave the composer; the send
-    /// completes (or is classified) in the background.
+    /// currently foregrounded cancellable operation"), delegated to the
+    /// family: sends and desktop handoffs are never cancellable, exactly
+    /// the ambiguity plan §12 forbids hiding.
     pub fn is_cancellable(&self) -> bool {
-        !matches!(
-            self,
-            OperationKind::Send { .. }
-                | OperationKind::OpenPath { .. }
-                | OperationKind::OpenUrl { .. }
-                | OperationKind::EditExternally { .. }
-        )
+        match self {
+            OperationKind::Mail(op) => op.is_cancellable(),
+            OperationKind::Draft(op) => op.is_cancellable(),
+            OperationKind::Files(op) => op.is_cancellable(),
+            OperationKind::Platform(op) => op.is_cancellable(),
+            OperationKind::Account(op) => op.is_cancellable(),
+            OperationKind::Notify(request) => request.is_cancellable(),
+            OperationKind::Cache(op) => op.is_cancellable(),
+        }
     }
 }
 
@@ -806,7 +491,9 @@ impl OperationRegistry {
     /// Superseding guarantees at most one.
     pub fn page_in_flight(&self, mailbox_id: &crate::domain::MailboxId) -> Option<PageRequest> {
         self.entries.values().find_map(|op| match &op.kind {
-            OperationKind::LoadPage(request) if &request.mailbox_id == mailbox_id => {
+            OperationKind::Mail(MailOperation::LoadPage(request))
+                if &request.mailbox_id == mailbox_id =>
+            {
                 Some(request.clone())
             }
             _ => None,
@@ -817,7 +504,9 @@ impl OperationRegistry {
     /// (Phase 9). Superseding guarantees at most one.
     pub fn search_in_flight(&self, mailbox_id: &crate::domain::MailboxId) -> Option<SearchRequest> {
         self.entries.values().find_map(|op| match &op.kind {
-            OperationKind::Search(request) if &request.mailbox_id == mailbox_id => {
+            OperationKind::Mail(MailOperation::Search(request))
+                if &request.mailbox_id == mailbox_id =>
+            {
                 Some(request.clone())
             }
             _ => None,
@@ -828,14 +517,14 @@ impl OperationRegistry {
     pub fn is_loading_mailboxes(&self) -> bool {
         self.entries
             .values()
-            .any(|op| matches!(op.kind, OperationKind::LoadMailboxes))
+            .any(|op| matches!(op.kind, OperationKind::Mail(MailOperation::LoadMailboxes)))
     }
 
     /// Whether a journal restore is currently in flight.
     pub fn is_loading_drafts(&self) -> bool {
         self.entries
             .values()
-            .any(|op| matches!(op.kind, OperationKind::LoadDrafts))
+            .any(|op| matches!(op.kind, OperationKind::Draft(DraftOperation::LoadDrafts)))
     }
 
     /// Whether a message send is currently in flight (Phase 7): a second
@@ -843,7 +532,7 @@ impl OperationRegistry {
     pub fn is_sending(&self) -> bool {
         self.entries
             .values()
-            .any(|op| matches!(op.kind, OperationKind::Send { .. }))
+            .any(|op| matches!(op.kind, OperationKind::Draft(DraftOperation::Send { .. })))
     }
 
     /// Whether a save of exactly `revision` of `local_id` is in flight —
@@ -851,7 +540,7 @@ impl OperationRegistry {
     /// save on leave (plan §14).
     pub fn is_saving_draft(&self, local_id: &crate::domain::DraftId, revision: u64) -> bool {
         self.entries.values().any(|op| match &op.kind {
-            OperationKind::SaveDraft { draft } => {
+            OperationKind::Draft(DraftOperation::SaveDraft { draft }) => {
                 draft.local_id == *local_id && draft.revision == revision
             }
             _ => false,
@@ -868,7 +557,7 @@ impl OperationRegistry {
         let ids: Vec<OperationId> = self
             .entries
             .values()
-            .filter(|op| matches!(op.kind, OperationKind::Preview(_)))
+            .filter(|op| matches!(op.kind, OperationKind::Mail(MailOperation::Preview(_))))
             .map(|op| op.id)
             .collect();
         for id in ids {
@@ -886,7 +575,9 @@ impl OperationRegistry {
             .entries
             .values()
             .filter(|op| match &op.kind {
-                OperationKind::SaveDraft { draft } => draft.local_id == *local_id,
+                OperationKind::Draft(DraftOperation::SaveDraft { draft }) => {
+                    draft.local_id == *local_id
+                }
                 _ => false,
             })
             .map(|op| op.id)
@@ -952,7 +643,7 @@ impl OperationRegistry {
     pub fn previews_in_flight(&self) -> usize {
         self.entries
             .values()
-            .filter(|op| matches!(op.kind, OperationKind::Preview(_)))
+            .filter(|op| matches!(op.kind, OperationKind::Mail(MailOperation::Preview(_))))
             .count()
     }
 
@@ -976,20 +667,20 @@ impl OperationRegistry {
 mod tests {
     use super::*;
     use crate::app::effect::Effect;
-    use crate::domain::{MailboxId, MessageId};
+    use crate::domain::{MailboxId, MessageLocator};
 
     fn page(mailbox: &str, offset: usize) -> OperationKind {
-        OperationKind::LoadPage(PageRequest {
+        OperationKind::Mail(MailOperation::LoadPage(PageRequest {
             mailbox_id: MailboxId(String::from(mailbox)),
             offset,
             limit: 20,
-        })
+        }))
     }
 
     #[test]
     fn start_allocates_fresh_ids_and_registers() {
         let mut registry = OperationRegistry::default();
-        let first = registry.start(OperationKind::LoadMailboxes);
+        let first = registry.start(OperationKind::Mail(MailOperation::LoadMailboxes));
         let second = registry.start(page("inbox", 0));
         assert_ne!(first.id, second.id);
         assert_eq!(registry.get(first.id).unwrap().kind, first.kind);
@@ -1038,12 +729,18 @@ mod tests {
         // exist in two mailboxes (maildir rename / role target), and the
         // registry keeps one child per message.
         let mut registry = OperationRegistry::default();
-        let older = registry.start(OperationKind::LoadMessage(locator("inbox", "m1")));
-        let newer = registry.start(OperationKind::LoadMessage(locator("archive", "m1")));
+        let older = registry.start(OperationKind::Mail(MailOperation::LoadMessage(locator(
+            "inbox", "m1",
+        ))));
+        let newer = registry.start(OperationKind::Mail(MailOperation::LoadMessage(locator(
+            "archive", "m1",
+        ))));
         assert!(registry.get(older.id).is_none(), "older fetch cancelled");
         assert!(registry.get(newer.id).is_some());
         // A different message in flight is left alone.
-        let other = registry.start(OperationKind::LoadMessage(locator("inbox", "m2")));
+        let other = registry.start(OperationKind::Mail(MailOperation::LoadMessage(locator(
+            "inbox", "m2",
+        ))));
         assert!(registry.get(other.id).is_some());
     }
 
@@ -1054,24 +751,32 @@ mod tests {
         // rename. The registry drops the duplicate and keeps the first.
         let mut registry = OperationRegistry::default();
         let first = registry
-            .start_unless_duplicate(OperationKind::Trash(locator("inbox", "m1")))
+            .start_unless_duplicate(OperationKind::Mail(MailOperation::Trash(locator(
+                "inbox", "m1",
+            ))))
             .expect("first owns the work");
         assert!(registry.get(first.id).is_some());
         assert!(
             registry
-                .start_unless_duplicate(OperationKind::Trash(locator("inbox", "m1")))
+                .start_unless_duplicate(OperationKind::Mail(MailOperation::Trash(locator(
+                    "inbox", "m1"
+                ))))
                 .is_none(),
             "identical duplicate coalesced"
         );
         assert!(
             registry
-                .start_unless_duplicate(OperationKind::Archive(locator("inbox", "m1")))
+                .start_unless_duplicate(OperationKind::Mail(MailOperation::Archive(locator(
+                    "inbox", "m1"
+                ))))
                 .is_some(),
             "a different move of the same message still runs"
         );
         assert!(
             registry
-                .start_unless_duplicate(OperationKind::Trash(locator("inbox", "m2")))
+                .start_unless_duplicate(OperationKind::Mail(MailOperation::Trash(locator(
+                    "inbox", "m2"
+                ))))
                 .is_some(),
             "the same move of another message still runs"
         );
@@ -1082,12 +787,16 @@ mod tests {
     fn duplicate_requests_never_supersede_the_first_one() {
         let mut registry = OperationRegistry::default();
         let first = registry
-            .start_unless_duplicate(OperationKind::Archive(locator("inbox", "m1")))
+            .start_unless_duplicate(OperationKind::Mail(MailOperation::Archive(locator(
+                "inbox", "m1",
+            ))))
             .expect("in flight");
         let token = registry.cancellation(first.id).unwrap();
         assert!(
             registry
-                .start_unless_duplicate(OperationKind::Archive(locator("inbox", "m1")))
+                .start_unless_duplicate(OperationKind::Mail(MailOperation::Archive(locator(
+                    "inbox", "m1"
+                ))))
                 .is_none()
         );
         assert!(registry.get(first.id).is_some());
@@ -1097,7 +806,7 @@ mod tests {
     #[test]
     fn finish_removes_and_unknown_results_are_none() {
         let mut registry = OperationRegistry::default();
-        let effect = registry.start(OperationKind::LoadMailboxes);
+        let effect = registry.start(OperationKind::Mail(MailOperation::LoadMailboxes));
         let op = registry.finish(effect.id).expect("in flight");
         assert_eq!(op.id, effect.id);
         assert!(registry.get(effect.id).is_none());
@@ -1160,7 +869,7 @@ mod tests {
         assert!(!registry.is_loading_mailboxes());
         registry.start(page("inbox", 0));
         assert!(!registry.is_loading_mailboxes());
-        registry.start(OperationKind::LoadMailboxes);
+        registry.start(OperationKind::Mail(MailOperation::LoadMailboxes));
         assert!(registry.is_loading_mailboxes());
     }
 
@@ -1181,7 +890,7 @@ mod tests {
         let mut registry = OperationRegistry::default();
         let first = registry.start(page("inbox", 0));
         let second = registry.start(page("sent", 0));
-        let third = registry.start(OperationKind::LoadMailboxes);
+        let third = registry.start(OperationKind::Mail(MailOperation::LoadMailboxes));
         let tokens: Vec<_> = [&first, &second, &third]
             .into_iter()
             .map(|effect| registry.cancellation(effect.id).unwrap())
@@ -1203,8 +912,8 @@ mod tests {
             id: MessageId(String::from("m1")),
             message_id: None,
         };
-        registry.start_background(OperationKind::Preview(locator.clone()));
-        registry.start_background(OperationKind::Preview(locator));
+        registry.start_background(OperationKind::Mail(MailOperation::Preview(locator.clone())));
+        registry.start_background(OperationKind::Mail(MailOperation::Preview(locator)));
         registry.start(page("inbox", 0));
         assert_eq!(
             registry.in_flight_summaries(),
@@ -1219,14 +928,14 @@ mod tests {
 #[cfg(test)]
 mod origin_tests {
     use super::*;
-    use crate::domain::MailboxId;
+    use crate::domain::{MailboxId, MessageLocator};
 
     fn page(mailbox: &str, offset: usize) -> OperationKind {
-        OperationKind::LoadPage(PageRequest {
+        OperationKind::Mail(MailOperation::LoadPage(PageRequest {
             mailbox_id: MailboxId(String::from(mailbox)),
             offset,
             limit: 20,
-        })
+        }))
     }
 
     #[test]
@@ -1253,7 +962,7 @@ mod origin_tests {
         assert!(registry.get(background.id).is_some());
         // A later foreground op holds the slot; when it completes, the
         // pointer falls back to nothing — never to the background fetch.
-        let foreground = registry.start(OperationKind::LoadMailboxes);
+        let foreground = registry.start(OperationKind::Mail(MailOperation::LoadMailboxes));
         assert_eq!(registry.foreground().map(|op| op.id), Some(foreground.id));
         registry.finish(foreground.id);
         assert!(registry.foreground().is_none());
@@ -1269,8 +978,8 @@ mod origin_tests {
             message_id: None,
         };
         assert_eq!(registry.previews_in_flight(), 0);
-        registry.start_background(OperationKind::Preview(locator.clone()));
-        registry.start_background(OperationKind::Preview(locator));
+        registry.start_background(OperationKind::Mail(MailOperation::Preview(locator.clone())));
+        registry.start_background(OperationKind::Mail(MailOperation::Preview(locator)));
         registry.start_background(page("inbox", 0));
         assert_eq!(registry.previews_in_flight(), 2);
         // And they do not block the foreground slot:
@@ -1282,11 +991,13 @@ mod origin_tests {
         // Ticket 183r: a mailbox switch must free the permits previews
         // hold without touching any other in-flight work.
         let mut registry = OperationRegistry::default();
-        let preview = registry.start_background(OperationKind::Preview(MessageLocator {
-            mailbox: MailboxId(String::from("inbox")),
-            id: crate::domain::MessageId(String::from("m1")),
-            message_id: None,
-        }));
+        let preview = registry.start_background(OperationKind::Mail(MailOperation::Preview(
+            MessageLocator {
+                mailbox: MailboxId(String::from("inbox")),
+                id: crate::domain::MessageId(String::from("m1")),
+                message_id: None,
+            },
+        )));
         let preview_token = registry.cancellation(preview.id).expect("token");
         let page_op = registry.start(page("inbox", 0));
         let page_token = registry.cancellation(page_op.id).expect("token");

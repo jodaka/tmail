@@ -15,7 +15,9 @@ use crate::app::action::Action;
 use crate::app::composer::ComposerField;
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
-use crate::app::operation::{OperationKind, OperationOutcome, OperationResult};
+use crate::app::operation::{
+    CacheOperation, FileOperation, MailOperation, OperationKind, OperationOutcome, OperationResult,
+};
 use crate::app::overlay::{AttachmentFileDialog, Overlay};
 use crate::app::route::{MessageRoute, Route};
 use crate::app::state::{AppState, Loadable};
@@ -307,18 +309,20 @@ pub(crate) fn change_page(state: &mut AppState, delta: i64) -> Vec<Effect> {
 /// and mailbox-only request entry points (Phase 9).
 fn visible_list_request(state: &AppState, offset: usize) -> Option<OperationKind> {
     match state.active_route() {
-        Some(Route::Search(route)) => Some(OperationKind::Search(SearchRequest {
-            mailbox_id: route.mailbox_id.clone(),
-            query: route.query.clone(),
-            offset,
-            limit: state.messages.limit.max(1),
-        })),
+        Some(Route::Search(route)) => {
+            Some(OperationKind::Mail(MailOperation::Search(SearchRequest {
+                mailbox_id: route.mailbox_id.clone(),
+                query: route.query.clone(),
+                offset,
+                limit: state.messages.limit.max(1),
+            })))
+        }
         Some(route) => route.mailbox_id().cloned().map(|mailbox_id| {
-            OperationKind::LoadPage(PageRequest {
+            OperationKind::Mail(MailOperation::LoadPage(PageRequest {
                 mailbox_id,
                 offset,
                 limit: state.messages.limit.max(1),
-            })
+            }))
         }),
         None => None,
     }
@@ -330,29 +334,29 @@ fn visible_list_request(state: &AppState, offset: usize) -> Option<OperationKind
 /// (`fresh_background_on_hit`) or just the fresh load.
 fn cache_list_load(operation: &OperationKind, fresh_background_on_hit: bool) -> OperationKind {
     match operation {
-        OperationKind::Search(SearchRequest {
+        OperationKind::Mail(MailOperation::Search(SearchRequest {
             mailbox_id,
             query,
             offset,
             limit,
-        }) => OperationKind::CacheListLoad {
+        })) => OperationKind::Cache(CacheOperation::CacheListLoad {
             mailbox: mailbox_id.clone(),
             query: Some(query.clone()),
             offset: *offset,
             limit: *limit,
             fresh_background_on_hit,
-        },
-        OperationKind::LoadPage(PageRequest {
+        }),
+        OperationKind::Mail(MailOperation::LoadPage(PageRequest {
             mailbox_id,
             offset,
             limit,
-        }) => OperationKind::CacheListLoad {
+        })) => OperationKind::Cache(CacheOperation::CacheListLoad {
             mailbox: mailbox_id.clone(),
             query: None,
             offset: *offset,
             limit: *limit,
             fresh_background_on_hit,
-        },
+        }),
         _ => unreachable!("visible list requests are searches or page loads"),
     }
 }
@@ -400,11 +404,11 @@ pub(crate) fn request_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
     let Some(mailbox_id) = state.active_route().and_then(Route::mailbox_id).cloned() else {
         return Vec::new();
     };
-    let operation = OperationKind::LoadPage(PageRequest {
+    let operation = OperationKind::Mail(MailOperation::LoadPage(PageRequest {
         mailbox_id,
         offset,
         limit: state.messages.limit.max(1),
-    });
+    }));
     // Ticket haeb: in cold contexts (empty list — startup, mailbox switch)
     // the cached page renders instantly; the fresh load below still runs
     // and its result overwrites the cache and the page. When the cache
@@ -463,14 +467,19 @@ pub(crate) fn complete_cache_list_load(
         Ok(OperationOutcome::CachedPage(page)) => {
             let mut effects = apply_page(state, page);
             let load = match query {
-                Some(query) => state.session.operations.start(OperationKind::Search(
-                    crate::domain::SearchRequest {
-                        mailbox_id: mailbox.clone(),
-                        query: String::from(query),
-                        offset,
-                        limit,
-                    },
-                )),
+                Some(query) => {
+                    state
+                        .session
+                        .operations
+                        .start(OperationKind::Mail(MailOperation::Search(
+                            crate::domain::SearchRequest {
+                                mailbox_id: mailbox.clone(),
+                                query: String::from(query),
+                                offset,
+                                limit,
+                            },
+                        )))
+                }
                 None => {
                     let request = PageRequest {
                         mailbox_id: mailbox.clone(),
@@ -481,12 +490,12 @@ pub(crate) fn complete_cache_list_load(
                         state
                             .session
                             .operations
-                            .start_background(OperationKind::LoadPage(request))
+                            .start_background(OperationKind::Mail(MailOperation::LoadPage(request)))
                     } else {
                         state
                             .session
                             .operations
-                            .start(OperationKind::LoadPage(request))
+                            .start(OperationKind::Mail(MailOperation::LoadPage(request)))
                     }
                 }
             };
@@ -494,24 +503,29 @@ pub(crate) fn complete_cache_list_load(
             effects
         }
         Ok(OperationOutcome::CacheMiss) => {
-            let load = match query {
-                Some(query) => state.session.operations.start(OperationKind::Search(
-                    crate::domain::SearchRequest {
-                        mailbox_id: mailbox.clone(),
-                        query: String::from(query),
-                        offset,
-                        limit,
-                    },
-                )),
-                None => state
-                    .session
-                    .operations
-                    .start(OperationKind::LoadPage(PageRequest {
-                        mailbox_id: mailbox.clone(),
-                        offset,
-                        limit,
-                    })),
-            };
+            let load =
+                match query {
+                    Some(query) => {
+                        state
+                            .session
+                            .operations
+                            .start(OperationKind::Mail(MailOperation::Search(
+                                crate::domain::SearchRequest {
+                                    mailbox_id: mailbox.clone(),
+                                    query: String::from(query),
+                                    offset,
+                                    limit,
+                                },
+                            )))
+                    }
+                    None => state.session.operations.start(OperationKind::Mail(
+                        MailOperation::LoadPage(PageRequest {
+                            mailbox_id: mailbox.clone(),
+                            offset,
+                            limit,
+                        }),
+                    )),
+                };
             vec![load]
         }
         Ok(_) => unexpected_payload(id, "cached page"),
@@ -542,7 +556,7 @@ pub(crate) fn complete_cache_mailboxes_load(
                 state
                     .session
                     .operations
-                    .start_background(OperationKind::LoadMailboxes),
+                    .start_background(OperationKind::Mail(MailOperation::LoadMailboxes)),
             );
             effects
         }
@@ -550,7 +564,7 @@ pub(crate) fn complete_cache_mailboxes_load(
             state
                 .session
                 .operations
-                .start_background(OperationKind::LoadMailboxes),
+                .start_background(OperationKind::Mail(MailOperation::LoadMailboxes)),
         ],
         Err(_) => Vec::new(),
     }
@@ -593,15 +607,21 @@ pub(crate) fn complete_cache_message_load(
                 state
                     .session
                     .operations
-                    .start_background(OperationKind::LoadMessage(locator.clone())),
+                    .start_background(OperationKind::Mail(MailOperation::LoadMessage(
+                        locator.clone(),
+                    ))),
             ]
         }
-        Ok(OperationOutcome::CacheMiss) => vec![
-            state
-                .session
-                .operations
-                .start(OperationKind::LoadMessage(locator.clone())),
-        ],
+        Ok(OperationOutcome::CacheMiss) => {
+            vec![
+                state
+                    .session
+                    .operations
+                    .start(OperationKind::Mail(MailOperation::LoadMessage(
+                        locator.clone(),
+                    ))),
+            ]
+        }
         Ok(_) => unexpected_payload(id, "cached message"),
         Err(_) => Vec::new(),
     }
@@ -708,7 +728,9 @@ pub(crate) fn open_attachment_dialog(state: &mut AppState) -> Vec<Effect> {
         state
             .session
             .operations
-            .start(OperationKind::ListAttachmentFiles { path: None }),
+            .start(OperationKind::Files(FileOperation::ListAttachmentFiles {
+                path: None,
+            })),
     ]
 }
 
@@ -847,7 +869,7 @@ pub(crate) fn open_draft_message(
         state
             .session
             .operations
-            .start(OperationKind::OpenDraft(locator)),
+            .start(OperationKind::Mail(MailOperation::OpenDraft(locator))),
     );
     effects
 }
@@ -924,7 +946,9 @@ pub(crate) fn open_message(
         state
             .session
             .operations
-            .start_background(OperationKind::CacheMessageLoad { locator }),
+            .start_background(OperationKind::Cache(CacheOperation::CacheMessageLoad {
+                locator,
+            })),
     ]
 }
 

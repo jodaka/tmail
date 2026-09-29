@@ -1,6 +1,7 @@
 //! Reducer tests: reader domain.
 
 use super::*;
+use crate::app::operation::{CacheOperation, FileOperation, MailOperation, PlatformOperation};
 
 #[test]
 fn activate_on_message_list_opens_the_reader() {
@@ -9,7 +10,7 @@ fn activate_on_message_list_opens_the_reader() {
     let selected = s.selected_message().unwrap().clone();
     let (id, kind) = open_reader(&mut s);
     assert!(
-        matches!(&kind, OperationKind::LoadMessage(locator)
+        matches!(&kind, OperationKind::Mail(MailOperation::LoadMessage(locator))
                 if locator.id == selected.id && locator.mailbox == selected.mailbox_id
         ),
         "kind: {kind:?}"
@@ -35,7 +36,10 @@ fn reader_result_applies_and_marks_unread_read() {
     let (flag_id, kind) = expect_kind(&complete_message_ok(&mut s, id));
     assert!(matches!(s.open_message, Loadable::Loaded(_)));
     assert!(
-        matches!(&kind, OperationKind::SetRead { read: true, .. }),
+        matches!(
+            &kind,
+            OperationKind::Mail(MailOperation::SetRead { read: true, .. })
+        ),
         "kind: {kind:?}"
     );
     // The list still shows the message as unread: the UI updates only
@@ -48,13 +52,20 @@ fn reader_result_applies_and_marks_unread_read() {
     // confirmation carries the cache store plus the chained background
     // listing; both are drained and the registry ends up empty.
     let effects = complete_done(&mut s, flag_id);
-    let (stores, listing): (Vec<_>, Vec<_>) = effects
-        .into_iter()
-        .partition(|e| matches!(e.kind, OperationKind::CacheListStore { .. }));
+    let (stores, listing): (Vec<_>, Vec<_>) = effects.into_iter().partition(|e| {
+        matches!(
+            e.kind,
+            OperationKind::Cache(CacheOperation::CacheListStore { .. })
+        )
+    });
     let listing: Vec<_> = listing
         .into_iter()
         .inspect(|e| {
-            assert_eq!(e.kind, OperationKind::LoadMailboxes, "the recount chain");
+            assert_eq!(
+                e.kind,
+                OperationKind::Mail(MailOperation::LoadMailboxes),
+                "the recount chain"
+            );
         })
         .collect();
     assert_eq!(listing.len(), 1, "one recount for the read-flag change");
@@ -127,7 +138,7 @@ fn preview_snippets_survive_a_background_refresh() {
     let id = s
         .session
         .operations
-        .start(OperationKind::LoadPage(req.clone()))
+        .start(OperationKind::Mail(MailOperation::LoadPage(req.clone())))
         .id;
     let effects = complete_page_ok(&mut s, id, &req, 0);
     no_effects(&effects);
@@ -234,7 +245,7 @@ fn esc_from_reader_restores_exact_list_state() {
         let pending = s.session.operations.foreground().unwrap().id;
         if matches!(
             s.session.operations.get(pending).unwrap().kind,
-            OperationKind::SetRead { .. }
+            OperationKind::Mail(MailOperation::SetRead { .. })
         ) {
             complete_done(&mut s, pending);
         } else {
@@ -348,7 +359,7 @@ fn enter_on_a_focused_link_opens_the_url() {
     reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Link(1)));
     let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
-    let OperationKind::OpenUrl { url } = kind else {
+    let OperationKind::Platform(PlatformOperation::OpenUrl { url }) = kind else {
         panic!("expected OpenUrl, got {kind:?}");
     };
     assert_eq!(url, "https://two.example/b");
@@ -427,7 +438,7 @@ fn attachment_actions_fall_back_to_the_first_chip() {
     assert_eq!(s.reader_focus, Some(ReaderFocus::Link(0)));
     let effects = reduce(&mut s, Action::SaveAttachment);
     let (_, kind) = effect_parts(&effects);
-    let OperationKind::SaveAttachment { request, .. } = kind else {
+    let OperationKind::Files(FileOperation::SaveAttachment { request, .. }) = kind else {
         panic!("expected SaveAttachment, got {kind:?}");
     };
     assert_eq!(request.part_id, 3, "the first chip is the default target");
@@ -457,7 +468,9 @@ fn the_message_store_effect_shares_the_open_allocation() {
     let store = effects
         .iter()
         .find_map(|e| match &e.kind {
-            OperationKind::CacheMessageStore { message, .. } => Some(message.clone()),
+            OperationKind::Cache(CacheOperation::CacheMessageStore { message, .. }) => {
+                Some(message.clone())
+            }
             _ => None,
         })
         .expect("a store effect for the open message");

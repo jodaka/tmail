@@ -3,7 +3,7 @@
 use super::navigation::{request_visible_page, request_visible_page_background};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
-use crate::app::operation::OperationKind;
+use crate::app::operation::{CacheOperation, MailOperation, OperationKind};
 use crate::app::route::{Route, SearchRoute};
 use crate::app::state::{AppState, ListStash, Loadable};
 use crate::domain::{Page, SearchRequest};
@@ -60,12 +60,12 @@ pub(crate) fn submit_search(state: &mut AppState) -> Vec<Effect> {
         state
             .session
             .operations
-            .start(OperationKind::Search(SearchRequest {
+            .start(OperationKind::Mail(MailOperation::Search(SearchRequest {
                 mailbox_id,
                 query,
                 offset: 0,
                 limit,
-            })),
+            }))),
     ]
 }
 
@@ -108,7 +108,7 @@ pub(crate) fn refresh(state: &mut AppState) -> Vec<Effect> {
             state
                 .session
                 .operations
-                .start_background(OperationKind::CacheMailboxesLoad),
+                .start_background(OperationKind::Cache(CacheOperation::CacheMailboxesLoad)),
         ];
     }
     if state.active_route().is_none() {
@@ -165,7 +165,7 @@ pub(crate) fn auto_refresh_tick(
         state
             .session
             .operations
-            .start_background(OperationKind::LoadMailboxes),
+            .start_background(OperationKind::Mail(MailOperation::LoadMailboxes)),
     );
     effects
 }

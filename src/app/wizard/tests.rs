@@ -151,7 +151,7 @@ fn drive_to_saved(state: &mut AppState) {
     let effects = act(state, WizardAction::SubmitEmail);
     assert!(matches!(
         effects.first().expect("discover effect").kind,
-        OperationKind::DiscoverConfig { .. }
+        OperationKind::Account(AccountOperation::DiscoverConfig { .. })
     ));
     complete(state, &effects, discovered(vec![gmail_service()]));
     assert_eq!(wizard(state).step, WizardStep::Discovery);
@@ -163,14 +163,14 @@ fn drive_to_saved(state: &mut AppState) {
     let effects = act(state, WizardAction::SubmitCredentials); // → W5 test
     assert!(matches!(
         effects.first().expect("test effect").kind,
-        OperationKind::TestAccount { .. }
+        OperationKind::Account(AccountOperation::TestAccount { .. })
     ));
     complete(state, &effects, test_ok(&["INBOX", "[Gmail]/Sent Mail"]));
     assert_eq!(wizard(state).step, WizardStep::Confirm);
     let effects = act(state, WizardAction::ConfirmSave);
     assert!(matches!(
         effects.first().expect("save effect").kind,
-        OperationKind::SaveAccount { .. }
+        OperationKind::Account(AccountOperation::SaveAccount { .. })
     ));
     complete(state, &effects, account_saved("/tmp/config.toml", true));
     assert_eq!(wizard(state).step, WizardStep::Saved);
@@ -261,7 +261,8 @@ fn missing_special_folders_are_queued_for_creation_and_saved() {
     );
 
     let effects = act(&mut state, WizardAction::ConfirmSave);
-    let OperationKind::SaveAccount { create, .. } = &effects.first().expect("save effect").kind
+    let OperationKind::Account(AccountOperation::SaveAccount { create, .. }) =
+        &effects.first().expect("save effect").kind
     else {
         panic!("expected a SaveAccount effect");
     };
@@ -449,7 +450,8 @@ fn manual_override_skips_straight_to_credentials() {
     wizard_mut(&mut state).credentials.password = TextField::secret("pw");
     let effects = act(&mut state, WizardAction::SubmitCredentials);
     let id = effects[0].id;
-    let OperationKind::TestAccount { draft } = &state.session.operations.get(id).unwrap().kind
+    let OperationKind::Account(AccountOperation::TestAccount { draft }) =
+        &state.session.operations.get(id).unwrap().kind
     else {
         panic!("expected a TestAccount operation");
     };
@@ -482,7 +484,7 @@ fn test_failure_returns_to_credentials_with_fields_intact() {
     let effects = act(&mut state, WizardAction::SubmitCredentials);
     assert!(matches!(
         effects.first().expect("test effect").kind,
-        OperationKind::TestAccount { .. }
+        OperationKind::Account(AccountOperation::TestAccount { .. })
     ));
     complete(&mut state, &effects, test_ok(&["INBOX"]));
     assert_eq!(wizard(&state).step, WizardStep::Confirm);
@@ -565,7 +567,7 @@ fn save_failure_stays_on_confirm_and_reports() {
     let effects = act(&mut state, WizardAction::ConfirmSave);
     assert!(matches!(
         effects.first().expect("save effect").kind,
-        OperationKind::SaveAccount { .. }
+        OperationKind::Account(AccountOperation::SaveAccount { .. })
     ));
 }
 
@@ -706,7 +708,8 @@ fn collision_suffix_is_offered_and_selected() {
     assert_eq!(wizard(&state).confirm.name_choice_index, 1);
     let effects = act(&mut state, WizardAction::ConfirmSave);
     let id = effects[0].id;
-    let OperationKind::SaveAccount { draft, .. } = &state.session.operations.get(id).unwrap().kind
+    let OperationKind::Account(AccountOperation::SaveAccount { draft, .. }) =
+        &state.session.operations.get(id).unwrap().kind
     else {
         panic!("expected a SaveAccount operation");
     };

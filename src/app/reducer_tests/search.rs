@@ -1,6 +1,7 @@
 //! Reducer tests: search domain.
 
 use super::*;
+use crate::app::operation::MailOperation;
 
 #[test]
 fn submit_search_stashes_mailbox_context_and_runs_search() {
@@ -127,7 +128,10 @@ fn reader_from_search_returns_to_the_same_results() {
     let load_id = match effects.as_slice() {
         [effect] => {
             assert!(
-                matches!(effect.kind, OperationKind::LoadMessage(_)),
+                matches!(
+                    effect.kind,
+                    OperationKind::Mail(MailOperation::LoadMessage(_))
+                ),
                 "expected LoadMessage"
             );
             effect.id
@@ -150,7 +154,10 @@ fn reader_from_search_returns_to_the_same_results() {
     match read_effects.as_slice() {
         [effect] => {
             assert!(
-                matches!(effect.kind, OperationKind::SetRead { read: true, .. }),
+                matches!(
+                    effect.kind,
+                    OperationKind::Mail(MailOperation::SetRead { read: true, .. })
+                ),
                 "expected the mark-read follow-up"
             );
             reduce(
@@ -389,7 +396,11 @@ fn background_refresh_failure_never_opens_the_modal() {
     let (id, req) = find_page(&effects);
     reduce(
         &mut s,
-        failure(id, &OperationKind::LoadPage(req.clone()), "connect refused"),
+        failure(
+            id,
+            &OperationKind::Mail(MailOperation::LoadPage(req.clone())),
+            "connect refused",
+        ),
     );
     // No Retry/Dismiss modal for background work; the status line carries
     // the failure and the record suppresses repeats (Phase 9.6).
@@ -403,7 +414,11 @@ fn background_refresh_failure_never_opens_the_modal() {
     // the announcement; the timer will retry.
     reduce(
         &mut s,
-        failure(id, &OperationKind::LoadPage(req.clone()), "connect refused"),
+        failure(
+            id,
+            &OperationKind::Mail(MailOperation::LoadPage(req.clone())),
+            "connect refused",
+        ),
     );
     assert_eq!(
         s.session.status.message.as_deref(),
@@ -414,7 +429,11 @@ fn background_refresh_failure_never_opens_the_modal() {
     let (id2, req2) = find_page(&effects);
     reduce(
         &mut s,
-        failure(id2, &OperationKind::LoadPage(req2.clone()), "dns timeout"),
+        failure(
+            id2,
+            &OperationKind::Mail(MailOperation::LoadPage(req2.clone())),
+            "dns timeout",
+        ),
     );
     assert_eq!(
         s.session.status.message.as_deref(),
@@ -432,7 +451,11 @@ fn background_failure_record_clears_on_success_and_on_manual_refresh() {
     let (id, req) = find_page(&effects);
     reduce(
         &mut s,
-        failure(id, &OperationKind::LoadPage(req.clone()), "connect refused"),
+        failure(
+            id,
+            &OperationKind::Mail(MailOperation::LoadPage(req.clone())),
+            "connect refused",
+        ),
     );
     assert!(s.session.last_background_error.is_some());
     // A success clears the record: a later failure is reported again.

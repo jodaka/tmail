@@ -9,7 +9,8 @@ use crate::app::action::{Action, AttachmentBrowse};
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::operation::{
-    DraftRemovalReason, OperationFailure, OperationKind, OperationOrigin, OperationResult,
+    DraftOperation, DraftRemovalReason, FileOperation, MailOperation, OperationFailure,
+    OperationKind, OperationOrigin, OperationResult,
 };
 use crate::app::overlay::{
     AccountSwitcherDialog, ConfirmButton, ErrorDialog, HelpDialog, MailboxesDialog, ModalButton,
@@ -355,13 +356,15 @@ pub(crate) fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<E
                 // loading placeholders reset so no stale failure text
                 // lingers while the replay runs.
                 match &spec.kind {
-                    OperationKind::LoadMailboxes => state.mailboxes = Loadable::Loading,
-                    OperationKind::LoadMessage(_) => {
+                    OperationKind::Mail(MailOperation::LoadMailboxes) => {
+                        state.mailboxes = Loadable::Loading
+                    }
+                    OperationKind::Mail(MailOperation::LoadMessage(_)) => {
                         state.open_message = Loadable::Loading;
                         state.reader_scroll = 0;
                         state.reader_focus = None;
                     }
-                    OperationKind::SaveDraft { draft } => {
+                    OperationKind::Draft(DraftOperation::SaveDraft { draft }) => {
                         // A draft-save retry replays the *intent* ("save
                         // this draft"), not the failed revision: retry
                         // materializes the newest revision so retrying
@@ -371,17 +374,17 @@ pub(crate) fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<E
                             && let Some(now) = state.session.clock
                         {
                             let fresh = composer.draft.start_save(now);
-                            return vec![state.session.operations.start(
-                                OperationKind::SaveDraft {
+                            return vec![state.session.operations.start(OperationKind::Draft(
+                                DraftOperation::SaveDraft {
                                     draft: Arc::new(fresh),
                                 },
-                            )];
+                            ))];
                         }
                         // No live draft (or no clock yet): replay the
                         // stored snapshot unchanged — the safe direction
                         // is to preserve, never discard.
                     }
-                    OperationKind::Send { .. } => {
+                    OperationKind::Draft(DraftOperation::Send { .. }) => {
                         // A send retry re-delivers the frozen bytes
                         // verbatim (plan §12: the intent is replayed
                         // unchanged, under a new id). The composer freezes
@@ -453,10 +456,15 @@ pub(crate) fn confirm_discard(
     close_composer_route(state);
     state.session.operations.cancel_draft_saves(&draft.local_id);
     state.set_status("Draft discarded");
-    vec![state.session.operations.start(OperationKind::DeleteDraft {
-        draft: Arc::new(draft),
-        reason: DraftRemovalReason::Discard,
-    })]
+    vec![
+        state
+            .session
+            .operations
+            .start(OperationKind::Draft(DraftOperation::DeleteDraft {
+                draft: Arc::new(draft),
+                reason: DraftRemovalReason::Discard,
+            })),
+    ]
 }
 
 /// Attachment file chooser handling (plan §15, ticket 95x0). The
@@ -521,12 +529,9 @@ pub(crate) fn attachment_dialog_reduce(state: &mut AppState, action: &Action) ->
                     dialog.listing = true;
                     dialog.error = None;
                     dialog.error_scroll = 0;
-                    vec![
-                        state
-                            .session
-                            .operations
-                            .start(OperationKind::ListAttachmentFiles { path: Some(path) }),
-                    ]
+                    vec![state.session.operations.start(OperationKind::Files(
+                        FileOperation::ListAttachmentFiles { path: Some(path) },
+                    ))]
                 }
             } else {
                 Vec::new()
@@ -542,24 +547,18 @@ pub(crate) fn attachment_dialog_reduce(state: &mut AppState, action: &Action) ->
                         dialog.listing = true;
                         dialog.error = None;
                         dialog.error_scroll = 0;
-                        vec![
-                            state
-                                .session
-                                .operations
-                                .start(OperationKind::ListAttachmentFiles { path: Some(dir) }),
-                        ]
+                        vec![state.session.operations.start(OperationKind::Files(
+                            FileOperation::ListAttachmentFiles { path: Some(dir) },
+                        ))]
                     }
                 }
                 None => match dialog.selected_file() {
                     Some(file) => {
                         dialog.error = None;
                         dialog.error_scroll = 0;
-                        vec![
-                            state
-                                .session
-                                .operations
-                                .start(OperationKind::ReadAttachment { path: file }),
-                        ]
+                        vec![state.session.operations.start(OperationKind::Files(
+                            FileOperation::ReadAttachment { path: file },
+                        ))]
                     }
                     None => Vec::new(),
                 },

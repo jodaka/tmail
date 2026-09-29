@@ -1,6 +1,7 @@
 //! Reducer tests: drafts domain.
 
 use super::*;
+use crate::app::operation::{CacheOperation, DraftOperation, MailOperation};
 use std::sync::Arc;
 
 #[test]
@@ -8,7 +9,10 @@ fn enter_in_other_mailboxes_still_opens_the_reader() {
     let mut s = state();
     let (_, kind) = effect_parts(&reduce(&mut s, Action::Activate));
     assert!(
-        matches!(kind, OperationKind::CacheMessageLoad { .. }),
+        matches!(
+            kind,
+            OperationKind::Cache(CacheOperation::CacheMessageLoad { .. })
+        ),
         "the reader open reads the message cache first, got {kind:?}"
     );
 }
@@ -53,7 +57,7 @@ fn enter_on_a_remote_draft_fetches_and_opens_the_composer() {
     s.messages.items = vec![draft_row("copy-7", Some("1778.draft@tmail.local"))];
     s.selection = 0;
     let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
-    let OperationKind::OpenDraft(locator) = kind else {
+    let OperationKind::Mail(MailOperation::OpenDraft(locator)) = kind else {
         panic!("expected OpenDraft, got {kind:?}");
     };
     assert_eq!(locator.id, MessageId(String::from("copy-7")));
@@ -135,7 +139,7 @@ fn enter_on_a_draft_row_secures_the_parked_draft_and_swaps() {
     s.messages.items = vec![draft_row("copy-9", Some("other@tmail.local"))];
     s.selection = 0;
     let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
-    let OperationKind::OpenDraft(locator) = kind else {
+    let OperationKind::Mail(MailOperation::OpenDraft(locator)) = kind else {
         panic!("expected OpenDraft, got {kind:?}");
     };
     assert_eq!(locator.id, MessageId(String::from("copy-9")));
@@ -180,12 +184,13 @@ fn enter_on_a_draft_row_force_saves_an_unsaved_parked_draft() {
         2,
         "the forced save of the parked draft plus the fetch"
     );
-    let OperationKind::SaveDraft { draft: snapshot } = &effects[0].kind else {
+    let OperationKind::Draft(DraftOperation::SaveDraft { draft: snapshot }) = &effects[0].kind
+    else {
         panic!("expected SaveDraft, got {:?}", effects[0].kind);
     };
     assert_eq!(snapshot.to, "old@example.com");
     assert_eq!(snapshot.revision, 1);
-    let OperationKind::OpenDraft(_) = &effects[1].kind else {
+    let OperationKind::Mail(MailOperation::OpenDraft(_)) = &effects[1].kind else {
         panic!("expected OpenDraft, got {:?}", effects[1].kind);
     };
     // The parked save confirms while its draft is still in the slot…
@@ -296,7 +301,7 @@ fn enter_on_a_draft_row_replaces_a_blank_c_draft() {
     s.messages.items = vec![draft_row("copy-9", Some("other@tmail.local"))];
     s.selection = 0;
     let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
-    let OperationKind::OpenDraft(locator) = kind else {
+    let OperationKind::Mail(MailOperation::OpenDraft(locator)) = kind else {
         panic!("expected OpenDraft, got {kind:?}");
     };
     assert_eq!(locator.id, MessageId(String::from("copy-9")));
@@ -679,10 +684,10 @@ fn send_success_leaves_the_composer_and_resolves_the_draft() {
     // One cleanup operation: journal entry + remote copy removal.
     let (cleanup_id, kind) = effect_parts(&effects);
     match &kind {
-        OperationKind::DeleteDraft {
+        OperationKind::Draft(DraftOperation::DeleteDraft {
             draft,
             reason: DraftRemovalReason::Sent,
-        } => {
+        }) => {
             assert_eq!(
                 draft.remote_id,
                 Some(MessageId(String::from("remote-draft")))
@@ -707,7 +712,7 @@ fn first_push_recounts_the_drafts_folder() {
     assert!(
         effects
             .iter()
-            .any(|e| e.kind == OperationKind::LoadMailboxes),
+            .any(|e| e.kind == OperationKind::Mail(MailOperation::LoadMailboxes)),
         "folder counts go stale without the recount, got {effects:?}"
     );
     // The optimistic counter (ticket ng42): the sidebar's Drafts content
@@ -769,7 +774,7 @@ fn sent_draft_recounts_the_drafts_folder() {
     assert!(
         effects
             .iter()
-            .any(|e| e.kind == OperationKind::LoadMailboxes),
+            .any(|e| e.kind == OperationKind::Mail(MailOperation::LoadMailboxes)),
         "the folder count must recount after the sweep, got {effects:?}"
     );
     // The optimistic counter (ticket ng42): the swept copy left the
@@ -904,9 +909,9 @@ fn ambiguous_send_opens_the_duplicate_warning_and_keeps_the_draft() {
     // Retry stays available, replaying the exact frozen message.
     assert_eq!(
         dialog.retry.as_ref().map(|spec| spec.kind.clone()),
-        Some(OperationKind::Send {
+        Some(OperationKind::Draft(DraftOperation::Send {
             message: Arc::new(message),
-        })
+        }))
     );
     // The draft is intact and editable again; nothing claimed success.
     let composer = s.session.composer.as_ref().unwrap();
@@ -1047,10 +1052,10 @@ fn a_failed_list_seed_opens_the_modal_without_a_composer() {
     let mut s = state();
     let effects = reduce(&mut s, Action::Reply);
     let (id, _locator, _kind) = expect_seed(&effects);
-    let kind = OperationKind::SeedComposer {
+    let kind = OperationKind::Mail(MailOperation::SeedComposer {
         locator: s.messages.items[0].clone().into_locator(),
         kind: SeedKind::Reply,
-    };
+    });
     let _ = &mut s;
     reduce(&mut s, failure(id, &kind, "himalaya exited with code 1"));
     assert!(

@@ -1,6 +1,7 @@
 //! Reducer tests: bulk domain.
 
 use super::*;
+use crate::app::operation::MailOperation;
 
 // ── Bulk selection (ticket p0s3) ─────────────────────────────────────────
 
@@ -91,7 +92,7 @@ fn bulk_archive_is_one_batched_operation() {
     // operation — one backend session, never one process per message.
     let effects = reduce(&mut s, Action::Archive);
     assert_eq!(effects.len(), 1, "one batched operation for the batch");
-    let OperationKind::ArchiveBulk(locators) = &effects[0].kind else {
+    let OperationKind::Mail(MailOperation::ArchiveBulk(locators)) = &effects[0].kind else {
         panic!("expected ArchiveBulk, got {:?}", effects[0].kind);
     };
     assert_eq!(locators.len(), count, "every selected row in the batch");
@@ -117,10 +118,10 @@ fn bulk_mark_read_is_one_batched_operation() {
     // operation — one backend session, never one process per message.
     let effects = reduce(&mut s, Action::MarkRead);
     assert_eq!(effects.len(), 1, "one batched operation for the batch");
-    let OperationKind::SetReadBulk {
+    let OperationKind::Mail(MailOperation::SetReadBulk {
         locators,
         read: true,
-    } = &effects[0].kind
+    }) = &effects[0].kind
     else {
         panic!("expected SetReadBulk read=true, got {:?}", effects[0].kind);
     };
@@ -128,7 +129,8 @@ fn bulk_mark_read_is_one_batched_operation() {
 
     let effects = reduce(&mut s, Action::MarkUnread);
     assert_eq!(effects.len(), 1, "one batched operation for the batch");
-    let OperationKind::SetReadBulk { read: false, .. } = &effects[0].kind else {
+    let OperationKind::Mail(MailOperation::SetReadBulk { read: false, .. }) = &effects[0].kind
+    else {
         panic!("expected SetReadBulk read=false, got {:?}", effects[0].kind);
     };
 }
@@ -144,7 +146,7 @@ fn bulk_trash_is_one_batched_operation() {
     // operation — one backend session, never one process per message.
     let effects = reduce(&mut s, Action::Trash);
     assert_eq!(effects.len(), 1, "one batched operation for the batch");
-    let OperationKind::TrashBulk(locators) = &effects[0].kind else {
+    let OperationKind::Mail(MailOperation::TrashBulk(locators)) = &effects[0].kind else {
         panic!("expected TrashBulk, got {:?}", effects[0].kind);
     };
     assert_eq!(locators.len(), count, "every selected row in the batch");
@@ -156,10 +158,10 @@ fn bulk_mark_read_confirmation_flips_every_selected_row() {
     s.session.focus = Focus::MessageList;
     no_effects(&reduce(&mut s, Action::SelectAll));
     let (id, kind) = expect_kind(&reduce(&mut s, Action::MarkRead));
-    let OperationKind::SetReadBulk {
+    let OperationKind::Mail(MailOperation::SetReadBulk {
         locators,
         read: true,
-    } = &kind
+    }) = &kind
     else {
         panic!("kind: {kind:?}");
     };
@@ -179,7 +181,10 @@ fn mark_read_single_row_when_no_selection() {
     let target = s.selected_message().unwrap().id.clone();
     let (id, kind) = expect_kind(&reduce(&mut s, Action::MarkRead));
     assert!(
-        matches!(&kind, OperationKind::SetRead { read: true, .. }),
+        matches!(
+            &kind,
+            OperationKind::Mail(MailOperation::SetRead { read: true, .. })
+        ),
         "kind: {kind:?}"
     );
     complete_done(&mut s, id);
@@ -201,9 +206,12 @@ fn reader_shortcuts_do_not_act_on_the_selection() {
     // not the batch.
     let effects = reduce(&mut s, Action::Archive);
     let (id, _) = effect_parts(&effects);
-    assert!(matches!(effects[0].kind, OperationKind::Archive(_)));
+    assert!(matches!(
+        effects[0].kind,
+        OperationKind::Mail(MailOperation::Archive(_))
+    ));
     let opened = s.open_summary().unwrap().id.clone();
-    if let OperationKind::Archive(locator) = &effects[0].kind {
+    if let OperationKind::Mail(MailOperation::Archive(locator)) = &effects[0].kind {
         assert_eq!(locator.id, opened, "the open message is the target");
     }
     complete_done(&mut s, id);
@@ -258,7 +266,7 @@ fn bulk_button_click_dispatches_the_advertised_action() {
         Action::Click(ClickTarget::BulkAction(BulkOp::Trash)),
     );
     assert_eq!(effects.len(), 1, "one batched move for the batch");
-    let OperationKind::TrashBulk(locators) = &effects[0].kind else {
+    let OperationKind::Mail(MailOperation::TrashBulk(locators)) = &effects[0].kind else {
         panic!("expected TrashBulk, got {:?}", effects[0].kind);
     };
     assert_eq!(

@@ -7,6 +7,7 @@
 //! `page_cache.rs`; the manager's cache arms in `runtime::tasks`.
 
 use super::*;
+use crate::app::operation::{CacheOperation, MailOperation};
 
 // ── Summary cache (ticket haeb) ──────────────────────────────────────────
 
@@ -72,7 +73,8 @@ fn cached_page_serves_instantly_and_the_fresh_load_still_runs() {
     assert!(
         !effects.iter().any(|e| matches!(
             e.kind,
-            OperationKind::LoadPage(_) | OperationKind::Search(_)
+            OperationKind::Mail(MailOperation::LoadPage(_))
+                | OperationKind::Mail(MailOperation::Search(_))
         )),
         "no page work may follow a completed load, got {effects:?}"
     );
@@ -89,7 +91,7 @@ fn cached_page_serves_instantly_and_the_fresh_load_still_runs() {
     // …and the successful load refreshes the cache — as an effect.
     assert!(
         effects.iter().any(
-            |e| matches!(&e.kind, OperationKind::CacheListStore { mailbox, query, page }
+            |e| matches!(&e.kind, OperationKind::Cache(CacheOperation::CacheListStore { mailbox, query, page })
             if mailbox.0 == "sent" && query.is_none()
                 && page.items.len() == expected.items.len())
         ),
@@ -140,7 +142,7 @@ fn cold_start_serves_cached_mailboxes_and_first_page_instantly() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e.kind, OperationKind::LoadMailboxes)),
+            .any(|e| matches!(e.kind, OperationKind::Mail(MailOperation::LoadMailboxes))),
         "the fresh mailbox listing still loads"
     );
     // The cached first page is visible without waiting…
@@ -178,7 +180,7 @@ fn opening_a_message_serves_the_cached_copy_instantly() {
     // slot, so Esc cannot cancel it into "cancelled" noise).
     let convergence = effects
         .iter()
-        .find(|e| matches!(e.kind, OperationKind::LoadMessage(_)))
+        .find(|e| matches!(e.kind, OperationKind::Mail(MailOperation::LoadMessage(_))))
         .expect("the convergence fetch still runs");
     let op = s.session.operations.get(convergence.id).expect("in flight");
     assert_eq!(op.origin, OperationOrigin::Background);
@@ -251,7 +253,7 @@ fn preview_result_fills_the_list_snippet_and_caches_the_message() {
     // the disk).
     assert!(
         effects.iter().any(
-            |e| matches!(&e.kind, OperationKind::CacheMessageStore { mailbox, id, .. }
+            |e| matches!(&e.kind, OperationKind::Cache(CacheOperation::CacheMessageStore { mailbox, id, .. })
             if mailbox == &locator.mailbox && id == &locator.id.0)
         ),
         "the preview fetch stores the message, got {effects:?}"
@@ -312,7 +314,7 @@ fn preview_fetch_reconciles_the_row_attachment_flag() {
     let id = s
         .session
         .operations
-        .start(OperationKind::LoadPage(req.clone()))
+        .start(OperationKind::Mail(MailOperation::LoadPage(req.clone())))
         .id;
     complete_page_ok(&mut s, id, &req, 0);
     let row = s
@@ -377,7 +379,10 @@ fn opening_a_message_reconciles_the_row_attachment_flag() {
     let effects = complete_cache_message(&mut s, cache_id, mock::mock_message(&summary));
     // The hit starts the silent convergence fetch…
     let (convergence_id, kind) = effect_parts(&effects);
-    assert!(matches!(kind, OperationKind::LoadMessage(_)));
+    assert!(matches!(
+        kind,
+        OperationKind::Mail(MailOperation::LoadMessage(_))
+    ));
     // …whose result reconciles the row.
     let mut message = mock::mock_message(&summary);
     message.attachments = vec![crate::domain::Attachment {
@@ -408,7 +413,7 @@ fn preview_failure_is_silent_and_never_retried() {
         &mut s,
         failure(
             id,
-            &OperationKind::Preview(locator.clone()),
+            &OperationKind::Mail(MailOperation::Preview(locator.clone())),
             "himalaya exploded",
         ),
     );
@@ -432,7 +437,7 @@ fn preview_failure_is_silent_and_never_retried() {
     let id = s
         .session
         .operations
-        .start(OperationKind::LoadPage(req.clone()))
+        .start(OperationKind::Mail(MailOperation::LoadPage(req.clone())))
         .id;
     let effects = complete_page_ok(&mut s, id, &req, 0);
     assert!(
@@ -500,7 +505,11 @@ fn preview_fetches_roll_within_the_window() {
         offset: 0,
         limit: 20,
     };
-    let id = s.session.operations.start(OperationKind::LoadPage(req)).id;
+    let id = s
+        .session
+        .operations
+        .start(OperationKind::Mail(MailOperation::LoadPage(req)))
+        .id;
     let effects = reduce(
         &mut s,
         Action::BackendCompleted(OperationResult {
@@ -518,7 +527,7 @@ fn preview_fetches_roll_within_the_window() {
     let mut previews = Vec::new();
     for read_id in reads {
         for effect in complete_cache_miss(&mut s, read_id) {
-            if let OperationKind::Preview(locator) = &effect.kind {
+            if let OperationKind::Mail(MailOperation::Preview(locator)) = &effect.kind {
                 previews.push((effect.id, locator.clone()));
             }
         }
@@ -544,7 +553,7 @@ fn preview_fetches_roll_within_the_window() {
     let mut refill = Vec::new();
     for read_id in refill_reads {
         for effect in complete_cache_miss(&mut s, read_id) {
-            if let OperationKind::Preview(locator) = &effect.kind {
+            if let OperationKind::Mail(MailOperation::Preview(locator)) = &effect.kind {
                 refill.push((effect.id, locator.clone()));
             }
         }
@@ -583,7 +592,11 @@ fn preview_fetches_are_capped_per_page() {
         offset: 0,
         limit: 20,
     };
-    let id = s.session.operations.start(OperationKind::LoadPage(req)).id;
+    let id = s
+        .session
+        .operations
+        .start(OperationKind::Mail(MailOperation::LoadPage(req)))
+        .id;
     reduce(
         &mut s,
         Action::BackendCompleted(OperationResult {
@@ -596,14 +609,13 @@ fn preview_fetches_are_capped_per_page() {
     // eagerly so the rolling window never becomes the limiter.
     let mut started = 0;
     for row in s.messages.items.clone() {
-        let read = s
-            .session
-            .operations
-            .start_background(OperationKind::CachePreviewLoad {
+        let read = s.session.operations.start_background(OperationKind::Cache(
+            CacheOperation::CachePreviewLoad {
                 locator: row.into_locator(),
-            });
+            },
+        ));
         for effect in complete_cache_miss(&mut s, read.id) {
-            if let OperationKind::Preview(locator) = &effect.kind {
+            if let OperationKind::Mail(MailOperation::Preview(locator)) = &effect.kind {
                 started += 1;
                 let summary = s
                     .messages
@@ -649,7 +661,11 @@ fn a_new_page_refills_the_per_page_budget() {
         offset: 0,
         limit: mock::PAGE_SIZE,
     };
-    let id = s.session.operations.start(OperationKind::LoadPage(req)).id;
+    let id = s
+        .session
+        .operations
+        .start(OperationKind::Mail(MailOperation::LoadPage(req)))
+        .id;
     reduce(
         &mut s,
         Action::BackendCompleted(OperationResult {
@@ -663,17 +679,16 @@ fn a_new_page_refills_the_per_page_budget() {
     );
     // A cache miss on the new page's rows starts fetching again…
     let row = s.messages.items[0].clone();
-    let read = s
-        .session
-        .operations
-        .start_background(OperationKind::CachePreviewLoad {
+    let read = s.session.operations.start_background(OperationKind::Cache(
+        CacheOperation::CachePreviewLoad {
             locator: row.into_locator(),
-        });
+        },
+    ));
     let effects = complete_cache_miss(&mut s, read.id);
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e.kind, OperationKind::Preview(_))),
+            .any(|e| matches!(e.kind, OperationKind::Mail(MailOperation::Preview(_)))),
         "a fresh page starts fetching again, got {effects:?}"
     );
     assert_eq!(
@@ -689,17 +704,16 @@ fn an_exhausted_session_budget_stops_preview_fetches() {
     let mut s = state();
     s.caches.preview_fetches_for_session = crate::app::state::MAX_PREVIEW_FETCHES_PER_SESSION;
     let row = s.messages.items[0].clone();
-    let read = s
-        .session
-        .operations
-        .start_background(OperationKind::CachePreviewLoad {
+    let read = s.session.operations.start_background(OperationKind::Cache(
+        CacheOperation::CachePreviewLoad {
             locator: row.into_locator(),
-        });
+        },
+    ));
     let effects = complete_cache_miss(&mut s, read.id);
     assert!(
         !effects
             .iter()
-            .any(|e| matches!(e.kind, OperationKind::Preview(_))),
+            .any(|e| matches!(e.kind, OperationKind::Mail(MailOperation::Preview(_)))),
         "no fetch starts once the session budget is spent, got {effects:?}"
     );
     assert_eq!(s.caches.preview_fetches_for_session, 64);
@@ -715,22 +729,27 @@ fn a_confirmed_flag_change_stores_the_corrected_page() {
     s.selection = 0; // m1: not starred.
     let (id, kind) = expect_kind(&reduce(&mut s, Action::ToggleStar));
     assert!(
-        matches!(&kind, OperationKind::SetStarred { .. }),
+        matches!(&kind, OperationKind::Mail(MailOperation::SetStarred { .. })),
         "kind: {kind:?}"
     );
     let effects = complete_done(&mut s, id);
     let stores: Vec<&Effect> = effects
         .iter()
-        .filter(|e| matches!(e.kind, OperationKind::CacheListStore { .. }))
+        .filter(|e| {
+            matches!(
+                e.kind,
+                OperationKind::Cache(CacheOperation::CacheListStore { .. })
+            )
+        })
         .collect();
     let [effect] = &stores[..] else {
         panic!("expected exactly one page store, got {effects:?}");
     };
-    let OperationKind::CacheListStore {
+    let OperationKind::Cache(CacheOperation::CacheListStore {
         mailbox,
         query,
         page,
-    } = &effect.kind
+    }) = &effect.kind
     else {
         unreachable!("filtered above");
     };
@@ -752,20 +771,21 @@ fn a_confirmed_flag_change_stores_the_corrected_page() {
 #[test]
 fn an_absent_row_flag_change_stores_nothing() {
     let mut s = state();
-    let kind = OperationKind::SetRead {
+    let kind = OperationKind::Mail(MailOperation::SetRead {
         locator: MessageLocator {
             mailbox: inbox_id(),
             id: MessageId(String::from("absent-from-page")),
             message_id: None,
         },
         read: true,
-    };
+    });
     let id = s.session.operations.start(kind).id;
     let effects = complete_done(&mut s, id);
     assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e.kind, OperationKind::CacheListStore { .. })),
+        !effects.iter().any(|e| matches!(
+            e.kind,
+            OperationKind::Cache(CacheOperation::CacheListStore { .. })
+        )),
         "no flip, no re-store, got {effects:?}"
     );
 }
@@ -778,16 +798,17 @@ fn an_already_in_target_flag_change_stores_nothing() {
     let mut s = state();
     s.selection = 3; // m4: already read in the mock seed.
     let locator = s.selected_message().unwrap().into_locator();
-    let kind = OperationKind::SetRead {
+    let kind = OperationKind::Mail(MailOperation::SetRead {
         locator,
         read: true,
-    };
+    });
     let id = s.session.operations.start(kind).id;
     let effects = complete_done(&mut s, id);
     assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e.kind, OperationKind::CacheListStore { .. })),
+        !effects.iter().any(|e| matches!(
+            e.kind,
+            OperationKind::Cache(CacheOperation::CacheListStore { .. })
+        )),
         "a no-op flag change must not re-store the unchanged page, got {effects:?}"
     );
 }
@@ -801,7 +822,10 @@ fn a_confirmed_move_evicts_the_cached_page() {
     s.selection = 0;
     let target = s.selected_message().unwrap().id.clone();
     let (id, kind) = expect_kind(&reduce(&mut s, Action::Archive));
-    assert!(matches!(&kind, OperationKind::Archive(_)), "kind: {kind:?}");
+    assert!(
+        matches!(&kind, OperationKind::Mail(MailOperation::Archive(_))),
+        "kind: {kind:?}"
+    );
     let effects = complete_done(&mut s, id);
     // The re-sync load and the eviction both go out…
     let (_, req) = find_page(&effects);
@@ -810,16 +834,21 @@ fn a_confirmed_move_evicts_the_cached_page() {
     // …and the eviction targets the exact cached identity.
     let evicts: Vec<&Effect> = effects
         .iter()
-        .filter(|e| matches!(e.kind, OperationKind::CacheListEvict { .. }))
+        .filter(|e| {
+            matches!(
+                e.kind,
+                OperationKind::Cache(CacheOperation::CacheListEvict { .. })
+            )
+        })
         .collect();
     let [effect] = &evicts[..] else {
         panic!("expected exactly one page eviction, got {effects:?}");
     };
-    let OperationKind::CacheListEvict {
+    let OperationKind::Cache(CacheOperation::CacheListEvict {
         mailbox,
         query,
         offset,
-    } = &effect.kind
+    }) = &effect.kind
     else {
         unreachable!("filtered above");
     };
@@ -842,7 +871,11 @@ fn an_identical_refresh_stores_nothing() {
         offset: 0,
         limit: mock::PAGE_SIZE,
     };
-    let id = s.session.operations.start(OperationKind::LoadPage(req)).id;
+    let id = s
+        .session
+        .operations
+        .start(OperationKind::Mail(MailOperation::LoadPage(req)))
+        .id;
     let effects = reduce(
         &mut s,
         Action::BackendCompleted(OperationResult {
@@ -851,9 +884,10 @@ fn an_identical_refresh_stores_nothing() {
         }),
     );
     assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e.kind, OperationKind::CacheListStore { .. })),
+        !effects.iter().any(|e| matches!(
+            e.kind,
+            OperationKind::Cache(CacheOperation::CacheListStore { .. })
+        )),
         "an identical page must not re-store, got {effects:?}"
     );
 }
@@ -891,30 +925,34 @@ fn session_previews_are_bounded() {
 #[test]
 fn a_mailbox_switch_cancels_outstanding_previews() {
     let mut s = state();
-    let preview1 = s
-        .session
-        .operations
-        .start_background(OperationKind::Preview(crate::domain::MessageLocator {
-            mailbox: inbox_id(),
-            id: MessageId(String::from("m1")),
-            message_id: None,
-        }));
-    let preview2 = s
-        .session
-        .operations
-        .start_background(OperationKind::Preview(crate::domain::MessageLocator {
-            mailbox: inbox_id(),
-            id: MessageId(String::from("m2")),
-            message_id: None,
-        }));
+    let preview1 =
+        s.session
+            .operations
+            .start_background(OperationKind::Mail(MailOperation::Preview(
+                crate::domain::MessageLocator {
+                    mailbox: inbox_id(),
+                    id: MessageId(String::from("m1")),
+                    message_id: None,
+                },
+            )));
+    let preview2 =
+        s.session
+            .operations
+            .start_background(OperationKind::Mail(MailOperation::Preview(
+                crate::domain::MessageLocator {
+                    mailbox: inbox_id(),
+                    id: MessageId(String::from("m2")),
+                    message_id: None,
+                },
+            )));
     let page_id = s
         .session
         .operations
-        .start(OperationKind::LoadPage(PageRequest {
+        .start(OperationKind::Mail(MailOperation::LoadPage(PageRequest {
             mailbox_id: inbox_id(),
             offset: 0,
             limit: 20,
-        }))
+        })))
         .id;
     assert_eq!(s.session.operations.previews_in_flight(), 2);
 

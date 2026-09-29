@@ -5,7 +5,7 @@
 //! (`Email → Discovery → Identity → Credentials → Testing → Confirm →
 //! Saved`). All transitions run through the same I/O-free reducer
 //! contract as the rest of the app: side effects travel as
-//! `OperationKind::DiscoverConfig` / `TestAccount` / `SaveAccount`
+//! `OperationKind::Account(AccountOperation::DiscoverConfig)` / `TestAccount` / `SaveAccount`
 //! effects for the operation manager, and results arrive as
 //! `Action::BackendCompleted`. Secrets live only here and in the boxed
 //! `DraftAccountConfig` payload — never in logs, never in display
@@ -20,7 +20,9 @@ use std::path::PathBuf;
 
 use crate::app::action::{Action, DialogEdit};
 use crate::app::effect::Effect;
-use crate::app::operation::{OperationId, OperationKind, OperationOutcome, OperationResult};
+use crate::app::operation::{
+    AccountOperation, OperationId, OperationKind, OperationOutcome, OperationResult,
+};
 use crate::app::state::AppState;
 use crate::config::write::{DraftAccount, SecretStorage};
 use crate::discovery::{
@@ -554,10 +556,9 @@ fn wizard_action(state: &mut AppState, action: &WizardAction) -> Vec<Effect> {
                 wizard.discovery.services.clear();
                 wizard.discovery.service_index = 0;
                 let email = wizard.email.address.value.trim().to_string();
-                let effect = state
-                    .session
-                    .operations
-                    .start(OperationKind::DiscoverConfig { email });
+                let effect = state.session.operations.start(OperationKind::Account(
+                    AccountOperation::DiscoverConfig { email },
+                ));
                 wizard.in_flight = Some(effect.id);
                 vec![effect]
             } else {
@@ -695,12 +696,13 @@ fn submit_email(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> {
     wizard.discovery.discovering = true;
     wizard.discovery.services.clear();
     wizard.discovery.service_index = 0;
-    let effect = state
-        .session
-        .operations
-        .start(OperationKind::DiscoverConfig {
-            email: email.clone(),
-        });
+    let effect =
+        state
+            .session
+            .operations
+            .start(OperationKind::Account(AccountOperation::DiscoverConfig {
+                email: email.clone(),
+            }));
     wizard.in_flight = Some(effect.id);
     vec![effect]
 }
@@ -912,9 +914,13 @@ fn submit_credentials(wizard: &mut WizardState, state: &mut AppState) -> Vec<Eff
 
     wizard.last_error = None;
     wizard.step = WizardStep::Testing;
-    let effect = state.session.operations.start(OperationKind::TestAccount {
-        draft: Box::new(draft),
-    });
+    let effect =
+        state
+            .session
+            .operations
+            .start(OperationKind::Account(AccountOperation::TestAccount {
+                draft: Box::new(draft),
+            }));
     wizard.in_flight = Some(effect.id);
     vec![effect]
 }
@@ -942,14 +948,18 @@ fn confirm_save(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> {
     draft.aliases = wizard.confirm.aliases.clone();
 
     wizard.last_error = None;
-    let effect = state.session.operations.start(OperationKind::SaveAccount {
-        path,
-        draft: Box::new(draft),
-        // Server-side provisioning for the special folders the listing
-        // could not resolve (issue txps); the manager adds the
-        // server-confirmed subset to the draft's alias table.
-        create: wizard.confirm.create_missing.clone(),
-    });
+    let effect =
+        state
+            .session
+            .operations
+            .start(OperationKind::Account(AccountOperation::SaveAccount {
+                path,
+                draft: Box::new(draft),
+                // Server-side provisioning for the special folders the listing
+                // could not resolve (issue txps); the manager adds the
+                // server-confirmed subset to the draft's alias table.
+                create: wizard.confirm.create_missing.clone(),
+            }));
     wizard.in_flight = Some(effect.id);
     vec![effect]
 }
@@ -1039,7 +1049,10 @@ fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effec
     }
     wizard.in_flight = None;
     match (&kind, &result.outcome) {
-        (OperationKind::DiscoverConfig { .. }, Ok(OperationOutcome::Discovered(services))) => {
+        (
+            OperationKind::Account(AccountOperation::DiscoverConfig { .. }),
+            Ok(OperationOutcome::Discovered(services)),
+        ) => {
             wizard.discovery.discovering = false;
             wizard.discovery.services = services.clone();
             wizard.discovery.service_index = 0;
@@ -1051,13 +1064,13 @@ fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effec
             }
             Vec::new()
         }
-        (OperationKind::DiscoverConfig { .. }, Err(failure)) => {
+        (OperationKind::Account(AccountOperation::DiscoverConfig { .. }), Err(failure)) => {
             wizard.discovery.discovering = false;
             wizard.last_error = Some(failure.detail.clone());
             Vec::new()
         }
         (
-            OperationKind::TestAccount { .. },
+            OperationKind::Account(AccountOperation::TestAccount { .. }),
             Ok(OperationOutcome::TestAccountCompleted { mailboxes }),
         ) => {
             wizard.confirm.mailboxes = mailboxes.clone();
@@ -1066,7 +1079,7 @@ fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effec
             wizard.step = WizardStep::Confirm;
             Vec::new()
         }
-        (OperationKind::TestAccount { .. }, Err(failure)) => {
+        (OperationKind::Account(AccountOperation::TestAccount { .. }), Err(failure)) => {
             // Back to W4 with the sanitized error, fields intact
             // (ADR 0003 §3.2 W5).
             wizard.step = WizardStep::Credentials;
@@ -1074,7 +1087,7 @@ fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effec
             Vec::new()
         }
         (
-            OperationKind::SaveAccount { .. },
+            OperationKind::Account(AccountOperation::SaveAccount { .. }),
             Ok(OperationOutcome::AccountSaved {
                 path,
                 created,
@@ -1089,7 +1102,7 @@ fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effec
             wizard.step = WizardStep::Saved;
             Vec::new()
         }
-        (OperationKind::SaveAccount { .. }, Err(failure)) => {
+        (OperationKind::Account(AccountOperation::SaveAccount { .. }), Err(failure)) => {
             wizard.step = WizardStep::Confirm;
             wizard.last_error = Some(failure.detail.clone());
             Vec::new()

@@ -1,6 +1,7 @@
 //! Reducer tests: modals domain.
 
 use super::*;
+use crate::app::operation::MailOperation;
 
 // ── Esc cancellation (plan §10/§11) ──────────────────────────────────────
 
@@ -235,10 +236,10 @@ fn a_foreground_failure_while_the_modal_is_open_queues_into_it() {
         id: MessageId(String::from("m1")),
         message_id: None,
     };
-    let kind = OperationKind::SetRead {
+    let kind = OperationKind::Mail(MailOperation::SetRead {
         locator: locator.clone(),
         read: true,
-    };
+    });
     let id = s.session.operations.start(kind.clone()).id;
     no_effects(&reduce(&mut s, failure(id, &kind, "second failure")));
     let Some(Overlay::Error(dialog)) = &s.session.overlay else {
@@ -262,11 +263,11 @@ fn queued_failure_count_clamps_and_never_wraps() {
     let mut s = state();
     open_modal(&mut s, "first failure");
     for i in 1..=3 {
-        let kind = OperationKind::Archive(MessageLocator {
+        let kind = OperationKind::Mail(MailOperation::Archive(MessageLocator {
             mailbox: inbox_id(),
             id: MessageId(format!("m{i}")),
             message_id: None,
-        });
+        }));
         let id = s.session.operations.start(kind.clone()).id;
         no_effects(&reduce(&mut s, failure(id, &kind, "failure")));
         let Some(Overlay::Error(dialog)) = &s.session.overlay else {

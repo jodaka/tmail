@@ -1,6 +1,7 @@
 //! Reducer tests: list domain.
 
 use super::*;
+use crate::app::operation::MailOperation;
 
 #[test]
 fn selection_moves_down_up_and_clamps() {
@@ -494,7 +495,7 @@ fn mailbox_page_result_never_lands_over_search_results() {
     let effects = reduce(&mut s, Action::SubmitSearch);
     assert!(matches!(
         effects.first().map(|e| &e.kind),
-        Some(OperationKind::Search(_))
+        Some(OperationKind::Mail(MailOperation::Search(_)))
     ));
     assert!(s.messages.items.is_empty());
     reduce(

@@ -5,7 +5,7 @@ use super::message_results::selected_attachment;
 use super::navigation::keep_selection_visible;
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
-use crate::app::operation::OperationKind;
+use crate::app::operation::{FileOperation, MailOperation, OperationKind, PlatformOperation};
 use crate::app::route::Route;
 use crate::app::state::{AppState, ReaderFocus};
 use crate::domain::MessageLocator;
@@ -41,8 +41,8 @@ pub(crate) fn archive_message(state: &mut AppState) -> Vec<Effect> {
         "Archiving {count} messages…",
         "Archiving…",
         false,
-        OperationKind::Archive,
-        OperationKind::ArchiveBulk,
+        |locator| OperationKind::Mail(MailOperation::Archive(locator)),
+        |locators| OperationKind::Mail(MailOperation::ArchiveBulk(locators)),
     )
 }
 
@@ -52,8 +52,8 @@ pub(crate) fn trash_message(state: &mut AppState) -> Vec<Effect> {
         "Moving {count} messages to trash…",
         "Moving to trash…",
         false,
-        OperationKind::Trash,
-        OperationKind::TrashBulk,
+        |locator| OperationKind::Mail(MailOperation::Trash(locator)),
+        |locators| OperationKind::Mail(MailOperation::TrashBulk(locators)),
     )
 }
 
@@ -67,10 +67,12 @@ pub(crate) fn mark_read(state: &mut AppState) -> Vec<Effect> {
     if let Some(locators) = bulk_targets(state) {
         let count = locators.len();
         state.set_status(format!("Marking {count} messages read…"));
-        return vec![state.session.operations.start(OperationKind::SetReadBulk {
-            locators,
-            read: true,
-        })];
+        return vec![state.session.operations.start(OperationKind::Mail(
+            MailOperation::SetReadBulk {
+                locators,
+                read: true,
+            },
+        ))];
     }
     single_flag(state, true, "Marking read…", true)
 }
@@ -80,10 +82,12 @@ pub(crate) fn mark_unread(state: &mut AppState) -> Vec<Effect> {
     if let Some(locators) = bulk_targets(state) {
         let count = locators.len();
         state.set_status(format!("Marking {count} messages unread…"));
-        return vec![state.session.operations.start(OperationKind::SetReadBulk {
-            locators,
-            read: false,
-        })];
+        return vec![state.session.operations.start(OperationKind::Mail(
+            MailOperation::SetReadBulk {
+                locators,
+                read: false,
+            },
+        ))];
     }
     single_flag(state, false, "Marking unread…", false)
 }
@@ -102,7 +106,10 @@ fn single_flag(state: &mut AppState, read: bool, status: &str, list_only: bool) 
                 state
                     .session
                     .operations
-                    .start(OperationKind::SetRead { locator, read }),
+                    .start(OperationKind::Mail(MailOperation::SetRead {
+                        locator,
+                        read,
+                    })),
             ]
         }
         None => Vec::new(),
@@ -119,10 +126,15 @@ pub(crate) fn toggle_star(state: &mut AppState) -> Vec<Effect> {
         Focus::Reader => state.open_summary().is_some_and(|s| s.is_starred),
         _ => state.selected_message().is_some_and(|s| s.is_starred),
     };
-    vec![state.session.operations.start(OperationKind::SetStarred {
-        locator,
-        starred: !starred,
-    })]
+    vec![
+        state
+            .session
+            .operations
+            .start(OperationKind::Mail(MailOperation::SetStarred {
+                locator,
+                starred: !starred,
+            })),
+    ]
 }
 
 /// The bulk skeleton of the move operations (ticket p0s3). The bulk path
@@ -251,10 +263,10 @@ pub(crate) fn save_selected_attachment(state: &mut AppState, open_after: bool) -
         state
             .session
             .operations
-            .start(OperationKind::SaveAttachment {
+            .start(OperationKind::Files(FileOperation::SaveAttachment {
                 request,
                 open_after,
-            }),
+            })),
     ]
 }
 
@@ -276,12 +288,9 @@ pub(crate) fn open_selected_attachment(state: &mut AppState) -> Vec<Effect> {
     let key = (message.id.clone(), attachment.part_id);
     if let Some(path) = state.caches.saved_attachments.get(&key).cloned() {
         tracing::debug!(path = %path.display(), "opening previously saved attachment");
-        return vec![
-            state
-                .session
-                .operations
-                .start(OperationKind::OpenPath { path }),
-        ];
+        return vec![state.session.operations.start(OperationKind::Platform(
+            PlatformOperation::OpenPath { path },
+        ))];
     }
     save_selected_attachment(state, true)
 }
@@ -314,7 +323,7 @@ pub(crate) fn open_reader_link(state: &mut AppState, width: usize, index: usize)
         state
             .session
             .operations
-            .start(OperationKind::OpenUrl { url }),
+            .start(OperationKind::Platform(PlatformOperation::OpenUrl { url })),
     ]
 }
 

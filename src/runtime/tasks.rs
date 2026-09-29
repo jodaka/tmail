@@ -25,7 +25,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app::effect::Effect;
 use crate::app::operation::{
-    NotifyRequest, OperationFailure, OperationKind, OperationOutcome, OperationResult,
+    AccountOperation, CacheOperation, DraftOperation, FileOperation, MailOperation, NotifyRequest,
+    OperationFailure, OperationKind, OperationOutcome, OperationResult, PlatformOperation,
 };
 use crate::backend::{
     AccountTester, BackendError, MailBackend, Notifier, PathOpener, RequestContext,
@@ -52,22 +53,15 @@ const MAX_CONCURRENT_BACKEND_CALLS: usize = 4;
 /// new backend arm defaults to permitted (safe direction: the pool
 /// bounds the dispatching, not the spawn).
 fn uses_backend_process(kind: &OperationKind) -> bool {
-    !matches!(
-        kind,
-        OperationKind::CacheListLoad { .. }
-            | OperationKind::CacheListStore { .. }
-            | OperationKind::CacheListEvict { .. }
-            | OperationKind::CacheMailboxesLoad
-            | OperationKind::CacheMailboxesStore { .. }
-            | OperationKind::CacheMessageLoad { .. }
-            | OperationKind::CachePreviewLoad { .. }
-            | OperationKind::CacheMessageStore { .. }
-            | OperationKind::ListAttachmentFiles { .. }
-            | OperationKind::Notify { .. }
-            | OperationKind::OpenPath { .. }
-            | OperationKind::OpenUrl { .. }
-            | OperationKind::EditExternally { .. }
-    )
+    match kind {
+        OperationKind::Mail(op) => op.uses_backend_process(),
+        OperationKind::Draft(op) => op.uses_backend_process(),
+        OperationKind::Files(op) => op.uses_backend_process(),
+        OperationKind::Platform(op) => op.uses_backend_process(),
+        OperationKind::Account(op) => op.uses_backend_process(),
+        OperationKind::Notify(request) => request.uses_backend_process(),
+        OperationKind::Cache(op) => op.uses_backend_process(),
+    }
 }
 
 /// Spawns backend tasks for the effects the reducer emits.
@@ -202,11 +196,30 @@ async fn run_effect(
     effect: &Effect,
     ctx: &RequestContext,
 ) -> Option<Result<OperationOutcome, OperationFailure>> {
-    // Ticket sakb: dispatch on a borrow — arms move only the sub-entity
-    // they need, instead of cloning the whole `OperationKind` (including
-    // draft/outbound bodies) on every launch.
+    // Issue ceh0: the dispatch is per family — each family runner owns
+    // its variants' calls, so a new operation lands in one family module
+    // instead of a central ~400-line match.
     match &effect.kind {
-        OperationKind::LoadMailboxes => {
+        OperationKind::Mail(op) => run_mail_call(backend, effect, ctx, op).await,
+        OperationKind::Draft(op) => run_draft_call(backend, effect, ctx, op).await,
+        OperationKind::Files(op) => run_files_call(backend, effect, ctx, op).await,
+        OperationKind::Platform(op) => run_platform_call(opener, effect, op).await,
+        OperationKind::Account(op) => run_account_call(discoverer, tester, effect, ctx, op).await,
+        OperationKind::Notify(request) => run_notify_call(notifier, request).await,
+        OperationKind::Cache(op) => run_cache_call(cache, op).await,
+    }
+}
+
+// ── Mail family: list/reader reads, flags, moves ─────────────────────────
+
+async fn run_mail_call(
+    backend: &Arc<dyn MailBackend>,
+    effect: &Effect,
+    ctx: &RequestContext,
+    op: &MailOperation,
+) -> Option<Result<OperationOutcome, OperationFailure>> {
+    match op {
+        MailOperation::LoadMailboxes => {
             run_call(
                 effect,
                 ctx,
@@ -215,20 +228,26 @@ async fn run_effect(
             )
             .await
         }
-        OperationKind::LoadPage(request) => {
+        MailOperation::LoadPage(request) => {
             run_call(
                 effect,
                 ctx,
-                move |c| backend.list_messages(c, request.clone()),
+                {
+                    let request = request.clone();
+                    move |c| backend.list_messages(c, request)
+                },
                 OperationOutcome::Page,
             )
             .await
         }
-        OperationKind::Search(request) => {
+        MailOperation::Search(request) => {
             run_call(
                 effect,
                 ctx,
-                move |c| backend.search_messages(c, request.clone()),
+                {
+                    let request = request.clone();
+                    move |c| backend.search_messages(c, request)
+                },
                 OperationOutcome::Page,
             )
             .await
@@ -237,83 +256,122 @@ async fn run_effect(
         // into a composer draft), list preview (ticket wxtx), and the
         // list-initiated reply/forward seed share one backend call and
         // one payload shape.
-        OperationKind::LoadMessage(locator)
-        | OperationKind::OpenDraft(locator)
-        | OperationKind::Preview(locator)
-        | OperationKind::SeedComposer { locator, .. } => {
+        MailOperation::LoadMessage(locator)
+        | MailOperation::OpenDraft(locator)
+        | MailOperation::Preview(locator)
+        | MailOperation::SeedComposer { locator, .. } => {
             run_call(
                 effect,
                 ctx,
-                move |c| backend.get_message(c, locator.clone()),
+                {
+                    let locator = locator.clone();
+                    move |c| backend.get_message(c, locator)
+                },
                 |message| OperationOutcome::Message(Box::new(message)),
             )
             .await
         }
-        OperationKind::SetRead { locator, read } => {
+        MailOperation::SetRead { locator, read } => {
             run_call(
                 effect,
                 ctx,
-                move |c| backend.set_read(c, locator.clone(), *read),
+                {
+                    let locator = locator.clone();
+                    let read = *read;
+                    move |c| backend.set_read(c, locator, read)
+                },
                 |_| OperationOutcome::Done,
             )
             .await
         }
         // One backend call for the whole selection (ticket aavy).
-        OperationKind::SetReadBulk { locators, read } => {
+        MailOperation::SetReadBulk { locators, read } => {
             run_call(
                 effect,
                 ctx,
-                move |c| backend.set_read_bulk(c, locators.clone(), *read),
+                {
+                    let locators = locators.clone();
+                    let read = *read;
+                    move |c| backend.set_read_bulk(c, locators, read)
+                },
                 |_| OperationOutcome::Done,
             )
             .await
         }
-        OperationKind::SetStarred { locator, starred } => {
+        MailOperation::SetStarred { locator, starred } => {
             run_call(
                 effect,
                 ctx,
-                move |c| backend.set_starred(c, locator.clone(), *starred),
+                {
+                    let locator = locator.clone();
+                    let starred = *starred;
+                    move |c| backend.set_starred(c, locator, starred)
+                },
                 |_| OperationOutcome::Done,
             )
             .await
         }
-        OperationKind::Archive(locator) => {
+        MailOperation::Archive(locator) => {
             run_call(
                 effect,
                 ctx,
-                move |c| backend.archive(c, locator.clone()),
+                {
+                    let locator = locator.clone();
+                    move |c| backend.archive(c, locator)
+                },
                 |_| OperationOutcome::Done,
             )
             .await
         }
-        OperationKind::Trash(locator) => {
+        MailOperation::Trash(locator) => {
             run_call(
                 effect,
                 ctx,
-                move |c| backend.trash(c, locator.clone()),
+                {
+                    let locator = locator.clone();
+                    move |c| backend.trash(c, locator)
+                },
                 |_| OperationOutcome::Done,
             )
             .await
         }
-        OperationKind::ArchiveBulk(locators) => {
+        MailOperation::ArchiveBulk(locators) => {
             run_call(
                 effect,
                 ctx,
-                move |c| backend.archive_bulk(c, locators.clone()),
+                {
+                    let locators = locators.clone();
+                    move |c| backend.archive_bulk(c, locators)
+                },
                 |_| OperationOutcome::Done,
             )
             .await
         }
-        OperationKind::TrashBulk(locators) => {
+        MailOperation::TrashBulk(locators) => {
             run_call(
                 effect,
                 ctx,
-                move |c| backend.trash_bulk(c, locators.clone()),
+                {
+                    let locators = locators.clone();
+                    move |c| backend.trash_bulk(c, locators)
+                },
                 |_| OperationOutcome::Done,
             )
             .await
         }
-        OperationKind::SaveDraft { draft } => {
+    }
+}
+
+// ── Draft family: autosave/push, restore, discard/sent cleanup, send ─────
+
+async fn run_draft_call(
+    backend: &Arc<dyn MailBackend>,
+    effect: &Effect,
+    ctx: &RequestContext,
+    op: &DraftOperation,
+) -> Option<Result<OperationOutcome, OperationFailure>> {
+    match op {
+        DraftOperation::SaveDraft { draft } => {
             // Shared, not copied (issue 6m97): the launch path takes a
             // refcount bump; the registry holds the same payload alive
             // for the retry intent, so the one deep copy left is the
@@ -327,7 +385,7 @@ async fn run_effect(
             )
             .await
         }
-        OperationKind::LoadDrafts => {
+        DraftOperation::LoadDrafts => {
             run_call(
                 effect,
                 ctx,
@@ -336,7 +394,7 @@ async fn run_effect(
             )
             .await
         }
-        OperationKind::DeleteDraft { draft, .. } => {
+        DraftOperation::DeleteDraft { draft, .. } => {
             // Shared, not copied (issue 6m97): as with `SaveDraft`.
             let draft = Arc::clone(draft);
             run_call(
@@ -347,7 +405,7 @@ async fn run_effect(
             )
             .await
         }
-        OperationKind::Send { message } => {
+        DraftOperation::Send { message } => {
             // Shared, not copied (issue 6m97): as with `SaveDraft`.
             let message = Arc::clone(message);
             run_call(
@@ -358,16 +416,31 @@ async fn run_effect(
             )
             .await
         }
-        OperationKind::ReadAttachment { path } => {
+    }
+}
+
+// ── Files family: attachment validation, chooser, save ───────────────────
+
+async fn run_files_call(
+    backend: &Arc<dyn MailBackend>,
+    effect: &Effect,
+    ctx: &RequestContext,
+    op: &FileOperation,
+) -> Option<Result<OperationOutcome, OperationFailure>> {
+    match op {
+        FileOperation::ReadAttachment { path } => {
             run_call(
                 effect,
                 ctx,
-                move |c| backend.read_attachment(c, path.clone()),
+                {
+                    let path = path.clone();
+                    move |c| backend.read_attachment(c, path)
+                },
                 OperationOutcome::Attachment,
             )
             .await
         }
-        OperationKind::ListAttachmentFiles { path } => {
+        FileOperation::ListAttachmentFiles { path } => {
             // The directory walk is file I/O: it hops to the blocking pool
             // so the single-threaded runtime never stalls (plan §3).
             let path = path.clone();
@@ -382,16 +455,30 @@ async fn run_effect(
                 ))),
             }
         }
-        OperationKind::SaveAttachment { request, .. } => {
+        FileOperation::SaveAttachment { request, .. } => {
             run_call(
                 effect,
                 ctx,
-                move |c| backend.save_attachment(c, request.clone()),
+                {
+                    let request = request.clone();
+                    move |c| backend.save_attachment(c, request)
+                },
                 OperationOutcome::SavedPath,
             )
             .await
         }
-        OperationKind::OpenPath { path } => {
+    }
+}
+
+// ── Platform family: desktop handoffs ─────────────────────────────────────
+
+async fn run_platform_call(
+    opener: &Arc<dyn PathOpener>,
+    effect: &Effect,
+    op: &PlatformOperation,
+) -> Option<Result<OperationOutcome, OperationFailure>> {
+    match op {
+        PlatformOperation::OpenPath { path } => {
             tracing::debug!(path = %path.display(), "opening with platform handler");
             // Spawned directly (argv, no shell); not cancellable, so no
             // token dance here — the handler app owns its own lifetime.
@@ -403,7 +490,7 @@ async fn run_effect(
                 ))),
             }
         }
-        OperationKind::OpenUrl { url } => {
+        PlatformOperation::OpenUrl { url } => {
             tracing::debug!(url = %url, "opening link with platform handler");
             // Spawned directly (argv, no shell); the opener itself refuses
             // non-web schemes before dispatching (ticket hc9n).
@@ -420,15 +507,28 @@ async fn run_effect(
         // 11). This arm keeps the match total; reaching it would mean the
         // editor was spawned behind a suspended TUI, so nothing is
         // reported and the registry entry is finished by the real runner.
-        OperationKind::EditExternally { .. } => {
+        PlatformOperation::EditExternally { .. } => {
             tracing::error!(id = %effect.id, "external editor effect reached the operation manager");
             None
         }
+    }
+}
+
+// ── Account family: wizard discovery, credential test, save ──────────────
+
+async fn run_account_call(
+    discoverer: &Arc<dyn EmailConfigDiscoverer>,
+    tester: &Arc<dyn AccountTester>,
+    effect: &Effect,
+    ctx: &RequestContext,
+    op: &AccountOperation,
+) -> Option<Result<OperationOutcome, OperationFailure>> {
+    match op {
         // Wizard discovery (ADR 0003 §3.3): the injected discoverer runs
         // the bounded blocking client on its own worker thread. `Err` is
         // a discoverer-level break surfaced like every operation failure;
         // `Ok(empty)` strictly means "nothing found in time".
-        OperationKind::DiscoverConfig { email } => match discoverer.discover(email).await {
+        AccountOperation::DiscoverConfig { email } => match discoverer.discover(email).await {
             Ok(services) => Some(Ok(OperationOutcome::Discovered(services))),
             // The typed discovery error is flattened to its display form at
             // the modal boundary (plan §12: typed errors at the backend,
@@ -439,7 +539,7 @@ async fn run_effect(
         // Wizard credential test (ADR 0003 §3.4): the injected tester runs
         // its credential path against a temporary 0600 config; the detail
         // of a failure is sanitized below like every other backend error.
-        OperationKind::TestAccount { draft } => {
+        AccountOperation::TestAccount { draft } => {
             match tester.test_account(draft, ctx.cancellation.clone()).await {
                 Ok(mailboxes) => Some(Ok(OperationOutcome::TestAccountCompleted { mailboxes })),
                 Err(err) => operation_failure(effect, err).map(Err),
@@ -450,7 +550,7 @@ async fn run_effect(
         // table — then the format-preserving merge runs on the blocking
         // pool (file I/O), keeping the reducer I/O-free and the runtime
         // loop unblocked.
-        OperationKind::SaveAccount {
+        AccountOperation::SaveAccount {
             path,
             draft,
             create,
@@ -500,56 +600,69 @@ async fn run_effect(
                 ))),
             }
         }
-        // New-mail notification (ticket b28p): best-effort and off the UI
-        // thread. A failure is logged, never modaled.
-        OperationKind::Notify { request } => {
-            match request {
-                // One byte to stdout — but a write to a flow-controlled
-                // or full tty buffer can block, so it hops to the blocking
-                // pool like the Desktop arm. A single-byte write cannot
-                // split a frame's escape sequences (each `write(2)` lands
-                // whole), so offloading it is safe for the terminal.
-                NotifyRequest::Bell => {
-                    let notifier = Arc::clone(notifier);
-                    let rung = tokio::task::spawn_blocking(move || notifier.bell()).await;
-                    match rung {
-                        Ok(Ok(())) => tracing::debug!("bell rung"),
-                        Ok(Err(err)) => tracing::warn!(%err, "bell notification failed"),
-                        Err(err) => tracing::warn!(%err, "bell task failed"),
-                    }
-                }
-                // notify-rust blocks while the desktop service answers,
-                // and the main runtime is single-threaded: the delivery
-                // runs on the blocking pool so the frame loop never waits.
-                NotifyRequest::Desktop { summary, body } => {
-                    let notifier = Arc::clone(notifier);
-                    let summary = summary.clone();
-                    let body = body.clone();
-                    let delivered = tokio::task::spawn_blocking(move || {
-                        let result = notifier.notify(&summary, &body);
-                        if result.is_ok() {
-                            tracing::debug!(summary = %summary, "desktop notification sent");
-                        }
-                        result
-                    })
-                    .await;
-                    match delivered {
-                        Ok(Ok(())) => {}
-                        Ok(Err(detail)) => tracing::warn!(detail = %detail, "notification failed"),
-                        Err(err) => tracing::warn!(%err, "notification task failed"),
-                    }
-                }
+    }
+}
+
+// ── Notify family: best-effort new-mail side effects ──────────────────────
+
+async fn run_notify_call(
+    notifier: &Arc<dyn Notifier>,
+    request: &NotifyRequest,
+) -> Option<Result<OperationOutcome, OperationFailure>> {
+    match request {
+        // One byte to stdout — but a write to a flow-controlled
+        // or full tty buffer can block, so it hops to the blocking
+        // pool like the Desktop arm. A single-byte write cannot
+        // split a frame's escape sequences (each `write(2)` lands
+        // whole), so offloading it is safe for the terminal.
+        NotifyRequest::Bell => {
+            let notifier = Arc::clone(notifier);
+            let rung = tokio::task::spawn_blocking(move || notifier.bell()).await;
+            match rung {
+                Ok(Ok(())) => tracing::debug!("bell rung"),
+                Ok(Err(err)) => tracing::warn!(%err, "bell notification failed"),
+                Err(err) => tracing::warn!(%err, "bell task failed"),
             }
-            Some(Ok(OperationOutcome::Done))
         }
-        // ── Summary/message cache (ticket haeb, off-thread I/O) ─────────
-        //
-        // Every arm hops to the blocking pool: the main runtime is
-        // single-threaded, and a cache read or write must never stall the
-        // frame loop. Reads never fail — a broken cache degrades to a
-        // miss; writes are best-effort (failures are logged inside the
-        // cache) and always report Done.
-        OperationKind::CacheListLoad {
+        // notify-rust blocks while the desktop service answers,
+        // and the main runtime is single-threaded: the delivery
+        // runs on the blocking pool so the frame loop never waits.
+        NotifyRequest::Desktop { summary, body } => {
+            let notifier = Arc::clone(notifier);
+            let summary = summary.clone();
+            let body = body.clone();
+            let delivered = tokio::task::spawn_blocking(move || {
+                let result = notifier.notify(&summary, &body);
+                if result.is_ok() {
+                    tracing::debug!(summary = %summary, "desktop notification sent");
+                }
+                result
+            })
+            .await;
+            match delivered {
+                Ok(Ok(())) => {}
+                Ok(Err(detail)) => tracing::warn!(detail = %detail, "notification failed"),
+                Err(err) => tracing::warn!(%err, "notification task failed"),
+            }
+        }
+    }
+    Some(Ok(OperationOutcome::Done))
+}
+
+// ── Cache family: off-thread summary/message/mailbox cache I/O ────────────
+//
+// Every arm hops to the blocking pool: the main runtime is
+// single-threaded, and a cache read or write must never stall the
+// frame loop. Reads never fail — a broken cache degrades to a
+// miss; writes are best-effort (failures are logged inside the
+// cache) and always report Done.
+
+async fn run_cache_call(
+    cache: &Option<crate::app::page_cache::PageCache>,
+    op: &CacheOperation,
+) -> Option<Result<OperationOutcome, OperationFailure>> {
+    match op {
+        CacheOperation::CacheListLoad {
             mailbox,
             query,
             offset,
@@ -569,7 +682,7 @@ async fn run_effect(
                 None => OperationOutcome::CacheMiss,
             }))
         }
-        OperationKind::CacheListStore {
+        CacheOperation::CacheListStore {
             mailbox,
             query,
             page,
@@ -585,7 +698,7 @@ async fn run_effect(
             .await;
             Some(Ok(OperationOutcome::Done))
         }
-        OperationKind::CacheListEvict {
+        CacheOperation::CacheListEvict {
             mailbox,
             query,
             offset,
@@ -599,19 +712,19 @@ async fn run_effect(
             .await;
             Some(Ok(OperationOutcome::Done))
         }
-        OperationKind::CacheMailboxesLoad => {
+        CacheOperation::CacheMailboxesLoad => {
             let mailboxes = run_cache(cache, move |cache| cache.load_mailboxes()).await;
             Some(Ok(match mailboxes {
                 Some(mailboxes) => OperationOutcome::CachedMailboxes(mailboxes),
                 None => OperationOutcome::CacheMiss,
             }))
         }
-        OperationKind::CacheMailboxesStore { mailboxes } => {
+        CacheOperation::CacheMailboxesStore { mailboxes } => {
             let mailboxes = mailboxes.clone();
             run_cache_store(cache, move |cache| cache.store_mailboxes(&mailboxes)).await;
             Some(Ok(OperationOutcome::Done))
         }
-        OperationKind::CacheMessageLoad { locator } => {
+        CacheOperation::CacheMessageLoad { locator } => {
             let mailbox = locator.mailbox.clone();
             let id = locator.id.0.clone();
             let message = run_cache(cache, move |cache| cache.load_message(&mailbox, &id)).await;
@@ -620,7 +733,7 @@ async fn run_effect(
                 None => OperationOutcome::CacheMiss,
             }))
         }
-        OperationKind::CachePreviewLoad { locator } => {
+        CacheOperation::CachePreviewLoad { locator } => {
             let mailbox = locator.mailbox.clone();
             let id = locator.id.0.clone();
             let message = run_cache(cache, move |cache| cache.load_message(&mailbox, &id)).await;
@@ -629,7 +742,7 @@ async fn run_effect(
                 None => OperationOutcome::CacheMiss,
             }))
         }
-        OperationKind::CacheMessageStore {
+        CacheOperation::CacheMessageStore {
             mailbox,
             id,
             message,
@@ -1141,7 +1254,7 @@ mod tests {
     #[tokio::test]
     async fn launches_effects_and_delivers_results() {
         let (manager, mut rx) = manager(Arc::new(FakeBackend::ok()));
-        let (effect, token) = effect(OperationKind::LoadMailboxes);
+        let (effect, token) = effect(OperationKind::Mail(MailOperation::LoadMailboxes));
         manager.launch(effect.clone(), ctx(7, &token));
         let result = rx.recv().await.expect("result");
         assert_eq!(result.id, effect.id);
@@ -1160,10 +1273,12 @@ mod tests {
             drafts: Vec::new(),
         });
         let (manager, mut rx) = manager(backend);
-        let (slow, slow_token) = effect(OperationKind::LoadMailboxes);
+        let (slow, slow_token) = effect(OperationKind::Mail(MailOperation::LoadMailboxes));
         let slow_id = slow.id;
         manager.launch(slow, ctx(1, &slow_token));
-        let (fast, fast_token) = effect(OperationKind::LoadPage(page_request("inbox")));
+        let (fast, fast_token) = effect(OperationKind::Mail(MailOperation::LoadPage(
+            page_request("inbox"),
+        )));
         let fast_id = fast.id;
         manager.launch(fast, ctx(2, &fast_token));
 
@@ -1319,7 +1434,7 @@ mod tests {
         let mut tokens = Vec::new();
         for i in 0..burst {
             let token = CancellationToken::new();
-            let (effect, _) = effect(OperationKind::LoadMailboxes);
+            let (effect, _) = effect(OperationKind::Mail(MailOperation::LoadMailboxes));
             manager.launch(effect, ctx(i as u64, &token));
             tokens.push(token);
         }
@@ -1508,7 +1623,10 @@ mod tests {
         //    fake, so the pool is at capacity and stays there.
         for i in 0..MAX_CONCURRENT_BACKEND_CALLS {
             let token = CancellationToken::new();
-            let (effect, _) = effect_with_id(OperationKind::LoadMailboxes, 100 + i as u64);
+            let (effect, _) = effect_with_id(
+                OperationKind::Mail(MailOperation::LoadMailboxes),
+                100 + i as u64,
+            );
             manager.launch(effect, ctx(i as u64, &token));
         }
         tokio::time::timeout(
@@ -1522,24 +1640,24 @@ mod tests {
         // 2. The cache flood (reads and one store): with the fix these
         //    dispatch without touching the exhausted pool.
         let flood = [
-            OperationKind::CacheMailboxesLoad,
-            OperationKind::CacheListLoad {
+            OperationKind::Cache(CacheOperation::CacheMailboxesLoad),
+            OperationKind::Cache(CacheOperation::CacheListLoad {
                 mailbox: MailboxId(String::from("INBOX")),
                 query: None,
                 offset: 0,
                 limit: 20,
                 fresh_background_on_hit: false,
-            },
-            OperationKind::CacheMessageLoad {
+            }),
+            OperationKind::Cache(CacheOperation::CacheMessageLoad {
                 locator: MessageLocator {
                     mailbox: MailboxId(String::from("INBOX")),
                     id: MessageId(String::from("m1")),
                     message_id: None,
                 },
-            },
-            OperationKind::CacheMailboxesStore {
+            }),
+            OperationKind::Cache(CacheOperation::CacheMailboxesStore {
                 mailboxes: Vec::new(),
-            },
+            }),
         ];
         let flood_ids: Vec<_> = flood
             .iter()
@@ -1584,43 +1702,55 @@ mod tests {
     fn cache_and_local_effects_do_not_consume_a_backend_permit() {
         // The denylist direction: backend arms (and unknown future ones)
         // acquire a permit; purely local arms never do.
-        assert!(uses_backend_process(&OperationKind::LoadMailboxes));
-        assert!(uses_backend_process(&OperationKind::LoadPage(
-            page_request("inbox")
+        assert!(uses_backend_process(&OperationKind::Mail(
+            MailOperation::LoadMailboxes
         )));
-        assert!(uses_backend_process(&OperationKind::Send {
-            message: Arc::new(
-                crate::domain::OutboundMessage::from_fields(
-                    "dest@example.com",
-                    "",
-                    "",
-                    crate::domain::OutgoingContent::default(),
-                    None,
-                )
-                .expect("valid recipients")
-            ),
-        }));
-        assert!(!uses_backend_process(&OperationKind::CacheMailboxesLoad));
-        assert!(!uses_backend_process(&OperationKind::CacheListLoad {
-            mailbox: MailboxId(String::from("INBOX")),
-            query: None,
-            offset: 0,
-            limit: 20,
-            fresh_background_on_hit: false,
-        }));
-        assert!(!uses_backend_process(&OperationKind::CachePreviewLoad {
-            locator: MessageLocator {
+        assert!(uses_backend_process(&OperationKind::Mail(
+            MailOperation::LoadPage(page_request("inbox"))
+        )));
+        assert!(uses_backend_process(&OperationKind::Draft(
+            DraftOperation::Send {
+                message: Arc::new(
+                    crate::domain::OutboundMessage::from_fields(
+                        "dest@example.com",
+                        "",
+                        "",
+                        crate::domain::OutgoingContent::default(),
+                        None,
+                    )
+                    .expect("valid recipients")
+                ),
+            }
+        )));
+        assert!(!uses_backend_process(&OperationKind::Cache(
+            CacheOperation::CacheMailboxesLoad
+        )));
+        assert!(!uses_backend_process(&OperationKind::Cache(
+            CacheOperation::CacheListLoad {
                 mailbox: MailboxId(String::from("INBOX")),
-                id: MessageId(String::from("m1")),
-                message_id: None,
-            },
-        }));
-        assert!(!uses_backend_process(&OperationKind::ListAttachmentFiles {
-            path: Some(std::path::PathBuf::from("/tmp"))
-        }));
-        assert!(!uses_backend_process(&OperationKind::Notify {
-            request: crate::app::operation::NotifyRequest::Bell,
-        }));
+                query: None,
+                offset: 0,
+                limit: 20,
+                fresh_background_on_hit: false,
+            }
+        )));
+        assert!(!uses_backend_process(&OperationKind::Cache(
+            CacheOperation::CachePreviewLoad {
+                locator: MessageLocator {
+                    mailbox: MailboxId(String::from("INBOX")),
+                    id: MessageId(String::from("m1")),
+                    message_id: None,
+                },
+            }
+        )));
+        assert!(!uses_backend_process(&OperationKind::Files(
+            FileOperation::ListAttachmentFiles {
+                path: Some(std::path::PathBuf::from("/tmp"))
+            }
+        )));
+        assert!(!uses_backend_process(&OperationKind::Notify(
+            crate::app::operation::NotifyRequest::Bell,
+        )));
     }
 
     #[tokio::test]
@@ -1632,7 +1762,7 @@ mod tests {
             drafts: Vec::new(),
         });
         let (manager, mut rx) = manager(backend);
-        let (effect, token) = effect(OperationKind::LoadMailboxes);
+        let (effect, token) = effect(OperationKind::Mail(MailOperation::LoadMailboxes));
         manager.launch(effect, ctx(7, &token));
         // Give the task time to start sleeping, then cancel.
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1646,7 +1776,7 @@ mod tests {
         let detail = "password=hunter2 token=abc connect refused";
         let backend = Arc::new(FakeBackend::failing(Some(3), detail));
         let (manager, mut rx) = manager(backend);
-        let (effect, token) = effect(OperationKind::LoadMailboxes);
+        let (effect, token) = effect(OperationKind::Mail(MailOperation::LoadMailboxes));
         let retry_spec = effect.retry_spec();
         manager.launch(effect, ctx(7, &token));
 
@@ -1678,7 +1808,7 @@ mod tests {
             program: String::from("himalaya"),
             secs: 30,
         };
-        let (effect, _) = effect(OperationKind::LoadMailboxes);
+        let (effect, _) = effect(OperationKind::Mail(MailOperation::LoadMailboxes));
         let retry_spec = effect.retry_spec();
         let failure = operation_failure(&effect, err).expect("surfaced");
         assert_eq!(failure.code, None);
@@ -1693,7 +1823,9 @@ mod tests {
         let opener = Arc::new(RecordingOpener::default());
         let (manager, mut rx) = manager_with_opener(backend, Arc::clone(&opener) as _);
         let path = std::path::PathBuf::from("/tmp/report final (1).pdf");
-        let (effect, token) = effect(OperationKind::OpenPath { path: path.clone() });
+        let (effect, token) = effect(OperationKind::Platform(PlatformOperation::OpenPath {
+            path: path.clone(),
+        }));
         assert!(!effect.kind.is_cancellable(), "opens are not cancellable");
         manager.launch(effect, ctx(9, &token));
         let result = rx.recv().await.expect("result");
@@ -1723,9 +1855,9 @@ mod tests {
         }
         let backend = Arc::new(FakeBackend::ok());
         let (manager, mut rx) = manager_with_opener(backend, Arc::new(RefusingOpener));
-        let (effect, token) = effect(OperationKind::OpenPath {
+        let (effect, token) = effect(OperationKind::Platform(PlatformOperation::OpenPath {
             path: std::path::PathBuf::from("/tmp/x.pdf"),
-        });
+        }));
         let retry = effect.retry_spec();
         manager.launch(effect, ctx(9, &token));
         let result = rx.recv().await.expect("result");
@@ -1743,7 +1875,9 @@ mod tests {
         let opener = Arc::new(RecordingOpener::default());
         let (manager, mut rx) = manager_with_opener(backend, Arc::clone(&opener) as _);
         let url = String::from("https://example.org/a?b=1&c=2#frag");
-        let (effect, token) = effect(OperationKind::OpenUrl { url: url.clone() });
+        let (effect, token) = effect(OperationKind::Platform(PlatformOperation::OpenUrl {
+            url: url.clone(),
+        }));
         assert!(!effect.kind.is_cancellable(), "opens are not cancellable");
         manager.launch(effect, ctx(11, &token));
         let result = rx.recv().await.expect("result");
@@ -1761,9 +1895,7 @@ mod tests {
             Arc::new(RecordingOpener::default()),
             Arc::clone(&notifier) as _,
         );
-        let (effect, token) = effect(OperationKind::Notify {
-            request: NotifyRequest::Bell,
-        });
+        let (effect, token) = effect(OperationKind::Notify(NotifyRequest::Bell));
         manager.launch(effect, ctx(21, &token));
         let result = rx.recv().await.expect("result");
         assert_eq!(result.outcome, Ok(OperationOutcome::Done));
@@ -1779,12 +1911,10 @@ mod tests {
             Arc::new(RecordingOpener::default()),
             Arc::clone(&notifier) as _,
         );
-        let (effect, token) = effect(OperationKind::Notify {
-            request: NotifyRequest::Desktop {
-                summary: String::from("Ada Example"),
-                body: String::from("Lunch?"),
-            },
-        });
+        let (effect, token) = effect(OperationKind::Notify(NotifyRequest::Desktop {
+            summary: String::from("Ada Example"),
+            body: String::from("Lunch?"),
+        }));
         manager.launch(effect, ctx(22, &token));
         let result = rx.recv().await.expect("result");
         assert_eq!(result.outcome, Ok(OperationOutcome::Done));
@@ -1818,12 +1948,10 @@ mod tests {
             Arc::new(RecordingOpener::default()),
             Arc::new(RefusingNotifier),
         );
-        let (effect, token) = effect(OperationKind::Notify {
-            request: NotifyRequest::Desktop {
-                summary: String::from("x"),
-                body: String::from("y"),
-            },
-        });
+        let (effect, token) = effect(OperationKind::Notify(NotifyRequest::Desktop {
+            summary: String::from("x"),
+            body: String::from("y"),
+        }));
         manager.launch(effect, ctx(23, &token));
         // Best-effort: a notification failure is logged, never surfaced.
         let result = rx.recv().await.expect("result");
@@ -1848,9 +1976,9 @@ mod tests {
         }
         let backend = Arc::new(FakeBackend::ok());
         let (manager, mut rx) = manager_with_opener(backend, Arc::new(RefusingUrlOpener));
-        let (effect, token) = effect(OperationKind::OpenUrl {
+        let (effect, token) = effect(OperationKind::Platform(PlatformOperation::OpenUrl {
             url: String::from("https://example.org/x"),
-        });
+        }));
         let retry = effect.retry_spec();
         manager.launch(effect, ctx(12, &token));
         let result = rx.recv().await.expect("result");
@@ -2086,13 +2214,13 @@ mod cache_tests {
             },
         );
         let (manager, mut rx) = manager_with_cache(Some(cache));
-        let (effect, token) = effect(OperationKind::CacheListLoad {
+        let (effect, token) = effect(OperationKind::Cache(CacheOperation::CacheListLoad {
             mailbox: MailboxId(String::from("INBOX")),
             query: None,
             offset: 0,
             limit: 20,
             fresh_background_on_hit: true,
-        });
+        }));
         manager.launch(effect, ctx(7, &token));
         let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
@@ -2109,13 +2237,13 @@ mod cache_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
         let (manager, mut rx) = manager_with_cache(Some(cache));
-        let (effect, token) = effect(OperationKind::CacheListLoad {
+        let (effect, token) = effect(OperationKind::Cache(CacheOperation::CacheListLoad {
             mailbox: MailboxId(String::from("INBOX")),
             query: None,
             offset: 0,
             limit: 20,
             fresh_background_on_hit: true,
-        });
+        }));
         manager.launch(effect, ctx(7, &token));
         let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
@@ -2129,7 +2257,7 @@ mod cache_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
         let (manager, mut rx) = manager_with_cache(Some(cache.clone()));
-        let (effect, token) = effect(OperationKind::CacheMessageStore {
+        let (effect, token) = effect(OperationKind::Cache(CacheOperation::CacheMessageStore {
             mailbox: MailboxId(String::from("INBOX")),
             id: String::from("m1"),
             message: std::sync::Arc::new(Message {
@@ -2140,7 +2268,7 @@ mod cache_tests {
                 html_body: None,
                 attachments: Vec::new(),
             }),
-        });
+        }));
         manager.launch(effect, ctx(7, &token));
         let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
@@ -2158,7 +2286,7 @@ mod cache_tests {
     #[tokio::test]
     async fn cache_work_without_a_cache_is_a_miss_or_a_noop() {
         let (manager, mut rx) = manager_with_cache(None);
-        let (load, token) = effect(OperationKind::CacheMailboxesLoad);
+        let (load, token) = effect(OperationKind::Cache(CacheOperation::CacheMailboxesLoad));
         manager.launch(load, ctx(1, &token));
         let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
@@ -2166,9 +2294,9 @@ mod cache_tests {
             .expect("result");
         assert_eq!(result.outcome, Ok(OperationOutcome::CacheMiss));
 
-        let (store, token) = effect(OperationKind::CacheMailboxesStore {
+        let (store, token) = effect(OperationKind::Cache(CacheOperation::CacheMailboxesStore {
             mailboxes: Vec::new(),
-        });
+        }));
         manager.launch(store, ctx(2, &token));
         let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await

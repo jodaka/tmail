@@ -7,7 +7,9 @@ use super::navigation::{
 };
 use super::results::unexpected_payload;
 use crate::app::effect::Effect;
-use crate::app::operation::{OperationKind, OperationOutcome, OperationResult};
+use crate::app::operation::{
+    CacheOperation, MailOperation, OperationKind, OperationOutcome, OperationResult,
+};
 use crate::app::route::{MailboxRoute, Route};
 use crate::app::state::{
     AppState, Loadable, MAX_PREVIEW_FETCHES_PER_PAGE, MAX_PREVIEW_FETCHES_PER_SESSION, ReaderFocus,
@@ -174,11 +176,11 @@ pub(crate) fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effe
             state
                 .session
                 .operations
-                .start_background(OperationKind::CacheMessageStore {
+                .start_background(OperationKind::Cache(CacheOperation::CacheMessageStore {
                     mailbox: route.mailbox_id.clone(),
                     id: message_id.0.clone(),
                     message: std::sync::Arc::clone(&message),
-                }),
+                })),
         );
     }
     state.open_message = Loadable::Loaded(message);
@@ -216,10 +218,15 @@ pub(crate) fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effe
         return effects;
     }
     let locator = route.summary.into_locator();
-    effects.push(state.session.operations.start(OperationKind::SetRead {
-        locator,
-        read: true,
-    }));
+    effects.push(
+        state
+            .session
+            .operations
+            .start(OperationKind::Mail(MailOperation::SetRead {
+                locator,
+                read: true,
+            })),
+    );
     effects
 }
 
@@ -292,11 +299,11 @@ pub(crate) fn message_moved(state: &mut AppState, locators: &[MessageLocator]) -
             state
                 .session
                 .operations
-                .start_background(OperationKind::CacheListEvict {
+                .start_background(OperationKind::Cache(CacheOperation::CacheListEvict {
                     mailbox,
                     query,
                     offset: state.messages.offset,
-                }),
+                })),
         );
     }
     // The unread/content counters in the sidebar live only in the mailbox
@@ -313,7 +320,7 @@ pub(crate) fn message_moved(state: &mut AppState, locators: &[MessageLocator]) -
         state
             .session
             .operations
-            .start_background(OperationKind::LoadMailboxes),
+            .start_background(OperationKind::Mail(MailOperation::LoadMailboxes)),
     );
     effects
 }
@@ -549,9 +556,9 @@ pub(crate) fn start_missing_previews(state: &mut AppState) -> Vec<Effect> {
             state
                 .session
                 .operations
-                .start_background(OperationKind::CachePreviewLoad {
+                .start_background(OperationKind::Cache(CacheOperation::CachePreviewLoad {
                     locator: summary.into_locator(),
-                })
+                }))
         })
         .collect()
 }
@@ -619,7 +626,9 @@ pub(crate) fn complete_cache_preview_load(
                 state
                     .session
                     .operations
-                    .start_background(OperationKind::Preview(summary.into_locator())),
+                    .start_background(OperationKind::Mail(MailOperation::Preview(
+                        summary.into_locator(),
+                    ))),
             ]
         }
         Ok(_) => unexpected_payload(result.id, "cached message"),
@@ -652,17 +661,16 @@ pub(crate) fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effe
     // as an effect, so the write never blocks the reducer. Shared, not
     // copied (ticket pa64).
     let message = std::sync::Arc::new(message);
-    let mut effects =
-        vec![
-            state
-                .session
-                .operations
-                .start_background(OperationKind::CacheMessageStore {
-                    mailbox: message.mailbox_id.clone(),
-                    id: message_id.0.clone(),
-                    message: std::sync::Arc::clone(&message),
-                }),
-        ];
+    let mut effects = vec![
+        state
+            .session
+            .operations
+            .start_background(OperationKind::Cache(CacheOperation::CacheMessageStore {
+                mailbox: message.mailbox_id.clone(),
+                id: message_id.0.clone(),
+                message: std::sync::Arc::clone(&message),
+            })),
+    ];
     if let Some(text) = snippet {
         state
             .caches

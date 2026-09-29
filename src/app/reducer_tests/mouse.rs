@@ -1,6 +1,7 @@
 //! Reducer tests: mouse domain.
 
 use super::*;
+use crate::app::operation::{DraftOperation, FileOperation, MailOperation, PlatformOperation};
 
 #[test]
 fn click_selects_then_opens_a_message_row() {
@@ -16,7 +17,7 @@ fn click_selects_then_opens_a_message_row() {
     let (cache_id, _) = effect_parts(&effects);
     let effects = complete_cache_miss(&mut s, cache_id);
     let (id, kind) = effect_parts(&effects);
-    let OperationKind::LoadMessage(locator) = kind else {
+    let OperationKind::Mail(MailOperation::LoadMessage(locator)) = kind else {
         panic!("expected LoadMessage, got {kind:?}");
     };
     assert_eq!(locator.id, s.messages.items[2].id);
@@ -199,7 +200,10 @@ fn click_confirm_discard_buttons_keep_or_delete() {
         Action::Click(ClickTarget::ConfirmButton(ConfirmButton::Discard)),
     );
     assert!(s.session.composer.is_none());
-    assert!(matches!(effects[0].kind, OperationKind::DeleteDraft { .. }));
+    assert!(matches!(
+        effects[0].kind,
+        OperationKind::Draft(DraftOperation::DeleteDraft { .. })
+    ));
 }
 
 #[test]
@@ -226,10 +230,10 @@ fn click_attachment_chip_selects_then_opens() {
     // Clicking the selected chip opens it (the `o` path: save, then open).
     let effects = reduce(&mut s, Action::Click(ClickTarget::ReaderAttachment(1)));
     let (id, kind) = effect_parts(&effects);
-    let OperationKind::SaveAttachment {
+    let OperationKind::Files(FileOperation::SaveAttachment {
         request,
         open_after,
-    } = kind
+    }) = kind
     else {
         panic!("expected SaveAttachment, got {kind:?}");
     };
@@ -248,7 +252,7 @@ fn click_link_focuses_then_opens_it() {
     // Clicking the focused link opens it in the browser.
     let effects = reduce(&mut s, Action::Click(ClickTarget::ReaderLink(1)));
     let (_, kind) = effect_parts(&effects);
-    let OperationKind::OpenUrl { url } = kind else {
+    let OperationKind::Platform(PlatformOperation::OpenUrl { url }) = kind else {
         panic!("expected OpenUrl, got {kind:?}");
     };
     assert_eq!(url, "https://two.example/b");
@@ -273,7 +277,10 @@ fn click_composer_send_button_sends_like_ctrl_enter() {
         Action::Click(ClickTarget::ComposerField(ComposerField::Send)),
     );
     let (_, kind) = effect_parts(&effects);
-    assert!(matches!(kind, OperationKind::Send { .. }));
+    assert!(matches!(
+        kind,
+        OperationKind::Draft(DraftOperation::Send { .. })
+    ));
     assert!(s.session.composer.as_ref().is_some_and(|c| c.sending));
 }
 

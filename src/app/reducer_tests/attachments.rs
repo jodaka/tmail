@@ -1,6 +1,7 @@
 //! Reducer tests: attachments domain.
 
 use super::*;
+use crate::app::operation::{FileOperation, MailOperation, PlatformOperation};
 
 #[test]
 fn d_saves_the_selected_attachment_with_a_frozen_request() {
@@ -8,10 +9,10 @@ fn d_saves_the_selected_attachment_with_a_frozen_request() {
     let effects = reduce(&mut s, Action::SaveAttachment);
     let (id, kind) = effect_parts(&effects);
     assert_eq!(kind.summary(), "Saving attachment");
-    let OperationKind::SaveAttachment {
+    let OperationKind::Files(FileOperation::SaveAttachment {
         request,
         open_after: _,
-    } = kind
+    }) = kind
     else {
         panic!("expected SaveAttachment");
     };
@@ -52,10 +53,10 @@ fn saving_targets_the_cursor_chip_by_part_id() {
     assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(1)));
     let effects = reduce(&mut s, Action::SaveAttachment);
     let (_, kind) = effect_parts(&effects);
-    let OperationKind::SaveAttachment {
+    let OperationKind::Files(FileOperation::SaveAttachment {
         request,
         open_after: _,
-    } = kind
+    }) = kind
     else {
         panic!("expected SaveAttachment");
     };
@@ -91,10 +92,10 @@ fn save_is_reader_only_and_attachment_gated() {
 fn enter_on_the_reader_opens_the_selected_attachment() {
     let mut s = reader_with_attachments();
     let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
-    let OperationKind::SaveAttachment {
+    let OperationKind::Files(FileOperation::SaveAttachment {
         request,
         open_after,
-    } = kind
+    }) = kind
     else {
         panic!("expected SaveAttachment");
     };
@@ -111,7 +112,10 @@ fn enter_on_the_reader_opens_the_selected_attachment() {
         }),
     );
     let (_, open_kind) = effect_parts(&effects);
-    assert!(matches!(open_kind, OperationKind::OpenPath { .. }));
+    assert!(matches!(
+        open_kind,
+        OperationKind::Platform(PlatformOperation::OpenPath { .. })
+    ));
 }
 
 /// Tab focuses a chip, Enter opens that exact chip: the focus cursor must
@@ -123,10 +127,10 @@ fn enter_on_a_focused_attachment_opens_that_attachment() {
     reduce(&mut s, Action::FocusNext);
     assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(1)));
     let (id, kind) = effect_parts(&reduce(&mut s, Action::Activate));
-    let OperationKind::SaveAttachment {
+    let OperationKind::Files(FileOperation::SaveAttachment {
         request,
         open_after,
-    } = kind
+    }) = kind
     else {
         panic!("expected SaveAttachment, got {kind:?}");
     };
@@ -141,7 +145,10 @@ fn enter_on_a_focused_attachment_opens_that_attachment() {
         }),
     );
     let (_, open_kind) = effect_parts(&effects);
-    assert_eq!(open_kind, OperationKind::OpenPath { path: final_path });
+    assert_eq!(
+        open_kind,
+        OperationKind::Platform(PlatformOperation::OpenPath { path: final_path })
+    );
 }
 
 #[test]
@@ -156,7 +163,7 @@ fn enter_reuses_a_session_saved_attachment_path() {
     let (_, kind) = effect_parts(&effects);
     assert_eq!(
         kind,
-        OperationKind::OpenPath { path: saved },
+        OperationKind::Platform(PlatformOperation::OpenPath { path: saved }),
         "Enter opens a saved file without a second download"
     );
 }
@@ -190,7 +197,10 @@ fn save_failure_opens_a_retryable_modal() {
         Some(Overlay::Error(dialog)) => dialog.retry.clone().expect("retryable"),
         _ => unreachable!(),
     };
-    assert!(matches!(retry.kind, OperationKind::SaveAttachment { .. }));
+    assert!(matches!(
+        retry.kind,
+        OperationKind::Files(FileOperation::SaveAttachment { .. })
+    ));
     // Retry replays the identical request under a new operation id.
     let replayed = reduce(&mut s, Action::RetryError);
     let (new_id, new_kind) = effect_parts(&replayed);
@@ -242,10 +252,10 @@ fn o_saves_first_then_chains_the_opener_on_the_confirmed_path() {
     let mut s = reader_with_attachments();
     let (id, kind) = effect_parts(&reduce(&mut s, Action::OpenAttachment));
     // Nothing saved yet: the save runs with the open-after chain armed.
-    let OperationKind::SaveAttachment {
+    let OperationKind::Files(FileOperation::SaveAttachment {
         request: _,
         open_after,
-    } = kind
+    }) = kind
     else {
         panic!("expected SaveAttachment");
     };
@@ -262,9 +272,9 @@ fn o_saves_first_then_chains_the_opener_on_the_confirmed_path() {
     let (open_id, open_kind) = effect_parts(&effects);
     assert_eq!(
         open_kind,
-        OperationKind::OpenPath {
+        OperationKind::Platform(PlatformOperation::OpenPath {
             path: final_path.clone()
-        }
+        })
     );
     // Completing the open closes the loop.
     reduce(
@@ -290,7 +300,7 @@ fn o_reuses_a_path_saved_this_session_without_a_second_save() {
     let (_, kind) = effect_parts(&effects);
     assert_eq!(
         kind,
-        OperationKind::OpenPath { path: saved },
+        OperationKind::Platform(PlatformOperation::OpenPath { path: saved }),
         "no SaveAttachment was started"
     );
 }
@@ -326,10 +336,10 @@ fn save_failure_keeps_the_open_chain_off() {
     let (_, kind) = effect_parts(&replayed);
     assert!(matches!(
         kind,
-        OperationKind::SaveAttachment {
+        OperationKind::Files(FileOperation::SaveAttachment {
             open_after: true,
             ..
-        }
+        })
     ));
 }
 
@@ -400,7 +410,10 @@ fn toggle_star_from_list_requests_inverse_and_applies_on_confirmation() {
     assert!(!s.messages.items[0].is_starred);
     let (id, kind) = expect_kind(&reduce(&mut s, Action::ToggleStar));
     assert!(
-        matches!(&kind, OperationKind::SetStarred { starred: true, .. }),
+        matches!(
+            &kind,
+            OperationKind::Mail(MailOperation::SetStarred { starred: true, .. })
+        ),
         "kind: {kind:?}"
     );
     // Not applied before confirmation.
@@ -411,7 +424,10 @@ fn toggle_star_from_list_requests_inverse_and_applies_on_confirmation() {
     // Toggling a starred message requests the inverse.
     let (id, kind) = expect_kind(&reduce(&mut s, Action::ToggleStar));
     assert!(
-        matches!(&kind, OperationKind::SetStarred { starred: false, .. }),
+        matches!(
+            &kind,
+            OperationKind::Mail(MailOperation::SetStarred { starred: false, .. })
+        ),
         "kind: {kind:?}"
     );
     complete_done(&mut s, id);
@@ -427,7 +443,7 @@ fn star_from_reader_targets_the_open_message() {
     let (id, kind) = expect_kind(&reduce(&mut s, Action::ToggleStar));
     assert!(matches!(
         &kind,
-        OperationKind::SetStarred { starred: true, .. }
+        OperationKind::Mail(MailOperation::SetStarred { starred: true, .. })
     ));
     complete_done(&mut s, id);
     assert!(
@@ -444,7 +460,10 @@ fn mark_unread_updates_list_and_route_after_confirmation() {
     let (load_id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, load_id);
     let (id, kind) = expect_kind(&reduce(&mut s, Action::MarkUnread));
-    assert!(matches!(&kind, OperationKind::SetRead { read: false, .. }));
+    assert!(matches!(
+        &kind,
+        OperationKind::Mail(MailOperation::SetRead { read: false, .. })
+    ));
     assert!(
         s.messages.items[3].is_read,
         "not applied before confirmation"
@@ -457,7 +476,7 @@ fn mark_unread_updates_list_and_route_after_confirmation() {
     assert!(
         effects
             .iter()
-            .any(|e| e.kind == OperationKind::LoadMailboxes),
+            .any(|e| e.kind == OperationKind::Mail(MailOperation::LoadMailboxes)),
         "a LoadMailboxes effect after the read flag change"
     );
 }
@@ -469,12 +488,15 @@ fn star_flip_chains_no_mailbox_listing() {
     let mut s = state();
     s.selection = 0;
     let (id, kind) = expect_kind(&reduce(&mut s, Action::ToggleStar));
-    assert!(matches!(&kind, OperationKind::SetStarred { .. }));
+    assert!(matches!(
+        &kind,
+        OperationKind::Mail(MailOperation::SetStarred { .. })
+    ));
     let effects = complete_done(&mut s, id);
     assert!(
         !effects
             .iter()
-            .any(|e| e.kind == OperationKind::LoadMailboxes),
+            .any(|e| e.kind == OperationKind::Mail(MailOperation::LoadMailboxes)),
         "no recount for a star flip"
     );
 }
@@ -496,7 +518,10 @@ fn archive_from_list_removes_row_and_resyncs_page() {
     s.selection = 0;
     let target = s.selected_message().unwrap().id.clone();
     let (id, kind) = expect_kind(&reduce(&mut s, Action::Archive));
-    assert!(matches!(&kind, OperationKind::Archive(_)), "kind: {kind:?}");
+    assert!(
+        matches!(&kind, OperationKind::Mail(MailOperation::Archive(_))),
+        "kind: {kind:?}"
+    );
     // The move confirmation itself emits the page re-sync effect.
     let (_, req) = find_page(&complete_done(&mut s, id));
     // Confirmation removed the row, kept the selection index on what took
@@ -516,7 +541,10 @@ fn double_press_archive_coalesces_into_one_operation() {
     let mut s = state();
     s.selection = 0;
     let (first, kind) = expect_kind(&reduce(&mut s, Action::Archive));
-    assert!(matches!(&kind, OperationKind::Archive(_)), "kind: {kind:?}");
+    assert!(
+        matches!(&kind, OperationKind::Mail(MailOperation::Archive(_))),
+        "kind: {kind:?}"
+    );
     assert!(reduce(&mut s, Action::Archive).is_empty(), "no duplicate");
     assert_eq!(s.session.operations.len(), 1);
     assert!(s.session.operations.get(first).is_some());
@@ -532,7 +560,10 @@ fn trash_closes_reader_and_removes_row() {
     let (load_id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, load_id);
     let (id, kind) = expect_kind(&reduce(&mut s, Action::Trash));
-    assert!(matches!(&kind, OperationKind::Trash(_)), "kind: {kind:?}");
+    assert!(
+        matches!(&kind, OperationKind::Mail(MailOperation::Trash(_))),
+        "kind: {kind:?}"
+    );
     let (_, req) = find_page(&complete_done(&mut s, id));
     // The reader closed; the row vanished; the page re-syncs.
     assert_eq!(s.session.routes.len(), 1);
@@ -550,11 +581,14 @@ fn confirmed_move_chains_a_mailbox_listing_for_the_counters() {
     let mut s = state();
     s.selection = 1;
     let (id, kind) = expect_kind(&reduce(&mut s, Action::Archive));
-    assert!(matches!(&kind, OperationKind::Archive(_)), "kind: {kind:?}");
+    assert!(
+        matches!(&kind, OperationKind::Mail(MailOperation::Archive(_))),
+        "kind: {kind:?}"
+    );
     let effects = complete_done(&mut s, id);
     let listing = effects
         .iter()
-        .find(|e| e.kind == OperationKind::LoadMailboxes)
+        .find(|e| e.kind == OperationKind::Mail(MailOperation::LoadMailboxes))
         .expect("a LoadMailboxes effect after the move");
     // Started and registered (the runtime will fetch the fresh listing).
     assert!(s.session.operations.get(listing.id).is_some());
@@ -936,7 +970,7 @@ fn reducer_is_free_of_io_by_construction() {
     assert!(matches!(
         effects.as_slice(),
         [Effect {
-            kind: OperationKind::LoadPage(_),
+            kind: OperationKind::Mail(MailOperation::LoadPage(_)),
             ..
         }]
     ));
@@ -1014,7 +1048,7 @@ fn arrows_move_the_selection_and_enter_submits_a_file() {
     let (_, kind) = effect_parts(&reduce(&mut s, Action::Activate));
     assert_eq!(
         kind,
-        OperationKind::ReadAttachment { path: expected },
+        OperationKind::Files(FileOperation::ReadAttachment { path: expected }),
         "the selected file's path goes to the backend"
     );
     assert!(
@@ -1039,9 +1073,9 @@ fn enter_on_a_directory_lists_it_and_navigation_freezes() {
     let (id2, kind) = effect_parts(&reduce(&mut s, Action::Activate));
     assert_eq!(
         kind,
-        OperationKind::ListAttachmentFiles {
+        OperationKind::Files(FileOperation::ListAttachmentFiles {
             path: Some(dir.join("docs")),
-        }
+        })
     );
     {
         let dialog = match s.session.overlay.as_ref().unwrap() {
@@ -1085,9 +1119,9 @@ fn left_goes_to_the_parent_and_right_into_the_selected_dir() {
     ));
     assert_eq!(
         kind,
-        OperationKind::ListAttachmentFiles {
+        OperationKind::Files(FileOperation::ListAttachmentFiles {
             path: Some(dir.join("docs")),
-        }
+        })
     );
     land_listing(&mut s, id2, &dir.join("docs"));
     let (_, kind) = effect_parts(&reduce(
@@ -1096,7 +1130,7 @@ fn left_goes_to_the_parent_and_right_into_the_selected_dir() {
     ));
     assert_eq!(
         kind,
-        OperationKind::ListAttachmentFiles { path: Some(dir) },
+        OperationKind::Files(FileOperation::ListAttachmentFiles { path: Some(dir) }),
         "back to the chooser's opening directory"
     );
 }

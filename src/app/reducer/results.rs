@@ -20,8 +20,9 @@ use super::send::send_completed;
 use crate::app::composer::{ComposerField, ComposerState};
 use crate::app::effect::Effect;
 use crate::app::operation::{
-    DraftRemovalReason, NotifyRequest, OperationFailure, OperationId, OperationKind,
-    OperationOrigin, OperationOutcome, OperationResult,
+    AccountOperation, CacheOperation, DraftOperation, DraftRemovalReason, FileOperation,
+    MailOperation, NotifyRequest, OperationFailure, OperationId, OperationKind, OperationOrigin,
+    OperationOutcome, OperationResult, PlatformOperation,
 };
 use crate::app::overlay::Overlay;
 use crate::app::route::Route;
@@ -106,7 +107,7 @@ pub(crate) fn notify_new_messages(
         state
             .session
             .operations
-            .start_background(OperationKind::Notify { request }),
+            .start_background(OperationKind::Notify(request)),
     ]
 }
 
@@ -150,78 +151,141 @@ pub(crate) fn backend_completed(state: &mut AppState, result: OperationResult) -
     let origin = op.origin;
     let id = result.id;
     match kind {
-        OperationKind::LoadMailboxes => complete_load_mailboxes(state, origin, result),
-        OperationKind::LoadPage(request) => complete_load_page(state, &request, origin, result),
-        OperationKind::Search(request) => complete_search(state, request, origin, result),
-        OperationKind::LoadMessage(locator) => {
+        OperationKind::Mail(op) => complete_mail_result(state, op, origin, result),
+        OperationKind::Draft(op) => complete_draft_result(state, op, result),
+        OperationKind::Files(op) => complete_files_result(state, op, result),
+        OperationKind::Platform(op) => complete_platform_result(state, op, result),
+        OperationKind::Account(op) => complete_account_result(state, op, result),
+        // Notifications are best-effort side effects (ticket b28p): the
+        // manager reports the attempt, state has nothing to apply.
+        OperationKind::Notify(_) => {
+            tracing::debug!(id = %id, "notification delivered");
+            Vec::new()
+        }
+        OperationKind::Cache(op) => complete_cache_result(state, op, result),
+    }
+}
+
+// ── Per-family result dispatch (issue ceh0): each family owns its
+// completion arms, so a new operation lands in one family function.
+
+fn complete_mail_result(
+    state: &mut AppState,
+    op: MailOperation,
+    origin: OperationOrigin,
+    result: OperationResult,
+) -> Vec<Effect> {
+    match op {
+        MailOperation::LoadMailboxes => complete_load_mailboxes(state, origin, result),
+        MailOperation::LoadPage(request) => complete_load_page(state, &request, origin, result),
+        MailOperation::Search(request) => complete_search(state, request, origin, result),
+        MailOperation::LoadMessage(locator) => {
             complete_load_message(state, &locator, origin, result)
         }
-        OperationKind::OpenDraft(locator) => complete_open_draft(state, &locator, result),
-        OperationKind::Preview(_) => complete_preview(state, result),
-        OperationKind::SeedComposer { kind, .. } => complete_seed_composer(state, result, kind),
-        OperationKind::SetRead { locator, read } => complete_flag(
+        MailOperation::OpenDraft(locator) => complete_open_draft(state, &locator, result),
+        MailOperation::Preview(_) => complete_preview(state, result),
+        MailOperation::SeedComposer { kind, .. } => complete_seed_composer(state, result, kind),
+        MailOperation::SetRead { locator, read } => complete_flag(
             state,
             result,
             std::slice::from_ref(&locator),
             FlagChange::Read(read),
         ),
         // One confirmation flips every locator of the batch (ticket aavy).
-        OperationKind::SetReadBulk { locators, read } => {
+        MailOperation::SetReadBulk { locators, read } => {
             complete_flag(state, result, &locators, FlagChange::Read(read))
         }
-        OperationKind::SetStarred { locator, starred } => complete_flag(
+        MailOperation::SetStarred { locator, starred } => complete_flag(
             state,
             result,
             std::slice::from_ref(&locator),
             FlagChange::Starred(starred),
         ),
-        OperationKind::Archive(locator) | OperationKind::Trash(locator) => {
+        MailOperation::Archive(locator) | MailOperation::Trash(locator) => {
             complete_move(state, result, std::slice::from_ref(&locator))
         }
         // One confirmation moves every locator of the batch (ticket j9bq).
-        OperationKind::ArchiveBulk(locators) | OperationKind::TrashBulk(locators) => {
+        MailOperation::ArchiveBulk(locators) | MailOperation::TrashBulk(locators) => {
             complete_move(state, result, &locators)
         }
-        OperationKind::SaveDraft { draft } => save_draft_completed(state, &draft, result),
-        OperationKind::LoadDrafts => complete_load_drafts(state, result),
-        OperationKind::DeleteDraft { reason, .. } => complete_delete_draft(state, result, &reason),
-        OperationKind::Send { message } => complete_send(state, result, message),
-        OperationKind::ReadAttachment { path } => attachment_validated(state, &path, result),
-        OperationKind::ListAttachmentFiles { .. } => attachment_listing_ready(state, result),
-        OperationKind::SaveAttachment { open_after, .. } => {
+    }
+}
+
+fn complete_draft_result(
+    state: &mut AppState,
+    op: DraftOperation,
+    result: OperationResult,
+) -> Vec<Effect> {
+    match op {
+        DraftOperation::SaveDraft { draft } => save_draft_completed(state, &draft, result),
+        DraftOperation::LoadDrafts => complete_load_drafts(state, result),
+        DraftOperation::DeleteDraft { reason, .. } => complete_delete_draft(state, result, &reason),
+        DraftOperation::Send { message } => complete_send(state, result, message),
+    }
+}
+
+fn complete_files_result(
+    state: &mut AppState,
+    op: FileOperation,
+    result: OperationResult,
+) -> Vec<Effect> {
+    match op {
+        FileOperation::ReadAttachment { path } => attachment_validated(state, &path, result),
+        FileOperation::ListAttachmentFiles { .. } => attachment_listing_ready(state, result),
+        FileOperation::SaveAttachment { open_after, .. } => {
             complete_save_attachment(state, result, open_after)
         }
-        OperationKind::OpenPath { .. } => complete_open_path(state, result),
-        OperationKind::OpenUrl { .. } => complete_open_url(state, result),
-        // Notifications are best-effort side effects (ticket b28p): the
-        // manager reports the attempt, state has nothing to apply.
-        OperationKind::Notify { .. } => {
-            tracing::debug!(id = %id, "notification delivered");
-            Vec::new()
-        }
+    }
+}
+
+fn complete_platform_result(
+    state: &mut AppState,
+    op: PlatformOperation,
+    result: OperationResult,
+) -> Vec<Effect> {
+    match op {
+        PlatformOperation::OpenPath { .. } => complete_open_path(state, result),
+        PlatformOperation::OpenUrl { .. } => complete_open_url(state, result),
         // The external editor completes through `Action::EditorFinished`,
         // not the result channel (Phase 11: it runs on the terminal owner,
         // not in the manager). A result arriving here would be a routing
         // bug; the operation is consumed above so the registry cannot leak.
-        OperationKind::EditExternally { .. } => {
-            tracing::warn!(id = %id, "result for an external-editor operation");
+        PlatformOperation::EditExternally { .. } => {
+            tracing::warn!(id = %result.id, "result for an external-editor operation");
             Vec::new()
         }
-        // Wizard operations complete through the wizard slice, which
-        // intercepts `BackendCompleted` first (ADR 0003 §3.7). Reaching
-        // this arm would be a routing bug; the operation is consumed above
-        // so nothing leaks.
-        OperationKind::DiscoverConfig { .. }
-        | OperationKind::TestAccount { .. }
-        | OperationKind::SaveAccount { .. } => {
+    }
+}
+
+fn complete_account_result(
+    _state: &mut AppState,
+    op: AccountOperation,
+    result: OperationResult,
+) -> Vec<Effect> {
+    // Wizard operations complete through the wizard slice, which
+    // intercepts `BackendCompleted` first (ADR 0003 §3.7). Reaching
+    // this arm would be a routing bug; the operation is consumed above
+    // so nothing leaks.
+    let id = result.id;
+    match op {
+        AccountOperation::DiscoverConfig { .. }
+        | AccountOperation::TestAccount { .. }
+        | AccountOperation::SaveAccount { .. } => {
             tracing::warn!(id = %id, "wizard result reached the main backend path");
             Vec::new()
         }
-        // ── Summary/message cache (ticket haeb) ─────────────────────────
-        //
-        // The cache lives in the operation manager; the reducer only
-        // applies what a read served and emits writes as effects.
-        OperationKind::CacheListLoad {
+    }
+}
+
+fn complete_cache_result(
+    state: &mut AppState,
+    op: CacheOperation,
+    result: OperationResult,
+) -> Vec<Effect> {
+    // The cache lives in the operation manager; the reducer only
+    // applies what a read served and emits writes as effects.
+    match op {
+        CacheOperation::CacheListLoad {
             mailbox,
             query,
             offset,
@@ -236,20 +300,20 @@ pub(crate) fn backend_completed(state: &mut AppState, result: OperationResult) -
             fresh_background_on_hit,
             result,
         ),
-        OperationKind::CacheMailboxesLoad => complete_cache_mailboxes_load(state, result),
-        OperationKind::CacheMessageLoad { locator } => {
+        CacheOperation::CacheMailboxesLoad => complete_cache_mailboxes_load(state, result),
+        CacheOperation::CacheMessageLoad { locator } => {
             complete_cache_message_load(state, &locator, result)
         }
-        OperationKind::CachePreviewLoad { locator } => {
+        CacheOperation::CachePreviewLoad { locator } => {
             complete_cache_preview_load(state, &locator, result)
         }
         // Writes and evictions are best-effort side effects: the manager
         // logs failures inside the cache, and a dropped write can never
         // lose mail — only warmth.
-        OperationKind::CacheListStore { .. }
-        | OperationKind::CacheListEvict { .. }
-        | OperationKind::CacheMailboxesStore { .. }
-        | OperationKind::CacheMessageStore { .. } => {
+        CacheOperation::CacheListStore { .. }
+        | CacheOperation::CacheListEvict { .. }
+        | CacheOperation::CacheMailboxesStore { .. }
+        | CacheOperation::CacheMessageStore { .. } => {
             if let Err(failure) = &result.outcome {
                 tracing::debug!(id = %result.id, detail = %failure.detail, "cache write failed");
             }
@@ -278,7 +342,9 @@ pub(crate) fn complete_load_mailboxes(
                 state
                     .session
                     .operations
-                    .start_background(OperationKind::CacheMailboxesStore { mailboxes }),
+                    .start_background(OperationKind::Cache(CacheOperation::CacheMailboxesStore {
+                        mailboxes,
+                    })),
             );
             effects
         }
@@ -346,11 +412,11 @@ fn apply_visible_page(
             state
                 .session
                 .operations
-                .start_background(OperationKind::CacheListStore {
+                .start_background(OperationKind::Cache(CacheOperation::CacheListStore {
                     mailbox: mailbox.clone(),
                     query,
                     page,
-                }),
+                })),
         );
     }
     effects
@@ -606,13 +672,16 @@ pub(crate) fn complete_flag(
                 }
             }
             if page_changed && let Some((mailbox, query)) = visible_list_identity(state) {
-                effects.push(state.session.operations.start_background(
-                    OperationKind::CacheListStore {
-                        mailbox,
-                        query,
-                        page: Arc::new(state.messages.clone()),
-                    },
-                ));
+                effects.push(
+                    state
+                        .session
+                        .operations
+                        .start_background(OperationKind::Cache(CacheOperation::CacheListStore {
+                            mailbox,
+                            query,
+                            page: Arc::new(state.messages.clone()),
+                        })),
+                );
             }
             // The sidebar's unread count lives only in the mailbox
             // listing (ticket q0hc): a read-flag change almost always
@@ -628,7 +697,7 @@ pub(crate) fn complete_flag(
                     state
                         .session
                         .operations
-                        .start_background(OperationKind::LoadMailboxes),
+                        .start_background(OperationKind::Mail(MailOperation::LoadMailboxes)),
                 );
             }
             effects
@@ -712,7 +781,7 @@ pub(crate) fn complete_delete_draft(
                         state
                             .session
                             .operations
-                            .start_background(OperationKind::LoadMailboxes),
+                            .start_background(OperationKind::Mail(MailOperation::LoadMailboxes)),
                     ];
                     effects.extend(request_visible_page_background(
                         state,
@@ -724,7 +793,7 @@ pub(crate) fn complete_delete_draft(
                     state
                         .session
                         .operations
-                        .start_background(OperationKind::LoadMailboxes),
+                        .start_background(OperationKind::Mail(MailOperation::LoadMailboxes)),
                 ],
             }
         }
@@ -778,12 +847,9 @@ pub(crate) fn complete_save_attachment(
             attachment_saved(state, &path);
             let open = open_after.then(|| path.clone());
             match open {
-                Some(open) => vec![
-                    state
-                        .session
-                        .operations
-                        .start(OperationKind::OpenPath { path: open }),
-                ],
+                Some(open) => vec![state.session.operations.start(OperationKind::Platform(
+                    PlatformOperation::OpenPath { path: open },
+                ))],
                 None => Vec::new(),
             }
         }
@@ -933,7 +999,7 @@ pub(crate) fn save_draft_completed(
                         state
                             .session
                             .operations
-                            .start_background(OperationKind::LoadMailboxes),
+                            .start_background(OperationKind::Mail(MailOperation::LoadMailboxes)),
                     );
                 }
                 effects
@@ -942,7 +1008,7 @@ pub(crate) fn save_draft_completed(
                     state
                         .session
                         .operations
-                        .start_background(OperationKind::LoadMailboxes),
+                        .start_background(OperationKind::Mail(MailOperation::LoadMailboxes)),
                 ]
             } else {
                 Vec::new()

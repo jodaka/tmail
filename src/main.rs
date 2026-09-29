@@ -20,6 +20,7 @@ use anyhow::{Context, bail};
 use chrono::Local;
 use tokio::sync::mpsc;
 
+use tmail::app::operation::PlatformOperation;
 use tmail::app::{Action, AppState, Effect, OperationResult, reducer};
 use tmail::backend::{
     MailBackend, Notifier, PathOpener, RequestContext, SystemNotifier, SystemOpener,
@@ -708,7 +709,10 @@ async fn handle_effects(
     effects: Vec<Effect>,
 ) -> anyhow::Result<()> {
     for effect in effects {
-        if let tmail::app::operation::OperationKind::EditExternally { program, body } = &effect.kind
+        if let tmail::app::operation::OperationKind::Platform(PlatformOperation::EditExternally {
+            program,
+            body,
+        }) = &effect.kind
         {
             // Suspend: drop the guard (its Drop restores the terminal) and
             // pause the event reader so it cannot steal the editor's
@@ -767,7 +771,7 @@ async fn handle_effects(
 fn launch_one(manager: &OperationManager, state: &AppState, effect: Effect) {
     if matches!(
         effect.kind,
-        tmail::app::operation::OperationKind::EditExternally { .. }
+        tmail::app::operation::OperationKind::Platform(PlatformOperation::EditExternally { .. })
     ) {
         tracing::warn!(id = %effect.id, "external editor effect reached the manager; dropped");
         return;

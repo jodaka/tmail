@@ -13,7 +13,9 @@ use crate::app::effect::Effect;
 use crate::app::focus::Focus;
 use crate::app::mock::{self, mock_initial_state};
 use crate::app::operation::DraftRemovalReason;
-use crate::app::operation::{OperationId, RetrySpec, SeedKind};
+use crate::app::operation::{
+    CacheOperation, DraftOperation, FileOperation, MailOperation, OperationId, RetrySpec, SeedKind,
+};
 use crate::app::overlay::AttachmentFileDialog;
 use crate::app::overlay::Overlay;
 use crate::app::overlay::{ConfirmButton, ErrorDialog, ModalButton};
@@ -51,11 +53,11 @@ fn inbox_id() -> MailboxId {
 }
 
 fn mailboxes_kind() -> OperationKind {
-    OperationKind::LoadMailboxes
+    OperationKind::Mail(MailOperation::LoadMailboxes)
 }
 
 fn page_kind(req: &PageRequest) -> OperationKind {
-    OperationKind::LoadPage(req.clone())
+    OperationKind::Mail(MailOperation::LoadPage(req.clone()))
 }
 
 /// Destructure an effect into `(id, kind)` for assertions.
@@ -69,7 +71,7 @@ fn effect_parts(effects: &[Effect]) -> (OperationId, OperationKind) {
 fn expect_page(effects: &[Effect]) -> (OperationId, PageRequest) {
     let (id, kind) = effect_parts(effects);
     match kind {
-        OperationKind::LoadPage(request) => (id, request),
+        OperationKind::Mail(MailOperation::LoadPage(request)) => (id, request),
         other => panic!("expected a LoadPage effect, got {other:?}"),
     }
 }
@@ -81,7 +83,9 @@ fn expect_cache_preview_reads(
     effects
         .iter()
         .filter_map(|e| match &e.kind {
-            OperationKind::CachePreviewLoad { locator } => Some((e.id, locator.clone())),
+            OperationKind::Cache(CacheOperation::CachePreviewLoad { locator }) => {
+                Some((e.id, locator.clone()))
+            }
             _ => None,
         })
         .collect()
@@ -92,7 +96,7 @@ fn find_page(effects: &[Effect]) -> (OperationId, PageRequest) {
     effects
         .iter()
         .find_map(|e| match &e.kind {
-            OperationKind::LoadPage(request) => Some((e.id, request.clone())),
+            OperationKind::Mail(MailOperation::LoadPage(request)) => Some((e.id, request.clone())),
             _ => None,
         })
         .expect("a LoadPage effect")
@@ -108,13 +112,13 @@ fn expect_cache_list_load(
     effects
         .iter()
         .find_map(|e| match &e.kind {
-            OperationKind::CacheListLoad {
+            OperationKind::Cache(CacheOperation::CacheListLoad {
                 mailbox,
                 query,
                 offset,
                 limit,
                 fresh_background_on_hit,
-            } => Some((
+            }) => Some((
                 e.id,
                 mailbox.clone(),
                 query.clone(),
@@ -176,10 +180,10 @@ fn no_effects_except_cache_stores(s: &mut AppState, effects: &[Effect]) {
     assert!(
         effects.iter().all(|e| matches!(
             e.kind,
-            OperationKind::CacheListStore { .. }
-                | OperationKind::CacheListEvict { .. }
-                | OperationKind::CacheMailboxesStore { .. }
-                | OperationKind::CacheMessageStore { .. }
+            OperationKind::Cache(CacheOperation::CacheListStore { .. })
+                | OperationKind::Cache(CacheOperation::CacheListEvict { .. })
+                | OperationKind::Cache(CacheOperation::CacheMailboxesStore { .. })
+                | OperationKind::Cache(CacheOperation::CacheMessageStore { .. })
         )),
         "expected only cache stores, got {effects:?}"
     );
@@ -195,10 +199,10 @@ fn complete_cache_stores(s: &mut AppState, effects: &[Effect]) -> Vec<Effect> {
         .filter(|e| {
             matches!(
                 e.kind,
-                OperationKind::CacheListStore { .. }
-                    | OperationKind::CacheListEvict { .. }
-                    | OperationKind::CacheMailboxesStore { .. }
-                    | OperationKind::CacheMessageStore { .. }
+                OperationKind::Cache(CacheOperation::CacheListStore { .. })
+                    | OperationKind::Cache(CacheOperation::CacheListEvict { .. })
+                    | OperationKind::Cache(CacheOperation::CacheMailboxesStore { .. })
+                    | OperationKind::Cache(CacheOperation::CacheMessageStore { .. })
             )
         })
         .map(|e| e.id)
@@ -361,10 +365,10 @@ fn settle_cache_stores(s: &mut AppState, effects: Vec<Effect>) -> Vec<Effect> {
     let is_store = |kind: &OperationKind| {
         matches!(
             kind,
-            OperationKind::CacheListStore { .. }
-                | OperationKind::CacheListEvict { .. }
-                | OperationKind::CacheMailboxesStore { .. }
-                | OperationKind::CacheMessageStore { .. }
+            OperationKind::Cache(CacheOperation::CacheListStore { .. })
+                | OperationKind::Cache(CacheOperation::CacheListEvict { .. })
+                | OperationKind::Cache(CacheOperation::CacheMailboxesStore { .. })
+                | OperationKind::Cache(CacheOperation::CacheMessageStore { .. })
         )
     };
     let store_ids: Vec<OperationId> = effects
@@ -569,7 +573,7 @@ fn open_attach_dialog(s: &mut AppState) -> (&mut AttachmentFileDialog, Operation
     let (id, kind) = effect_parts(&reduce(s, Action::Activate));
     assert_eq!(
         kind,
-        OperationKind::ListAttachmentFiles { path: None },
+        OperationKind::Files(FileOperation::ListAttachmentFiles { path: None }),
         "the chooser opens with a home-directory listing"
     );
     assert_eq!(s.session.focus, Focus::Dialog);
@@ -627,7 +631,9 @@ fn attachment(name: &str) -> DraftAttachment {
 fn expect_save(effects: &[Effect]) -> (OperationId, crate::domain::DraftSnapshot) {
     match effects {
         [effect] => match &effect.kind {
-            OperationKind::SaveDraft { draft } => (effect.id, (**draft).clone()),
+            OperationKind::Draft(DraftOperation::SaveDraft { draft }) => {
+                (effect.id, (**draft).clone())
+            }
             other => panic!("expected a SaveDraft effect, got {other:?}"),
         },
         other => panic!("expected exactly one effect, got {other:?}"),
@@ -675,7 +681,7 @@ fn restored_draft(to: &str, revision: u64, saved_revision: u64) -> crate::domain
 
 fn complete_restore(s: &mut AppState, drafts: Vec<crate::domain::RestoredDraft>) {
     let (id, kind) = effect_parts(&reduce(s, Action::LoadDrafts));
-    assert_eq!(kind, OperationKind::LoadDrafts);
+    assert_eq!(kind, OperationKind::Draft(DraftOperation::LoadDrafts));
     reduce(
         s,
         Action::BackendCompleted(OperationResult {
@@ -772,7 +778,9 @@ fn sendable(s: &mut AppState) {
 fn expect_send(effects: &[Effect]) -> (OperationId, OutboundMessage) {
     match effects {
         [effect] => match &effect.kind {
-            OperationKind::Send { message } => (effect.id, (**message).clone()),
+            OperationKind::Draft(DraftOperation::Send { message }) => {
+                (effect.id, (**message).clone())
+            }
             other => panic!("expected a Send effect, got {other:?}"),
         },
         other => panic!("expected exactly one effect, got {other:?}"),
@@ -795,7 +803,7 @@ fn complete_send(s: &mut AppState, id: OperationId, outcome: SendOutcome) -> Vec
 fn expect_search(effects: &[Effect]) -> (OperationId, crate::domain::SearchRequest) {
     let (id, kind) = effect_parts(effects);
     match kind {
-        OperationKind::Search(request) => (id, request),
+        OperationKind::Mail(MailOperation::Search(request)) => (id, request),
         other => panic!("expected a Search effect, got {other:?}"),
     }
 }
@@ -806,7 +814,7 @@ fn find_search(effects: &[Effect]) -> (OperationId, crate::domain::SearchRequest
     effects
         .iter()
         .find_map(|e| match &e.kind {
-            OperationKind::Search(request) => Some((e.id, request.clone())),
+            OperationKind::Mail(MailOperation::Search(request)) => Some((e.id, request.clone())),
             _ => None,
         })
         .expect("a Search effect")
@@ -853,7 +861,7 @@ fn expect_previews(effects: &[Effect]) -> Vec<(OperationId, crate::domain::Messa
     effects
         .iter()
         .filter_map(|e| match &e.kind {
-            OperationKind::Preview(locator) => Some((e.id, locator.clone())),
+            OperationKind::Mail(MailOperation::Preview(locator)) => Some((e.id, locator.clone())),
             _ => None,
         })
         .collect()
@@ -926,7 +934,7 @@ fn picker_state() -> AppState {
 fn expect_seed(effects: &[Effect]) -> (OperationId, MessageLocator, SeedKind) {
     let (id, kind) = effect_parts(effects);
     match kind {
-        OperationKind::SeedComposer { locator, kind } => (id, locator, kind),
+        OperationKind::Mail(MailOperation::SeedComposer { locator, kind }) => (id, locator, kind),
         other => panic!("expected a SeedComposer effect, got {other:?}"),
     }
 }
