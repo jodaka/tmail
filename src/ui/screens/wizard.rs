@@ -20,7 +20,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
 
 use crate::app::state::AppState;
-use crate::app::wizard::{NameChoice, StorageMode, WizardState, WizardStep};
+use crate::app::wizard::{
+    CREDENTIAL_SECRET_ROW, CREDENTIAL_STORAGE_ROW, CREDENTIAL_USERNAME_ROW, NameChoice,
+    StorageMode, WizardState, WizardStep,
+};
 use crate::ui::components::spinner;
 use crate::ui::theme::Theme;
 
@@ -34,13 +37,20 @@ const INPUT_HEIGHT: u16 = 3;
 /// Chrome rows: title band (3) + separator (1) + status band (3).
 const CHROME_ROWS: u16 = 7;
 
+/// Smallest terminal the wizard renders its forms in: below this the
+/// "too small" placeholder takes over. The guard and the user-facing
+/// message in `render_too_small` quote the same numbers, so they cannot
+/// drift apart (review pbcn).
+const MIN_WIZARD_WIDTH: u16 = 46;
+const MIN_WIZARD_BODY_ROWS: u16 = 4;
+
 /// Render the wizard over the whole terminal area. (Keyboard-first: the
 /// wizard records no click targets in v1 — mouse input is inert here.)
 pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
     let Some(wizard) = &state.session.wizard else {
         return;
     };
-    if area.width < 46 || area.height < CHROME_ROWS + 4 {
+    if area.width < MIN_WIZARD_WIDTH || area.height < CHROME_ROWS + MIN_WIZARD_BODY_ROWS {
         render_too_small(frame, area, theme);
         return;
     }
@@ -135,7 +145,9 @@ fn hint_spans<'a>(wizard: &WizardState, theme: &'a Theme) -> Vec<Span<'a>> {
             "Esc steps back",
         ],
         WizardStep::Identity => &["↵ continue", "Esc steps back"],
-        WizardStep::Credentials if wizard.credentials.credentials_index == 1 => {
+        WizardStep::Credentials
+            if wizard.credentials.credentials_index == CREDENTIAL_STORAGE_ROW =>
+        {
             &["Tab next field", "↵/space switch storage", "Esc steps back"]
         }
         WizardStep::Credentials => &["Tab next field", "↵ test connection", "Esc steps back"],
@@ -477,18 +489,18 @@ fn render_credentials(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, t
         value_spans(
             &wizard.credentials.username.value,
             wizard.credentials.username.cursor,
-            wizard.credentials.credentials_index == 0,
+            wizard.credentials.credentials_index == CREDENTIAL_USERNAME_ROW,
             false,
             input_inner_width(column),
             theme,
         ),
-        wizard.credentials.credentials_index == 0,
+        wizard.credentials.credentials_index == CREDENTIAL_USERNAME_ROW,
         theme,
     );
     y += INPUT_HEIGHT + 1;
 
     // The storage-mode toggle as its own box (checkbox row inside).
-    let storage_focused = wizard.credentials.credentials_index == 1;
+    let storage_focused = wizard.credentials.credentials_index == CREDENTIAL_STORAGE_ROW;
     let storage = Rect {
         x: column.x,
         y,
@@ -529,12 +541,12 @@ fn render_credentials(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, t
                 value_spans(
                     &masked,
                     wizard.credentials.password.cursor,
-                    wizard.credentials.credentials_index == 2,
+                    wizard.credentials.credentials_index == CREDENTIAL_SECRET_ROW,
                     true,
                     input_inner_width(column),
                     theme,
                 ),
-                wizard.credentials.credentials_index == 2,
+                wizard.credentials.credentials_index == CREDENTIAL_SECRET_ROW,
                 theme,
             );
         }
@@ -547,12 +559,12 @@ fn render_credentials(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, t
                 value_spans(
                     &wizard.credentials.command.value,
                     wizard.credentials.command.cursor,
-                    wizard.credentials.credentials_index == 2,
+                    wizard.credentials.credentials_index == CREDENTIAL_SECRET_ROW,
                     false,
                     input_inner_width(column),
                     theme,
                 ),
-                wizard.credentials.credentials_index == 2,
+                wizard.credentials.credentials_index == CREDENTIAL_SECRET_ROW,
                 theme,
             );
         }
@@ -956,7 +968,11 @@ fn render_too_small(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         frame,
         area,
         (area.width, area.height),
-        "tmail's wizard needs at least 46×11 columns/rows.",
+        &format!(
+            "tmail's wizard needs at least {}×{} columns/rows.",
+            MIN_WIZARD_WIDTH,
+            CHROME_ROWS + MIN_WIZARD_BODY_ROWS
+        ),
         "Enlarge the window or press Ctrl+C to quit.",
         theme,
     );

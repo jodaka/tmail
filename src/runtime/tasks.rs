@@ -9,7 +9,9 @@
 //!   cap concurrent sessions per user (Gmail ~15; Exchange varies), so a
 //!   burst of effects queues on a small permit pool instead of stacking
 //!   dozens of simultaneous logins that the server rejects with
-//!   confusing auth errors;
+//!   confusing auth errors — cache, notification, and platform-open
+//!   effects bypass the pool since they spawn no mail-server child
+//!   (issue p723);
 //! - map typed [`BackendError`]s into modal-ready [`OperationFailure`]s,
 //!   sanitizing every detail before it can reach logs or the UI (plan §12);
 //! - suppress results of cancelled operations — cancellation also
@@ -39,6 +41,35 @@ use crate::domain::sanitize::sanitize;
 /// spawn itself stays unbounded so cancellation tokens stay live.
 const MAX_CONCURRENT_BACKEND_CALLS: usize = 4;
 
+/// Whether the effect dispatches a mail-backend child process (issue
+/// p723): only those queue on the bounded pool. The pool bounds
+/// concurrent mail-server sessions against per-user caps (issue 1v38);
+/// purely local work — cache file I/O, notifications, attachment-file
+/// walks, platform opens — never touches the mail server, and holding a
+/// permit for it would only invert priorities: a page-apply cache flood
+/// could starve an interactive `LoadPage` (the pool holds four permits),
+/// and a hung child would starve cache hits in return. Denylist, so a
+/// new backend arm defaults to permitted (safe direction: the pool
+/// bounds the dispatching, not the spawn).
+fn uses_backend_process(kind: &OperationKind) -> bool {
+    !matches!(
+        kind,
+        OperationKind::CacheListLoad { .. }
+            | OperationKind::CacheListStore { .. }
+            | OperationKind::CacheListEvict { .. }
+            | OperationKind::CacheMailboxesLoad
+            | OperationKind::CacheMailboxesStore { .. }
+            | OperationKind::CacheMessageLoad { .. }
+            | OperationKind::CachePreviewLoad { .. }
+            | OperationKind::CacheMessageStore { .. }
+            | OperationKind::ListAttachmentFiles { .. }
+            | OperationKind::Notify { .. }
+            | OperationKind::OpenPath { .. }
+            | OperationKind::OpenUrl { .. }
+            | OperationKind::EditExternally { .. }
+    )
+}
+
 /// Spawns backend tasks for the effects the reducer emits.
 pub struct OperationManager {
     backend: Arc<dyn MailBackend>,
@@ -62,8 +93,9 @@ pub struct OperationManager {
     /// stays I/O-free. `None` disables caching (unknown data dir).
     cache: Option<crate::app::page_cache::PageCache>,
     /// Bounds the concurrently *dispatching* backend children (issue
-    /// 1v38): each task acquires one permit before running its backend
-    /// call and holds it to completion.
+    /// 1v38, gated by [`uses_backend_process`] — issue p723): only tasks
+    /// running a mail-backend child process acquire one permit and hold it
+    /// to completion; local work dispatches without one.
     permits: Arc<Semaphore>,
     results: UnboundedSender<OperationResult>,
 }
@@ -93,13 +125,16 @@ impl OperationManager {
     /// Launch one effect. The cancellation token comes from the operation
     /// registry (`AppState.session.operations`), so `Esc` reaches the child process.
     ///
-    /// The task acquires one of the manager's [`MAX_CONCURRENT_BACKEND_CALLS`]
-    /// permits before dispatching (issue 1v38): a burst of effects queues on
-    /// the pool instead of stacking unbounded concurrent IMAP sessions the
-    /// server would reject. The spawn itself is unbounded, so a queued task
-    /// still observes its cancellation token and exits silently — the
-    /// permit (if taken) drops and the result is suppressed exactly like a
-    /// cancelled in-flight operation.
+    /// Only effects that dispatch a mail-backend child process acquire one
+    /// of the manager's [`MAX_CONCURRENT_BACKEND_CALLS`] permits first
+    /// (issue 1v38, gated per [`uses_backend_process`]): a burst of backend
+    /// calls queues on the pool instead of stacking unbounded concurrent
+    /// IMAP sessions the server would reject, while local work (cache
+    /// I/O, notifications, platform opens) dispatches immediately (issue
+    /// p723). The spawn itself is unbounded, so a queued task still
+    /// observes its cancellation token and exits silently — the permit (if
+    /// taken) drops and the result is suppressed exactly like a cancelled
+    /// in-flight operation.
     pub fn launch(&self, effect: Effect, ctx: RequestContext) {
         let backend = Arc::clone(&self.backend);
         let opener = Arc::clone(&self.opener);
@@ -112,10 +147,14 @@ impl OperationManager {
         let id = effect.id;
         tokio::spawn(async move {
             tracing::debug!(id = %id, "operation launched");
-            // Issue 1v38: queue behind the bounded pool before dispatching.
-            // `acquire` can only fail when the semaphore is closed, and the
-            // manager never closes it.
-            let _permit = permits.acquire().await.expect("semaphore never closed");
+            // Issue 1v38 / p723: only backend child processes queue behind
+            // the bounded pool. `acquire` can only fail when the semaphore
+            // is closed, and the manager never closes it.
+            let _permit = if uses_backend_process(&effect.kind) {
+                Some(permits.acquire().await.expect("semaphore never closed"))
+            } else {
+                None
+            };
             match run_effect(
                 &backend,
                 &opener,
@@ -275,10 +314,15 @@ async fn run_effect(
             .await
         }
         OperationKind::SaveDraft { draft } => {
+            // Shared, not copied (issue 6m97): the launch path takes a
+            // refcount bump; the registry holds the same payload alive
+            // for the retry intent, so the one deep copy left is the
+            // backend's own by-value parameter.
+            let draft = Arc::clone(draft);
             run_call(
                 effect,
                 ctx,
-                move |c| backend.save_draft(c, draft.as_ref().clone()),
+                move |c| backend.save_draft(c, (*draft).clone()),
                 |remote_id| OperationOutcome::DraftSaved { remote_id },
             )
             .await
@@ -293,19 +337,23 @@ async fn run_effect(
             .await
         }
         OperationKind::DeleteDraft { draft, .. } => {
+            // Shared, not copied (issue 6m97): as with `SaveDraft`.
+            let draft = Arc::clone(draft);
             run_call(
                 effect,
                 ctx,
-                move |c| backend.delete_draft(c, draft.as_ref().clone()),
+                move |c| backend.delete_draft(c, (*draft).clone()),
                 |_| OperationOutcome::Done,
             )
             .await
         }
         OperationKind::Send { message } => {
+            // Shared, not copied (issue 6m97): as with `SaveDraft`.
+            let message = Arc::clone(message);
             run_call(
                 effect,
                 ctx,
-                move |c| backend.send_message(c, message.as_ref().clone()),
+                move |c| backend.send_message(c, (*message).clone()),
                 OperationOutcome::SendOutcome,
             )
             .await
@@ -528,7 +576,9 @@ async fn run_effect(
         } => {
             let mailbox = mailbox.clone();
             let query = query.clone();
-            let page = page.as_ref().clone();
+            // Shared, not copied (issue cbkz): the store path travels by
+            // reference count, never a deep page copy.
+            let page = Arc::clone(page);
             run_cache_store(cache, move |cache| {
                 cache.store(&mailbox, query.as_deref(), &page)
             })
@@ -586,7 +636,9 @@ async fn run_effect(
         } => {
             let mailbox = mailbox.clone();
             let id = id.clone();
-            let message = message.as_ref().clone();
+            // Shared, not copied (ticket pa64): the store closure takes a
+            // refcount bump, never a body clone.
+            let message = Arc::clone(message);
             run_cache_store(cache, move |cache| {
                 cache.store_message(&mailbox, &id, &message)
             })
@@ -709,6 +761,9 @@ fn operation_failure(effect: &Effect, err: BackendError) -> Option<OperationFail
             None,
             format!("`{program}` executable could not be run: {source}"),
         ),
+        BackendError::Timeout { program, secs } => {
+            (None, format!("`{program}` call timed out after {secs}s"))
+        }
         BackendError::Io(err) => (None, err.to_string()),
         BackendError::Cancelled => unreachable!("matched above"),
     };
@@ -1070,9 +1125,13 @@ mod tests {
     }
 
     fn effect(kind: OperationKind) -> (Effect, CancellationToken) {
+        effect_with_id(kind, 7)
+    }
+
+    fn effect_with_id(kind: OperationKind, id: u64) -> (Effect, CancellationToken) {
         (
             Effect {
-                id: OperationId(7),
+                id: OperationId(id),
                 kind,
             },
             CancellationToken::new(),
@@ -1285,6 +1344,286 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cache_io_does_not_queue_behind_the_backend_permit_pool() {
+        // Issue p723 acceptance: a cache-read flood must not wait for the
+        // backend pool. Four backend children occupy every permit and
+        // park at a gate; cache effects then complete immediately — they
+        // spawn no mail-server child, so they neither queue on the pool
+        // nor wait for the parked children.
+        struct GatedBackend {
+            /// Count of calls that entered (and parked inside) the fake,
+            /// on a watch channel the test polls.
+            arrivals: tokio::sync::watch::Sender<usize>,
+            /// The parked calls hold until the test releases this.
+            gate: tokio::sync::watch::Receiver<bool>,
+        }
+
+        async fn park_until_released(gate: &tokio::sync::watch::Receiver<bool>) {
+            let mut gate = gate.clone();
+            while !*gate.borrow_and_update() {
+                if gate.changed().await.is_err() {
+                    return; // Sender dropped: proceed, never hang.
+                }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl MailBackend for GatedBackend {
+            async fn list_mailboxes(&self, _req: RequestContext) -> BackendResult<Vec<Mailbox>> {
+                let now = self.arrivals.borrow().wrapping_add(1);
+                let _ = self.arrivals.send(now);
+                park_until_released(&self.gate).await;
+                Ok(Vec::new())
+            }
+
+            async fn list_messages(
+                &self,
+                _req: RequestContext,
+                _page: PageRequest,
+            ) -> BackendResult<Page<MessageSummary>> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn search_messages(
+                &self,
+                _req: RequestContext,
+                _request: SearchRequest,
+            ) -> BackendResult<Page<MessageSummary>> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn get_message(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+            ) -> BackendResult<Message> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn set_read(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+                _read: bool,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn set_starred(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+                _starred: bool,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn archive(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn trash(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn save_draft(
+                &self,
+                _req: RequestContext,
+                _draft: crate::domain::DraftSnapshot,
+            ) -> BackendResult<MessageId> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn load_drafts(
+                &self,
+                _req: RequestContext,
+            ) -> BackendResult<Vec<crate::domain::RestoredDraft>> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn delete_draft(
+                &self,
+                _req: RequestContext,
+                _draft: crate::domain::DraftSnapshot,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn send_message(
+                &self,
+                _req: RequestContext,
+                _message: crate::domain::OutboundMessage,
+            ) -> BackendResult<crate::domain::SendOutcome> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn read_attachment(
+                &self,
+                _req: RequestContext,
+                _path: std::path::PathBuf,
+            ) -> BackendResult<crate::domain::DraftAttachment> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn save_attachment(
+                &self,
+                _req: RequestContext,
+                _request: crate::domain::AttachmentRequest,
+            ) -> BackendResult<std::path::PathBuf> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+        }
+
+        let (arrival_tx, mut arrival_rx) = tokio::sync::watch::channel(0usize);
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+        let backend = Arc::new(GatedBackend {
+            arrivals: arrival_tx,
+            gate: gate_rx,
+        });
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = crate::app::page_cache::PageCache::open(
+            dir.path().to_path_buf(),
+            crate::app::page_cache::CacheLimits::default(),
+        );
+        let (tx, mut rx) = unbounded_channel();
+        let manager = OperationManager::new(
+            Arc::clone(&backend) as _,
+            Arc::new(RecordingOpener::default()),
+            Arc::new(RecordingNotifier::default()),
+            std::sync::Arc::new(crate::discovery::FakeDiscoverer),
+            std::sync::Arc::new(InertTester),
+            Some(cache),
+            tx,
+        );
+
+        // 1. Occupy every permit: four backend children park inside the
+        //    fake, so the pool is at capacity and stays there.
+        for i in 0..MAX_CONCURRENT_BACKEND_CALLS {
+            let token = CancellationToken::new();
+            let (effect, _) = effect_with_id(OperationKind::LoadMailboxes, 100 + i as u64);
+            manager.launch(effect, ctx(i as u64, &token));
+        }
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            arrival_rx.wait_for(|count| *count >= MAX_CONCURRENT_BACKEND_CALLS),
+        )
+        .await
+        .expect("all backend children entered and parked")
+        .expect("watch sender alive");
+
+        // 2. The cache flood (reads and one store): with the fix these
+        //    dispatch without touching the exhausted pool.
+        let flood = [
+            OperationKind::CacheMailboxesLoad,
+            OperationKind::CacheListLoad {
+                mailbox: MailboxId(String::from("INBOX")),
+                query: None,
+                offset: 0,
+                limit: 20,
+                fresh_background_on_hit: false,
+            },
+            OperationKind::CacheMessageLoad {
+                locator: MessageLocator {
+                    mailbox: MailboxId(String::from("INBOX")),
+                    id: MessageId(String::from("m1")),
+                    message_id: None,
+                },
+            },
+            OperationKind::CacheMailboxesStore {
+                mailboxes: Vec::new(),
+            },
+        ];
+        let flood_ids: Vec<_> = flood
+            .iter()
+            .enumerate()
+            .map(|(i, kind)| {
+                let (effect, token) = effect_with_id(kind.clone(), 200 + i as u64);
+                manager.launch(effect, ctx(i as u64, &token));
+                Effect {
+                    id: OperationId(200 + i as u64),
+                    kind: kind.clone(),
+                }
+                .id
+            })
+            .collect();
+
+        // 3. Every cache result lands while the pool is still fully
+        //    occupied by parked backend children — a permit-less dispatch
+        //    (the pre-fix manager made these wait for a permit, and the
+        //    parked children never released one).
+        let deadline = Duration::from_secs(5);
+        for _ in 0..flood_ids.len() {
+            let result = tokio::time::timeout(deadline, rx.recv())
+                .await
+                .expect("cache results arrive while the pool is parked")
+                .expect("cache result");
+            assert!(
+                flood_ids.contains(&result.id),
+                "unexpected result id {:?}",
+                result.id
+            );
+            assert!(result.outcome.is_ok(), "cache effect completed");
+        }
+
+        // Tidy shutdown: release the gate and let the children return.
+        let _ = gate_tx.send(true);
+        for _ in 0..MAX_CONCURRENT_BACKEND_CALLS {
+            let _ = rx.recv().await;
+        }
+    }
+
+    #[test]
+    fn cache_and_local_effects_do_not_consume_a_backend_permit() {
+        // The denylist direction: backend arms (and unknown future ones)
+        // acquire a permit; purely local arms never do.
+        assert!(uses_backend_process(&OperationKind::LoadMailboxes));
+        assert!(uses_backend_process(&OperationKind::LoadPage(
+            page_request("inbox")
+        )));
+        assert!(uses_backend_process(&OperationKind::Send {
+            message: Arc::new(
+                crate::domain::OutboundMessage::from_fields(
+                    "dest@example.com",
+                    "",
+                    "",
+                    crate::domain::OutgoingContent::default(),
+                    None,
+                )
+                .expect("valid recipients")
+            ),
+        }));
+        assert!(!uses_backend_process(&OperationKind::CacheMailboxesLoad));
+        assert!(!uses_backend_process(&OperationKind::CacheListLoad {
+            mailbox: MailboxId(String::from("INBOX")),
+            query: None,
+            offset: 0,
+            limit: 20,
+            fresh_background_on_hit: false,
+        }));
+        assert!(!uses_backend_process(&OperationKind::CachePreviewLoad {
+            locator: MessageLocator {
+                mailbox: MailboxId(String::from("INBOX")),
+                id: MessageId(String::from("m1")),
+                message_id: None,
+            },
+        }));
+        assert!(!uses_backend_process(&OperationKind::ListAttachmentFiles {
+            path: Some(std::path::PathBuf::from("/tmp"))
+        }));
+        assert!(!uses_backend_process(&OperationKind::Notify {
+            request: crate::app::operation::NotifyRequest::Bell,
+        }));
+    }
+
+    #[tokio::test]
     async fn cancelled_operations_produce_no_result() {
         let backend = Arc::new(FakeBackend {
             mailboxes_delay: Duration::from_secs(30),
@@ -1329,6 +1668,23 @@ mod tests {
             failure.detail
         );
         assert!(failure.detail.contains("connect refused"));
+    }
+
+    #[test]
+    fn a_timeout_failure_surfaces_typed_and_retryable() {
+        // Ticket 183r: the timeout is an ordinary surfaced failure — not
+        // suppressed like a cancellation — and retryable.
+        let err = BackendError::Timeout {
+            program: String::from("himalaya"),
+            secs: 30,
+        };
+        let (effect, _) = effect(OperationKind::LoadMailboxes);
+        let retry_spec = effect.retry_spec();
+        let failure = operation_failure(&effect, err).expect("surfaced");
+        assert_eq!(failure.code, None);
+        assert_eq!(failure.retry, Some(retry_spec));
+        assert!(!failure.ambiguous);
+        assert_eq!(failure.detail, "`himalaya` call timed out after 30s");
     }
 
     #[tokio::test]
@@ -1776,7 +2132,7 @@ mod cache_tests {
         let (effect, token) = effect(OperationKind::CacheMessageStore {
             mailbox: MailboxId(String::from("INBOX")),
             id: String::from("m1"),
-            message: Box::new(Message {
+            message: std::sync::Arc::new(Message {
                 id: MessageId(String::from("m1")),
                 mailbox_id: MailboxId(String::from("INBOX")),
                 headers: Default::default(),

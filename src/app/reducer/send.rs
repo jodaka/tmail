@@ -1,5 +1,7 @@
 //! Send (plan §14, Phase 7.6/7.7): confirming the composer, the
 //! in-flight state, and the classified outcome handling.
+use std::sync::Arc;
+
 use super::composer_flow::close_composer_route;
 use super::modals::open_error_modal;
 use crate::app::effect::Effect;
@@ -68,7 +70,7 @@ pub(crate) fn send_from_composer(state: &mut AppState) -> Vec<Effect> {
     }
     state.set_status("Sending…");
     vec![state.session.operations.start(OperationKind::Send {
-        message: Box::new(message),
+        message: Arc::new(message),
     })]
 }
 
@@ -79,7 +81,7 @@ pub(crate) fn send_from_composer(state: &mut AppState) -> Vec<Effect> {
 pub(crate) fn send_completed(
     state: &mut AppState,
     outcome: &crate::domain::SendOutcome,
-    message: Box<crate::domain::OutboundMessage>,
+    message: Arc<crate::domain::OutboundMessage>,
 ) -> Vec<Effect> {
     use crate::domain::SendOutcome;
     match outcome {
@@ -134,7 +136,7 @@ pub(crate) fn confirm_send(state: &mut AppState) -> Vec<Effect> {
     close_composer_route(state);
     match snapshot {
         Some(snapshot) => vec![state.session.operations.start(OperationKind::DeleteDraft {
-            draft: Box::new(snapshot),
+            draft: Arc::new(snapshot),
             reason: DraftRemovalReason::Sent,
         })],
         None => {

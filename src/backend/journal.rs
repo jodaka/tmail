@@ -14,9 +14,11 @@
 //! and entries `0600`, and entries written by an older version under a
 //! looser umask are repaired on the next read or write.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
@@ -41,8 +43,24 @@ pub struct JournalEntry {
     pub saved_revision: u64,
 }
 
+/// Per-draft write lock table (ticket fjz8): journal calls run on the
+/// blocking pool — separate threads, never serialized by the single-threaded
+/// main runtime — so the read-modify-write cycles of
+/// [`DraftJournal::record`]/[`DraftJournal::mark_remote`] must exclude each
+/// other per `local_id`, or two overlapping saves can interleave and the
+/// older snapshot can land on disk last.
+///
+/// Keyed by `local_id` rather than one global lock so distinct drafts never
+/// contend.
+type DraftLocks = Arc<Mutex<HashMap<String, DraftWriteLock>>>;
+
+/// The inner write lock for one draft (ticket fjz8): held across the whole
+/// read-modify-write, so the read at the start of a journal write sees the
+/// previous writer's bytes.
+type DraftWriteLock = Arc<Mutex<()>>;
+
 /// The draft journal rooted at a directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct DraftJournal {
     dir: PathBuf,
     /// The highest directory the journal owns: permission repair walks
@@ -50,7 +68,21 @@ pub struct DraftJournal {
     /// With an account scope it is the shared drafts container above the
     /// per-account directory.
     repair_root: PathBuf,
+    /// Guards every read-modify-write cycle per draft id (ticket fjz8).
+    /// The critical sections are a couple of small file reads/writes, and
+    /// contention is only between the racing journal writes of one draft.
+    locks: DraftLocks,
 }
+
+/// Two journals are equal when they guard the same directory: the in-process
+/// lock table is identity, not part of the journal's value.
+impl PartialEq for DraftJournal {
+    fn eq(&self, other: &Self) -> bool {
+        self.dir == other.dir && self.repair_root == other.repair_root
+    }
+}
+
+impl Eq for DraftJournal {}
 
 impl DraftJournal {
     /// Journal rooted at an explicit directory (tests, explicit config).
@@ -60,6 +92,7 @@ impl DraftJournal {
         Self {
             repair_root: dir.clone(),
             dir,
+            locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -112,6 +145,7 @@ impl DraftJournal {
         Self {
             repair_root: root,
             dir: scoped,
+            locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -222,30 +256,85 @@ impl DraftJournal {
     /// preserved; remote status is advanced afterwards by
     /// [`DraftJournal::mark_remote`]. Atomic: temp file + rename, so a
     /// crash mid-write leaves the previous revision intact.
+    ///
+    /// Serialized per draft under the journal's lock table (ticket fjz8):
+    /// while the read-modify-write runs, no other journal write of the same
+    /// draft can interleave its own read/write.
+    ///
+    /// Monotonic (ticket fjz8): an already-recorded *higher* revision is
+    /// never overwritten with the older one in `snapshot` — autosave S2
+    /// (rev N+1) can supersede save S1 (rev N) while S1's journal write is
+    /// still queued, and S1 landing last must not roll the journal back.
+    /// The remote confirmation is kept either way.
     pub fn record(&self, snapshot: &DraftSnapshot) -> io::Result<()> {
-        let path = self.file(&snapshot.local_id.0)?;
-        let mut entry = match self.read(&snapshot.local_id.0) {
-            Ok(Some(entry)) => entry,
-            _ => JournalEntry {
-                version: VERSION,
-                saved_revision: 0,
-                draft: snapshot.clone(),
-            },
+        let local_id = &snapshot.local_id.0;
+        let path = self.file(local_id)?;
+        let lock = self.write_lock(local_id);
+        let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        // A missing or unreadable (corrupt) file carries no comparable
+        // revision: start from the fresh entry — replacing a corrupt file
+        // with the newest typed text is the fail-fresh direction the
+        // journal always took (a broken entry must not lose drafts).
+        let recorded = match self.read(local_id) {
+            Ok(recorded) => recorded,
+            Err(err) => {
+                tracing::warn!(
+                    local_id = %local_id,
+                    %err,
+                    "unreadable draft journal entry; recording a fresh one"
+                );
+                None
+            }
         };
+        let Some(mut entry) = recorded else {
+            return self.write_atomic(
+                &path,
+                &JournalEntry {
+                    version: VERSION,
+                    saved_revision: 0,
+                    draft: snapshot.clone(),
+                },
+            );
+        };
+        if entry.draft.revision > snapshot.revision {
+            tracing::warn!(
+                local_id = %local_id,
+                stored = entry.draft.revision,
+                rejected = snapshot.revision,
+                "ignored an out-of-order draft journal record (a newer revision is already stored)"
+            );
+            return Ok(());
+        }
         entry.version = VERSION;
         entry.draft = snapshot.clone();
         self.write_atomic(&path, &entry)
     }
 
     /// Mark `revision` of `local_id` as confirmed on the remote (after the
-    /// add-then-delete replacement completed, ADR 0002 §D.3).
+    /// add-then-delete replacement completed, ADR 0002 §D.3). Serialized
+    /// with every other write of the same draft under the journal's lock
+    /// table (ticket fjz8), so it cannot clobber or be clobbered by a
+    /// concurrent `record`.
     pub fn mark_remote(&self, local_id: &str, revision: u64) -> io::Result<()> {
         let path = self.file(local_id)?;
+        let lock = self.write_lock(local_id);
+        let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(mut entry) = self.read(local_id)? else {
             return Ok(()); // Nothing recorded (e.g. journal removed meanwhile).
         };
         entry.saved_revision = entry.saved_revision.max(revision);
         self.write_atomic(&path, &entry)
+    }
+
+    /// The inner per-draft write guard from the journal's lock table
+    /// (ticket fjz8). The table lock is held only to look up or insert the
+    /// entry; the returned `Arc` is cloned under it and its inner lock is
+    /// taken by the caller across the whole read-modify-write. A poisoned
+    /// lock (a writer panicked mid-write) is unwrapped: the guarded file
+    /// was written atomically, so the next writer may proceed.
+    fn write_lock(&self, local_id: &str) -> DraftWriteLock {
+        let mut table = self.locks.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(table.entry(local_id.to_owned()).or_default())
     }
 
     /// The remote-confirmed revision recorded for `local_id`, if any.
@@ -291,9 +380,14 @@ impl DraftJournal {
     }
 
     /// Delete the journal entry for `local_id` (confirmed discard, plan
-    /// §14). A missing file is fine — already gone.
+    /// §14). A missing file is fine — already gone. Serialized with the
+    /// other writes of the same draft under the journal's lock table
+    /// (ticket fjz8): a deletion landing between a concurrent `record`'s
+    /// read and its atomic write would resurrect the entry mid-flight.
     pub fn remove(&self, local_id: &str) -> io::Result<()> {
         let path = self.file(local_id)?;
+        let lock = self.write_lock(local_id);
+        let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -315,8 +409,9 @@ impl DraftJournal {
     /// Versioned temp-file + atomic rename with a file sync before the
     /// rename, so the recorded bytes survive a crash (ADR 0002 §D.1).
     /// The temp name carries a process-unique counter on top of the pid:
-    /// two concurrent saves of the same draft (same pid, so serialized by
-    /// the single-threaded runtime today) would otherwise share one name.
+    /// two saves of the same draft in one process (the blocking pool puts
+    /// them on separate threads; ticket fjz8 serializes them per draft
+    /// above) would otherwise share one name.
     fn write_atomic(&self, path: &Path, entry: &JournalEntry) -> io::Result<()> {
         private_fs::create_dir_all(&self.dir)?;
         private_fs::restrict_dir_chain(&self.repair_root, &self.dir);
@@ -397,6 +492,67 @@ mod tests {
         let entries = j.load_all().unwrap();
         assert_eq!(entries[0].draft.body, "second");
         assert_eq!(entries[0].draft.revision, 2);
+    }
+
+    #[test]
+    fn out_of_order_record_never_regresses_the_revision() {
+        // Ticket fjz8: autosave S2 (rev N+1) supersedes S1 (rev N) while
+        // S1's journal write is still queued; when S1 finally lands, the
+        // journal must keep the newest typed text.
+        let (j, _dir) = journal();
+        j.record(&snapshot("local-1", 2, "newer text")).unwrap();
+        j.mark_remote("local-1", 1).unwrap();
+        j.record(&snapshot("local-1", 1, "stale text")).unwrap();
+        let entries = j.load_all().unwrap();
+        assert_eq!(entries[0].draft.revision, 2, "the newer revision stays");
+        assert_eq!(entries[0].draft.body, "newer text");
+        assert_eq!(
+            j.saved_revision("local-1").unwrap(),
+            Some(1),
+            "the remote confirmation survives the skipped stale record"
+        );
+    }
+
+    #[test]
+    fn overlapping_record_and_mark_remote_keep_the_newest_entry() {
+        // Ticket fjz8 acceptance: two overlapping record/mark_remote pairs
+        // finish with max(revision) persisted, in any interleaving of the
+        // blocking-pool threads. The per-draft lock closes the lost-update
+        // window between one write's read and its atomic rename.
+        use std::sync::Barrier;
+        let (j, _dir) = journal();
+        let rounds = 64u64;
+        let barrier = std::sync::Arc::new(Barrier::new(2));
+        for round in 0..rounds {
+            // Revision 0 marks the very first recorded revision; every
+            // later round marks the previous one remotely.
+            let older = round;
+            let newer = round + 1;
+            let a = {
+                let j = j.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    j.record(&snapshot("local-1", older, "older")).unwrap();
+                    j.mark_remote("local-1", older).unwrap();
+                })
+            };
+            let b = {
+                let j = j.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    j.record(&snapshot("local-1", newer, "newer")).unwrap();
+                })
+            };
+            a.join().expect("thread a");
+            b.join().expect("thread b");
+            let entries = j.load_all().unwrap();
+            assert_eq!(entries.len(), 1, "round {round}");
+            assert_eq!(entries[0].draft.revision, newer, "round {round}");
+            assert_eq!(entries[0].draft.body, "newer", "round {round}");
+            assert_eq!(entries[0].saved_revision, older, "round {round}");
+        }
     }
 
     #[test]

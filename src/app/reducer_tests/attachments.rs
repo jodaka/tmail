@@ -79,7 +79,7 @@ fn save_is_reader_only_and_attachment_gated() {
             mailbox_id: summary.mailbox_id.clone(),
             summary,
         }));
-    s.open_message = Loadable::Loaded(message);
+    s.open_message = Loadable::Loaded(std::sync::Arc::new(message));
     s.session.focus = Focus::Reader;
     no_effects(&reduce(&mut s, Action::SaveAttachment));
     assert!(s.session.operations.is_empty());

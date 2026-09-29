@@ -171,6 +171,14 @@ pub const OVERRIDE_FIELDS: usize = 3;
 /// choice comes before the secret it governs).
 pub const CREDENTIAL_FIELDS: usize = 3;
 
+/// Row indexes within the W4 credential fields (see
+/// [`CREDENTIAL_FIELDS`]): the middle row is the storage-mode toggle —
+/// the one focused row whose Enter/Space flips the mode instead of
+/// editing text — and the last row edits the secret.
+pub const CREDENTIAL_USERNAME_ROW: usize = 0;
+pub const CREDENTIAL_STORAGE_ROW: usize = 1;
+pub const CREDENTIAL_SECRET_ROW: usize = 2;
+
 /// How the W6 confirm screen resolves an account-name collision
 /// (ADR 0003 §3.6): replace the existing block or pick `-2`, `-3`….
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -464,7 +472,9 @@ pub fn wizard_reduce(state: &mut AppState, action: &Action) -> Vec<Effect> {
                     // Enter activates the focused control (ADR 0003 §3.2):
                     // on the storage-mode row that is the toggle, not the
                     // credential test.
-                    WizardStep::Credentials if current.credentials.credentials_index == 1 => {
+                    WizardStep::Credentials
+                        if current.credentials.credentials_index == CREDENTIAL_STORAGE_ROW =>
+                    {
                         WizardAction::ToggleStorageMode
                     }
                     WizardStep::Credentials => WizardAction::SubmitCredentials,
@@ -562,7 +572,9 @@ fn wizard_action(state: &mut AppState, action: &WizardAction) -> Vec<Effect> {
         }
         WizardAction::SubmitCredentials => submit_credentials(&mut wizard, state),
         WizardAction::ToggleStorageMode => {
-            if wizard.step == WizardStep::Credentials && wizard.credentials.credentials_index == 1 {
+            if wizard.step == WizardStep::Credentials
+                && wizard.credentials.credentials_index == CREDENTIAL_STORAGE_ROW
+            {
                 // The storage-mode row is focused: flip the mode.
                 wizard.credentials.storage_mode = match wizard.credentials.storage_mode {
                     StorageMode::Raw => StorageMode::Command,
@@ -595,7 +607,7 @@ fn wizard_text_entry_focused(wizard: &WizardState) -> bool {
         WizardStep::Email => true,
         WizardStep::Discovery => wizard.discovery.override_open,
         WizardStep::Identity => true,
-        WizardStep::Credentials => wizard.credentials.credentials_index != 1,
+        WizardStep::Credentials => wizard.credentials.credentials_index != CREDENTIAL_STORAGE_ROW,
         WizardStep::Testing | WizardStep::Confirm | WizardStep::Saved => false,
     }
 }
@@ -608,9 +620,9 @@ fn edit_wizard_field(wizard: &mut WizardState, edit: &DialogEdit) {
         }
         WizardStep::Identity => wizard.credentials.display_name.apply(edit),
         WizardStep::Credentials => match wizard.credentials.credentials_index {
-            0 => wizard.credentials.username.apply(edit),
-            // The storage toggle (1) is not a text field.
-            2 => match wizard.credentials.storage_mode {
+            CREDENTIAL_USERNAME_ROW => wizard.credentials.username.apply(edit),
+            // The storage toggle row is not a text field.
+            CREDENTIAL_SECRET_ROW => match wizard.credentials.storage_mode {
                 StorageMode::Raw => wizard.credentials.password.apply(edit),
                 StorageMode::Command => wizard.credentials.command.apply(edit),
             },
@@ -808,7 +820,9 @@ fn submit_override(wizard: &mut WizardState) -> Vec<Effect> {
 
 /// Parses a himalaya server URL: `scheme://host:port` where scheme is
 /// `imap(s)` / `smtp(s)`. Returns the normalized URL and the security
-/// it implies.
+/// it implies. The port must be numeric (a `u16`), so a malformed port
+/// surfaces here as a wizard validation error instead of a backend
+/// error later (review pbcn).
 fn parse_server_url(raw: &str) -> Result<(String, Security), String> {
     let raw = raw.trim();
     let (scheme, rest) = raw
@@ -819,9 +833,19 @@ fn parse_server_url(raw: &str) -> Result<(String, Security), String> {
         "imap" | "smtp" => Security::StartTls,
         other => return Err(format!("unknown scheme “{other}” (use imap(s) or smtp(s))")),
     };
-    if rest.is_empty() || rest.contains('/') || !rest.contains(':') {
+    if rest.is_empty() || rest.contains('/') {
         return Err(format!(
             "“{raw}” needs host and port, e.g. {scheme}://host:993"
+        ));
+    }
+    let Some((host, port)) = rest.rsplit_once(':') else {
+        return Err(format!(
+            "“{raw}” needs host and port, e.g. {scheme}://host:993"
+        ));
+    };
+    if host.is_empty() || port.parse::<u16>().is_err() {
+        return Err(format!(
+            "“{raw}” needs a numeric port, e.g. {scheme}://host:993"
         ));
     }
     Ok((format!("{scheme}://{rest}"), security))

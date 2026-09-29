@@ -11,6 +11,7 @@
 //! killed on cancellation (Phase 3.2).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
@@ -86,25 +87,28 @@ pub enum OperationKind {
     /// Persist one draft revision (plan §14, ADR 0002): journal record +
     /// remote add-then-delete replacement. The snapshot freezes the exact
     /// revision saved, so a stale success can be detected and re-saved.
-    /// Boxed: full draft payloads must not bloat every operation kind.
-    SaveDraft { draft: Box<DraftSnapshot> },
+    /// Shared (`Arc`, issue 6m97): boxed out of the enum's inline size,
+    /// and refcounted so the registry's kind/retry clones and every
+    /// launch copy the payload by reference count — never a deep body
+    /// copy. The backend call consumes its own owned copy.
+    SaveDraft { draft: Arc<DraftSnapshot> },
     /// Restore drafts from the crash-safe journal at startup (ADR 0002
     /// §D.5).
     LoadDrafts,
     /// Delete a draft everywhere (journal + remote). `Discard` follows a
     /// confirmed discard (plan §14) and opens the modal on failure;
     /// `Sent` is the tmail-send cleanup (ADR 0002: best-effort — delivery
-    /// is already confirmed, so a failure must never claim one). Boxed
+    /// is already confirmed, so a failure must never claim one). Shared
     /// snapshot, as with `SaveDraft`.
     DeleteDraft {
-        draft: Box<DraftSnapshot>,
+        draft: Arc<DraftSnapshot>,
         reason: DraftRemovalReason,
     },
     /// Deliver one serialized message through the Himalaya stdin contract
     /// (plan §14, Phase 7). The message is frozen at send time; retries
-    /// replay the exact bytes under a new operation id. Boxed, as with the
-    /// draft payloads.
-    Send { message: Box<OutboundMessage> },
+    /// replay the exact bytes under a new operation id. Shared, as with
+    /// the draft payloads.
+    Send { message: Arc<OutboundMessage> },
     /// Validate one composer attachment source (plan §15, Phase 8): the
     /// path as typed (`~` unexpanded); the backend expands and checks it.
     /// No bytes travel — only the resulting metadata.
@@ -176,11 +180,13 @@ pub enum OperationKind {
     },
     /// Persist one page of summaries (ticket haeb, off-thread I/O). A
     /// store result carries nothing to apply: the cache is an
-    /// optimization, never a source of truth.
+    /// optimization, never a source of truth. Shared (`Arc`, issue
+    /// cbkz): the store path (effect -> manager -> serialization)
+    /// travels by reference count, never a deep page copy.
     CacheListStore {
         mailbox: MailboxId,
         query: Option<String>,
-        page: Box<Page<MessageSummary>>,
+        page: Arc<Page<MessageSummary>>,
     },
     /// Drop one cached page (ticket kkaq): after a confirmed move the
     /// stored copy lists a message that left the mailbox, and the local
@@ -211,11 +217,13 @@ pub enum OperationKind {
     /// window.
     CachePreviewLoad { locator: MessageLocator },
     /// Persist one full message (ticket haeb, off-thread I/O). Best
-    /// effort: the result carries nothing to apply.
+    /// effort: the result carries nothing to apply. Shared (`Arc`, ticket
+    /// pa64): the effect must not deep-copy a possibly multi-megabyte body
+    /// on its way to the store.
     CacheMessageStore {
         mailbox: MailboxId,
         id: String,
-        message: Box<Message>,
+        message: Arc<Message>,
     },
 }
 
@@ -850,6 +858,26 @@ impl OperationRegistry {
         })
     }
 
+    /// Cancel every in-flight preview fetch (ticket 183r): previews serve
+    /// the *displayed* list, and a mailbox switch makes them pointless
+    /// while each holds a backend permit until its child finishes — up to
+    /// all four, with previews uncancellable by `Esc`. Tokens fire so the
+    /// children die at once; entries clear so late results are rejected as
+    /// unknown.
+    pub fn cancel_previews(&mut self) {
+        let ids: Vec<OperationId> = self
+            .entries
+            .values()
+            .filter(|op| matches!(op.kind, OperationKind::Preview(_)))
+            .map(|op| op.id)
+            .collect();
+        for id in ids {
+            if let Some(op) = self.cancel(id) {
+                tracing::debug!(id = %op.id, "preview fetch cancelled (mailbox switched)");
+            }
+        }
+    }
+
     /// Cancel every in-flight save of `local_id` (confirmed discard): the
     /// tokens fire so the backend stops its children, and the operations
     /// are removed so their results can never re-apply.
@@ -1247,5 +1275,29 @@ mod origin_tests {
         assert_eq!(registry.previews_in_flight(), 2);
         // And they do not block the foreground slot:
         assert!(!registry.has_foreground());
+    }
+
+    #[test]
+    fn cancel_previews_kills_only_the_previews() {
+        // Ticket 183r: a mailbox switch must free the permits previews
+        // hold without touching any other in-flight work.
+        let mut registry = OperationRegistry::default();
+        let preview = registry.start_background(OperationKind::Preview(MessageLocator {
+            mailbox: MailboxId(String::from("inbox")),
+            id: crate::domain::MessageId(String::from("m1")),
+            message_id: None,
+        }));
+        let preview_token = registry.cancellation(preview.id).expect("token");
+        let page_op = registry.start(page("inbox", 0));
+        let page_token = registry.cancellation(page_op.id).expect("token");
+        registry.cancel_previews();
+        assert_eq!(registry.previews_in_flight(), 0);
+        assert!(registry.get(preview.id).is_none(), "preview removed");
+        assert!(preview_token.is_cancelled(), "preview token fired");
+        assert!(
+            registry.get(page_op.id).is_some(),
+            "unrelated work untouched"
+        );
+        assert!(!page_token.is_cancelled(), "unrelated token untouched");
     }
 }

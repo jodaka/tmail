@@ -1,6 +1,7 @@
 //! Reducer tests: drafts domain.
 
 use super::*;
+use std::sync::Arc;
 
 #[test]
 fn enter_in_other_mailboxes_still_opens_the_reader() {
@@ -904,7 +905,7 @@ fn ambiguous_send_opens_the_duplicate_warning_and_keeps_the_draft() {
     assert_eq!(
         dialog.retry.as_ref().map(|spec| spec.kind.clone()),
         Some(OperationKind::Send {
-            message: Box::new(message),
+            message: Arc::new(message),
         })
     );
     // The draft is intact and editable again; nothing claimed success.

@@ -278,7 +278,7 @@ fn tab_cycles_the_reader_attachment_cursor_and_wraps() {
             mailbox_id: summary.mailbox_id.clone(),
             summary,
         }));
-    s.open_message = Loadable::Loaded(message);
+    s.open_message = Loadable::Loaded(std::sync::Arc::new(message));
     s.session.focus = Focus::Reader;
 
     assert_eq!(s.reader_focus, None, "nothing focused before Tab");
@@ -379,7 +379,7 @@ fn tab_focus_scrolls_the_focused_link_into_view() {
             mailbox_id: summary.mailbox_id.clone(),
             summary,
         }));
-    s.open_message = Loadable::Loaded(message);
+    s.open_message = Loadable::Loaded(std::sync::Arc::new(message));
     s.session.focus = Focus::Reader;
     s.session.size = (80, 25);
 
@@ -431,4 +431,39 @@ fn attachment_actions_fall_back_to_the_first_chip() {
         panic!("expected SaveAttachment, got {kind:?}");
     };
     assert_eq!(request.part_id, 3, "the first chip is the default target");
+}
+
+/// The cache-store effect shares the state's message allocation (ticket
+/// pa64): the open path moves the fetched message into one `Arc` and
+/// hands the effect a refcount — the body is never deep-copied on its way
+/// to the store.
+#[test]
+fn the_message_store_effect_shares_the_open_allocation() {
+    let mut s = state();
+    s.selection = 1;
+    let (load_id, _) = open_reader(&mut s);
+    // Complete the load by hand: the usual helper settles the store
+    // effects, and this test needs the raw effects to inspect the Arc.
+    let summary = s.open_summary().expect("reader open").clone();
+    let effects = reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id: load_id,
+            outcome: Ok(OperationOutcome::Message(Box::new(mock::mock_message(
+                &summary,
+            )))),
+        }),
+    );
+    let store = effects
+        .iter()
+        .find_map(|e| match &e.kind {
+            OperationKind::CacheMessageStore { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("a store effect for the open message");
+    let loaded = s.open_message.as_loaded().expect("the message is open");
+    assert!(
+        std::sync::Arc::ptr_eq(&store, loaded),
+        "state and the store effect must hold the same allocation"
+    );
 }

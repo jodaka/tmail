@@ -173,3 +173,54 @@ pub fn bracketed_message_id(id: &str) -> String {
         format!("<{bare}>")
     }
 }
+
+/// Header-safe text (ticket 9anh): RFC 2047 encoded-words decoded by the
+/// backend can carry real CR/LF (`=?UTF-8?Q?Hi=0D=0ABcc:=20victim=40…?=`
+/// decodes to a line break), and decoded header text is exactly what reply
+/// seeding and draft reopening feed back into outgoing MIME — where
+/// mail-builder writes subject values without CR/LF rejection, so a raw
+/// break would become a real header boundary.
+///
+/// Runs of CR/LF become a single space (a visible separator, never a header
+/// boundary); every other control character except TAB is dropped. Applied
+/// where decoded header text enters the domain (backend mapping) and again
+/// on the serialization path (defense in depth, e.g. drafts journaled by an
+/// older version).
+pub fn header_safe_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\r' | '\n' if out.ends_with(' ') => {}
+            '\r' | '\n' => out.push(' '),
+            c if c.is_control() && c != '\t' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod header_text_tests {
+    use super::*;
+
+    #[test]
+    fn header_safe_text_removes_header_boundaries() {
+        // The decoded shape of `=?UTF-8?Q?Hi=0D=0ABcc:=20victim=40evil.example?=`
+        // (ticket 9anh): CR/LF collapse to one space, the text stays
+        // searchable in the composer.
+        assert_eq!(
+            header_safe_text("Hi\r\nBcc: victim@evil.example"),
+            "Hi Bcc: victim@evil.example"
+        );
+        // A CRLF run (blank lines) collapses too; real folds with spaces
+        // already carried stay as they are.
+        assert_eq!(header_safe_text("a\r\n\r\nb"), "a b");
+        assert_eq!(header_safe_text("a  b"), "a  b");
+        // Other controls are dropped; TAB (a legal header FWS character)
+        // survives.
+        assert_eq!(header_safe_text("x\u{0}\u{1}\u{7}\u{7f}y\tz"), "xy\tz");
+        // Clean text is untouched.
+        assert_eq!(header_safe_text("Grüße mit emoji 🎉"), "Grüße mit emoji 🎉");
+        assert_eq!(header_safe_text(""), "");
+    }
+}

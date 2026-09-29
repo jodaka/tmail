@@ -421,7 +421,7 @@ fn reader_with_attachments() -> AppState {
             mailbox_id: summary.mailbox_id.clone(),
             summary,
         }));
-    s.open_message = Loadable::Loaded(message);
+    s.open_message = Loadable::Loaded(std::sync::Arc::new(message));
     s.session.focus = Focus::Reader;
     s
 }
@@ -469,7 +469,7 @@ fn reader_with_links_and_attachment() -> AppState {
             mailbox_id: summary.mailbox_id.clone(),
             summary,
         }));
-    s.open_message = Loadable::Loaded(message);
+    s.open_message = Loadable::Loaded(std::sync::Arc::new(message));
     s.session.focus = Focus::Reader;
     s
 }
@@ -491,7 +491,7 @@ fn reader_with_non_web_link() -> AppState {
             mailbox_id: summary.mailbox_id.clone(),
             summary,
         }));
-    s.open_message = Loadable::Loaded(message);
+    s.open_message = Loadable::Loaded(std::sync::Arc::new(message));
     s.session.focus = Focus::Reader;
     s
 }
@@ -753,7 +753,7 @@ fn open_reader_with(s: &mut AppState, message: Message) {
             summary,
         }));
     s.session.focus = Focus::Reader;
-    s.open_message = Loadable::Loaded(message);
+    s.open_message = Loadable::Loaded(std::sync::Arc::new(message));
 }
 
 fn seeded_composer(s: &AppState) -> &crate::app::composer::ComposerState {

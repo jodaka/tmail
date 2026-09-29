@@ -669,6 +669,10 @@ impl MailBackend for HimalayaCliBackend {
         //    §D.1): a crash after this point can only leave duplicates,
         //    never lost text. Journal I/O runs on the blocking pool — the
         //    runtime is single-threaded and must never wait on a disk.
+        //    Concurrent saves of one draft are serialized inside the
+        //    journal itself per draft id (ticket fjz8), and `record` is
+        //    monotonic, so a slower superseded save cannot roll the
+        //    journal back to an older revision.
         //    No writable journal: refuse with the clear request error
         //    before touching the server.
         let journal = self.journal_required()?.clone();
@@ -1133,7 +1137,10 @@ impl HimalayaCliBackend {
             None => builder,
         };
         if !draft.subject.is_empty() {
-            builder = builder.subject(draft.subject.as_str());
+            // Header-safe at the wire too (ticket 9anh): a subject journaled
+            // by an older version, or typed with stray controls, must not
+            // inject a header boundary here.
+            builder = builder.subject(crate::domain::header_safe_text(&draft.subject));
         }
         builder
             .text_body(draft.body.as_str())
@@ -1198,7 +1205,16 @@ impl HimalayaCliBackend {
             let list = MailAddress::List(
                 addresses
                     .iter()
-                    .map(|a| MailAddress::new_address(a.name.clone(), a.email.clone()))
+                    .map(|a| {
+                        // Display names are sanitized like every other
+                        // decoded header text (ticket 9anh defense in
+                        // depth): mail-builder strips CR/LF itself, so the
+                        // remaining controls never reach the wire either.
+                        MailAddress::new_address(
+                            a.name.as_deref().map(crate::domain::header_safe_text),
+                            a.email.clone(),
+                        )
+                    })
                     .collect(),
             );
             builder = match field {
@@ -1208,7 +1224,11 @@ impl HimalayaCliBackend {
             };
         }
         if !message.content.subject.is_empty() {
-            builder = builder.subject(message.content.subject.as_str());
+            // Header-safe at the wire too (ticket 9anh): the subject is the
+            // one header value written by mail-builder without CR/LF
+            // rejection, so decoded reply subjects must never ride through
+            // raw.
+            builder = builder.subject(crate::domain::header_safe_text(&message.content.subject));
         }
         if let Some(in_reply_to) = &message.content.in_reply_to {
             builder = builder.in_reply_to(bare_message_id(in_reply_to));
@@ -1249,6 +1269,17 @@ where
         .map_err(|err| BackendError::Io(std::io::Error::other(err.to_string())))?
 }
 
+/// Upper bound of the `name (1).ext`, `name (2).ext`, … collision walk
+/// in [`write_collision_safe`]: generous enough that a user never hits
+/// it by hand, tight enough that a pathological directory fails with a
+/// clear error instead of spinning.
+const COLLISION_WALK_LIMIT: u32 = 999;
+
+/// Page size of the envelope listings that sweep for stray draft copies
+/// (ADR 0002 §D.6): one IMAP page is enough for the handful of copies a
+/// crash or a slow save can leave behind, and the sweep is best-effort.
+const DRAFT_SWEEP_PAGE_SIZE: usize = 100;
+
 /// Parse one composer address field into library addresses (valid entries
 /// only). Draft fields may hold partially typed input — the composer flags
 /// invalid entries live and send refuses them before starting (Phase 7) —
@@ -1257,7 +1288,14 @@ fn header_addresses(field: &str) -> Option<MailAddress<'static>> {
     let list: Vec<MailAddress<'static>> = crate::domain::address::parse_address_list(field)
         .into_iter()
         .filter_map(Result::ok)
-        .map(|a| MailAddress::new_address(a.name, a.email))
+        .map(|a| {
+            // Display names sanitized like every decoded header text
+            // (ticket 9anh defense in depth).
+            MailAddress::new_address(
+                a.name.as_deref().map(crate::domain::header_safe_text),
+                a.email,
+            )
+        })
         .collect();
     (!list.is_empty()).then_some(MailAddress::List(list))
 }
@@ -1386,7 +1424,7 @@ fn write_collision_safe(dir: &Path, name: &str, bytes: &[u8]) -> BackendResult<P
         return Ok(saved);
     }
     let (stem, ext) = split_stem_ext(name);
-    for index in 1..=999u32 {
+    for index in 1..=COLLISION_WALK_LIMIT {
         let candidate = dir.join(format!("{stem} ({index}){ext}"));
         match write_new(&candidate) {
             Ok(saved) => return Ok(saved),
@@ -1400,7 +1438,7 @@ fn write_collision_safe(dir: &Path, name: &str, bytes: &[u8]) -> BackendResult<P
         }
     }
     Err(BackendError::File(format!(
-        "`{}` is taken and no free numbered name was found (tried 999)",
+        "`{}` is taken and no free numbered name was found (tried {COLLISION_WALK_LIMIT})",
         dir.join(name).display()
     )))
 }
@@ -1675,7 +1713,7 @@ async fn list_envelope_ids_with_message_id(
         cli.account.as_deref(),
         mailbox,
         1,
-        100,
+        DRAFT_SWEEP_PAGE_SIZE,
     );
     let Ok(output) = process::run(&cli.program, &argv, cancellation).await else {
         return Vec::new();
@@ -2260,6 +2298,71 @@ mod attachment_mime_tests {
         let text = String::from_utf8_lossy(&wire);
         assert!(!text.contains("multipart"), "no attachment scaffolding");
         assert!(text.contains("see attached"));
+    }
+
+    /// Ticket 9anh regression: a decoded subject carrying CR/LF must never
+    /// become a header boundary on the wire — neither in drafts nor in
+    /// outgoing mail. Verified against the same parser Himalaya embeds: the
+    /// serialized bytes must hold exactly one subject whose text is the
+    /// sanitized line, and no injected recipient header.
+    #[tokio::test]
+    async fn outbound_subject_cannot_inject_headers() {
+        let message = OutboundMessage::from_fields(
+            "ada@example.org",
+            "",
+            "",
+            OutgoingContent {
+                subject: String::from("Hi\r\nBcc: victim@evil.example"),
+                body: String::from("hi"),
+                in_reply_to: None,
+                references: None,
+            },
+            None,
+        )
+        .expect("valid recipients");
+        let wire = backend().serialize_outbound(&message).await.expect("ok");
+        assert_wire_has_no_injected_bcc(&wire);
+    }
+
+    #[test]
+    fn draft_subject_cannot_inject_headers() {
+        let draft = DraftSnapshot {
+            local_id: crate::domain::DraftId(String::from("local-crlf")),
+            message_id: Some(String::from("<local-crlf@tmail.local>")),
+            in_reply_to: None,
+            references: None,
+            remote_id: None,
+            to: String::from("dest@example.com"),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: String::from("Hi\r\nBcc: victim@evil.example"),
+            body: String::from("hi"),
+            attachments: Vec::new(),
+            revision: 1,
+        };
+        let wire = backend().serialize_draft(&draft).expect("ok");
+        assert_wire_has_no_injected_bcc(&wire);
+    }
+
+    fn assert_wire_has_no_injected_bcc(wire: &[u8]) {
+        let text = String::from_utf8_lossy(wire);
+        // mail-builder 0.5.0 writes subject values without CR/LF rejection
+        // (verified against the compiled crate), so the boundary would be
+        // a real `Bcc: victim@evil.example` header line if the value rode
+        // through raw. The visible text stays inside the subject header.
+        let bcc_injection = text.lines().any(|line| line == "Bcc: victim@evil.example");
+        assert!(
+            !bcc_injection,
+            "subject injected a header boundary:\n{text}"
+        );
+        let parsed = mail_parser::MessageParser::default()
+            .parse(wire)
+            .expect("wire bytes are parseable MIME");
+        assert_eq!(
+            parsed.subject().unwrap_or_default(),
+            "Hi Bcc: victim@evil.example",
+            "the subject text survived as one header, spaces where CR/LF was"
+        );
     }
 }
 

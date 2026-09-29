@@ -1,7 +1,13 @@
 //! Text helpers: width-aware, panic-free truncation (plan §13: never slice
 //! strings at invalid byte boundaries; Unicode-safe everywhere).
+//!
+//! Width measurement is allocation-free (issue sqtx): per-character width
+//! comes from [`UnicodeWidthChar::width`] — control characters measure as
+//! zero, matching the string variant — never from a per-character
+//! `to_string()`, so the list render path (these helpers run per row per
+//! frame) does not churn the allocator.
 
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Truncate to `max_width` display columns, appending `…` when truncated.
 pub fn truncate(text: &str, max_width: usize) -> String {
@@ -16,7 +22,7 @@ pub fn truncate(text: &str, max_width: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
     for ch in text.chars() {
-        let w = ch.to_string().width();
+        let w = ch.width().unwrap_or(0);
         if used + w > budget {
             break;
         }
@@ -38,7 +44,7 @@ pub fn clip(text: &str, max_width: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
     for ch in text.chars() {
-        let w = ch.to_string().width();
+        let w = ch.width().unwrap_or(0);
         if used + w > max_width {
             break;
         }
@@ -48,11 +54,18 @@ pub fn clip(text: &str, max_width: usize) -> String {
     out
 }
 
-/// Pad/truncate to an exact display width (left-aligned).
+/// Pad/truncate to an exact display width (left-aligned). One
+/// allocation: the clipped text and the padding land in the same
+/// buffer (issue sqtx).
 pub fn fit_left(text: &str, width: usize) -> String {
     let t = clip(text, width);
     let pad = width.saturating_sub(t.width());
-    format!("{t}{}", " ".repeat(pad))
+    let mut out = String::with_capacity(t.len() + pad);
+    out.push_str(&t);
+    for _ in 0..pad {
+        out.push(' ');
+    }
+    out
 }
 
 /// Word-wrap `text` to `width` display columns, preserving explicit
@@ -82,7 +95,7 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
                 let mut chunk = String::new();
                 let mut used = 0;
                 for ch in word.chars() {
-                    let w = ch.to_string().width();
+                    let w = ch.width().unwrap_or(0);
                     if used + w > width {
                         out.push(std::mem::take(&mut chunk));
                         used = 0;

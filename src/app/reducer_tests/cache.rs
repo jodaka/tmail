@@ -557,6 +557,154 @@ fn preview_fetches_roll_within_the_window() {
     );
 }
 
+/// The per-page budget caps total full-message preview fetches for one
+/// displayed page (ticket j0ca): beyond the cap the remaining rows keep
+/// no snippet — a preview is decorative, not required data. Each started
+/// fetch completes immediately, so the rolling window never blocks and
+/// the total budget is what stops the fetches.
+#[test]
+fn preview_fetches_are_capped_per_page() {
+    let mut s = state();
+    // A page with more rows than the per-page budget (12).
+    let mut page = crate::domain::Page {
+        items: Vec::new(),
+        offset: 0,
+        limit: 20,
+        total: Some(16),
+    };
+    for i in 0..16 {
+        let mut summary = mock::mock_page(&inbox_id(), 0, 1).items.remove(0);
+        summary.id = MessageId(format!("p{i}"));
+        summary.snippet = None;
+        page.items.push(summary);
+    }
+    let req = PageRequest {
+        mailbox_id: inbox_id(),
+        offset: 0,
+        limit: 20,
+    };
+    let id = s.session.operations.start(OperationKind::LoadPage(req)).id;
+    reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Page(page.clone())),
+        }),
+    );
+
+    // Drive misses one row at a time, completing each started fetch
+    // eagerly so the rolling window never becomes the limiter.
+    let mut started = 0;
+    for row in s.messages.items.clone() {
+        let read = s
+            .session
+            .operations
+            .start_background(OperationKind::CachePreviewLoad {
+                locator: row.into_locator(),
+            });
+        for effect in complete_cache_miss(&mut s, read.id) {
+            if let OperationKind::Preview(locator) = &effect.kind {
+                started += 1;
+                let summary = s
+                    .messages
+                    .items
+                    .iter()
+                    .find(|m| m.id == locator.id)
+                    .expect("row listed")
+                    .clone();
+                complete_preview_ok(&mut s, effect.id, &summary);
+            }
+        }
+    }
+    assert_eq!(
+        started, 12,
+        "exactly the per-page budget of fetches started"
+    );
+    assert_eq!(
+        s.caches.preview_fetches_for_page, 12,
+        "the page budget is spent"
+    );
+    assert_eq!(
+        s.caches.preview_fetches_for_session, 12,
+        "the session budget counts the same fetches"
+    );
+}
+
+/// The per-page budget resets when a new page is applied (ticket j0ca):
+/// a fresh page fetches its own rows again, while the session budget
+/// keeps counting.
+#[test]
+fn a_new_page_refills_the_per_page_budget() {
+    let mut s = state();
+    s.caches.preview_fetches_for_page = crate::app::state::MAX_PREVIEW_FETCHES_PER_PAGE;
+    // A genuinely different page (fresh ids): an identical page compares
+    // equal and changes nothing (ticket sazy).
+    let mut fresh = mock::mock_page(&inbox_id(), 0, mock::PAGE_SIZE);
+    for (i, item) in fresh.items.iter_mut().enumerate() {
+        item.id = MessageId(format!("q{i}"));
+        item.snippet = None;
+    }
+    let req = PageRequest {
+        mailbox_id: inbox_id(),
+        offset: 0,
+        limit: mock::PAGE_SIZE,
+    };
+    let id = s.session.operations.start(OperationKind::LoadPage(req)).id;
+    reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Page(fresh)),
+        }),
+    );
+    assert_eq!(
+        s.caches.preview_fetches_for_page, 0,
+        "the new page's budget is fresh"
+    );
+    // A cache miss on the new page's rows starts fetching again…
+    let row = s.messages.items[0].clone();
+    let read = s
+        .session
+        .operations
+        .start_background(OperationKind::CachePreviewLoad {
+            locator: row.into_locator(),
+        });
+    let effects = complete_cache_miss(&mut s, read.id);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e.kind, OperationKind::Preview(_))),
+        "a fresh page starts fetching again, got {effects:?}"
+    );
+    assert_eq!(
+        s.caches.preview_fetches_for_session, 1,
+        "session still counts"
+    );
+}
+
+/// The session budget, once exhausted, stops preview fetches for the
+/// rest of the session (ticket j0ca) even on fresh pages.
+#[test]
+fn an_exhausted_session_budget_stops_preview_fetches() {
+    let mut s = state();
+    s.caches.preview_fetches_for_session = crate::app::state::MAX_PREVIEW_FETCHES_PER_SESSION;
+    let row = s.messages.items[0].clone();
+    let read = s
+        .session
+        .operations
+        .start_background(OperationKind::CachePreviewLoad {
+            locator: row.into_locator(),
+        });
+    let effects = complete_cache_miss(&mut s, read.id);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e.kind, OperationKind::Preview(_))),
+        "no fetch starts once the session budget is spent, got {effects:?}"
+    );
+    assert_eq!(s.caches.preview_fetches_for_session, 64);
+}
+
 // ── Mutation invalidation (ticket kkaq) ──────────────────────────────────
 
 /// A confirmed flag change re-stores the corrected visible page, so a
@@ -596,6 +744,52 @@ fn a_confirmed_flag_change_stores_the_corrected_page() {
         .expect("stored page lists the row");
     assert!(row.is_starred, "the stored copy carries the confirmed flag");
     assert!(s.messages.items[0].is_starred);
+}
+
+/// A confirmed flag change whose rows are absent from the visible page
+/// flips nothing, so the unchanged page is not re-stored (issue cbkz):
+/// the disk copy already matches what the page holds.
+#[test]
+fn an_absent_row_flag_change_stores_nothing() {
+    let mut s = state();
+    let kind = OperationKind::SetRead {
+        locator: MessageLocator {
+            mailbox: inbox_id(),
+            id: MessageId(String::from("absent-from-page")),
+            message_id: None,
+        },
+        read: true,
+    };
+    let id = s.session.operations.start(kind).id;
+    let effects = complete_done(&mut s, id);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e.kind, OperationKind::CacheListStore { .. })),
+        "no flip, no re-store, got {effects:?}"
+    );
+}
+
+/// A confirmed flag change that only re-asserts the target state on the
+/// rows it matches flips nothing either — the re-store is skipped the
+/// same way (issue cbkz).
+#[test]
+fn an_already_in_target_flag_change_stores_nothing() {
+    let mut s = state();
+    s.selection = 3; // m4: already read in the mock seed.
+    let locator = s.selected_message().unwrap().into_locator();
+    let kind = OperationKind::SetRead {
+        locator,
+        read: true,
+    };
+    let id = s.session.operations.start(kind).id;
+    let effects = complete_done(&mut s, id);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e.kind, OperationKind::CacheListStore { .. })),
+        "a no-op flag change must not re-store the unchanged page, got {effects:?}"
+    );
 }
 
 /// A confirmed move evicts the cached page for the visible identity: the
@@ -688,4 +882,53 @@ fn session_previews_are_bounded() {
     assert!(s.caches.preview_requested.is_empty());
     // …and the inserted snippet lands in the fresh map.
     assert_eq!(s.caches.previews.len(), 1);
+}
+
+/// A mailbox switch cancels the old mailbox's outstanding preview fetches
+/// (ticket 183r): they are useless after the switch, each held a backend
+/// permit, and previews are uncancellable by `Esc` — the switch is the
+/// moment they must die. Unrelated in-flight work is untouched.
+#[test]
+fn a_mailbox_switch_cancels_outstanding_previews() {
+    let mut s = state();
+    let preview1 = s
+        .session
+        .operations
+        .start_background(OperationKind::Preview(crate::domain::MessageLocator {
+            mailbox: inbox_id(),
+            id: MessageId(String::from("m1")),
+            message_id: None,
+        }));
+    let preview2 = s
+        .session
+        .operations
+        .start_background(OperationKind::Preview(crate::domain::MessageLocator {
+            mailbox: inbox_id(),
+            id: MessageId(String::from("m2")),
+            message_id: None,
+        }));
+    let page_id = s
+        .session
+        .operations
+        .start(OperationKind::LoadPage(PageRequest {
+            mailbox_id: inbox_id(),
+            offset: 0,
+            limit: 20,
+        }))
+        .id;
+    assert_eq!(s.session.operations.previews_in_flight(), 2);
+
+    // Switch to Sent (select, then activate — the sidebar's Enter).
+    reduce(&mut s, Action::Click(ClickTarget::Mailbox(1)));
+    let effects = reduce(&mut s, Action::Click(ClickTarget::Mailbox(1)));
+    // The switch still starts its own cold-context work…
+    let (cache_id, mailbox, ..) = expect_cache_list_load(&effects);
+    assert_eq!(mailbox.0, "sent");
+    complete_cache_miss(&mut s, cache_id);
+    // …the previews are gone and their tokens fired…
+    assert_eq!(s.session.operations.previews_in_flight(), 0);
+    assert!(s.session.operations.get(preview1.id).is_none());
+    assert!(s.session.operations.get(preview2.id).is_none());
+    // …and unrelated work is untouched.
+    assert!(s.session.operations.get(page_id).is_some());
 }

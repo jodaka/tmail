@@ -76,20 +76,13 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
     // The hint sits in the label slot one row below the content rect —
     // separated from the entries by the rect's last (blank) row, adjacent
     // to the bottom border.
-    let hint = Rect {
-        x: inner.x,
-        y: inner.y + inner.height,
-        width: inner.width,
-        height: 1,
-    };
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            // Short on purpose: the popup clips a long hint (the config
-            // pointer does not fit at the dialog's width).
-            "↑↓ scroll · Esc or ? closes",
-            Style::new().fg(theme.dim),
-        )),
-        hint,
+    chrome::render_hint(
+        frame,
+        chrome::hint_slot_below_content(inner),
+        // Short on purpose: the popup clips a long hint (the config
+        // pointer does not fit at the dialog's width).
+        "↑↓ scroll · Esc or ? closes",
+        theme,
     );
 }
 

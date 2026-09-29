@@ -27,6 +27,19 @@ use crate::ui::layout::LayoutMode;
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
+/// Column anatomy of one message row (mockup `list.html` grid): the
+/// marker and icon columns (`MARKER_ICON_COLUMNS`), a `CELL_GAP` before
+/// and after the who/subject cell, and the fixed-width date cell — the
+/// sum equals the row width, so the date lands on the right edge.
+const MARKER_ICON_COLUMNS: usize = 3;
+const CELL_GAP: usize = 2;
+const DATE_CELL_W: usize = 8;
+/// Sender (or recipient, on Drafts rows) cell width per view mode.
+const WHO_COMPACT_W: usize = 14;
+const WHO_FULL_W: usize = 18;
+/// The subject cell never drops below this, even on narrow terminals.
+const SUBJECT_MIN_W: usize = 10;
+
 /// Width of the 8-column date cell minus the top visible row's rendered
 /// date text — the header's range label aligns with what is actually
 /// drawn beneath it. The 5-column common outputs (`HH:MM`, `Sep 1`) end
@@ -34,7 +47,6 @@ use crate::ui::theme::Theme;
 /// other-year mail ends 4 short, and the label follows instead of
 /// assuming the old constant (review s843).
 fn date_text_right_inset(state: &AppState, now: chrono::DateTime<chrono::FixedOffset>) -> usize {
-    const DATE_CELL_W: usize = 8;
     let Some(timestamp) = state
         .messages
         .items
@@ -69,10 +81,12 @@ pub fn render(
     // Row geometry follows the view mode (`[tmail].view_mode`): compact
     // draws one line per message; comfortable splits consecutive messages
     // with a faint horizontal separator, so each message costs two lines
-    // and fewer fit — the same math as `layout::messages_visible`, which
-    // the reducer uses for scroll and page sizing.
+    // and fewer fit — the row count comes from the same
+    // `layout::rows_visible_in` the reducer's `messages_visible` builds
+    // on, so the drawn window and the reducer's scroll/page math cannot
+    // disagree (issue p5cn).
     let row_height = state.settings.view_mode.row_height();
-    let visible = rows.height as usize / row_height;
+    let visible = crate::ui::layout::rows_visible_in(rows, state.settings.view_mode);
     let scrolling = state.messages.items.len() > visible;
     let row_width = if scrolling {
         rows.width.saturating_sub(1)
@@ -368,8 +382,10 @@ fn message_spans<'a>(
     // summing to the full row width so the date lands on the right edge
     // (mockup grid). `who` is the sender, or the recipient on Drafts rows.
     let date = dates::format_relative(now, message.timestamp);
-    let who_w = if compact { 14 } else { 18 };
-    let subject_w = width.saturating_sub(3 + who_w + 2 + 2 + 8).max(10);
+    let who_w = if compact { WHO_COMPACT_W } else { WHO_FULL_W };
+    let subject_w = width
+        .saturating_sub(MARKER_ICON_COLUMNS + who_w + CELL_GAP + CELL_GAP + DATE_CELL_W)
+        .max(SUBJECT_MIN_W);
     // The paperclip rides one space left of the date (ticket r84f, user
     // amend): on attachment rows the title/body cell gives up one column
     // and the clip (2 cells, one char) plus the separator space replace
@@ -402,11 +418,12 @@ fn message_spans<'a>(
 
     // Icon column (ticket cvc4): a bulk-selected row shows the filled dot
     // whatever its star state; otherwise the star, or a blank. The cell is
-    // always two columns — symbol + trailing space. On the selected row the
-    // dot rides the base style: like-colored fg/bg would vanish.
-    let (symbol, style) = if bulk_selected {
+    // always two columns — symbol + trailing space, baked into the static
+    // literals (issue sqtx: no per-row format allocation). On the selected
+    // row the dot rides the base style: like-colored fg/bg would vanish.
+    let (icon, style) = if bulk_selected {
         (
-            "●",
+            "● ",
             if selected {
                 base
             } else {
@@ -414,11 +431,11 @@ fn message_spans<'a>(
             },
         )
     } else if message.is_starred {
-        ("*", theme.star().bg(bg))
+        ("* ", theme.star().bg(bg))
     } else {
-        (" ", base)
+        ("  ", base)
     };
-    let icon = Span::styled(format!("{symbol} "), style);
+    let icon = Span::styled(icon, style);
     // Bar in the marker column (mockup `.folder.active` bar): marks the
     // focused row while the list holds focus. marker_bar over the marker fill.
     let marker = if selected && focused {
@@ -479,8 +496,9 @@ fn message_spans<'a>(
     spans.push(Span::styled("  ", base));
     if full {
         let sep = " — ";
+        let subject_cols = message.subject.width();
         let subject_cell = text::truncate(&message.subject, cell_w);
-        let subject_alone = message.subject.width() > cell_w;
+        let subject_alone = subject_cols > cell_w;
         let preview_cell = if subject_alone {
             String::new()
         } else {
@@ -489,7 +507,7 @@ fn message_spans<'a>(
                 .as_ref()
                 .and_then(|snippet| {
                     let budget = cell_w
-                        .saturating_sub(message.subject.width())
+                        .saturating_sub(subject_cols)
                         .saturating_sub(sep.width());
                     (budget > 0).then(|| format!("{sep}{}", text::truncate(snippet, budget)))
                 })
@@ -523,7 +541,7 @@ fn message_spans<'a>(
     } else {
         who_style.bg(bg)
     };
-    spans.push(Span::styled(text::fit_left(&date, 8), date_style));
+    spans.push(Span::styled(text::fit_left(&date, DATE_CELL_W), date_style));
     spans
 }
 

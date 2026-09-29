@@ -15,6 +15,65 @@ use unicode_width::UnicodeWidthChar;
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
+/// The dialog hint slot, picker-family anatomy: one row below the list
+/// rows — the content rect's last (blank) row separates rows from the
+/// hint, which sits adjacent to the bottom border. Shared by the theme
+/// picker, the account switcher, and the mailboxes popup (issue 36gy).
+pub fn hint_slot_below_rows(inner: Rect, rows: u16) -> Rect {
+    Rect {
+        x: inner.x,
+        y: inner.y + rows + 1,
+        width: inner.width,
+        height: 1,
+    }
+}
+
+/// The dialog hint slot, plain-dialog anatomy: one row below the content
+/// rect — the rect's last (blank) row separates content from the hint.
+/// Shared by the help popup, the confirm dialog, and the attachment
+/// chooser (issue 36gy).
+pub fn hint_slot_below_content(inner: Rect) -> Rect {
+    Rect {
+        x: inner.x,
+        y: inner.y + inner.height,
+        width: inner.width,
+        height: 1,
+    }
+}
+
+/// The shared dialog hint line: dim, clipped to the slot. Every modal
+/// ends with exactly this look (issue 36gy: the render was re-implemented
+/// per component).
+pub fn render_hint(frame: &mut Frame<'_>, slot: Rect, hint: &str, theme: &Theme) {
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            text::clip(hint, slot.width as usize),
+            Style::new().fg(theme.dim),
+        )),
+        slot,
+    );
+}
+
+/// The cursor-row highlight of the picker family (theme picker, account
+/// switcher): a marker-bar column over the `marker` fill, bold; plain
+/// rows carry no bar on the page background. Deliberately the same look
+/// as the message list's focused row — the message list, the sidebar,
+/// and the wizard discovery rows tie the bar to different conditions
+/// (list focus, cursor-or-active, accent fill) and keep their own blocks.
+pub fn row_highlight(selected: bool, theme: &Theme) -> (&'static str, Style) {
+    if selected {
+        (
+            "▎",
+            Style::new()
+                .fg(theme.marker_bar)
+                .bg(theme.marker)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (" ", Style::new().fg(theme.text_soft).bg(theme.background))
+    }
+}
+
 /// One side of a hairline rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HairlineSide {

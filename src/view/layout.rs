@@ -109,19 +109,26 @@ fn list_rect(size: (u16, u16)) -> Option<(Rect, LayoutMode)> {
     Some((list, mode))
 }
 
+/// How many message rows fit in a list rows rectangle: the one shared
+/// divisor for the drawn row window and the reducer's page/scroll math
+/// (issue p5cn — the "same math" is now the same function, not a
+/// comment). Comfortable view mode interleaves a faint separator under
+/// every row, so each message costs [`ViewMode::row_height`] lines.
+pub fn rows_visible_in(rows: Rect, view_mode: ViewMode) -> usize {
+    rows.height as usize / view_mode.row_height()
+}
+
 /// Number of messages the list area shows for a terminal `size` under a
 /// view mode, computed with the exact same layout functions the renderer
 /// uses. The reducer consumes this to keep the selection on screen across
 /// movement, page loads, and resize (Phase 2 acceptance) and to size
 /// auto-sized pages (ticket kjfq); `0` means the list is not drawn at all.
-/// Comfortable view mode interleaves a faint separator under every row, so
-/// each message costs [`ViewMode::row_height`] lines and fewer fit.
 pub fn messages_visible(size: (u16, u16), view_mode: ViewMode) -> usize {
     let Some((list, _)) = list_rect(size) else {
         return 0;
     };
     let (_, rows) = split_list(list);
-    rows.height as usize / view_mode.row_height()
+    rows_visible_in(rows, view_mode)
 }
 
 /// Height of the reader viewport (the whole body area: the reader document

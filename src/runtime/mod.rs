@@ -4,5 +4,6 @@
 pub mod editor;
 pub mod events;
 pub mod logging;
+pub mod signals;
 pub mod tasks;
 pub mod terminal;

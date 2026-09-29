@@ -15,6 +15,22 @@ use crate::ui::chrome::{self, HairlineSide};
 use crate::ui::text;
 use crate::ui::theme::Theme;
 
+/// Search-field geometry (mockup `list.html` topbar): the field starts
+/// after the brand column and takes what is left of the right margin,
+/// clamped to a readable minimum and a mockup maximum. The absolute `x`
+/// and the relative width budget are offset by the same start column, so
+/// they never double-count the screen origin.
+const SEARCH_START_COLUMN: u16 = 24;
+const SEARCH_MIN_WIDTH: u16 = 12;
+const SEARCH_MAX_WIDTH: u16 = 60;
+/// Right margin of the unclamped width budget (start column + this =
+/// the 28 shaved before the min/max clamp).
+const SEARCH_WIDTH_MARGIN: u16 = 4;
+/// Right margin between the clamped field and the clock block. Wider
+/// than [`SEARCH_WIDTH_MARGIN`]; kept as drawn (review pbcn flagged the
+/// mismatch, the mockup look wins until redone).
+const SEARCH_RIGHT_MARGIN: u16 = 18;
+
 /// Render the topbar into `area` (height 4: 3 content rows + hairline).
 #[allow(clippy::too_many_arguments)]
 pub fn render(
@@ -106,12 +122,18 @@ pub fn render(
     // Search field: bordered well, `/` prompt, query or placeholder.
     // `search_x` is absolute; the width budget is computed relative to
     // `area` (both offsets must not double-count the screen origin).
-    let search_width = area.width.saturating_sub(28).clamp(12, 60);
-    let search_x = area.x.saturating_add(24);
+    let search_width = area
+        .width
+        .saturating_sub(SEARCH_START_COLUMN + SEARCH_WIDTH_MARGIN)
+        .clamp(SEARCH_MIN_WIDTH, SEARCH_MAX_WIDTH);
+    let search_x = area.x.saturating_add(SEARCH_START_COLUMN);
     let search_area = Rect {
         x: search_x,
         y: area.y,
-        width: search_width.min(area.width.saturating_sub(24 + 18)),
+        width: search_width.min(
+            area.width
+                .saturating_sub(SEARCH_START_COLUMN + SEARCH_RIGHT_MARGIN),
+        ),
         height: 3,
     };
     if search_area.width >= 4 {

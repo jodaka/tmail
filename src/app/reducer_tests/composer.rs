@@ -1,6 +1,7 @@
 //! Reducer tests: composer domain.
 
 use super::*;
+use std::sync::Arc;
 
 #[test]
 fn compose_opens_the_composer_over_the_mailbox_route() {
@@ -328,7 +329,7 @@ fn draft_save_failure_opens_retry_modal_and_retains_content() {
         failure(
             id,
             &OperationKind::SaveDraft {
-                draft: Box::new(snapshot.clone()),
+                draft: Arc::new(snapshot.clone()),
             },
             "imap down",
         ),
@@ -370,7 +371,7 @@ fn dismiss_after_failure_keeps_the_draft_awaiting_retry_or_edit() {
         failure(
             id,
             &OperationKind::SaveDraft {
-                draft: Box::new(snapshot),
+                draft: Arc::new(snapshot),
             },
             "imap down",
         ),
@@ -418,7 +419,7 @@ fn stale_failure_does_not_cancel_a_scheduled_save() {
         failure(
             id1,
             &OperationKind::SaveDraft {
-                draft: Box::new(snap1.clone()),
+                draft: Arc::new(snap1.clone()),
             },
             "boom",
         ),

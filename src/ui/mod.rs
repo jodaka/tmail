@@ -68,7 +68,7 @@ pub fn render(
     // The loader animation reads elapsed wall clock (a
     // `DateTime::timestamp_millis()`), so the scanner phase does not
     // lag behind the tick cadence.
-    let loader_millis = ctx.now.timestamp_millis().max(0) as u64;
+    let loader_millis = components::spinner::millis_of(ctx.now);
     components::topbar::render(frame, topbar, state, theme, &ctx.clock, hits);
     let (sidebar, list) = layout::split_body(mode, body);
     if let Some(sidebar) = sidebar {

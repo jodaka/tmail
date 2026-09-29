@@ -1,5 +1,7 @@
 //! External editor (plan §14, Phase 11) and composer lifecycle: open,
 //! park, secure, leave, autosave, and the crash-safe draft plumbing.
+use std::sync::Arc;
+
 use super::navigation::{close_reader, keep_mailbox_visible, request_page};
 use super::search_refresh::leave_search;
 use crate::app::action::SearchEdit;
@@ -228,7 +230,7 @@ pub(crate) fn autosave_tick(
     );
     let snapshot = composer.draft.start_save(now);
     vec![state.session.operations.start(OperationKind::SaveDraft {
-        draft: Box::new(snapshot),
+        draft: Arc::new(snapshot),
     })]
 }
 
@@ -243,7 +245,7 @@ pub(crate) fn draft_save_effect(state: &mut AppState) -> Option<Effect> {
     }
     let snapshot = composer.draft.start_save(now);
     Some(state.session.operations.start(OperationKind::SaveDraft {
-        draft: Box::new(snapshot),
+        draft: Arc::new(snapshot),
     }))
 }
 
@@ -285,6 +287,10 @@ pub(crate) fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Ve
     state.selected.clear();
     // Rows of the previous mailbox must not linger while the new one loads.
     state.messages = Page::empty(state.messages.limit);
+    // Ticket 183r: the old mailbox's preview fetches are pointless now and
+    // each holds a backend permit until its child finishes — kill them so
+    // the new mailbox's page load (and everything else) gets the pool.
+    state.session.operations.cancel_previews();
     request_page(state, 0)
 }
 

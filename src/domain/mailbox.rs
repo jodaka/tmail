@@ -37,12 +37,16 @@ pub struct TestedMailbox {
     pub role: Option<MailboxRole>,
 }
 
+/// Gmail's reserved IMAP prefix for its own system folders (Starred,
+/// Important, …): user labels sit at the top level and never carry it.
+pub const GMAIL_RESERVED_PREFIX: &str = "[Gmail]/";
+
 impl Mailbox {
     /// True when this mailbox is a user label rather than a system folder:
     /// no resolved role, and not under Gmail's reserved `[Gmail]/` IMAP
     /// prefix (Gmail keeps only its own folders there — Starred, Important,
     /// … — while user labels sit at the top level, possibly nested with `/`).
     pub fn is_label(&self) -> bool {
-        self.role.is_none() && !self.id.0.starts_with("[Gmail]/")
+        self.role.is_none() && !self.id.0.starts_with(GMAIL_RESERVED_PREFIX)
     }
 }

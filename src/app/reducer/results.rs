@@ -1,6 +1,8 @@
 //! Backend results (plan §11): `backend_completed` dispatch and every
 //! completion handler. Results apply only while their operation is still
 //! registered; stale, cancelled, or superseded results never win.
+use std::sync::Arc;
+
 use super::actions::attachment_saved;
 use super::composer_flow::draft_save_effect;
 use super::message_results::{
@@ -326,6 +328,10 @@ fn apply_visible_page(
 ) -> Vec<Effect> {
     state.session.last_background_error = None;
     let mut effects = Vec::new();
+    // Shared, not copied (issue cbkz): the page is wrapped once and the
+    // store effect takes the same allocation by reference count; state
+    // receives its own clone and stays row-mutable.
+    let page = Arc::new(page);
     if origin == OperationOrigin::Background {
         effects.extend(notify_new_messages(state, &page));
     }
@@ -333,8 +339,8 @@ fn apply_visible_page(
     // is the page that was last applied (every applied page is stored),
     // so skipping the write saves a serialize + write on every timer
     // refresh whose data has not moved (ticket kkaq).
-    let unchanged = page == state.messages;
-    effects.extend(apply_page(state, page));
+    let unchanged = *page == state.messages;
+    effects.extend(apply_page(state, (*page).clone()));
     if !unchanged {
         effects.push(
             state
@@ -343,7 +349,7 @@ fn apply_visible_page(
                 .start_background(OperationKind::CacheListStore {
                     mailbox: mailbox.clone(),
                     query,
-                    page: Box::new(state.messages.clone()),
+                    page,
                 }),
         );
     }
@@ -584,8 +590,14 @@ pub(crate) fn complete_flag(
                 }
                 FlagChange::Starred(_) => None,
             };
+            // Only a page row that actually flipped changes the payload
+            // the on-disk cache holds, so only then is a re-store worth
+            // an effect (issue cbkz): a confirmed change whose rows are
+            // absent from the visible page — or already in the target
+            // state — would re-store a byte-identical page.
+            let mut page_changed = false;
             for locator in locators {
-                apply_flag(state, locator, change);
+                page_changed |= apply_flag(state, locator, change);
             }
             let mut effects = Vec::new();
             if let Some(deltas) = deltas {
@@ -593,12 +605,12 @@ pub(crate) fn complete_flag(
                     state.adjust_mailbox_counts(&mailbox_id, delta, 0);
                 }
             }
-            if let Some((mailbox, query)) = visible_list_identity(state) {
+            if page_changed && let Some((mailbox, query)) = visible_list_identity(state) {
                 effects.push(state.session.operations.start_background(
                     OperationKind::CacheListStore {
                         mailbox,
                         query,
-                        page: Box::new(state.messages.clone()),
+                        page: Arc::new(state.messages.clone()),
                     },
                 ));
             }
@@ -736,7 +748,7 @@ pub(crate) fn complete_delete_draft(
 pub(crate) fn complete_send(
     state: &mut AppState,
     result: OperationResult,
-    message: Box<crate::domain::OutboundMessage>,
+    message: Arc<crate::domain::OutboundMessage>,
 ) -> Vec<Effect> {
     let id = result.id;
     match result.outcome {

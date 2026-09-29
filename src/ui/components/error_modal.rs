@@ -192,13 +192,7 @@ pub fn render(
     // separated from them by the content rect's last (blank) row,
     // adjacent to the bottom border.
     let hint = "↑↓ scroll · Tab switch · ↵ confirm · Esc dismiss";
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            crate::ui::text::clip(hint, inner_w as usize),
-            Style::new().fg(theme.dim),
-        ))),
-        row(area.y + area.height, 1),
-    );
+    chrome::render_hint(frame, row(area.y + area.height, 1), hint, theme);
 }
 
 #[cfg(test)]

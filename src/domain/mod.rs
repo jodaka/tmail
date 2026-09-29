@@ -29,7 +29,7 @@ pub use draft::{
 pub use mailbox::{Mailbox, MailboxId, MailboxRole, TestedMailbox};
 pub use message::{
     Attachment, AttachmentRequest, Message, MessageHeaders, MessageId, MessageLocator,
-    MessageSummary, bare_message_id, bracketed_message_id,
+    MessageSummary, bare_message_id, bracketed_message_id, header_safe_text,
 };
 pub use page::{Page, PageRequest, SearchRequest};
 pub use reply::{ReplyKind, Seed, seed_forward, seed_reply};

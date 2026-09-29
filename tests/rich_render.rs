@@ -104,7 +104,7 @@ fn reader_state(message: Message) -> AppState {
         mailbox_id: message.mailbox_id.clone(),
         summary,
     }));
-    state.open_message = Loadable::Loaded(message);
+    state.open_message = Loadable::Loaded(std::sync::Arc::new(message));
     state
 }
 

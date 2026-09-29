@@ -236,11 +236,15 @@ pub fn render_blocks(frame: &mut Frame<'_>, area: Rect, base: Color, bg: Color, 
 /// Wall-clock milliseconds from the reducer's tick clock: what the pane
 /// loaders animate against.
 pub fn pane_millis(state: &AppState) -> u64 {
-    state
-        .session
-        .clock
-        .map(|now| now.timestamp_millis().max(0) as u64)
-        .unwrap_or(0)
+    state.session.clock.map(millis_of).unwrap_or(0)
+}
+
+/// Wall-clock milliseconds of one tick instant, clamped at zero so a
+/// pre-epoch clock can never make the phase arithmetic underflow. The
+/// one shared computation for every loader (issue pbcn: the topbar and
+/// the pane loaders used to duplicate it).
+pub fn millis_of(now: chrono::DateTime<chrono::FixedOffset>) -> u64 {
+    now.timestamp_millis().max(0) as u64
 }
 
 /// Render the loader centered in `area` (ticket m3by: every pane loader

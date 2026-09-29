@@ -16,6 +16,56 @@ const MAX_SWITCHER_ROWS: usize = 10;
 /// Rows the Mailboxes popup shows before it starts scrolling.
 const MAX_MAILBOXES_ROWS: usize = 10;
 
+/// Error-modal width: columns shaved off the terminal before the
+/// min/max clamp (a wide margin so the dialog never touches the edges),
+/// then the size window. The minimum keeps the buttons readable in tiny
+/// terminals; the maximum keeps long details wrapped instead of running
+/// the full width of a huge window.
+const ERROR_MODAL_WIDTH_MARGIN: u16 = 10;
+const ERROR_MODAL_MIN_WIDTH: u16 = 24;
+const ERROR_MODAL_MAX_WIDTH: u16 = 76;
+
+/// Error-modal height: rows shaved off the terminal before the min/max
+/// clamp — the modal floats with room above and below, grows with the
+/// terminal up to the cap (long details scroll, they never stretch the
+/// dialog), and the minimum keeps title, one detail row, buttons, and
+/// hint visible.
+const ERROR_MODAL_HEIGHT_MARGIN: u16 = 6;
+const ERROR_MODAL_MIN_HEIGHT: u16 = 9;
+const ERROR_MODAL_MAX_HEIGHT: u16 = 18;
+
+/// Theme picker dialog width: fits the longest theme label and its
+/// preview swatch with room for the border (mockup).
+const PICKER_WIDTH: u16 = 34;
+
+/// Account switcher dialog width (ticket c0n0): wider than the theme
+/// picker because rows carry the account's email.
+const SWITCHER_WIDTH: u16 = 46;
+
+/// Mailboxes popup width (issue brnw): folder row (name + unread
+/// counter) plus border, inside the 90-column compact terminal floor.
+const MAILBOXES_POPUP_WIDTH: u16 = 40;
+
+/// Shortcuts help dialog width: fits the longest label/key pair without
+/// clipping (the help is read, not navigated).
+const HELP_WIDTH: u16 = 46;
+
+/// Account-switch confirm dialog width (ticket c0n0): fits its longest
+/// prose line without wrapping.
+const SWITCH_CONFIRM_WIDTH: u16 = 56;
+
+/// Attachment chooser error viewport: rows shaved off the dialog height
+/// before the min/max clamp (cwd row, list floor, blank separator, and
+/// the borders/margins; see [`attachment_error_viewport`]).
+const ATTACHMENT_ERROR_VIEWPORT_MARGIN: usize = 7;
+const ATTACHMENT_ERROR_MIN_HEIGHT: u16 = 12;
+const ATTACHMENT_ERROR_MAX_HEIGHT: u16 = 30;
+
+/// Attachment chooser dialog width: three quarters of the terminal,
+/// clamped so the file table stays readable on both ends (ticket 6t30).
+const ATTACHMENT_DIALOG_MIN_WIDTH: u16 = 46;
+const ATTACHMENT_DIALOG_MAX_WIDTH: u16 = 96;
+
 /// Geometry of the error modal for one terminal size and dialog shape.
 /// Shared by the renderer and the reducer's scroll clamping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,8 +90,16 @@ pub fn error_modal_layout(
     ambiguous: bool,
     more_failures: usize,
 ) -> ModalLayout {
-    let width = size.0.saturating_sub(10).clamp(24, 76).min(size.0.max(1));
-    let height = size.1.saturating_sub(6).clamp(9, 18).min(size.1.max(1));
+    let width = size
+        .0
+        .saturating_sub(ERROR_MODAL_WIDTH_MARGIN)
+        .clamp(ERROR_MODAL_MIN_WIDTH, ERROR_MODAL_MAX_WIDTH)
+        .min(size.0.max(1));
+    let height = size
+        .1
+        .saturating_sub(ERROR_MODAL_HEIGHT_MARGIN)
+        .clamp(ERROR_MODAL_MIN_HEIGHT, ERROR_MODAL_MAX_HEIGHT)
+        .min(size.1.max(1));
     let area = centered(size, width, height);
     // Inside borders+margins: [code?] [warning?] [more?] [detail…] [buttons] [hint].
     let content_height = height.saturating_sub(4) as usize;
@@ -99,7 +157,7 @@ pub struct PickerLayout {
 /// height budgets the borders, the one-line margins `modal_frame` keeps
 /// above and below the content, and the hint row.
 pub fn picker_layout(size: (u16, u16), theme_count: usize) -> PickerLayout {
-    let width = 34u16.min(size.0.max(1));
+    let width = PICKER_WIDTH.min(size.0.max(1));
     let height = ((theme_count.min(MAX_VISIBLE_ROWS) as u16) + 5).min(size.1.max(1));
     let visible_rows = height.saturating_sub(5).max(1) as usize;
     PickerLayout {
@@ -126,7 +184,7 @@ pub fn picker_max_scroll(theme_count: usize, size: (u16, u16)) -> usize {
 /// drift apart — but a wider dialog: rows carry the account's email.
 /// Height budgets the borders, the one-line margins, and the hint row.
 pub fn switcher_layout(size: (u16, u16), account_count: usize) -> PickerLayout {
-    let width = 46u16.min(size.0.max(1));
+    let width = SWITCHER_WIDTH.min(size.0.max(1));
     let height = ((account_count.min(MAX_SWITCHER_ROWS) as u16) + 5).min(size.1.max(1));
     let visible_rows = height.saturating_sub(5).max(1) as usize;
     PickerLayout {
@@ -155,7 +213,7 @@ pub fn switcher_max_scroll(account_count: usize, size: (u16, u16)) -> usize {
 /// at least 90 columns wide. Height budgets the borders, the one-line
 /// margins, and the hint row.
 pub fn mailboxes_layout(size: (u16, u16), mailbox_count: usize) -> PickerLayout {
-    let width = 40u16.min(size.0.max(1));
+    let width = MAILBOXES_POPUP_WIDTH.min(size.0.max(1));
     let height = ((mailbox_count.min(MAX_MAILBOXES_ROWS) as u16) + 5).min(size.1.max(1));
     let visible_rows = height.saturating_sub(5).max(1) as usize;
     PickerLayout {
@@ -181,7 +239,9 @@ pub fn mailboxes_max_scroll(mailbox_count: usize, size: (u16, u16)) -> usize {
 /// reducer scrolls is measured at exactly the width the renderer clips
 /// to (ticket 6t30).
 pub fn attachment_dialog_width(size: (u16, u16)) -> u16 {
-    (size.0 * 3 / 4).clamp(46, 96).min(size.0.max(1))
+    (size.0 * 3 / 4)
+        .clamp(ATTACHMENT_DIALOG_MIN_WIDTH, ATTACHMENT_DIALOG_MAX_WIDTH)
+        .min(size.0.max(1))
 }
 
 /// Rows the attachment chooser's error viewport shows at once (the status
@@ -191,11 +251,15 @@ pub fn attachment_dialog_width(size: (u16, u16)) -> u16 {
 /// the first.
 pub fn attachment_error_viewport(size: (u16, u16)) -> usize {
     const MAX_ERROR_LINES: usize = 4;
-    let height = (size.1 * 3 / 4).clamp(12, 30).min(size.1.max(1)) as usize;
+    let height = (size.1 * 3 / 4)
+        .clamp(ATTACHMENT_ERROR_MIN_HEIGHT, ATTACHMENT_ERROR_MAX_HEIGHT)
+        .min(size.1.max(1)) as usize;
     // Inside borders + margins: cwd row + [list] + error rows + blank row.
     // At least one line shows even in a degenerate window; a larger
     // terminal shows no more than MAX_ERROR_LINES at once.
-    height.saturating_sub(7).clamp(1, MAX_ERROR_LINES)
+    height
+        .saturating_sub(ATTACHMENT_ERROR_VIEWPORT_MARGIN)
+        .clamp(1, MAX_ERROR_LINES)
 }
 
 /// Wrapped lines of the chooser's error detail (the same width the
@@ -223,7 +287,7 @@ pub fn attachment_error_max_scroll(detail: &str, size: (u16, u16)) -> usize {
 /// navigated); a short terminal clamps the dialog and the overflow
 /// scrolls.
 pub fn help_layout(size: (u16, u16), entry_count: usize) -> PickerLayout {
-    let width = 46u16.min(size.0.max(1));
+    let width = HELP_WIDTH.min(size.0.max(1));
     let height = (entry_count.min(1000) as u16)
         .saturating_add(5)
         .min(size.1.max(1));
@@ -253,7 +317,7 @@ pub fn help_max_scroll(entry_count: usize, size: (u16, u16)) -> usize {
 /// carries (the frozen op summaries, the composer warning). The height
 /// budgets the borders and the one-line margins.
 pub fn switch_confirm_layout(size: (u16, u16), operations: bool, unsaved: bool) -> Rect {
-    let width = 56u16.min(size.0.max(1));
+    let width = SWITCH_CONFIRM_WIDTH.min(size.0.max(1));
     // Content: target line, [ops line], [unsaved line], blank, buttons,
     // hint; outer adds the borders and the margins.
     let inner = 4 + u16::from(operations) + u16::from(unsaved);

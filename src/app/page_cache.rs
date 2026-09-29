@@ -17,7 +17,12 @@
 //! Storage is bounded: per-mailbox pages are capped at
 //! [`MAX_FILES_PER_MAILBOX`] files; the viewed-message cache is capped by
 //! [`CacheLimits`] (entry count and total bytes, from `[tmail.cache]`).
-//! The oldest modifications are evicted first.
+//! The oldest modifications are evicted first. The full prune of the
+//! viewed-message cache is debounced (issue h087): it runs on the first
+//! store of the process and then at most once per
+//! [`PRUNE_EVERY_N_STORES`] stores, so opening a message never pays the
+//! whole-tree walk every time — between prunes the caps may be exceeded
+//! by at most that many entries.
 //!
 //! The cache is private by construction (ticket ty57) via
 //! [`crate::domain::private_fs`]: directories are created owner-only
@@ -28,6 +33,8 @@
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +60,22 @@ struct CachedPage {
     items: Vec<MessageSummary>,
 }
 
+/// The same shape as [`CachedPage`], borrowed: the store path
+/// serializes straight from the page reference so the summaries are
+/// never deep-copied just to be written (issue cbkz). Field-for-field
+/// compatible with [`CachedPage`] (the reader loads it back as that
+/// struct).
+#[derive(Serialize)]
+struct CachedPageRef<'a> {
+    version: u32,
+    mailbox: &'a str,
+    query: Option<&'a str>,
+    offset: usize,
+    limit: usize,
+    total: Option<usize>,
+    items: &'a [MessageSummary],
+}
+
 /// The on-disk mailbox listing (ticket haeb: instant start needs the
 /// sidebar before the first backend round trip).
 #[derive(Serialize, Deserialize)]
@@ -72,6 +95,19 @@ struct CachedMessage {
     message: Message,
 }
 
+/// The same shape as [`CachedMessage`], borrowed: the store path
+/// serializes straight from the references so a multi-megabyte body is
+/// never deep-copied just to be written (ticket pa64). Field-for-field
+/// compatible with [`CachedMessage`] (the reader loads it back as that
+/// struct).
+#[derive(Serialize)]
+struct CachedMessageRef<'a> {
+    version: u32,
+    mailbox: &'a str,
+    id: &'a str,
+    message: &'a Message,
+}
+
 /// Bump a cache entry's recency stamp: the file's modification time is
 /// the LRU key, so a hit re-stamps it with a metadata write instead of a
 /// full rewrite. Best-effort — a failed touch only makes the entry look
@@ -88,6 +124,15 @@ fn touch(path: &Path) {
 /// Upper bound on stored pages per mailbox (offset/limit/query variants
 /// share the quota; the oldest by modification time go first).
 const MAX_FILES_PER_MAILBOX: usize = 8;
+
+/// Debounce for the full viewed-message prune (issue h087): the whole
+/// `messages/` tree is enumerated, stat'ed, sorted, and swept for torn
+/// temp files, so it runs on the first store of the process (cleaning a
+/// crashed session's litter and re-enforcing the caps) and afterwards at
+/// most once per this many stores — never on every stored message.
+/// Between prunes the caps may be exceeded by at most this many minus
+/// one entries; the next prune re-enforces them.
+const PRUNE_EVERY_N_STORES: u32 = 32;
 
 /// Caps for the viewed-message cache (ticket haeb): entries and total
 /// bytes, both configurable via `[tmail.cache]`. When either is exceeded,
@@ -113,12 +158,17 @@ impl Default for CacheLimits {
 
 /// A `mailbox`/`query` string reduced to a filesystem-safe key: safe
 /// characters kept (bounded), everything else (including `/` in maildir
-/// absolute ids) hashed in so distinct ids never collide.
+/// absolute ids) hashed in so distinct ids never collide. The readable
+/// portion is capped because a filename must stay under 255 bytes once
+/// the hash suffix and extensions join it; the cap only bounds name
+/// length — the full identity lives in the hash and inside the file.
+const KEY_PART_MAX_CHARS: usize = 48;
+
 fn key_part(value: &str) -> String {
     let safe: String = value
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-        .take(48)
+        .take(KEY_PART_MAX_CHARS)
         .collect();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
@@ -138,6 +188,15 @@ pub struct PageCache {
     /// per-account scopes as well.
     repair_root: PathBuf,
     limits: CacheLimits,
+    /// Shared by every clone (each cache task runs on its own clone):
+    /// `store_message` calls since the last full prune, driving the
+    /// [`PRUNE_EVERY_N_STORES`] debounce. The counter only decides
+    /// *when* to walk the tree, so a relaxed order is enough.
+    stores_since_prune: Arc<AtomicU32>,
+    /// The prune cadence in stores; `1` restores prune-on-every-store
+    /// (eviction-semantics tests rely on caps being re-enforced
+    /// immediately).
+    prune_every: u32,
 }
 
 impl PageCache {
@@ -149,6 +208,8 @@ impl PageCache {
             repair_root: root.clone(),
             root,
             limits,
+            stores_since_prune: Arc::new(AtomicU32::new(0)),
+            prune_every: PRUNE_EVERY_N_STORES,
         }
     }
 
@@ -186,6 +247,8 @@ impl PageCache {
             root: container.join(key_part(account.unwrap_or("default"))),
             repair_root: container,
             limits,
+            stores_since_prune: Arc::new(AtomicU32::new(0)),
+            prune_every: PRUNE_EVERY_N_STORES,
         }
     }
 
@@ -231,17 +294,19 @@ impl PageCache {
     }
 
     /// Persist a successful page. Failures are logged and swallowed: the
-    /// cache is an optimization, never a source of truth.
+    /// cache is an optimization, never a source of truth. The page is
+    /// serialized straight from the reference — no deep copy is ever
+    /// made (issue cbkz).
     pub fn store(&self, mailbox: &MailboxId, query: Option<&str>, page: &Page<MessageSummary>) {
         let path = self.path(mailbox, query, page.offset);
-        let cached = CachedPage {
+        let cached = CachedPageRef {
             version: CACHE_VERSION,
-            mailbox: mailbox.0.clone(),
-            query: query.map(str::to_owned),
+            mailbox: &mailbox.0,
+            query,
             offset: page.offset,
             limit: page.limit,
             total: page.total,
-            items: page.items.clone(),
+            items: &page.items,
         };
         self.write_json(&path, &cached);
         self.prune(mailbox);
@@ -337,19 +402,21 @@ impl PageCache {
     /// Persist a viewed message after a successful load, enforcing the
     /// configured limits: messages larger than the total byte budget are
     /// skipped entirely; otherwise the least-recently-used entries beyond
-    /// the caps are evicted.
+    /// the caps are evicted. The message is serialized straight from the
+    /// reference — no deep copy is ever made (ticket pa64) — so an
+    /// oversized message costs exactly one borrowed serialization and
+    /// nothing else.
     pub fn store_message(&self, mailbox: &MailboxId, id: &str, message: &Message) {
         if self.limits.max_messages == 0 {
             return;
         }
         let path = self.message_path(mailbox, id);
-        let cached = CachedMessage {
+        let payload = match serde_json::to_vec(&CachedMessageRef {
             version: CACHE_VERSION,
-            mailbox: mailbox.0.clone(),
-            id: String::from(id),
-            message: message.clone(),
-        };
-        let payload = match serde_json::to_vec(&cached) {
+            mailbox: &mailbox.0,
+            id,
+            message,
+        }) {
             Ok(bytes) => bytes,
             Err(err) => {
                 tracing::debug!(%err, "message cache: serialize failed");
@@ -364,16 +431,29 @@ impl PageCache {
             return;
         }
         self.write_bytes(&path, &payload);
-        self.prune_messages();
+        // Debounced full prune (issue h087): the first store of the
+        // process prunes (session-start cleanup), then at most once per
+        // [`PRUNE_EVERY_N_STORES`] stores — never on every stored
+        // message.
+        let count = self
+            .stores_since_prune
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        if count == 1 || count.is_multiple_of(self.prune_every) {
+            self.prune_messages();
+        }
     }
 
     /// Enforce [`CacheLimits`] across all mailboxes' viewed messages
     /// (`<root>/messages/<mailbox>/<id>.json`): evict the
     /// least-recently-used entries until the entry count and total byte
-    /// size fit. Recency is the file's modification time (bumped on every
-    /// hit), so pruning reads only directory listings and metadata —
-    /// never file contents. Unparsable stamps (a legacy or foreign file)
-    /// sort as oldest and go first.
+    /// size fit. Called on the first store of the process and then at
+    /// most once per [`PRUNE_EVERY_N_STORES`] stores (issue h087) — the
+    /// whole-tree walk is debounced, not per-store. Recency is the
+    /// file's modification time (bumped on every hit), so pruning reads
+    /// only directory listings and metadata — never file contents.
+    /// Unparsable stamps (a legacy or foreign file) sort as oldest and
+    /// go first.
     fn prune_messages(&self) {
         let dir = self.root.join("messages");
         let Ok(mailbox_dirs) = fs::read_dir(&dir) else {
@@ -408,7 +488,9 @@ impl PageCache {
             }
         }
         // Crash leftovers from a torn write: the temp files never carry
-        // data the cache would serve, so they are only litter.
+        // data the cache would serve, so they are only litter. The temp
+        // extension starts with `tmp` (`tmp`, or the process-unique
+        // `tmp-<pid>-<seq>` from issue p723's concurrent stores).
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 if !entry.file_type().is_ok_and(|t| t.is_dir()) {
@@ -418,7 +500,12 @@ impl PageCache {
                     continue;
                 };
                 for file in files.flatten() {
-                    if file.path().extension().is_some_and(|ext| ext == "tmp") {
+                    if file
+                        .path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| ext.starts_with("tmp"))
+                    {
                         let _ = fs::remove_file(file.path());
                     }
                 }
@@ -448,7 +535,17 @@ impl PageCache {
             // what this process creates; fix them on the way past.
             private_fs::restrict_dir_chain(&self.repair_root, parent);
         }
-        let tmp = path.with_extension("json.tmp");
+        // Concurrent stores of the same entry (a refresh racing the
+        // initial store, issue p723) share the target path, so the temp
+        // name must be process-unique like the draft journal's: a shared
+        // name would let the second write clobber the first's bytes
+        // before its rename.
+        static TMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = path.with_extension(format!(
+            "json.tmp-{}-{}",
+            std::process::id(),
+            TMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         if private_fs::write(&tmp, payload)
             .and_then(|()| fs::rename(&tmp, path))
             .is_err()
@@ -613,6 +710,15 @@ mod mailbox_message_tests {
         }
     }
 
+    /// A cache that prunes on every store (the pre-h087 behavior): the
+    /// eviction-semantics tests below rely on caps being re-enforced
+    /// immediately, which the debounced cadence no longer guarantees.
+    fn eager_prune_cache(dir: &tempfile::TempDir, limits: CacheLimits) -> PageCache {
+        let mut cache = PageCache::open(dir.path().to_path_buf(), limits);
+        cache.prune_every = 1;
+        cache
+    }
+
     #[test]
     fn mailboxes_round_trip() {
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -662,8 +768,8 @@ mod mailbox_message_tests {
     #[test]
     fn message_count_limit_evicts_oldest() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let cache = PageCache::open(
-            dir.path().to_path_buf(),
+        let cache = eager_prune_cache(
+            &dir,
             CacheLimits {
                 max_messages: 2,
                 max_bytes: u64::MAX,
@@ -683,8 +789,8 @@ mod mailbox_message_tests {
     #[test]
     fn a_hit_refreshes_recency_without_a_rewrite() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let cache = PageCache::open(
-            dir.path().to_path_buf(),
+        let cache = eager_prune_cache(
+            &dir,
             CacheLimits {
                 max_messages: 2,
                 max_bytes: u64::MAX,
@@ -709,14 +815,60 @@ mod mailbox_message_tests {
     #[test]
     fn torn_write_tempfiles_are_swept() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
+        let cache = eager_prune_cache(&dir, CacheLimits::default());
         let inbox = MailboxId(String::from("INBOX"));
         cache.store_message(&inbox, "a", &message("a"));
-        // A crash mid-write leaves the sibling temp file behind.
-        let tmp = cache.message_path(&inbox, "a").with_extension("json.tmp");
-        std::fs::write(&tmp, b"torn write").expect("litter the cache");
+        // A crash mid-write leaves sibling temp files behind: the current
+        // process-unique shape (issue p723) and the older fixed shape
+        // from a previous version.
+        let current = cache
+            .message_path(&inbox, "a")
+            .with_extension("json.tmp-4242-7");
+        std::fs::write(&current, b"torn write").expect("litter the cache");
+        let legacy = cache.message_path(&inbox, "b").with_extension("json.tmp");
+        std::fs::write(&legacy, b"torn write").expect("litter the cache");
         cache.store_message(&inbox, "b", &message("b"));
-        assert!(!tmp.exists(), "the temp file is swept on the next prune");
+        assert!(
+            !current.exists() && !legacy.exists(),
+            "both temp shapes are swept on the next prune"
+        );
+    }
+
+    #[test]
+    fn the_full_prune_is_debounced_but_caps_are_still_enforced() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = PageCache::open(
+            dir.path().to_path_buf(),
+            CacheLimits {
+                max_messages: 3,
+                max_bytes: u64::MAX,
+            },
+        );
+        let inbox = MailboxId(String::from("INBOX"));
+        let on_disk = || -> usize {
+            fs::read_dir(cache.root.join("messages").join(key_part(&inbox.0)))
+                .expect("messages dir")
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+                .count()
+        };
+        // The first store prunes (session-start cleanup); the next
+        // PRUNE_EVERY_N_STORES - 1 do not — the cap is only soft until
+        // the cadence fires.
+        for id in ["a", "b", "c", "d", "e"] {
+            cache.store_message(&inbox, id, &message(id));
+        }
+        assert_eq!(on_disk(), 5, "no per-store prune between cadence marks");
+        // Drive the store count to the cadence mark: the prune there
+        // re-enforces the caps.
+        for i in 0..PRUNE_EVERY_N_STORES - 5 {
+            cache.store_message(&inbox, &format!("late-{i}"), &message("late"));
+        }
+        let remaining = on_disk();
+        assert!(
+            remaining <= 3,
+            "{remaining} entries exceed the cap after the cadence prune"
+        );
     }
 
     #[test]

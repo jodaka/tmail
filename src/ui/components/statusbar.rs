@@ -102,20 +102,20 @@ pub fn render(
     // the screen is left), so the bar still announces that a selection
     // exists there — without replacing the screen's own hint row with the
     // bulk buttons (ticket 6t30). The list screen keeps the full bar.
+    //
+    // The count is the *actionable* selection: bulk operations act on the
+    // rows the visible list actually holds (`selected_locators`), so the
+    // single notion of selection size is the visible one (issue p5cn) —
+    // never a max with the whole mark set, which could promise more than
+    // the buttons deliver.
     let selection_note = if !selection_mode && state.selection_active() {
-        Some(format!(
-            "  {} selected ·",
-            state.visible_selected_count().max(state.selected.len())
-        ))
+        Some(format!("  {} selected ·", state.visible_selected_count()))
     } else {
         None
     };
     let mut spans: Vec<Span<'_>> = Vec::new();
     if selection_mode {
-        let count = format!(
-            "  {} selected:",
-            state.visible_selected_count().max(state.selected.len())
-        );
+        let count = format!("  {} selected:", state.visible_selected_count());
         let mut cursor_x = row.x + count.width() as u16;
         spans.push(Span::styled(
             count,

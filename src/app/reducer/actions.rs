@@ -206,9 +206,10 @@ pub(crate) fn toggle_select_all(state: &mut AppState) -> Vec<Effect> {
         state.selected.clear();
         state.set_status("Selection cleared");
     } else {
-        let ids: Vec<_> = state.messages.items.iter().map(|m| m.id.clone()).collect();
-        for id in ids {
-            state.selected.insert(id);
+        // Direct iteration (review pbcn): no intermediate id Vec — the
+        // field borrows are disjoint.
+        for summary in &state.messages.items {
+            state.selected.insert(summary.id.clone());
         }
         let count = state.messages.items.len();
         state.set_status(format!("{count} messages selected"));

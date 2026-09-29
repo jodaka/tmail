@@ -67,6 +67,18 @@ pub enum BackendError {
     #[error("operation cancelled")]
     Cancelled,
 
+    /// The child exceeded its wall-clock budget and was terminated
+    /// (ticket 183r): a hung backend (blackholing IMAP server, network
+    /// stall) must release its permit and report failure instead of
+    /// pinning the bounded pool forever. Retryable like any other failure.
+    #[error("`{program}` call timed out after {secs}s")]
+    Timeout {
+        /// The executable that was run, as in [`BackendError::Command`].
+        program: String,
+        /// The budget that expired, in whole seconds.
+        secs: u64,
+    },
+
     /// The child process could not even be spawned (missing executable,
     /// permission, I/O). The configured program is named explicitly so an
     /// alternative adapter inherits no concrete backend's vocabulary; the

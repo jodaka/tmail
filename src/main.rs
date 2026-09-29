@@ -285,18 +285,19 @@ async fn session(
         handle_effects(&mut state, &manager, &mut assets, effects).await?;
     }
 
-    // Loader pacing: the event loop's tick cadence flips only while a
-    // foreground operation keeps the scanner animating.
-    let events_pace = assets.events_control.clone();
+    // External-kill signals (ticket y6s5): `SIGTERM`/`SIGHUP` restore the
+    // terminal and exit with the shell convention `128 + signal`; a user
+    // `SIGTSTP` suspends cleanly.
+    let mut signals = tmail::runtime::signals::ExitSignals::install()?;
 
-    run_event_loop(
+    let exit_code = run_event_loop(
         &mut state,
         &manager,
         &mut assets,
         &mut events,
         &mut result_rx,
         &config,
-        &events_pace,
+        &mut signals,
     )
     .await?;
 
@@ -304,6 +305,10 @@ async fn session(
     // hand the session's original title back (best-effort, popped from
     // the title stack pushed by `enable`).
     terminal::restore_title();
+    if exit_code != 0 {
+        tracing::info!(exit_code, "session ended by an external signal");
+        return Ok(SessionOutcome::Exit(ExitCode::from(exit_code)));
+    }
     Ok(finish_session(&mut state, &config))
 }
 
@@ -497,9 +502,11 @@ fn start_wizard(state: &mut AppState, invocation: &Invocation) {
     state.session.focus = tmail::app::Focus::Wizard;
 }
 
-/// The main loop: draw a frame, then wait for one batch of input or one
-/// backend result, applying effects between frames. Returns when the user
-/// quits or the event stream closes.
+/// The main loop: draw a frame, then wait for one batch of input, one
+/// backend result, or one external-kill signal, applying effects between
+/// frames. Returns the exit code the session should report: `0` for the
+/// ordinary paths (quit, account switch, closed stream), `128 + signal`
+/// when an external `SIGTERM`/`SIGHUP` ended the session (ticket y6s5).
 async fn run_event_loop(
     state: &mut AppState,
     manager: &OperationManager,
@@ -507,12 +514,16 @@ async fn run_event_loop(
     events: &mut mpsc::UnboundedReceiver<events::Event>,
     result_rx: &mut mpsc::UnboundedReceiver<OperationResult>,
     config: &tmail::config::Config,
-    events_pace: &events::EventControl,
-) -> anyhow::Result<()> {
+    signals: &mut tmail::runtime::signals::ExitSignals,
+) -> anyhow::Result<u8> {
     // Mouse capture starts in the configured mode; the reducer owns the
     // intent as `state.settings.mouse_capture`, and the runtime applies any change.
     let mut capture_applied = config.mouse;
     let mut fast_ticks = false;
+    // Loader pacing: the tick cadence flips only while a foreground
+    // operation keeps the scanner animating. A private clone: the loop
+    // owns it while `assets` itself is mutably borrowed by the arms.
+    let events_pace = assets.events_control.clone();
     loop {
         // Title sync ahead of the draw: the reducer may have changed the
         // mode (open the composer/wizard, switch mailboxes, unread tick).
@@ -551,14 +562,14 @@ async fn run_event_loop(
 
         if state.session.quit_requested {
             tracing::info!("quit requested; leaving event loop");
-            break;
+            break Ok(0);
         }
         // A confirmed account switch (ticket c0n0) leaves the loop the
         // same way a quit does — the session ends and the runtime decides
         // between rebuilding (with the target account) and exiting.
         if let Some(target) = &state.session.switch_requested {
             tracing::info!(target = %target, "account switch requested; leaving event loop");
-            break;
+            break Ok(0);
         }
 
         // Test hook: `TMAIL_INDUCE_PANIC=1` panics after the first draw to
@@ -574,7 +585,9 @@ async fn run_event_loop(
         // input dispatches ahead of backend results, so a burst of
         // completions can never starve the keyboard, and the batch drain
         // below keeps a keypress burst from starving backend results.
-        tokio::select! {
+        // The signal arm (ticket y6s5) sits last: input and backend
+        // results dispatch before an external kill is honored.
+        let signal_action = tokio::select! {
             biased;
             event = events.recv() => match event {
                 Some(first) => {
@@ -599,11 +612,12 @@ async fn run_event_loop(
                         handle_effects(state, manager, assets, effects).await?;
                         sync_mouse_capture(state, &mut capture_applied);
                     }
-                    pace_loader(state, events_pace, &mut fast_ticks);
+                    pace_loader(state, &events_pace, &mut fast_ticks);
+                    None
                 }
                 None => {
                     tracing::warn!("event stream closed");
-                    break;
+                    break Ok(0);
                 }
             },
             action = result_rx.recv() => match action {
@@ -611,14 +625,46 @@ async fn run_event_loop(
                     let effects = reducer::reduce(state, Action::BackendCompleted(result));
                     handle_effects(state, manager, assets, effects).await?;
                     sync_mouse_capture(state, &mut capture_applied);
-                    pace_loader(state, events_pace, &mut fast_ticks);
+                    pace_loader(state, &events_pace, &mut fast_ticks);
+                    None
                 }
                 // The manager holds a sender for the whole session.
                 None => bail!("backend result channel closed unexpectedly"),
             },
+            action = signals.next() => Some(action),
+        };
+        match signal_action {
+            Some(tmail::runtime::signals::SignalAction::Exit(code)) => {
+                tracing::warn!(
+                    code,
+                    "external kill signal; restoring the terminal and exiting"
+                );
+                break Ok(code);
+            }
+            Some(tmail::runtime::signals::SignalAction::Suspend) => {
+                // Ticket y6s5: a user `SIGTSTP` must leave the shell
+                // healthy. Restore first (the guard's Drop), stop the
+                // process under the signal's default disposition, and when
+                // `SIGCONT` resumes it, re-enter with a fresh guard (and a
+                // fresh watcher — the suspend consumed this one) so the
+                // next draw repaints everything.
+                if let Some(guard) = assets.guard.take() {
+                    drop(guard);
+                }
+                tmail::runtime::terminal::restore();
+                signals.suspend_after_restore();
+                let mouse = state.settings.mouse_capture;
+                *signals = tmail::runtime::signals::ExitSignals::install()
+                    .context("signal watchers re-install after resume")?;
+                assets.guard =
+                    Some(terminal::reenter(mouse).context("terminal resume after suspend failed")?);
+                // The screen is the shell's now: forget the applied title
+                // so the next frame re-asserts Tmail's.
+                assets.applied_title = String::new();
+            }
+            None => {}
         }
     }
-    Ok(())
 }
 
 /// Map the post-loop state to the session outcome (ADR 0003 §3.1):

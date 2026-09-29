@@ -7,7 +7,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
@@ -65,17 +65,7 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
         // The cursor row carries the same accent bar + fill the message
         // list's focused row uses (the theme picker's look); dim extras
         // (display name, the current marker) sit on the same fill.
-        let (marker, row_style) = if selected {
-            (
-                "▎",
-                Style::new()
-                    .fg(theme.marker_bar)
-                    .bg(theme.marker)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            (" ", Style::new().fg(theme.text_soft).bg(theme.background))
-        };
+        let (marker, row_style) = chrome::row_highlight(selected, theme);
         let fill_bg = if selected {
             theme.marker
         } else {
@@ -146,18 +136,11 @@ pub fn render(frame: &mut Frame<'_>, state: &crate::app::state::AppState, theme:
     // The hint sits in the label slot one row below the rows — separated
     // from them by the content rect's last (blank) row, adjacent to the
     // bottom border.
-    let hint = Rect {
-        x: inner.x,
-        y: inner.y + rows_height + 1,
-        width: inner.width,
-        height: 1,
-    };
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            text::clip("↑/↓ choose · ↵ switch · Esc cancel", inner.width as usize),
-            Style::new().fg(theme.dim),
-        )),
-        hint,
+    chrome::render_hint(
+        frame,
+        chrome::hint_slot_below_rows(inner, rows_height),
+        "↑/↓ choose · ↵ switch · Esc cancel",
+        theme,
     );
 }
 

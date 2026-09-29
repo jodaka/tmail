@@ -9,7 +9,9 @@ use super::results::unexpected_payload;
 use crate::app::effect::Effect;
 use crate::app::operation::{OperationKind, OperationOutcome, OperationResult};
 use crate::app::route::{MailboxRoute, Route};
-use crate::app::state::{AppState, Loadable, ReaderFocus};
+use crate::app::state::{
+    AppState, Loadable, MAX_PREVIEW_FETCHES_PER_PAGE, MAX_PREVIEW_FETCHES_PER_SESSION, ReaderFocus,
+};
 use crate::domain::{Mailbox, MailboxId, MailboxRole, Message, MessageLocator, Page};
 
 /// Local flag application after a confirmed flag operation. The list row
@@ -36,8 +38,14 @@ pub(crate) fn locator_matches_summary(
 /// compute the sidebar-counter impact of every visible row that actually
 /// flips — used by [`super::results::complete_flag`] to adjust
 /// optimistically; rows the sidebar cannot see are healed by the chained
-/// listing recount, which stays authoritative.
-pub(crate) fn apply_flag(state: &mut AppState, locator: &MessageLocator, change: FlagChange) {
+/// listing recount, which stays authoritative. Returns whether any page
+/// row actually changed value (issue cbkz): an already-in-target flag is
+/// a no-op, and the caller skips the unchanged-page cache re-store.
+pub(crate) fn apply_flag(
+    state: &mut AppState,
+    locator: &MessageLocator,
+    change: FlagChange,
+) -> bool {
     let matches =
         |summary: &crate::domain::MessageSummary| locator_matches_summary(locator, summary);
     if let Some(Route::Message(route)) = state.session.routes.last_mut()
@@ -48,12 +56,21 @@ pub(crate) fn apply_flag(state: &mut AppState, locator: &MessageLocator, change:
             FlagChange::Starred(starred) => route.summary.is_starred = starred,
         }
     }
+    let mut page_changed = false;
     for summary in state.messages.items.iter_mut().filter(|s| matches(s)) {
         match change {
-            FlagChange::Read(read) => summary.is_read = read,
-            FlagChange::Starred(starred) => summary.is_starred = starred,
+            FlagChange::Read(read) if summary.is_read != read => {
+                summary.is_read = read;
+                page_changed = true;
+            }
+            FlagChange::Starred(starred) if summary.is_starred != starred => {
+                summary.is_starred = starred;
+                page_changed = true;
+            }
+            _ => {}
         }
     }
+    page_changed
 }
 
 #[derive(Clone, Copy)]
@@ -147,7 +164,10 @@ pub(crate) fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effe
     // a preview, even when its body carries no preview text.
     state.caches.preview_requested.insert(message_id.clone());
     // Ticket haeb: cache the viewed message (bounded by [tmail.cache]) —
-    // as an effect, so the write never blocks the reducer.
+    // as an effect, so the write never blocks the reducer. The message is
+    // shared, not copied (ticket pa64): state and the store effect hold
+    // the same allocation, whatever the body size.
+    let message = std::sync::Arc::new(message);
     let mut effects = Vec::new();
     if let Some(Route::Message(route)) = state.active_route() {
         effects.push(
@@ -157,7 +177,7 @@ pub(crate) fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effe
                 .start_background(OperationKind::CacheMessageStore {
                     mailbox: route.mailbox_id.clone(),
                     id: message_id.0.clone(),
-                    message: Box::new(message.clone()),
+                    message: std::sync::Arc::clone(&message),
                 }),
         );
     }
@@ -245,11 +265,12 @@ pub(crate) fn message_moved(state: &mut AppState, locators: &[MessageLocator]) -
             entry.0 -= 1;
         }
     }
-    let moved_ids: Vec<_> = moved_rows.iter().map(|s| s.id.clone()).collect();
-    state.messages.items.retain(|summary| !matches(summary));
-    for id in moved_ids {
-        state.selected.remove(&id);
+    // Prune the selection straight from the moved rows (review pbcn): no
+    // intermediate id Vec.
+    for summary in &moved_rows {
+        state.selected.remove(&summary.id);
     }
+    state.messages.items.retain(|summary| !matches(summary));
     for (mailbox_id, (unread, total)) in deltas {
         state.adjust_mailbox_counts(&mailbox_id, unread, total);
     }
@@ -451,6 +472,10 @@ pub(crate) fn apply_page(
     if page == state.messages {
         return Vec::new();
     }
+    // Ticket j0ca: a replaced page gets a fresh per-page preview budget —
+    // the cap bounds full-message fetches per displayed page, and the
+    // page that just landed is a new one.
+    state.caches.preview_fetches_for_page = 0;
     let previous = state.selected_message();
     let previous_message_id = previous.and_then(|m| m.message_id.clone());
     let previous_id = previous.map(|m| m.id.clone());
@@ -576,10 +601,19 @@ pub(crate) fn complete_cache_preview_load(
         Ok(OperationOutcome::CacheMiss) => {
             // Genuinely unknown: fetch in the background, once, within
             // the rolling window (the live count, so concurrent
-            // completions cannot overshoot).
-            if state.session.operations.previews_in_flight() >= MAX_IN_FLIGHT_PREVIEWS {
+            // completions cannot overshoot) and inside the total budgets
+            // (ticket j0ca): the page's budget (reset on every page
+            // apply) and the session's. An exhausted budget degrades to
+            // "no snippet" — a preview is decorative context, never
+            // required data.
+            if state.caches.preview_fetches_for_page >= MAX_PREVIEW_FETCHES_PER_PAGE
+                || state.caches.preview_fetches_for_session >= MAX_PREVIEW_FETCHES_PER_SESSION
+                || state.session.operations.previews_in_flight() >= MAX_IN_FLIGHT_PREVIEWS
+            {
                 return Vec::new();
             }
+            state.caches.preview_fetches_for_page += 1;
+            state.caches.preview_fetches_for_session += 1;
             state.caches.preview_requested.insert(summary.id.clone());
             vec![
                 state
@@ -608,8 +642,16 @@ pub(crate) fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effe
     // also closes the race with the store effect below — a cache read
     // that ran before the write would otherwise re-fetch it).
     state.caches.preview_requested.insert(message.id.clone());
+    // The derived values are computed before the message moves into its
+    // shared allocation (ticket pa64): the preview path never deep-copies
+    // the body.
+    let message_id = message.id.clone();
+    let snippet = crate::view::rich::preview_text(&message);
+    let has_attachments = !message.attachments.is_empty();
     // Ticket haeb: cache the fetched message (bounded by [tmail.cache]) —
-    // as an effect, so the write never blocks the reducer.
+    // as an effect, so the write never blocks the reducer. Shared, not
+    // copied (ticket pa64).
+    let message = std::sync::Arc::new(message);
     let mut effects =
         vec![
             state
@@ -617,12 +659,11 @@ pub(crate) fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effe
                 .operations
                 .start_background(OperationKind::CacheMessageStore {
                     mailbox: message.mailbox_id.clone(),
-                    id: message.id.0.clone(),
-                    message: Box::new(message.clone()),
+                    id: message_id.0.clone(),
+                    message: std::sync::Arc::clone(&message),
                 }),
         ];
-    let message_id = message.id.clone();
-    if let Some(text) = crate::view::rich::preview_text(&message) {
+    if let Some(text) = snippet {
         state
             .caches
             .insert_preview(message_id.clone(), text.clone());
@@ -631,7 +672,6 @@ pub(crate) fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effe
     // (ticket r84f: IMAP envelopes carry no body structure, so the flag
     // was false and the paperclip never rendered). The row's snippet,
     // when still missing, fills from the preview computed above.
-    let has_attachments = !message.attachments.is_empty();
     if let Some(summary) = state.messages.items.iter_mut().find(|s| s.id == message_id) {
         summary.has_attachments = has_attachments;
         if summary.snippet.is_none() {

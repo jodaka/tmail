@@ -17,6 +17,7 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 /// Raw result of one child process run.
+#[derive(Debug)]
 pub(crate) struct ChildOutput {
     /// The executable that was run, echoed into command failures so
     /// [`BackendError::Command`] names the configured program (issue 5ab7)
@@ -31,6 +32,15 @@ pub(crate) struct ChildOutput {
 /// reaped before giving up on it (immediate in practice; the bound only
 /// covers a child stuck in uninterruptible disk sleep).
 const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Wall-clock budget for one ordinary backend child run (ticket 183r): a
+/// hung himalaya (a blackholing IMAP server, a network stall) must
+/// release its permit and report a failure instead of pinning the bounded
+/// pool forever. 30 s matches the wizard credential-test budget
+/// (ADR 0003 §3.4): generous for a healthy server, finite for a dead one.
+/// The budget is per child run — a bulk operation looping over mailbox
+/// groups gets it per group, never a shared total.
+const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Terminate the child (and ideally its whole tree) on cancellation, and
 /// log whatever could not be killed (ticket 8s0g: the `kill(2)` result was
@@ -87,7 +97,8 @@ fn kill_child_tree(child: &mut tokio::process::Child, pid: Option<u32>) {
 /// Run `program args` capturing stdout/stderr separately. stdin is null:
 /// Phase 2/3 operations are read-only. If `token` fires while the child
 /// runs, the child is SIGKILLed by pid and [`BackendError::Cancelled`] is
-/// returned.
+/// returned. A child exceeding [`CALL_TIMEOUT`] is killed the same way and
+/// [`BackendError::Timeout`] is returned (ticket 183r).
 pub(crate) async fn run(
     program: &str,
     args: &[String],
@@ -103,6 +114,18 @@ pub(crate) async fn run_with_stdin(
     args: &[String],
     input: Option<&[u8]>,
     token: &CancellationToken,
+) -> BackendResult<ChildOutput> {
+    run_bounded(program, args, input, token, CALL_TIMEOUT).await
+}
+
+/// [`run_with_stdin`] with an explicit budget (tests exercise the timeout
+/// path with a short one).
+async fn run_bounded(
+    program: &str,
+    args: &[String],
+    input: Option<&[u8]>,
+    token: &CancellationToken,
+    budget: std::time::Duration,
 ) -> BackendResult<ChildOutput> {
     tracing::debug!(program, args = ?args, stdin = input.is_some(), "spawning himalaya");
     let mut command = Command::new(program);
@@ -167,44 +190,31 @@ pub(crate) async fn run_with_stdin(
     tokio::select! {
         biased;
         _ = token.cancelled() => {
-            kill_child_tree(&mut child, pid);
-            // Abort, never await (ticket 8s0g): the kill is expected to
-            // close every pipe and let these tasks finish, but a pipe
-            // holder the kill could not reach (a D-state child, an
-            // EPERM'd group) would otherwise stall cancellation exactly
-            // when it must not. Aborting drops each future at its await
-            // point and releases the pipe; the buffered output is
-            // discarded anyway — a cancelled run reports `Cancelled`,
-            // never data.
-            if let Some(task) = stdin_task {
-                task.abort();
-            }
-            if let Some(task) = stdout_task {
-                task.abort();
-            }
-            if let Some(task) = stderr_task {
-                task.abort();
-            }
-            // The reap itself is bounded (ticket 8s0g): the SIGKILL
-            // above makes the exit immediate, so an expiry here can only
-            // mean the signal never reached the process (uninterruptible
-            // disk sleep). Dropping the wait future leaves the reaping
-            // to tokio's driver, and dropping `child` re-arms
-            // `kill_on_drop` for the direct child.
-            if tokio::time::timeout(REAP_GRACE, child.wait())
-                .await
-                .is_err()
-            {
-                tracing::warn!(pid, "cancelled child did not exit within the reap grace");
-            }
+            terminate(&mut child, pid, stdin_task, stdout_task, stderr_task).await;
             Err(BackendError::Cancelled)
+        }
+        // Ticket 183r: a hung child (a blackholing server) releases its
+        // permit after the budget instead of holding it forever. The
+        // teardown mirrors cancellation exactly — kill the tree we own,
+        // drop the pipes, reap within the grace.
+        _ = tokio::time::sleep(budget) => {
+            tracing::warn!(program, secs = budget.as_secs(), "backend call timed out; killing the child");
+            terminate(&mut child, pid, stdin_task, stdout_task, stderr_task).await;
+            Err(BackendError::Timeout {
+                program: program.to_owned(),
+                secs: budget.as_secs(),
+            })
         }
         status = child.wait() => {
             let status = status?;
             if let Some(task) = stdin_task {
                 // A write failure (e.g. child died early) surfaces through
-                // the exit status; the payload is regenerable.
-                let _ = task.await;
+                // the exit status; the payload is regenerable. Still log
+                // it — a silently broken pipe would hide real delivery
+                // problems behind unrelated exit codes (review pbcn).
+                if let Err(err) = task.await {
+                    tracing::warn!(program, %err, "stdin write to the backend child failed");
+                }
             }
             let stdout = match stdout_task {
                 Some(task) => join_reader(task).await?,
@@ -221,6 +231,47 @@ pub(crate) async fn run_with_stdin(
                 stderr,
             })
         }
+    }
+}
+
+/// The shared teardown of the cancellation and timeout paths: kill the
+/// child tree we own, abort the pipe tasks, and reap within the grace.
+///
+/// Abort, never await (ticket 8s0g): the kill is expected to close every
+/// pipe and let these tasks finish, but a pipe holder the kill could not
+/// reach (a D-state child, an EPERM'd group) would otherwise stall the
+/// teardown exactly when it must not. Aborting drops each future at its
+/// await point and releases the pipe; the buffered output is discarded
+/// anyway — a cancelled or timed-out run reports its typed error, never
+/// data.
+///
+/// The reap itself is bounded (ticket 8s0g): the SIGKILL above makes the
+/// exit immediate, so an expiry here can only mean the signal never
+/// reached the process (uninterruptible disk sleep). Dropping the wait
+/// future leaves the reaping to tokio's driver, and dropping `child`
+/// re-arms `kill_on_drop` for the direct child.
+async fn terminate(
+    child: &mut tokio::process::Child,
+    pid: Option<u32>,
+    stdin_task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    stdout_task: Option<tokio::task::JoinHandle<std::io::Result<Vec<u8>>>>,
+    stderr_task: Option<tokio::task::JoinHandle<std::io::Result<Vec<u8>>>>,
+) {
+    kill_child_tree(child, pid);
+    if let Some(task) = stdin_task {
+        task.abort();
+    }
+    if let Some(task) = stdout_task {
+        task.abort();
+    }
+    if let Some(task) = stderr_task {
+        task.abort();
+    }
+    if tokio::time::timeout(REAP_GRACE, child.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!(pid, "terminated child did not exit within the reap grace");
     }
 }
 
@@ -324,5 +375,102 @@ fn snippet(bytes: &[u8]) -> String {
         format!("{text}…")
     } else {
         text.into_owned()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod timeout_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn token() -> CancellationToken {
+        CancellationToken::new()
+    }
+
+    /// A hung child must die at the budget and surface the typed timeout
+    /// error (ticket 183r) — never an indefinite permit hold.
+    #[tokio::test]
+    async fn a_hung_child_times_out_with_a_typed_error() {
+        let started = std::time::Instant::now();
+        let err = run_bounded(
+            "sleep",
+            &["100".into()],
+            None,
+            &token(),
+            std::time::Duration::from_millis(150),
+        )
+        .await
+        .expect_err("a hung child must fail");
+        match &err {
+            BackendError::Timeout { program, secs } => {
+                assert_eq!(program, "sleep");
+                assert_eq!(*secs, 0, "the test budget is sub-second");
+            }
+            other => panic!("expected a Timeout, got {other:?}"),
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the budget fired promptly, not at the OS level"
+        );
+    }
+
+    /// The timeout must not wedge the child machinery: a normal command
+    /// still runs to completion afterwards.
+    #[tokio::test]
+    async fn a_normal_child_runs_to_completion() {
+        let output = run_bounded(
+            "echo",
+            &["ok".into()],
+            None,
+            &token(),
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .expect("echo runs");
+        assert_eq!(output.code, Some(0));
+        assert_eq!(output.stdout, b"ok\n");
+    }
+
+    /// Cancellation still wins over the timeout and reports Cancelled.
+    #[tokio::test]
+    async fn cancellation_still_wins() {
+        let cancel = token();
+        let args = [String::from("100")];
+        let wait = run_bounded("sleep", &args, None, &cancel, Duration::from_secs(60));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+        let err = wait.await.expect_err("cancelled");
+        assert!(matches!(err, BackendError::Cancelled), "got {err:?}");
+    }
+
+    /// The timed-out child is actually gone: no zombie `sleep` lingers
+    /// after the run reports failure (the pool stays usable, no leaked
+    /// process holding a pipe).
+    #[tokio::test]
+    async fn the_timed_out_child_is_reaped() {
+        let err = run_bounded(
+            "sleep",
+            &["100".into()],
+            None,
+            &token(),
+            std::time::Duration::from_millis(150),
+        )
+        .await
+        .expect_err("timed out");
+        assert!(matches!(err, BackendError::Timeout { .. }));
+        // Give the SIGKILL a moment, then count our sleeping children.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let output = run(
+            "sh",
+            &[
+                "-c".into(),
+                "ps -eo comm= | grep -c '^sleep$' || true".into(),
+            ],
+            &token(),
+        )
+        .await
+        .expect("ps runs");
+        let count = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_eq!(count, "0", "the killed child left a process behind");
     }
 }

@@ -75,7 +75,10 @@ fn map_envelope(dto: dto::EnvelopeDto, mailbox_id: &MailboxId) -> MessageSummary
         message_id: dto.message_id,
         from: dto.from.iter().map(address).collect(),
         to: dto.to.iter().map(address).collect(),
-        subject: dto.subject,
+        // Decoded encoded-words can carry CR/LF (ticket 9anh): a list row's
+        // subject is display text and reply-seed input, never raw header
+        // text.
+        subject: crate::domain::header_safe_text(&dto.subject),
         // `envelope list` carries no snippet (ADR 0001 finding 2); Tmail
         // fills it only once full messages are fetched (Phase 4+).
         snippet: None,
@@ -91,14 +94,14 @@ fn map_envelope(dto: dto::EnvelopeDto, mailbox_id: &MailboxId) -> MessageSummary
 
 fn address(dto: &dto::AddressDto) -> Address {
     Address {
-        name: dto.name.clone(),
+        name: dto.name.as_deref().map(crate::domain::header_safe_text),
         email: dto.email.clone(),
     }
 }
 
 fn part_address(dto: &dto::PartAddressDto) -> Address {
     Address {
-        name: dto.name.clone(),
+        name: dto.name.as_deref().map(crate::domain::header_safe_text),
         email: dto.address.clone(),
     }
 }
@@ -180,10 +183,15 @@ fn header<'a>(headers: &'a [dto::HeaderDto], name: &str) -> Option<&'a dto::Head
 
 fn text_header(headers: &[dto::HeaderDto], name: &str) -> Option<String> {
     match header(headers, name) {
-        Some(dto::HeaderValueDto::Known(dto::KnownHeaderValue::Text(text))) => Some(text.clone()),
+        Some(dto::HeaderValueDto::Known(dto::KnownHeaderValue::Text(text))) => {
+            // RFC 2047 decoding can surface real CR/LF from an encoded
+            // word; a decoded value must never ride back into outgoing
+            // MIME as raw header text (ticket 9anh).
+            Some(crate::domain::header_safe_text(text))
+        }
         // `References` and friends serialize as a list of ids.
         Some(dto::HeaderValueDto::Known(dto::KnownHeaderValue::TextList(ids))) => {
-            Some(ids.join(" "))
+            Some(crate::domain::header_safe_text(&ids.join(" ")))
         }
         _ => None,
     }
@@ -811,6 +819,35 @@ mod tests {
         let message = message(dto, locator());
         assert_eq!(message.headers.bcc.len(), 1);
         assert_eq!(message.headers.bcc[0].display(), "hidden@example.com");
+    }
+
+    #[test]
+    fn decoded_header_text_cannot_carry_crlf_injection() {
+        // Ticket 9anh: a crafted encoded-word decodes to real CR/LF, and a
+        // decoded subject feeds back into outgoing MIME. The mapping must
+        // never hand on header-boundary bytes, and display names ride the
+        // same defense.
+        let dto: dto::MessageReadDto = serde_json::from_str(
+            r#"{
+                "parts": [{"headers": [
+                    {"name":"subject","value":{"Text":"Hi\r\nBcc: victim@evil.example"}},
+                    {"name":"from","value":{"Address":{"List":[
+                        {"name":"Evil\r\nBcc: victim@evil.example","address":"a@evil.example"}
+                    ]}}}
+                ]}]
+            }"#,
+        )
+        .expect("parses");
+        let message = message(dto, locator());
+        assert_eq!(
+            message.headers.subject, "Hi Bcc: victim@evil.example",
+            "CR/LF became spaces, never a header boundary"
+        );
+        assert!(!message.headers.subject.contains(['\r', '\n']));
+        assert_eq!(
+            message.headers.from[0].display(),
+            "Evil Bcc: victim@evil.example"
+        );
     }
 
     #[test]

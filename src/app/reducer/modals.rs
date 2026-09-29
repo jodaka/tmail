@@ -2,6 +2,8 @@
 //! Retry/Dismiss modal, the discard and send confirmations, the attachment
 //! dialog, and the theme picker — every overlay intercepts all input while
 //! open.
+use std::sync::Arc;
+
 use super::composer_flow::{close_composer_route, switch_mailbox};
 use crate::app::action::{Action, AttachmentBrowse};
 use crate::app::effect::Effect;
@@ -371,7 +373,7 @@ pub(crate) fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<E
                             let fresh = composer.draft.start_save(now);
                             return vec![state.session.operations.start(
                                 OperationKind::SaveDraft {
-                                    draft: Box::new(fresh),
+                                    draft: Arc::new(fresh),
                                 },
                             )];
                         }
@@ -452,7 +454,7 @@ pub(crate) fn confirm_discard(
     state.session.operations.cancel_draft_saves(&draft.local_id);
     state.set_status("Draft discarded");
     vec![state.session.operations.start(OperationKind::DeleteDraft {
-        draft: Box::new(draft),
+        draft: Arc::new(draft),
         reason: DraftRemovalReason::Discard,
     })]
 }

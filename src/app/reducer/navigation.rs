@@ -588,7 +588,7 @@ pub(crate) fn complete_cache_message_load(
             // no loader slot): its result converges read state, fills the
             // list snippet, and reconciles the attachment flag — exactly
             // what a fresh load would do (ticket haeb).
-            state.open_message = Loadable::Loaded(*message);
+            state.open_message = Loadable::Loaded(std::sync::Arc::new(*message));
             vec![
                 state
                     .session

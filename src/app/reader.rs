@@ -575,7 +575,7 @@ mod tests {
             mailbox_id: MailboxId(String::from("inbox")),
             summary,
         }));
-        state.open_message = Loadable::Loaded(message);
+        state.open_message = Loadable::Loaded(std::sync::Arc::new(message));
         state.session.focus = crate::app::focus::Focus::Reader;
         state
     }
@@ -652,7 +652,7 @@ mod tests {
             mailbox_id: MailboxId(String::from("inbox")),
             summary,
         }));
-        state.open_message = Loadable::Loaded(message);
+        state.open_message = Loadable::Loaded(std::sync::Arc::new(message));
         let lines = content(&state, 100);
         let text: Vec<String> = lines.iter().map(ReaderLine::text).collect();
         assert!(text.iter().any(|t| t.contains("(no subject)")));
@@ -680,7 +680,7 @@ mod tests {
             mailbox_id: MailboxId(String::from("inbox")),
             summary,
         }));
-        state.open_message = Loadable::Loaded(message);
+        state.open_message = Loadable::Loaded(std::sync::Arc::new(message));
         let lines = content(&state, 100);
         let text: Vec<String> = lines.iter().map(ReaderLine::text).collect();
         // The markup renders as content, not as a degrade note or raw HTML.
@@ -728,7 +728,7 @@ mod tests {
             mailbox_id: MailboxId(String::from("inbox")),
             summary,
         }));
-        state.open_message = Loadable::Loaded(message);
+        state.open_message = Loadable::Loaded(std::sync::Arc::new(message));
         let lines = content(&state, 100);
         assert!(lines.iter().any(|l| l.text().contains("plain fallback")));
     }
@@ -749,7 +749,7 @@ mod tests {
             mailbox_id: MailboxId(String::from("inbox")),
             summary,
         }));
-        state.open_message = Loadable::Loaded(message);
+        state.open_message = Loadable::Loaded(std::sync::Arc::new(message));
         let lines = content(&state, 100);
         assert!(
             lines
@@ -803,6 +803,7 @@ mod tests {
     fn body_wraps_short_of_the_scrollbar_rail() {
         let mut state = loaded_state();
         if let Loadable::Loaded(message) = &mut state.open_message {
+            let message = std::sync::Arc::make_mut(message);
             // One unbroken token: `wrap` hard-chunks it into exactly
             // budget-width lines, so the geometry is deterministic.
             message.plain_body = Some(format!("{}\n", "x".repeat(200)));
@@ -835,6 +836,7 @@ mod tests {
     fn attachment_chips_wrap_short_of_the_scrollbar_rail() {
         let mut state = loaded_state();
         if let Loadable::Loaded(message) = &mut state.open_message {
+            let message = std::sync::Arc::make_mut(message);
             message.attachments = vec![Attachment {
                 name: Some("a-very-long-attachment-name-that-will-not-fit.png".into()),
                 mime_type: Some(String::from("image/png")),
@@ -919,6 +921,7 @@ mod tests {
         let mut state = loaded_state();
         scroll_document(&state, 100);
         if let Loadable::Loaded(message) = &mut state.open_message {
+            let message = std::sync::Arc::make_mut(message);
             message.plain_body = Some(String::from(
                 "First line.\n\nSecond paragraph.\n\nThird paragraph with another long line that will need wrapping to fit the viewport width.\n",
             ));
@@ -966,6 +969,7 @@ mod tests {
     fn selected_chip_carries_the_cursor_marker() {
         let mut state = loaded_state();
         if let Loadable::Loaded(message) = &mut state.open_message {
+            let message = std::sync::Arc::make_mut(message);
             message.attachments.push(Attachment {
                 name: Some(String::from("second.png")),
                 mime_type: Some(String::from("image/png")),
@@ -1085,6 +1089,7 @@ mod tests {
     fn link_count_reads_the_rendered_body() {
         let mut state = loaded_state();
         if let Loadable::Loaded(message) = &mut state.open_message {
+            let message = std::sync::Arc::make_mut(message);
             message.html_body = Some(String::from(
                 "<p>see <a href=\"https://a.example\">A</a> and \
                  <a href=\"https://b.example\">B</a></p>\

@@ -114,11 +114,15 @@ pub fn render(
 /// View-only nicety (permanent): Gmail exposes its special folders as
 /// `[GMAIL]/Drafts` and friends; the sidebar shows the bare folder name.
 /// Purely cosmetic — storage, routing, and the reducer keep the full
-/// IMAP name everywhere else.
+/// IMAP name everywhere else. Compared case-insensitively against the
+/// domain's reserved prefix (Gmail's casing varies), and the stripped
+/// slice length is the prefix's own length.
 fn display_name(imap_name: &str) -> &str {
-    match imap_name.get(..8) {
-        Some(prefix) if prefix.eq_ignore_ascii_case("[GMAIL]/") => {
-            imap_name.get(8..).unwrap_or(imap_name)
+    let prefix = crate::domain::mailbox::GMAIL_RESERVED_PREFIX;
+    let prefix_len = prefix.len();
+    match imap_name.get(..prefix_len) {
+        Some(head) if head.eq_ignore_ascii_case(prefix) => {
+            imap_name.get(prefix_len..).unwrap_or(imap_name)
         }
         _ => imap_name,
     }

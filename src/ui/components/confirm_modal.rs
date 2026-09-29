@@ -82,20 +82,11 @@ pub fn render(
     // The hint sits in the label slot one row below the content rect —
     // separated from it by the rect's last (blank) row, adjacent to the
     // bottom border.
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            text::clip(
-                "Tab switch · ↵ confirm · Esc keep draft",
-                inner.width as usize,
-            ),
-            Style::new().fg(theme.dim),
-        )),
-        Rect {
-            x: inner.x,
-            y: inner.y + inner.height,
-            width: inner.width,
-            height: 1,
-        },
+    chrome::render_hint(
+        frame,
+        chrome::hint_slot_below_content(inner),
+        "Tab switch · ↵ confirm · Esc keep draft",
+        theme,
     );
     // Click targets for the two buttons when their row is drawn (plan
     // §10/§14): Tab + Enter reaches the same states. `Keep` stays the safe

@@ -880,7 +880,7 @@ fn reader_state(selection: usize) -> tmail::app::AppState {
         mailbox_id: MailboxId(String::from("inbox")),
         summary,
     }));
-    state.open_message = Loadable::Loaded(message);
+    state.open_message = Loadable::Loaded(std::sync::Arc::new(message));
     state.session.focus = Focus::Reader;
     state
 }
@@ -921,7 +921,7 @@ fn reader_status_bar_advertises_attachment_actions_only_with_attachments() {
     let mut with = reader_state(0);
     with.session.size = (152, 40);
     let message = match &mut with.open_message {
-        Loadable::Loaded(message) => message,
+        Loadable::Loaded(message) => std::sync::Arc::make_mut(message),
         other => panic!("reader_state leaves the message loaded: {other:?}"),
     };
     message.attachments = vec![tmail::domain::Attachment {
@@ -950,6 +950,7 @@ fn focused_attachment_chip_shows_the_button_fill() {
     use tmail::app::state::ReaderFocus;
     let mut state = reader_state(0);
     if let Loadable::Loaded(message) = &mut state.open_message {
+        let message = std::sync::Arc::make_mut(message);
         // Short body so the chips are on screen without scrolling.
         message.plain_body = Some(String::from("short body\n"));
         message.html_body = None;
@@ -1050,6 +1051,7 @@ fn reader_link_click_focuses_then_opens() {
     let mut state = reader_state(0);
     state.session.size = (152, 40);
     if let Loadable::Loaded(message) = &mut state.open_message {
+        let message = std::sync::Arc::make_mut(message);
         message.plain_body = None;
         message.html_body = Some(String::from(
             "<p>see <a href=\"https://example.org/x\">the docs</a></p>",
@@ -1131,7 +1133,7 @@ fn reader_handles_missing_fields() {
         mailbox_id: MailboxId(String::from("inbox")),
         summary,
     }));
-    state.open_message = Loadable::Loaded(message);
+    state.open_message = Loadable::Loaded(std::sync::Arc::new(message));
     state.session.focus = Focus::Reader;
     let text = draw_after(&mut state, &[], 152, 40);
     assert!(
@@ -2642,7 +2644,7 @@ fn reader_without_overflow_draws_no_scrollbar() {
     let mut state = reader_state(0);
     state.session.size = (152, 40);
     if let Loadable::Loaded(message) = &mut state.open_message {
-        message.plain_body = Some(String::from("one short line\n"));
+        std::sync::Arc::make_mut(message).plain_body = Some(String::from("one short line\n"));
     }
     let buffer = buffer_after(&mut state, &[], 152, 40);
     let none = (4..37).any(|y| buffer[(151, y)].symbol() == "█");

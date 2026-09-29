@@ -207,6 +207,9 @@ pub const MAX_BATCH: usize = 256;
 pub fn coalesce(batch: Vec<Event>, hits: &mouse::HitMap, state: &AppState) -> Vec<Action> {
     let mut actions = Vec::with_capacity(batch.len());
     let mut key_seen = false;
+    // A tick already collapsed into the batch: every later one is a
+    // duplicate heartbeat (a bool, not a scan — issue pbcn).
+    let mut tick_seen = false;
     // Pending net movement of the trailing move-run (up is negative),
     // flushed as plain actions before any other action dispatches.
     let mut run: i64 = 0;
@@ -231,9 +234,10 @@ pub fn coalesce(batch: Vec<Event>, hits: &mouse::HitMap, state: &AppState) -> Ve
             Event::Focus(focused) => Some(Action::SetTerminalFocus(focused)),
             Event::Resize { width, height } => Some(Action::Resize { width, height }),
             Event::Tick => {
-                if actions.iter().any(|a| matches!(a, Action::Tick { .. })) {
+                if tick_seen {
                     continue;
                 }
+                tick_seen = true;
                 Some(Action::Tick {
                     now: Box::new(Local::now().fixed_offset()),
                 })

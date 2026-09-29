@@ -20,6 +20,7 @@ use chrono::{DateTime, FixedOffset};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Async load lifecycle for backend-fed collections (mock-fed in Phase 1).
 /// `Idle` marks a slot that is not currently in use (no message open).
@@ -201,6 +202,21 @@ pub struct Settings {
 /// not to promise them).
 pub(crate) const MAX_SESSION_PREVIEWS: usize = 1024;
 
+/// Total full-message preview fetches one displayed page may start
+/// (ticket j0ca): the rolling window (`MAX_IN_FLIGHT_PREVIEWS`) bounds
+/// concurrency only, so a page of N rows would eventually spawn N full
+/// `message read` children — the dominant backend cost while browsing.
+/// At the cap rows keep no snippet: previews are decorative context
+/// (ticket wxtx), and every row stays individually openable. Twice the
+/// rolling window: the first screenful of interesting rows.
+pub(crate) const MAX_PREVIEW_FETCHES_PER_PAGE: usize = 12;
+
+/// Total full-message preview fetches a session may start (ticket j0ca):
+/// a long browsing session across many mailboxes stays bounded even
+/// though each page refreshes its own budget. Same degrade-as-decorative
+/// direction: exhausted budget keeps rows snippet-less.
+pub(crate) const MAX_PREVIEW_FETCHES_PER_SESSION: usize = 64;
+
 /// Session-local caches: everything here exists to avoid re-fetching or
 /// re-building work the backend already produced. Cleared implicitly when
 /// the session ends. The on-disk page cache (ticket haeb) lives in the
@@ -213,6 +229,15 @@ pub struct CacheBundle {
     /// accepted (it is decorative context), and a message fetched in an
     /// *earlier* session counts, so startup never re-fetches known mail.
     pub preview_requested: HashSet<MessageId>,
+    /// Full-message preview fetches started for the *displayed* page
+    /// (ticket j0ca): the per-page budget, reset whenever the displayed
+    /// page is replaced. Cache reads are free and uncounted — only
+    /// backend fetches consume it.
+    pub(crate) preview_fetches_for_page: usize,
+    /// Full-message preview fetches started this session (ticket j0ca):
+    /// the session budget, never reset. Both caps degrade to "no
+    /// snippet" — a preview is decorative context, never required data.
+    pub(crate) preview_fetches_for_session: usize,
     /// One-line body previews this session (ticket wxtx), keyed by backend
     /// message id. `MessageSummary.snippet` does not survive a page load —
     /// fresh envelope listings carry none — so `apply_page` restores
@@ -307,6 +332,12 @@ pub struct SessionState {
     pub switch_requested: Option<String>,
 }
 
+/// Default terminal size before the first real `Resize` arrives: large
+/// enough that the initial frame renders the full three-pane layout
+/// instead of the too-small placeholder, matching a typical desktop
+/// terminal window.
+const DEFAULT_TERMINAL_SIZE: (u16, u16) = (152, 40);
+
 /// The whole application state: the visible list/reader data plus the
 /// three domain groups (`settings`, `caches`, `session`).
 #[derive(Clone)]
@@ -335,8 +366,10 @@ pub struct AppState {
     /// (Phase 2 acceptance).
     pub list_scroll: usize,
     /// The message currently open in the reader, when a `Route::Message` is
-    /// active (plan §19 Phase 4). `Idle` when the reader is closed.
-    pub open_message: Loadable<Message>,
+    /// active (plan §19 Phase 4). `Idle` when the reader is closed. Shared
+    /// (`Arc`) so the cache-store path (ticket pa64) never deep-copies the
+    /// body: state and the store effect hold the same allocation.
+    pub open_message: Loadable<Arc<Message>>,
     /// First content line currently visible in the reader document.
     pub reader_scroll: usize,
     /// What the reader's Tab cycle focuses (tickets 1fnh/hc9n): a link run
@@ -388,6 +421,8 @@ impl AppState {
             },
             caches: CacheBundle {
                 preview_requested: HashSet::new(),
+                preview_fetches_for_page: 0,
+                preview_fetches_for_session: 0,
                 previews: HashMap::new(),
                 saved_attachments: HashMap::new(),
                 reader_doc: RefCell::new(None),
@@ -402,7 +437,7 @@ impl AppState {
                 },
                 clock: None,
                 quit_requested: false,
-                size: (152, 40),
+                size: DEFAULT_TERMINAL_SIZE,
                 search_query: String::new(),
                 search_return: None,
                 last_refresh_at: None,
@@ -664,6 +699,12 @@ impl AppState {
     /// mailbox title is prefixed with the driving account's email
     /// (`me@example.org: INBOX (4 unread)`, user request) — with one
     /// account the plain mailbox title stands.
+    ///
+    /// The result is escape-injection-safe (ticket jzn0): the title is
+    /// written with `crossterm::terminal::SetTitle`, which wraps the value
+    /// raw, and every component (composer recipient seeded from a received
+    /// message's display name, server-controlled mailbox name, account
+    /// identity) can carry control characters.
     pub fn terminal_title(&self) -> String {
         if self.session.wizard.is_some() {
             return String::from("tmail setup");
@@ -683,17 +724,18 @@ impl AppState {
             if recipient.is_empty() {
                 return String::from("Mail to —");
             }
-            return format!("Mail to {recipient}");
+            return terminal_safe_title(&format!("Mail to {recipient}"));
         }
         let name = self.active_mailbox_name().unwrap_or("Mailbox");
         let mailbox = match self.active_mailbox_unread() {
             Some(unread) => format!("{name} ({unread} unread)"),
             None => String::from(name),
         };
-        match self.multi_account_identity() {
+        let title = match self.multi_account_identity() {
             Some(identity) => format!("{identity}: {mailbox}"),
             None => mailbox,
-        }
+        };
+        terminal_safe_title(&title)
     }
 
     /// The identity prefix the terminal title carries when the config
@@ -710,6 +752,27 @@ impl AppState {
             .clone()
             .or_else(|| self.current_account_label())
     }
+}
+
+/// Escape-injection-safe terminal title (ticket jzn0): crossterm's
+/// `SetTitle` wraps the value in `ESC ] 0 ; … BEL` with no escaping, so a
+/// control character in the text would close the OSC sequence early and
+/// inject arbitrary terminal commands (OSC 52 clipboard writes, OSC 8
+/// hyperlinks, CSI styling, private modes). Runs of CR/LF become one
+/// visible space; every other control character — C0 (ESC and BEL
+/// included), TAB, DEL, and C1 (many terminals honor the 8-bit forms even
+/// in UTF-8) — is dropped. Visible text, non-ASCII included, survives.
+fn terminal_safe_title(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    for ch in title.chars() {
+        match ch {
+            '\r' | '\n' if out.ends_with(' ') => {}
+            '\r' | '\n' => out.push(' '),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -822,5 +885,73 @@ mod terminal_title_tests {
         // A single account keeps the plain mailbox title.
         state.settings.accounts.truncate(1);
         assert_eq!(state.terminal_title(), "INBOX (4 unread)");
+    }
+
+    #[test]
+    fn mailbox_name_cannot_inject_terminal_escapes() {
+        // Ticket jzn0: a server-controlled mailbox name carrying an OSC 52
+        // clipboard-write sequence must not survive into the title, where
+        // `SetTitle` would write it raw to stdout.
+        let mut state = mailbox_state();
+        state.mailboxes = Loadable::Loaded(vec![Mailbox {
+            id: MailboxId(String::from("evil")),
+            name: String::from("\x1b]52;c;QUFB\x07Secret \u{9b}31m INBOX"),
+            role: Some(MailboxRole::Inbox),
+            unread_count: Some(1),
+            total_count: Some(9),
+        }]);
+        state.session.routes.pop();
+        state.session.routes.push(Route::Mailbox(MailboxRoute {
+            mailbox_id: MailboxId(String::from("evil")),
+        }));
+        let title = state.terminal_title();
+        assert!(
+            !title.chars().any(char::is_control),
+            "a control character reached the title: {title:?}"
+        );
+        // Only the visible text of the name survives; the sequence is a
+        // harmless fragment inside one title.
+        assert_eq!(title, "]52;c;QUFBSecret 31m INBOX (1 unread)");
+    }
+
+    #[test]
+    fn composer_recipient_cannot_inject_terminal_escapes() {
+        // Ticket jzn0: the composer title takes the recipient raw (the
+        // field may still be mid-typed); a seeded display name carrying an
+        // OSC 8 hyperlink must not reach `SetTitle` either. The recipient
+        // split keeps only the entry between separators — a fragment with
+        // the payload's URL left out entirely.
+        let mut state = mailbox_state();
+        let mut composer = ComposerState::new();
+        composer.draft.to = String::from("\x1b]8;;https://evil.example\x07Ada <ada@example.io>, ");
+        state.session.composer = Some(composer);
+        state.session.routes.push(Route::Composer);
+        let title = state.terminal_title();
+        assert!(
+            !title.chars().any(char::is_control),
+            "a control character reached the title: {title:?}"
+        );
+        assert!(
+            !title.contains("evil.example"),
+            "payload text leaked: {title:?}"
+        );
+        assert_eq!(title, "Mail to ]8");
+    }
+
+    #[test]
+    fn title_crlf_runs_become_one_space() {
+        let mut state = mailbox_state();
+        state.mailboxes = Loadable::Loaded(vec![Mailbox {
+            id: MailboxId(String::from("m")),
+            name: String::from("Line\r\n\r\nBroken"),
+            role: None,
+            unread_count: None,
+            total_count: None,
+        }]);
+        state.session.routes.pop();
+        state.session.routes.push(Route::Mailbox(MailboxRoute {
+            mailbox_id: MailboxId(String::from("m")),
+        }));
+        assert_eq!(state.terminal_title(), "Line Broken");
     }
 }
