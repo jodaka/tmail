@@ -110,7 +110,7 @@ impl ExitSignals {
 
     /// Non-Unix builds never suspend.
     #[cfg(not(unix))]
-    pub fn suspend_after_restore(self) {
+    pub fn suspend_after_restore(&mut self) {
         let _ = self;
     }
 }
