@@ -8,6 +8,7 @@ use std::panic;
 use crossterm::cursor::Show;
 use crossterm::event::{
     DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::style::Print;
 use crossterm::{execute, terminal as term};
@@ -66,7 +67,19 @@ fn enter(mouse: bool, what: &'static str) -> io::Result<TerminalGuard> {
     // Focus reporting (CSI 1004, ticket b28p) arms the "user is active"
     // signal new-mail notifications respect; terminals without support
     // ignore the mode and simply never report a change.
-    if let Err(err) = execute!(io::stdout(), term::EnterAlternateScreen, EnableFocusChange) {
+    // Keyboard enhancement (kitty protocol, ticket 5p0b) disambiguates
+    // chords legacy input cannot express — Ctrl+Enter above all, the
+    // composer's Send key: without it every terminal reports Ctrl+Enter
+    // as a plain Enter byte and the chord never reaches the action
+    // mapping. Plain keys keep their legacy bytes, so typing, Esc,
+    // Enter, and Tab are unchanged; terminals without protocol support
+    // ignore the push and keep the legacy behavior.
+    if let Err(err) = execute!(
+        io::stdout(),
+        term::EnterAlternateScreen,
+        EnableFocusChange,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    ) {
         restore();
         return Err(err);
     }
@@ -99,13 +112,16 @@ pub fn set_mouse_capture(enabled: bool) -> io::Result<()> {
 /// Best-effort, idempotent restoration. Safe to call multiple times and
 /// from the panic hook. Mouse capture is always disabled: it is harmless
 /// when never enabled and guarantees restoration after a mid-session
-/// enable.
+/// enable. Keyboard enhancement is always popped to match: harmless when
+/// never pushed, and required before the external editor runs, which
+/// would otherwise receive disambiguated chord bytes it cannot parse.
 pub fn restore() {
     let _ = execute!(
         io::stdout(),
         term::LeaveAlternateScreen,
         DisableMouseCapture,
         DisableFocusChange,
+        PopKeyboardEnhancementFlags,
         Show
     );
     let _ = term::disable_raw_mode();

@@ -33,7 +33,12 @@ hints always follow the configured bindings.
 | Reader | `S` / `o` | Save / open the focused attachment (first chip when none is focused) |
 | Search | printable, `Backspace`, `Enter`, `Esc` | Edit query, submit, leave |
 | Composer | `Enter` | Newline in body; activate focused control |
-| Composer | `Ctrl+Enter` | Send |
+| Composer | `Ctrl+Enter` | Send² |
 | Composer | `Ctrl+E` | Edit the body in the configured external editor |
 | Composer | `Esc` | Save and leave (never silently discards) |
 | Modal | `↑↓` / `Tab` / `Enter` / `Esc` | Scroll, switch button, confirm, dismiss/keep |
+
+² Needs a terminal with kitty-protocol keyboard support (Ghostty, kitty, foot,
+WezTerm, iTerm2 3.5+, …): legacy input cannot distinguish `Ctrl+Enter` from
+`Enter` at all. Terminals without support ignore the mode; the chord simply
+stays inert there.
