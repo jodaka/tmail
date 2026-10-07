@@ -1,13 +1,14 @@
 //! Platform open-with adapters (plan §15, Phase 8.5): open a saved
 //! attachment, or a link from an HTML body (ticket hc9n), with the OS
-//! handler — `open` on macOS, `xdg-open` on Linux, `cmd /C start` on
-//! Windows. The opener program is
-//! spawned directly by argv, one target per invocation; a shell is never
-//! involved in target resolution, so paths with spaces or special
-//! characters stay intact (Windows `start` goes through `cmd`, which
-//! resolves the target it is handed, never interpolating it). On
-//! other platforms there is no opener in v1: the request fails with a
-//! clear, typed error instead of guessing.
+//! handler — `open` on macOS, `xdg-open` on Linux, `explorer` on Windows
+//! (ticket 264r). Every opener is spawned directly by argv with the
+//! target as its single argument; no shell ever enters the picture, so
+//! attacker-influenced URL and attachment-name characters (`&`, `^`,
+//! `%`) cannot reparse into extra commands: Windows was the vulnerable
+//! platform (`cmd /C start` rebuilt a command line and cmd metacharacters
+//! are Rust-unquoted argv), and `explorer` receives the target as one
+//! opaque argv entry instead. On other platforms there is no opener in
+//! v1: the request fails with a clear, typed error instead of guessing.
 
 use std::io;
 use std::path::Path;
@@ -40,13 +41,13 @@ pub trait PathOpener: Send + Sync {
 pub struct SystemOpener;
 
 /// No opener on the platform: v1 refuses rather than guessing (macOS
-/// `open`, Linux `xdg-open`, and Windows `start` are the supported
+/// `open`, Linux `xdg-open`, and Windows `explorer` are the supported
 /// handlers).
 fn no_opener() -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
         "no platform opener is configured for this OS (v1 supports \
-         macOS `open` and Linux `xdg-open`)",
+         macOS `open`, Linux `xdg-open`, and Windows `explorer`)",
     )
 }
 
@@ -78,28 +79,17 @@ impl PathOpener for SystemOpener {
     }
 }
 
-/// Spawn the platform opener with the target as the trailing argument
-/// (never a shell string on Unix). Windows is the one exception where a
-/// shell *builtin* is required: `start` is not a program, so it rides on
-/// `cmd /C start "" <target>`, the empty title guard keeping a
-/// quoted/first-quoted target from being swallowed as the window title
-/// (Windows port, issue y90w).
+/// Spawn the platform opener with the target as its one argument. No
+/// platform builds a command line string: macOS `open`, Linux
+/// `xdg-open`, and Windows `explorer` are all argv-spawned, so a target
+/// is always one opaque argv entry on the receiver side (ticket 264r:
+/// `cmd /C start` was the last adapter that reparsed a shell string,
+/// and it gave mail-controlled URL/attachment characters a way to
+/// separate or interpolate commands).
 async fn spawn_opener(program: &'static str, args: &[std::ffi::OsString]) -> io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        // `program` (the Unix opener name) is only carried for the
-        // Unix branch below.
-        let _ = program;
-        let mut command = tokio::process::Command::new("cmd");
-        command.arg("/C").arg("start").arg("").args(args);
-        spawn_reaped(&mut command).await
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let mut command = tokio::process::Command::new(program);
-        command.arg(&args[0]);
-        spawn_reaped(&mut command).await
-    }
+    let mut command = tokio::process::Command::new(program);
+    command.arg(&args[0]);
+    spawn_reaped(&mut command).await
 }
 
 /// Spawn with all three stdio detached: the opener outlives Tmail in
@@ -125,12 +115,14 @@ fn opener_program() -> Option<&'static str> {
     Some("xdg-open")
 }
 
-/// The opener program for the current platform (plan §15). On Windows the
-/// name is only a marker for the availability check: the actual spawn
-/// rides `cmd /C start` (see [`spawn_opener`]).
+/// The opener program for the current platform (plan §15). Windows uses
+/// `explorer`, which both opens a URL in the default browser and a file
+/// with the default association, as one argv entry (ticket 264r: the
+/// earlier `cmd` marker existed only to host the `start` builtin whose
+/// command line invited metacharacter injection).
 #[cfg(target_os = "windows")]
 fn opener_program() -> Option<&'static str> {
-    Some("cmd")
+    Some("explorer")
 }
 
 /// No opener on other platforms in v1: refusing beats guessing.
@@ -171,6 +163,19 @@ mod tests {
     // runtime::tasks (RecordingOpener / RefusingOpener): SystemOpener
     // always spawns the real platform program, so unit tests must not
     // call it.
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    use super::*;
+
+    /// Ticket 264r: Windows spawns `explorer` directly by argv — the
+    /// `cmd /C start` indirection (whose command line let cmd
+    /// metacharacters in the target separate commands) is retired.
+    #[test]
+    fn windows_spawns_no_shell() {
+        assert_eq!(opener_program(), Some("explorer"));
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
