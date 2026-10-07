@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 8 | Medium | runtime/editor | Paused event reader can consume and replay the first keystroke typed in `$EDITOR` |
 | 9 | Medium | runtime/tasks | Operations cancelled while queued still dispatch and briefly spawn a child process |
 | 10 | Medium | runtime/logging | World-readable, predictable log dir (`$TMPDIR/tmail/log`) on Linux; symlink-following writes |
 | 11 | Medium | backend/drafts | A detached stray-draft sweep can delete the newest remote draft revision |
@@ -58,14 +57,6 @@
 ---
 
 ## Detailed findings
-
-### 8. Medium — Paused event reader can steal an editor keystroke
-
-**Location:** `src/runtime/events.rs:63-66,104-124`; `src/main.rs:718-744`
-
-`EventControl::pause()` is fire-and-forget, and the event reader task merely disables the `reader.next()` select branch while `paused`. Crossterm 0.29's `EventStream` runs a background thread that parks in a blocking `poll_internal(None, …)` (verified in `crossterm-0.29.0/src/event/stream.rs`); dropping the select branch does not wake or cancel that thread — only dropping the `EventStream` does. Since the stream is polled every frame, it is normally armed when `handle_effects` starts the editor, so the first key typed into `$EDITOR` can be consumed and replayed into tmail after `resume()` (typed into the composer or firing a shortcut). There is also no acknowledgement of `Pause` before the editor spawns.
-
-**Fix:** recreate (or drop and re-open) the `EventStream` around the editor, or add a pause acknowledgement before spawning.
 
 ### 9. Medium — Cancelled, queued operations still dispatch
 
@@ -261,6 +252,6 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 
 ## Suggested priority
 
-1. Findings 8–11 (editor race, cancellation, log perms, draft sweep) — resource/integrity hardening.
+2. Findings 9–11 (cancellation, log perms, draft sweep) — resource/integrity hardening.
 4. Findings 12–23 — behavioral bugs clustered around composer/draft/cache lifecycles; each needs a regression test.
 5. Remaining Low items — batch fixes with the surrounding code.
