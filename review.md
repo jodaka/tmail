@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 9 | Medium | runtime/tasks | Operations cancelled while queued still dispatch and briefly spawn a child process |
 | 10 | Medium | runtime/logging | World-readable, predictable log dir (`$TMPDIR/tmail/log`) on Linux; symlink-following writes |
 | 11 | Medium | backend/drafts | A detached stray-draft sweep can delete the newest remote draft revision |
 | 12 | Medium | domain/address | Quoted display names containing `,`/`;` do not round-trip; send is refused and drafts mangle/drop them |
@@ -57,20 +56,6 @@
 ---
 
 ## Detailed findings
-
-### 9. Medium — Cancelled, queued operations still dispatch
-
-**Location:** `src/runtime/tasks.rs:142-162`; `src/backend/himalaya/process.rs:150-158,190-195`
-
-```rust
-let _permit = if uses_backend_process(&effect.kind) {
-    Some(permits.acquire().await.expect("semaphore never closed"))
-} else { None };
-```
-
-`acquire()` does not race `ctx.cancellation`. An operation cancelled while queued waits for a permit and then dispatches anyway; the Himalaya process path spawns the child *before* checking the token, so a long-cancelled `send`/`save` briefly starts a real child (network side effects possible before the SIGKILL). At minimum, cancellation latency is unbounded while waiting.
-
-**Fix:** `tokio::select!` the permit acquisition against `ctx.cancellation`, or check the token before dispatch.
 
 ### 10. Medium — World-readable log directory
 
@@ -252,6 +237,6 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 
 ## Suggested priority
 
-2. Findings 9–11 (cancellation, log perms, draft sweep) — resource/integrity hardening.
+2. Findings 10–11 (log perms, draft sweep) — resource/integrity hardening.
 4. Findings 12–23 — behavioral bugs clustered around composer/draft/cache lifecycles; each needs a regression test.
 5. Remaining Low items — batch fixes with the surrounding code.

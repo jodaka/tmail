@@ -147,6 +147,14 @@ async fn run_bounded(
     // see the `#[cfg(not(unix))]` note on `kill_child_tree`.
     #[cfg(unix)]
     command.process_group(0);
+    // Ticket xvcp: a request cancelled before dispatch must never create
+    // a child at all — the spawn participates in network side effects the
+    // moment it runs (IMAP/DIAL/DATA), and the select below can only
+    // observe cancellation after the child exists.
+    if token.is_cancelled() {
+        tracing::debug!(program, "child cancelled before spawn");
+        return Err(BackendError::Cancelled);
+    }
     let mut child = command
         .spawn()
         // Name the configured program here (issue 5ab7): the spawn failure
@@ -441,6 +449,41 @@ mod timeout_tests {
         cancel.cancel();
         let err = wait.await.expect_err("cancelled");
         assert!(matches!(err, BackendError::Cancelled), "got {err:?}");
+    }
+
+    /// Ticket xvcp: a request whose token is already cancelled must never
+    /// create a child — the spawn participates in network side effects
+    /// the moment it runs, and the typed Cancelled surfaces before any
+    /// of that can happen.
+    #[tokio::test]
+    async fn a_pre_cancelled_token_spawns_nothing() {
+        let cancel = token();
+        cancel.cancel();
+        let started = std::time::Instant::now();
+        let err = run("sleep", &["100".into()], &cancel)
+            .await
+            .expect_err("cancelled before dispatch");
+        assert!(matches!(err, BackendError::Cancelled), "{err:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "no spawn and no reap grace on a pre-cancelled token"
+        );
+        // The child never ran: no side effect it could have owned.
+        let side = tempfile::Builder::new()
+            .prefix("tmail-nospawn-proof")
+            .tempfile()
+            .expect("temp file");
+        let path = side.path().to_path_buf();
+        drop(side);
+        let err = run(
+            "sh",
+            &["-c".to_string(), format!("touch {}", path.display())],
+            &cancel,
+        )
+        .await
+        .expect_err("cancelled before dispatch");
+        assert!(matches!(err, BackendError::Cancelled), "{err:?}");
+        assert!(!path.exists(), "the child must not have run");
     }
 
     /// The timed-out child is actually gone: no zombie `sleep` lingers

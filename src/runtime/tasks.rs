@@ -129,6 +129,12 @@ impl OperationManager {
     /// observes its cancellation token and exits silently — the permit (if
     /// taken) drops and the result is suppressed exactly like a cancelled
     /// in-flight operation.
+    ///
+    /// Ticket xvcp: cancellation is observed at the pool gate too — the
+    /// acquire races the token, and the dispatch is re-checked once the
+    /// permit is in hand, so an operation cancelled while queued never
+    /// dispatches (a cancelled `send` must not start a child at all, and
+    /// the queue wait itself is bounded by the cancel).
     pub fn launch(&self, effect: Effect, ctx: RequestContext) {
         let backend = Arc::clone(&self.backend);
         let opener = Arc::clone(&self.opener);
@@ -143,12 +149,34 @@ impl OperationManager {
             tracing::debug!(id = %id, "operation launched");
             // Issue 1v38 / p723: only backend child processes queue behind
             // the bounded pool. `acquire` can only fail when the semaphore
-            // is closed, and the manager never closes it.
+            // is closed, and the manager never closes it. The wait races
+            // the cancellation token (ticket xvcp): a cancelled entry
+            // leaves the queue without a permit instead of dispatching on
+            // the next free slot.
             let _permit = if uses_backend_process(&effect.kind) {
-                Some(permits.acquire().await.expect("semaphore never closed"))
+                tokio::select! {
+                    _ = ctx.cancellation.cancelled() => {
+                        tracing::debug!(id = %id, "operation cancelled while queued");
+                        return;
+                    }
+                    permit = async {
+                        permits
+                            .acquire()
+                            .await
+                            .expect("semaphore never closed")
+                    } => Some(permit),
+                }
             } else {
                 None
             };
+            // The token may have fired between the acquire and this
+            // dispatch: never create a child for it (ticket xvcp). A
+            // cancelled in-flight run is suppressed by the same
+            // Cancelled-arm machinery once it dispatches.
+            if ctx.cancellation.is_cancelled() {
+                tracing::debug!(id = %id, "operation cancelled at dispatch; result suppressed");
+                return;
+            }
             match run_effect(
                 &backend,
                 &opener,
@@ -1787,6 +1815,66 @@ mod tests {
         token.cancel();
         let result = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
         assert!(result.is_err(), "cancelled operations must be silent");
+    }
+
+    /// Ticket xvcp: an operation cancelled while queued on the bounded
+    /// pool must never dispatch. Four long holders saturate the pool;
+    /// the fifth entry (id 5) is cancelled mid-queue and then one holder
+    /// (in flight, id 1) is cancelled too, freeing its permit — the
+    /// queue must retire the cancelled entry silently instead of
+    /// dispatching a child on the freed slot (a cancelled send would
+    /// otherwise start real network traffic). The pool stays usable for
+    /// fresh work afterwards.
+    #[tokio::test]
+    async fn cancellation_while_queued_prevents_dispatch() {
+        let backend = Arc::new(FakeBackend {
+            mailboxes_delay: Duration::from_secs(30),
+            messages_delay: Duration::ZERO,
+            error: None,
+            drafts: Vec::new(),
+        });
+        let (manager, mut rx) = manager(backend);
+        let mut holder_tokens = Vec::new();
+        for id in 1..=4 {
+            let (effect, token) =
+                effect_with_id(OperationKind::Mail(MailOperation::LoadMailboxes), id);
+            manager.launch(effect, ctx(id, &token));
+            holder_tokens.push(token);
+        }
+        // All four dispatched behind the pool.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let (queued_effect, queued_token) =
+            effect_with_id(OperationKind::Mail(MailOperation::LoadMailboxes), 5);
+        manager.launch(queued_effect, ctx(5, &queued_token));
+        // The entry sits on the pool (nothing dispatches while the
+        // holders run).
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        queued_token.cancel();
+
+        // Free one permit: the queued entry would acquire it next.
+        holder_tokens[0].cancel();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let nothing = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+        assert!(
+            nothing.is_err(),
+            "the queued-cancelled op must dispatch nothing, the freed holder must stay silent"
+        );
+
+        // The pool is healthy for operations that were never cancelled:
+        // this one dispatches on the freed permit and completes at once
+        // (`messages_delay` is ZERO).
+        let (fresh, fresh_token) = effect_with_id(
+            OperationKind::Mail(MailOperation::LoadPage(page_request("inbox"))),
+            6,
+        );
+        manager.launch(fresh, ctx(6, &fresh_token));
+        let result = tokio::time::timeout(Duration::from_millis(2000), rx.recv())
+            .await
+            .expect("pool serves fresh work")
+            .expect("fresh work succeeds");
+        assert_eq!(result.id, OperationId(6));
+        assert!(matches!(result.outcome, Ok(OperationOutcome::Page(_))));
     }
 
     #[tokio::test]
