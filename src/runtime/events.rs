@@ -9,6 +9,7 @@ use crossterm::event::{
 };
 use futures_util::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::oneshot;
 
 use crate::app::{Action, AppState};
 use crate::input::{keyboard, mouse};
@@ -38,18 +39,24 @@ pub enum Event {
     Tick,
 }
 
-/// Control commands for the running event loop.
+/// Control commands to the running event loop.
 enum Control {
-    /// Stop reading input events and ticks: the terminal is about to be
-    /// handed to a child program (the external editor, plan §14 Phase
-    /// 11.2), and a concurrent reader would steal its keystrokes.
-    Pause,
-    /// Resume normal event delivery.
-    Resume,
     /// Switch the tick cadence: fast (`true`) while foreground work keeps
     /// the loader animating, slow otherwise, so idle sessions don't burn
     /// the render loop at 20 Hz for nothing.
     Pace(bool),
+    /// Stop reading input events and ticks *and drop the crossterm
+    /// reader*, then acknowledge through the one-shot. The terminal is
+    /// about to be handed to a child program (the external editor, plan
+    /// §14 Phase 11), and a concurrent reader would steal its
+    /// keystrokes. Dropping is the load-bearing half (ticket a8n9): the
+    /// stream's background thread sits in a blocking `poll_internal`
+    /// on the tty and neither sleeps nor cancels just because the
+    /// select arm is disabled — only `EventStream`'s `Drop` tells it to
+    /// leave.
+    Pause(oneshot::Sender<()>),
+    /// Re-arm a fresh reader and resume normal event delivery.
+    Resume,
 }
 
 /// Handle over the running event loop's lifecycle (Phase 11.5): pause
@@ -61,8 +68,20 @@ pub struct EventControl {
 }
 
 impl EventControl {
-    pub fn pause(&self) {
-        let _ = self.tx.send(Control::Pause);
+    /// Pause input delivery and wait until the event loop confirms the
+    /// crossterm reader is torn down. The external editor must only take
+    /// the terminal after this returns — a keystroke typed into the
+    /// editor before the old reader dies can be consumed by its
+    /// background thread and replayed into tmail after resume (ticket
+    /// a8n9). Resolves even when the loop is already gone (ack error):
+    /// the terminal is being dropped in that case too, so the editor
+    /// flow never hangs on a vanished reader.
+    pub async fn pause(&self) {
+        let (ack, wait) = oneshot::channel();
+        if self.tx.send(Control::Pause(ack)).is_err() {
+            return;
+        }
+        let _ = wait.await;
     }
 
     pub fn resume(&self) {
@@ -87,7 +106,13 @@ pub fn spawn() -> (UnboundedReceiver<Event>, EventControl) {
 }
 
 async fn event_loop(tx: UnboundedSender<Event>, mut control: UnboundedReceiver<Control>) {
-    let mut reader = crossterm::event::EventStream::new();
+    // The reader is optional while paused: `None` means the terminal
+    // belongs to a child program (the external editor) and no tmail-owned
+    // reader may touch the tty (ticket a8n9 — with a live but unselected
+    // stream, crossterm's background thread stays blocked on the tty and
+    // consumes the editor's first keystrokes).
+    let mut reader: Option<crossterm::event::EventStream> =
+        Some(crossterm::event::EventStream::new());
     let mut idle = tokio::time::interval(SLOW_TICK_INTERVAL);
     let mut fast = tokio::time::interval(FAST_TICK_INTERVAL);
     // While paused (external editor owns the terminal) ticks are not
@@ -102,10 +127,24 @@ async fn event_loop(tx: UnboundedSender<Event>, mut control: UnboundedReceiver<C
     let mut paused = false;
     loop {
         tokio::select! {
+            biased;
             command = control.recv() => match command {
                 Some(Control::Pace(fast)) => fast_ticks = fast,
-                Some(Control::Pause) => paused = true,
-                Some(Control::Resume) => paused = false,
+                Some(Control::Pause(ack)) => {
+                    // `EventStream::drop` is what wakes and releases
+                    // crossterm's background poll thread; then the ack
+                    // lets the editor flow proceed to the spawn (ticket
+                    // a8n9). A second pause is idempotent.
+                    reader = None;
+                    paused = true;
+                    let _ = ack.send(());
+                }
+                Some(Control::Resume) => {
+                    if reader.is_none() {
+                        reader = Some(crossterm::event::EventStream::new());
+                    }
+                    paused = false;
+                }
                 None => break,
             },
             // Only the active pace's timer is awaited; a pace switch takes
@@ -121,8 +160,11 @@ async fn event_loop(tx: UnboundedSender<Event>, mut control: UnboundedReceiver<C
                     break;
                 }
             }
-            event = reader.next(), if !paused => {
-                match event {
+            // While paused this arm parks forever instead of touching the
+            // (dropped) reader; the pause flag keeps every other turn of
+            // the select going until Resume re-arms a fresh stream.
+            poll = poll_reader(&mut reader) => {
+                match poll {
                     Some(Ok(CrosstermEvent::Key(key))) => {
                         // Only real presses; repeats/releases would double-fire.
                         if key.kind == KeyEventKind::Press && tx.send(Event::Key(key)).is_err() {
@@ -177,6 +219,18 @@ async fn event_loop(tx: UnboundedSender<Event>, mut control: UnboundedReceiver<C
                 }
             }
         }
+    }
+}
+
+/// Poll the armed reader; while unloaded (paused), never resolve so the
+/// other select arms keep the loop's control path alive. Never touches a
+/// dropped stream, and never panics on the select construction order.
+async fn poll_reader(
+    reader: &mut Option<crossterm::event::EventStream>,
+) -> Option<std::io::Result<CrosstermEvent>> {
+    match reader {
+        Some(stream) => stream.next().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -408,5 +462,34 @@ mod tests {
                 height: 24
             }]
         );
+    }
+
+    /// Ticket a8n9: the editor spawn path *awaits* `pause()`. Whether the
+    /// loop is alive (it acks after dropping the reader) or already
+    /// gone (the control receiver dropped with its task), the handshake
+    /// must resolve — a hang here would freeze the terminal while the
+    /// editor is supposed to take over. In a test environment the
+    /// loop's crossterm source may fail immediately or keep polling:
+    /// both outcomes are acceptable, no outcome may deadlock.
+    #[tokio::test]
+    async fn pause_resolves_whatever_the_loop_state() {
+        let (_events, control) = spawn();
+        let started = std::time::Instant::now();
+        control.pause().await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "pause must not hang the editor flow"
+        );
+        // And after the receiver (and with it the loop) is gone.
+        drop(_events);
+        let started = std::time::Instant::now();
+        control.pause().await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "pause on a dead loop must not hang either"
+        );
+        // Resume on a dead loop is a fire-and-forget send: nothing to
+        // await, but it must not panic either.
+        control.resume();
     }
 }

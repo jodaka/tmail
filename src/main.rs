@@ -701,10 +701,13 @@ fn finish_session(state: &mut AppState, config: &tmail::config::Config) -> Sessi
 
 /// Route one batch of reducer effects: async backend operations go to the
 /// manager; the external editor runs here, synchronously, on the terminal
-/// owner (plan §14 steps 2–7, Phase 11): pause the event reader so it
-/// cannot steal the editor's keystrokes, suspend the TUI, run the editor
-/// (the runtime stays live, so the pre-launch draft save completes), then
-/// always resume — success or failure (step 7) — and force a full redraw.
+/// owner (plan §14 steps 2–7, Phase 11): tear the event reader down and
+/// wait for the acknowledgement so it cannot steal the editor's
+/// keystrokes (ticket a8n9: a live-but-unselected crossterm stream keeps
+/// its background thread blocked on the tty), suspend the TUI, run the
+/// editor (the runtime stays live, so the pre-launch draft save
+/// completes), then always resume — success or failure (step 7) — and
+/// force a full redraw.
 async fn handle_effects(
     state: &mut AppState,
     manager: &OperationManager,
@@ -717,12 +720,13 @@ async fn handle_effects(
             body,
         }) = &effect.kind
         {
-            // Suspend: drop the guard (its Drop restores the terminal) and
-            // pause the event reader so it cannot steal the editor's
-            // keystrokes (plan §14 steps 2 and 5).
-            assets.events_control.pause();
+            // Suspend: await the reader teardown FIRST (its Drop is what
+            // releases crossterm's background poll thread) and only then
+            // drop the guard, restoring the terminal for the editor
+            // (plan §14 steps 2 and 5).
+            assets.events_control.pause().await;
             let Some(guard) = assets.guard.take() else {
-                // The reader stays paused; the `?` ends the session, whose
+                // The reader stays paused. The `?` ends the session, whose
                 // teardown drops the control — same as a failed re-enter
                 // below.
                 bail!("terminal guard missing while suspending for the editor");
