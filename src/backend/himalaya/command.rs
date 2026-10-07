@@ -268,9 +268,43 @@ pub(crate) fn message_add_argv(
 /// prints `{"message":"Message successfully sent"}`, failures are JSON
 /// errors with exit 1 — including errors that may mean the message was
 /// already delivered, which Tmail classifies in the adapter).
+///
+/// Envelope-wise this command derives everything from the message
+/// headers, so it is only safe for messages without Bcc (ticket kws6:
+/// on himalaya 2.1.x the Bcc header stays in the transmitted DATA and
+/// every To/Cc recipient sees it).
 pub(crate) fn message_send_argv(config: Option<&Path>, account: Option<&str>) -> Vec<String> {
     let mut argv = global_flags(config, account);
     args!(argv, "message", "send", "--json");
+    argv
+}
+
+/// `smtp send` with an explicit RFC 5321 envelope (ticket kws6): the
+/// reverse path and every forward path are argv, and the raw message
+/// piped on stdin becomes the DATA payload byte-for-byte on himalaya
+/// 2.1.0 and 2.2.1 alike (`keep_bcc: true` is pinned for this command on
+/// 2.2, and 2.1 has no strip machinery to fight). Used for sends that
+/// carry Bcc recipients: the piped bytes never contain a `Bcc` header,
+/// and all To/Cc/Bcc recipients still receive the mail through the
+/// envelope — so blind recipients get nothing to read, whatever io-smtp
+/// version strips or keeps. Recipients are one `--rcpt-to` each in
+/// To/Cc/Bcc order, mirroring the header order himalaya itself derives
+/// from. Success/failure output is the same JSON either branch produces.
+pub(crate) fn smtp_send_argv(
+    config: Option<&Path>,
+    account: Option<&str>,
+    mail_from: &str,
+    recipients: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Vec<String> {
+    let mut argv = global_flags(config, account);
+    args!(argv, "smtp", "send", "-f", mail_from);
+    // The send gate refuses empty recipient lists before any process
+    // exists, and this call is only reachable with Bcc recipients
+    // present, so the `-t` list is never empty on a real invocation.
+    for recipient in recipients {
+        args!(argv, "-t", recipient.as_ref());
+    }
+    args!(argv, "--json");
     argv
 }
 

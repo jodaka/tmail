@@ -31,3 +31,24 @@
 # through the shared CLI with maildir; on IMAP accounts a failed APPEND after
 # SMTP delivery would surface as a generic error, which the conservative
 # Unknown bucket also covers.
+
+# Ticket kws6 addendum (2026-10-07): `message send` is only safe for
+# Bcc-less mail — himalaya 2.1.0 (io-smtp 0.3) transmits the DATA payload
+# verbatim, so a `Bcc:` header would be disclosed to every To/Cc
+# recipient. Sends that carry Bcc recipients now go through
+# `smtp send --mail-from <account> --rcpt-to <to...> --rcpt-to <cc...>
+# --rcpt-to <bcc...> --json`: the envelope is explicit (2.1.0 and 2.2.1
+# expose the identical CLI, and 2.2.1 pins `keep_bcc: true` for this
+# command), while tmail's serializer keeps the Bcc header off the DATA.
+# Probed with smtp_sink.py against himalaya 2.2.1: identical
+# `{"message":"Message successfully sent"}` JSON, the RCPT envelope
+# carries the blind addresses, and the captured DATA holds no Bcc header.
+# The outcome taxonomy below applies to this path unchanged.
+#
+# Ticket frmm addendum (2026-10-07): the 30 s `CALL_TIMEOUT` kill
+# (ticket 183r) never produced an exit status, so it must not surface as
+# a structural failure. The backend maps a send timeout into
+# `SendOutcome::Unknown` (delivery ambiguous) in `send_message` — the
+# "timeout during DATA → Unknown" line of the algorithm below now also
+# covers the budget kill itself, whether it fires mid-DATA or after a
+# silent restart.

@@ -301,14 +301,16 @@ cat >> "$STDIN_RECORD"
 rmdir "$STDIN_RECORD.lock"
 
 # Identify the subcommand anywhere in argv (global flags like `-c` come
-# first on real invocations). For `message`, `attachment` and `imap`, the
-# operation is the word that follows (read/move/delete, download, list/create).
+# first on real invocations). For `message`, `smtp`, `attachment` and
+# `imap`, the operation is the word that follows (read/move/delete, send,
+# download, list/create).
 SUB=""
 OP=""
 prev=""
 for a in "$@"; do
   case "$prev" in
     message) OP="$a" ;;
+    smtp) OP="$a" ;;
     attachment) OP="$a" ;;
     imap) OP="$a" ;;
   esac
@@ -316,6 +318,7 @@ for a in "$@"; do
     mailbox) SUB="mailbox" ;;
     envelope) SUB="envelope" ;;
     message) SUB="message" ;;
+    smtp) SUB="smtp" ;;
     flag) SUB="flag" ;;
     attachment) SUB="attachment" ;;
     imap) SUB="imap" ;;
@@ -472,9 +475,11 @@ if [ "$SUB" = "envelope" ]; then
   exit 0
 fi
 
-if [ "$SUB" = "message" ]; then
+if [ "$SUB" = "message" ] || [ "$SUB" = "smtp" ]; then
   if [ "$OP" = "send" ]; then
-    # Phase 7 send-outcome modes (fixtures/himalaya/send-outcomes.md).
+    # Phase 7 send-outcome modes (fixtures/himalaya/send-outcomes.md),
+    # shared by `message send` and the explicit-envelope `smtp send`
+    # (ticket kws6): both print the same JSON surface.
     case "@SEND_MODE@" in
       ok)
         printf '%s' '{"message":"Message successfully sent"}'

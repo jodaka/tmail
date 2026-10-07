@@ -767,17 +767,27 @@ impl MailBackend for HimalayaCliBackend {
 
     async fn delete_draft(&self, ctx: RequestContext, draft: DraftSnapshot) -> BackendResult<()> {
         tracing::debug!(local_id = %draft.local_id.0, "delete_draft");
-        // The user confirmed the discard: journal first (worst case after a
+        // The user confirmed the removal: journal first (worst case after a
         // crash is a lingering remote copy, never a resurrected draft).
         // Journal I/O runs on the blocking pool (single-threaded runtime).
-        // No journal: nothing was recorded, so the remote cleanup below
-        // runs regardless (can only mean an earlier save proceeded
-        // without a journal).
+        // No journal: nothing was ever recorded (the save path refuses
+        // without one), so only a known remote copy could remain.
         let journal = self.journal.clone();
         let local_id = draft.local_id.0.clone();
-        blocking(move || match journal {
-            Some(journal) => journal.remove(&local_id).map_err(BackendError::Io),
-            None => Ok(()),
+        // Whether this draft was ever recorded, checked before the entry
+        // is removed: a draft neither journaled nor pushed — a send of a
+        // fresh, never-autosaved draft — has no copies for the envelope
+        // sweep to find, and the sweep would still list the Drafts
+        // mailbox for nothing. An entry recorded after the send started
+        // (a leave-time forced save) counts, so the sweep still finds
+        // its copy.
+        let journaled = blocking(move || match journal {
+            Some(journal) => {
+                let journaled = journal.saved_revision(&local_id)?.is_some();
+                journal.remove(&local_id).map_err(BackendError::Io)?;
+                Ok(journaled)
+            }
+            None => Ok(false),
         })
         .await?;
         if let Some(drafts) = self.mailbox_for_role(MailboxRole::Drafts) {
@@ -801,6 +811,11 @@ impl MailBackend for HimalayaCliBackend {
                     )
                     .await;
                 }
+                return Ok(());
+            }
+            if !journaled && draft.remote_id.is_none() {
+                // Nothing was ever recorded or pushed under this draft's
+                // identity: no copies exist to sweep.
                 return Ok(());
             }
             // The Message-ID sweep (keep=None) deletes the known copy and
@@ -831,16 +846,63 @@ impl MailBackend for HimalayaCliBackend {
         );
         // 1. Serialize through the library (Phase 7.1) — refusals for a
         //    missing identity or empty recipient lists happen here, before
-        //    any child process exists.
+        //    any child process exists. Blind recipients ride the envelope
+        //    once delivered: the serialized bytes never carry a `Bcc`
+        //    header (ticket kws6).
         let bytes = self.serialize_outbound(&message).await?;
-        // 2. Deliver through the stdin contract (ADR 0001 decision 2,
-        //    plan §11: "Pipe serialized mail to stdin when required").
-        let argv = command::message_send_argv(self.config_path.as_deref(), self.account.as_deref());
+        // 2. Deliver through a stdin contract (ADR 0001 decision 2, plan
+        //    §11: "Pipe serialized mail to stdin when required"). With Bcc
+        //    recipients the envelope must not be derived from the message
+        //    headers — on himalaya 2.1.x the derivation reads the Bcc
+        //    header we deliberately left off, so the headerless payload
+        //    would drop those recipients. `smtp send` takes the full
+        //    envelope as argv instead (ticket kws6); Bcc-less mail keeps
+        //    the plain `message send` contract.
+        let argv = if message.bcc.is_empty() {
+            command::message_send_argv(self.config_path.as_deref(), self.account.as_deref())
+        } else {
+            // `serialize_outbound` just refused to run without an identity,
+            // so the sender address exists by the time the envelope is
+            // built.
+            let mail_from = self
+                .account_email
+                .as_deref()
+                .expect("identity-less sends are refused during serialization");
+            command::smtp_send_argv(
+                self.config_path.as_deref(),
+                self.account.as_deref(),
+                mail_from,
+                message
+                    .to
+                    .iter()
+                    .chain(&message.cc)
+                    .chain(&message.bcc)
+                    .map(|address| address.email.as_str()),
+            )
+        };
         let output =
-            process::run_with_stdin(&self.program, &argv, Some(&bytes), &ctx.cancellation).await?;
+            match process::run_with_stdin(&self.program, &argv, Some(&bytes), &ctx.cancellation)
+                .await
+            {
+                Ok(output) => output,
+                Err(err) => match send_outcome_from_error(&self.program, &err) {
+                    // A killed child leaves delivery undetermined (review
+                    // finding 7, ticket frmm): the 30 s budget can kill the
+                    // SMTP transaction mid-DATA while the message is already
+                    // on the wire, so the timeout must surface through the
+                    // ambiguous classification — the retry modal's
+                    // duplicate-send warning — never as a structural
+                    // failure. Any other error has no delivery semantics
+                    // here and keeps its typed propagation.
+                    Some(outcome) => return Ok(outcome),
+                    None => return Err(err),
+                },
+            };
         // 3. Classify the outcome (plan §12, ADR 0001 finding 12): the
         //    exit status alone cannot separate "failed before delivery"
-        //    from "may already be delivered".
+        //    from "may already be delivered" — and the output contract is
+        //    the same JSON either way, so the classification is
+        //    branch-independent.
         Ok(classify_send(output))
     }
 
@@ -1194,11 +1256,15 @@ impl HimalayaCliBackend {
                 self.account_display_name.clone(),
                 email.clone(),
             ));
-        for (field, addresses) in [
-            ("To", &message.to),
-            ("Cc", &message.cc),
-            ("Bcc", &message.bcc),
-        ] {
+        // Visible recipients reach the wire as headers; blind ones never
+        // do (ticket kws6): the transmitted bytes are only ever delivered
+        // to the envelope recipients, and on himalaya 2.1.x the io-smtp
+        // path would otherwise transmit the `Bcc` header to every
+        // To/Cc recipient. The envelope that still covers Bcc comes from
+        // the explicit `smtp send` argv (see [`Self::send_message`]).
+        // Draft copies (`serialize_draft`) keep the header so the
+        // composer sees the original blind recipients on reopen.
+        for (field, addresses) in [("To", &message.to), ("Cc", &message.cc)] {
             if addresses.is_empty() {
                 continue;
             }
@@ -1217,11 +1283,11 @@ impl HimalayaCliBackend {
                     })
                     .collect(),
             );
-            builder = match field {
-                "To" => builder.to(list),
-                "Cc" => builder.cc(list),
-                _ => builder.bcc(list),
-            };
+            if field == "To" {
+                builder = builder.to(list);
+            } else {
+                builder = builder.cc(list);
+            }
         }
         if !message.content.subject.is_empty() {
             // Header-safe at the wire too (ticket 9anh): the subject is the
@@ -1570,6 +1636,30 @@ fn validate_attachment_source_inner(
         name,
         size,
     })
+}
+
+/// Map a child-run error into its [`SendOutcome`] when the error itself
+/// carries delivery information the exit-status classifier cannot see.
+///
+/// Ticket frmm: the only such case is the per-child [`CALL_TIMEOUT`]
+/// kill (ticket 183r). A send killed at the 30 s budget may have already
+/// completed its SMTP DATA phase — the message can be on the wire — so
+/// the outcome is [`SendOutcome::Unknown`] and the UI's ambiguous path
+/// (duplicate-send warning, keep draft) applies. Everything else
+/// (refused request, missing executable, cancelled run) keeps its typed
+/// error propagation: nothing there claims or denies delivery, and the
+/// draft's fate belongs to the reducer either way.
+fn send_outcome_from_error(program: &str, err: &BackendError) -> Option<SendOutcome> {
+    match err {
+        BackendError::Timeout { secs, .. } => Some(SendOutcome::Unknown {
+            code: None,
+            detail: format!(
+                "`{program}` send timed out after {secs}s; \
+                 the message may already have been delivered"
+            ),
+        }),
+        _ => None,
+    }
 }
 
 /// Classify one finished `message send` run into a [`SendOutcome`] (plan
@@ -2289,6 +2379,37 @@ mod attachment_mime_tests {
         }
     }
 
+    /// Ticket kws6: blind recipients ride the envelope, never the wire.
+    /// Outgoing serialization strips the `Bcc` header (delivery still
+    /// covers those addresses through the explicit `smtp send` argv),
+    /// while To and Cc are written normally.
+    #[tokio::test]
+    async fn outgoing_wire_carries_to_and_cc_but_never_the_bcc_header() {
+        let message = OutboundMessage::from_fields(
+            "ada@example.org, bob@example.org",
+            "carol@example.org",
+            "Hidden <one@hidden.example>, two@hidden.example",
+            OutgoingContent {
+                subject: String::from("Quiet note"),
+                body: String::from("shh"),
+                in_reply_to: None,
+                references: None,
+            },
+            None,
+        )
+        .expect("valid recipients");
+        let wire = backend().serialize_outbound(&message).await.expect("ok");
+        let text = String::from_utf8(wire).expect("wire bytes are UTF-8");
+        assert!(text.contains("ada@example.org"), "{text}");
+        assert!(text.contains("bob@example.org"), "{text}");
+        assert!(text.contains("carol@example.org"), "{text}");
+        assert!(text.lines().all(|line| !line.starts_with("Bcc:")));
+        assert!(
+            !text.contains("hidden.example"),
+            "blind address on the wire"
+        );
+    }
+
     #[tokio::test]
     async fn a_send_without_attachments_stays_single_part() {
         let wire = backend()
@@ -2440,6 +2561,47 @@ mod send_tests {
         let outcome = classify_send(output(Some(2), "", "killed by signal?"));
         assert!(matches!(outcome, SendOutcome::Unknown { .. }));
         assert_eq!(outcome.detail(), "killed by signal?");
+    }
+
+    /// Ticket frmm: the 30 s budget kill can land while the SMTP
+    /// transaction is mid-DATA, so a send timeout is delivery-ambiguous
+    /// by construction — it must map to `Unknown` (the duplicate-send
+    /// warning path) instead of escaping `send_message` as a structural
+    /// failure.
+    #[test]
+    fn a_send_timeout_is_delivery_ambiguous() {
+        let outcome = send_outcome_from_error(
+            "himalaya",
+            &BackendError::Timeout {
+                program: String::from("himalaya"),
+                secs: 30,
+            },
+        )
+        .expect("a send timeout carries delivery information");
+        assert!(outcome.is_ambiguous());
+        assert!(
+            matches!(outcome, SendOutcome::Unknown { code: None, .. }),
+            "{outcome:?}"
+        );
+        assert!(
+            outcome.detail().contains("timed out after 30s")
+                && outcome.detail().contains("may already have been delivered"),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn structurally_refused_sends_keep_typed_propagation() {
+        // Questions of delivery only arise in the timeout: spawn/decode
+        // failures and cancellations keep their error propagation so the
+        // structural (never-ambiguous) mapping or the suppressed-cancelled
+        // path stays in charge.
+        let spawn = BackendError::Spawn {
+            program: String::from("himalaya"),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        };
+        assert!(send_outcome_from_error("himalaya", &spawn).is_none());
+        assert!(send_outcome_from_error("himalaya", &BackendError::Cancelled).is_none());
     }
 
     #[test]

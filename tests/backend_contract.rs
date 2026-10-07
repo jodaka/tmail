@@ -892,6 +892,22 @@ fn outbound() -> OutboundMessage {
     .expect("valid recipients")
 }
 
+fn outbound_with_bcc() -> OutboundMessage {
+    OutboundMessage::from_fields(
+        "Ada Lovelace <ada@example.org>, bob@example.org",
+        "Carol <carol@example.org>",
+        "Hidden One <one@hidden.example>, two@hidden.example",
+        OutgoingContent {
+            subject: String::from("Hello again"),
+            body: String::from("Body line one.\nBody line two.\n"),
+            in_reply_to: None,
+            references: None,
+        },
+        Some(String::from("<123.send@tmail.local>")),
+    )
+    .expect("valid recipients")
+}
+
 #[test]
 fn send_pipes_the_serialized_message_on_stdin_with_exact_argv() {
     let fake = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "ok");
@@ -918,6 +934,89 @@ fn send_pipes_the_serialized_message_on_stdin_with_exact_argv() {
     assert!(text.contains("Subject: Hello again"));
     assert!(text.contains("Message-ID: <123.send@tmail.local>"));
     assert!(text.contains("Body line one."));
+}
+
+/// Ticket kws6: sends that carry blind recipients deliver through the
+/// explicit `smtp send` envelope — the account email is the reverse path
+/// and every To/Cc/Bcc email a `--rcpt-to` forward path in header order —
+/// while the piped bytes never market the Bcc list. Only the validated
+/// email values ride argv; display names stay out of the envelope, and
+/// the same success JSON makes the outcome identical to a normal send.
+#[test]
+fn send_with_bcc_uses_the_explicit_smtp_envelope_and_no_bcc_header() {
+    let fake = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "ok");
+    let message = outbound_with_bcc();
+    let outcome = block(backend_with_identity(&fake).send_message(ctx(), message)).expect("sent");
+    assert_eq!(outcome, tmail::domain::SendOutcome::Sent);
+    assert_eq!(
+        fake.argv(),
+        vec![vec![
+            "-c".to_string(),
+            fake.config().display().to_string(),
+            "-a".to_string(),
+            "probe".to_string(),
+            "smtp".to_string(),
+            "send".to_string(),
+            "-f".to_string(),
+            "probe@tmail.local".to_string(),
+            "-t".to_string(),
+            "ada@example.org".to_string(),
+            "-t".to_string(),
+            "bob@example.org".to_string(),
+            "-t".to_string(),
+            "carol@example.org".to_string(),
+            "-t".to_string(),
+            "one@hidden.example".to_string(),
+            "-t".to_string(),
+            "two@hidden.example".to_string(),
+            "--json".to_string(),
+        ]]
+    );
+    let stdin = fake.stdin_bytes();
+    let text = String::from_utf8(stdin).expect("serialized mail is UTF-8");
+    // The visible recipients and body still reach the wire, the blind
+    // list never does (header or body leak alike).
+    assert!(
+        text.contains("To: \"Ada Lovelace\" <ada@example.org>"),
+        "{text}"
+    );
+    assert!(text.contains("carol@example.org"), "{text}");
+    assert!(text.contains("Body line one."));
+    assert!(
+        text.lines().all(|line| !line.starts_with("Bcc:")),
+        "a Bcc header reached the transmitted payload:\n{text}"
+    );
+    assert!(
+        !text.contains("hidden.example"),
+        "a blind address reached the transmitted payload:\n{text}"
+    );
+}
+
+/// Ticket kws6: the explicit-envelope branch feeds the same Phase 0
+/// classification — a pre-delivery dial failure stays safe to retry and
+/// a DATA-phase EOF stays ambiguous — so duplicate-send handling works
+/// for Bcc mail exactly like for the plain send path.
+#[test]
+fn bcc_send_outcomes_follow_the_phase_0_characterization() {
+    let predelivery = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "predelivery");
+    let outcome =
+        block(backend_with_identity(&predelivery).send_message(ctx(), outbound_with_bcc()))
+            .expect("classified");
+    assert!(
+        matches!(
+            outcome,
+            tmail::domain::SendOutcome::FailedBeforeDelivery { .. }
+        ),
+        "{outcome:?}"
+    );
+
+    let ambiguous = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "ambiguous");
+    let outcome = block(backend_with_identity(&ambiguous).send_message(ctx(), outbound_with_bcc()))
+        .expect("classified");
+    assert!(
+        matches!(outcome, tmail::domain::SendOutcome::Unknown { .. }) && outcome.is_ambiguous(),
+        "{outcome:?}"
+    );
 }
 
 /// Acceptance (plan §19 Phase 7): integration fixtures parse the sent
