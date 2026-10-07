@@ -327,6 +327,19 @@ pub struct HimalayaCliBackend {
     /// harmless: every copy carries the same stable `Message-ID`, so the
     /// next save's sweep removes whatever this one missed.
     sweeps: Arc<tokio::sync::Semaphore>,
+    /// The newest confirmed remote copy per draft, keyed by the bare
+    /// `Message-ID` (ticket jmxd). The detached sweep's spawned `keep`
+    /// is already stale the moment a newer save confirms — the finding:
+    /// sweep N (keep = copy N) would treat the just-confirmed copy N+1
+    /// as a stray, delete it, and leave the journal claiming the N+1
+    /// revision saved. Every save publishes its own confirmed id here
+    /// *before* spawning (or being skipped by) a sweep, and every
+    /// replacement sweep re-reads it right before each deletion, so the
+    /// copy that must survive is always the registry's. The std mutex
+    /// is a small map touched without awaits, like the `mailboxes` lock
+    /// above. Explicit draft deletions clear the entry: `keep = None`
+    /// sweeps ignore it by contract.
+    sweep_keep: Arc<std::sync::Mutex<HashMap<String, String>>>,
 }
 
 impl HimalayaCliBackend {
@@ -350,6 +363,7 @@ impl HimalayaCliBackend {
             account_display_name: None,
             downloads_dir: None,
             sweeps: Arc::new(tokio::sync::Semaphore::new(1)),
+            sweep_keep: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -709,6 +723,16 @@ impl MailBackend for HimalayaCliBackend {
         //    leaves a duplicate, never data loss). The Message-ID sweep
         //    covers both the known previous id and any stray copies from a
         //    crash mid-replacement, so one pass handles all cleanup.
+        //    Publication happens first (ticket jmxd): the sweep's own
+        //    spawned `keep` is stale the instant a newer save confirms,
+        //    and the registry is what trims the deletion instead.
+        self.publish_sweep_keep(
+            draft
+                .message_id
+                .as_ref()
+                .expect("the serializer mandated a stable Message-ID"),
+            &new_id.0,
+        );
         self.delete_stray_draft_copies(&ctx, &drafts, Some(&new_id), &draft.message_id);
 
         // 5. Confirm the revision in the journal (newest pushed), on the
@@ -820,13 +844,18 @@ impl MailBackend for HimalayaCliBackend {
             }
             // The Message-ID sweep (keep=None) deletes the known copy and
             // any strays alike — running an explicit two-phase delete of
-            // `old` on top would just repeat the same work.
+            // `old` on top would just repeat the same work. The registry
+            // entry goes first (ticket jmxd): a keep=None sweep ignores
+            // the registry, and a stale entry pointing at ids this sweep
+            // is about to delete must not mislead a later save.
+            self.clear_sweep_keep(&draft.message_id);
             run_stray_draft_sweep(
                 cli,
                 drafts,
                 trash,
                 None,
                 draft.message_id.clone(),
+                Arc::clone(&self.sweep_keep),
                 ctx.clone(),
             )
             .await;
@@ -1133,8 +1162,10 @@ impl HimalayaCliBackend {
         // One sweep at a time (ticket 8s0g): each sweep is detached and
         // effectively uncancellable, so rapid saves must not pile them
         // up unbounded. Skipping is safe — every copy carries the same
-        // stable Message-ID, so the next save's sweep removes the
-        // leftovers this one missed.
+        // stable Message-ID, and the [`Self::sweep_keep`] registry
+        // (ticket jmxd) carries the newest confirmed copy even for the
+        // skipped saves, so the running sweep never deletes a newer
+        // revision.
         let Ok(permit) = self.sweeps.clone().try_acquire_owned() else {
             tracing::debug!("a stray draft sweep is already running; skipping this one");
             return;
@@ -1144,12 +1175,37 @@ impl HimalayaCliBackend {
         let trash = self.mailbox_for_role(MailboxRole::Trash);
         let keep = keep.map(|id| id.0.clone());
         let message_id = Some(message_id.clone());
+        let registry = Arc::clone(&self.sweep_keep);
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            run_stray_draft_sweep(cli, drafts_mailbox, trash, keep, message_id, ctx).await;
+            run_stray_draft_sweep(cli, drafts_mailbox, trash, keep, message_id, registry, ctx)
+                .await;
             // Hold the single-sweep permit until the sweep ends.
             drop(permit);
         });
+    }
+
+    /// Publish the newest confirmed remote copy (ticket jmxd): the bare
+    /// `Message-ID` keys the entry, the fresh server id is what every
+    /// subsequent replacement sweep must keep.
+    fn publish_sweep_keep(&self, message_id: &str, remote_id: &str) {
+        self.sweep_keep.lock().expect("sweep registry lock").insert(
+            bare_message_id(message_id).to_string(),
+            remote_id.to_string(),
+        );
+    }
+
+    /// Forget the sweep registry entry for a deleted draft (ticket jmxd):
+    /// its replacement sweeps carry `keep = None` and ignore the
+    /// registry by contract, so a stale entry pointing at a deleted id
+    /// would only mislead later saves' sweeps.
+    fn clear_sweep_keep(&self, message_id: &Option<String>) {
+        if let Some(message_id) = message_id {
+            self.sweep_keep
+                .lock()
+                .expect("sweep registry lock")
+                .remove(&bare_message_id(message_id));
+        }
     }
 
     /// Serialize one draft revision as a single-part `text/plain` RFC 5322
@@ -1754,16 +1810,38 @@ fn pre_delivery_failure(detail: &str) -> bool {
     PRE_DATA_MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
+/// The keep id a sweep deletion is judged against (ticket jmxd): a
+/// replacement sweep (spawned with `keep = Some`) re-reads the sweep
+/// registry — the newest confirmed copy, kept green even for saves whose
+/// own sweep was skipped — so a stale spawned keep can never delete the
+/// just-confirmed revision; when the registry has nothing (e.g. an
+/// older-version draft), the spawn keep holds. An explicit deletion
+/// carries `keep = None` and ignores the registry wholesale: the user
+/// asked for every copy to go.
+fn effective_keep(
+    keep: Option<&String>,
+    registry_keep: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    match keep {
+        Some(_) => registry_keep().or_else(|| keep.cloned()),
+        None => None,
+    }
+}
+
 /// The awaited stray-sweep body (see the detached
 /// `delete_stray_draft_copies` wrapper): list the Drafts mailbox, then
 /// trash-first delete every envelope carrying the draft's `Message-ID`
-/// except `keep`. Best-effort — any failure just ends the sweep.
+/// except the effective keep: the spawn-time `keep`, refreshed from the
+/// sweep registry before every deletion (ticket jmxd — the spawned keep
+/// can be stale the moment a newer save confirms). Best-effort — any
+/// failure just ends the sweep.
 async fn run_stray_draft_sweep(
     cli: Cli,
     drafts_mailbox: String,
     trash: Option<String>,
     keep: Option<String>,
     message_id: Option<String>,
+    registry: Arc<std::sync::Mutex<HashMap<String, String>>>,
     ctx: RequestContext,
 ) {
     let Some(message_id) = message_id else {
@@ -1773,7 +1851,19 @@ async fn run_stray_draft_sweep(
     let ids =
         list_envelope_ids_with_message_id(&cli, &drafts_mailbox, &bare, &ctx.cancellation).await;
     for id in ids {
-        if keep.as_deref() == Some(id.as_str()) {
+        // Replacement sweeps (keep = Some) consult the registry: it
+        // carries the newest confirmed copy even for saves whose own
+        // sweeps were skipped (ticket jmxd). An explicit deletion
+        // (keep = None) ignores it — the user asked for all copies to
+        // go.
+        let effective_keep = effective_keep(keep.as_ref(), || {
+            registry
+                .lock()
+                .expect("sweep registry lock")
+                .get(&bare)
+                .cloned()
+        });
+        if effective_keep.as_deref() == Some(id.as_str()) {
             continue;
         }
         tracing::info!(id = %id, "deleting stray draft copy");
@@ -2676,5 +2766,67 @@ mod stray_sweep_tests {
             }
         }
         panic!("sweep permit was never released");
+    }
+
+    /// Ticket jmxd: the registry carries the newest confirmed copy even
+    /// for saves whose own sweep was skipped (8s0g); a stale spawned
+    /// keep must lose to it. Publication overwrites, keyed by the bare
+    /// `Message-ID`; clearance (explicit deletion) removes the entry so
+    /// a later save starts clean.
+    #[test]
+    fn registry_publication_and_clearance() {
+        let backend = HimalayaCliBackend::new("himalaya", None, None, HashMap::new());
+        backend.publish_sweep_keep("1@tmail.local", "copy-1");
+        assert_eq!(
+            backend
+                .sweep_keep
+                .lock()
+                .expect("lock")
+                .get("1@tmail.local")
+                .map(String::as_str),
+            Some("copy-1"),
+            "first publication registers the copy"
+        );
+        backend.publish_sweep_keep("<1@tmail.local>", "copy-2");
+        assert_eq!(
+            backend
+                .sweep_keep
+                .lock()
+                .expect("lock")
+                .get("1@tmail.local")
+                .map(String::as_str),
+            Some("copy-2"),
+            "the bare id is the key, the newest id the value"
+        );
+        backend.clear_sweep_keep(&Some(String::from("<1@tmail.local>")));
+        assert!(
+            backend.sweep_keep.lock().expect("lock").is_empty(),
+            "clearance on deletion keeps later save publications honest"
+        );
+    }
+
+    /// The pure deletion gate: replacement sweeps consult the registry
+    /// (a stale spawned keep loses to the newest confirmed copy); an
+    /// explicit deletion carries no keep and never consults it.
+    #[test]
+    fn the_deletion_gate_prefers_the_registry_over_a_stale_keep() {
+        let stale = Some(String::from("old-copy"));
+        // Registry ahead of the spawn keep: the newer copy wins.
+        assert_eq!(
+            effective_keep(stale.as_ref(), || Some(String::from("new-copy"))),
+            Some(String::from("new-copy"))
+        );
+        // Registry empty (nothing published before the spawn): the
+        // spawn keep still holds.
+        assert_eq!(
+            effective_keep(stale.as_ref(), || None),
+            Some(String::from("old-copy"))
+        );
+        // Explicit deletion: the registry is ignored wholesale.
+        assert_eq!(
+            effective_keep(None, || Some(String::from("new-copy"))),
+            None,
+            "keep=None sweeps delete every copy"
+        );
     }
 }

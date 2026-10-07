@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 11 | Medium | backend/drafts | A detached stray-draft sweep can delete the newest remote draft revision |
 | 12 | Medium | domain/address | Quoted display names containing `,`/`;` do not round-trip; send is refused and drafts mangle/drop them |
 | 13 | Medium | app/attachments | Saved-attachment path is recorded against the *currently selected* chip, not the saved one |
 | 14 | Medium | app/cache | Move confirmation evicts the wrong cached page (visible mailbox instead of the source mailbox) |
@@ -55,14 +54,6 @@
 ---
 
 ## Detailed findings
-
-### 11. Medium — Stray-draft sweep can delete the newest revision
-
-**Location:** `src/backend/himalaya/mod.rs:1061-1091` (spawn) and `:1671-1700` (sweep)
-
-Each save spawns a detached sweep with `keep = its own new copy id`, and `try_acquire_owned` skips a second concurrent sweep. If revision N+1 is added while sweep N is still listing, sweep N deletes every copy except N — including the newer N+1 copy — and N+1's own sweep may have been skipped. The journal then marks N+1 as remotely saved while the server only holds N; on restore, `saved_revision` suppresses the self-heal re-push, so the newest edit exists only in the local journal.
-
-**Fix:** have the sweep re-check the journal/current revision before deleting, or serialize sweeps with saves per draft instead of skipping.
 
 ### 12. Medium — Quoted comma names break address lists
 
@@ -222,6 +213,5 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 
 ## Suggested priority
 
-2. Finding 11 (draft sweep) — resource/integrity hardening.
-4. Findings 12–23 — behavioral bugs clustered around composer/draft/cache lifecycles; each needs a regression test.
+2. Findings 12–23 — behavioral bugs clustered around composer/draft/cache lifecycles; each needs a regression test.
 5. Remaining Low items — batch fixes with the surrounding code.

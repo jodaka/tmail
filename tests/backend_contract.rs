@@ -828,6 +828,221 @@ fn save_draft_sweeps_stray_copies_by_message_id_two_phase() {
     );
 }
 
+/// A bespoke fake for ticket jmxd: `message add` yields a fresh id per
+/// call (d1, then d2), `envelope` parking on a barrier file before
+/// reporting both copies of the draft's Message-ID, and `message
+/// delete` that only records. The shared fake's unused template mode
+/// slots smuggle the barrier, state, and record paths (the template is
+/// whole-script, so its own placeholders reused here). No trash role on
+/// the backend under test, so a stray is one direct delete.
+const SWEEP_BARRIER_SCRIPT: &str = r#"#!/usr/bin/env bash
+set -u
+ARGV_LOG="@SEND_MODE@"
+STDIN_RECORD="@FLAG_MODE@"
+BARRIER="@ENVELOPE_MODE@"
+ADD_STATE="@MESSAGE_MODE@"
+
+while ! mkdir "$ARGV_LOG.lock" 2>/dev/null; do sleep 0.01; done
+printf '%s\0' "$@" >> "$ARGV_LOG"
+printf '\n' >> "$ARGV_LOG"
+rmdir "$ARGV_LOG.lock"
+while ! mkdir "$STDIN_RECORD.lock" 2>/dev/null; do sleep 0.01; done
+cat >> "$STDIN_RECORD"
+rmdir "$STDIN_RECORD.lock"
+
+SUB=""
+OP=""
+prev=""
+for a in "$@"; do
+  case "$prev" in message) OP="$a" ;; esac
+  case "$a" in
+    message) SUB="message" ;;
+    envelope) SUB="envelope" ;;
+  esac
+  prev="$a"
+done
+
+if [ "$SUB" = "message" ] && [ "$OP" = "add" ]; then
+  N=$(cat "$ADD_STATE" 2>/dev/null || echo 0)
+  N=$((N+1))
+  printf '%s' "$N" > "$ADD_STATE"
+  if [ "$N" = "1" ]; then
+    printf '%s' '{"id":"d1","sent":false}'
+  else
+    printf '%s' '{"id":"d2","sent":false}'
+  fi
+  exit 0
+fi
+
+if [ "$SUB" = "envelope" ]; then
+  # The sweeper parks here (with its spawned keep captured) while the
+  # later save confirms and publishes the newer copy.
+  while [ ! -f "$BARRIER" ]; do sleep 0.02; done
+  printf '%s' '{"envelopes":[{"id":"d1","message-id":"123.draft@tmail.local","in-reply-to":[],"flags":[],"subject":"one","from":[],"date":null},{"id":"d2","message-id":"123.draft@tmail.local","in-reply-to":[],"flags":[],"subject":"two","from":[],"date":null}]}'
+  exit 0
+fi
+
+if [ "$SUB" = "message" ] && [ "$OP" = "delete" ]; then
+  printf '%s' '{"action":"moved"}'
+  exit 0
+fi
+
+exit 0
+"#;
+
+/// Ticket jmxd, the reported construction replayed at the process
+/// contract: save #1's sweep spawns (keep = d1) and parks on its
+/// listing while save #2 confirms d2 and publishes it — save #2's own
+/// sweep is skipped (ticket 8s0g). On release, sweep #1 — stale keep in
+/// hand — must delete d1 (a true stray) and keep d2 (the registry's
+/// newest): the journal then matches the server.
+#[test]
+fn a_stale_sweep_keep_deletes_only_the_genuinely_older_copy() {
+    let dir = TempDir::new().expect("journal tempdir");
+    let journal_dir = TempDir::new().expect("journal tempdir");
+    let barrier: &'static str = Box::leak(
+        dir.path()
+            .join("barrier")
+            .into_os_string()
+            .into_string()
+            .expect("UTF-8")
+            .into_boxed_str(),
+    );
+    let add_state: &'static str = Box::leak(
+        dir.path()
+            .join("add-state")
+            .into_os_string()
+            .into_string()
+            .expect("UTF-8")
+            .into_boxed_str(),
+    );
+    // The argv/stdin record slots ride the send and flag modes (the
+    // built-in constructor does not accept paths directly).
+    let argv_log: &'static str = Box::leak(
+        dir.path()
+            .join("argv.log")
+            .into_os_string()
+            .into_string()
+            .expect("UTF-8")
+            .into_boxed_str(),
+    );
+    let stdin_record: &'static str = Box::leak(
+        dir.path()
+            .join("stdin.record")
+            .into_os_string()
+            .into_string()
+            .expect("UTF-8")
+            .into_boxed_str(),
+    );
+    let fake = FakeHimalaya::spawn_script_send(
+        "unused-mailbox",
+        barrier,
+        add_state,
+        stdin_record,
+        argv_log,
+        SWEEP_BARRIER_SCRIPT,
+    );
+    let backend = HimalayaCliBackend::new(
+        fake.program().display().to_string(),
+        Some(PathBuf::from(fake.config())),
+        Some(String::from("probe")),
+        aliases(&[("inbox", "INBOX"), ("drafts", "Drafts")]),
+    )
+    .with_journal(DraftJournal::open(journal_dir.path().to_path_buf()));
+
+    // The whole construction lives in ONE runtime: the detached sweep
+    // must stay parked while the next save runs and its publication
+    // lands (a per-save `block` runtime would reap the parked sweep
+    // with its runtime — the sweep would never reach the barrier).
+    Runtime::new().expect("runtime").block_on(async {
+        // Save #1: add -> d1, registry <- d1, sweep spawns with
+        // keep = d1 and parks on the barrier.
+        backend
+            .save_draft(ctx(), draft_snapshot(1, None))
+            .await
+            .expect("save #1 succeeds");
+        // Give the detached sweep its turn (its listing parks).
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let records = wait_for_records(Path::new(argv_log), 2)
+            .await
+            .expect("sweep #1 parked");
+        assert_eq!(records.len(), 2, "add #1 + parked listing #1");
+
+        // Save #2: add -> d2, registry <- d2, and its sweep is skipped
+        // — sweep #1 still holds the single-sweep permit.
+        backend
+            .save_draft(ctx(), draft_snapshot(2, Some("d1")))
+            .await
+            .expect("save #2 succeeds");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let records = recorded_argv(Path::new(argv_log));
+        assert_eq!(
+            records.len(),
+            3,
+            "add #2 ran; sweep #2 was skipped while #1 is parked: {records:?}"
+        );
+        let listings = records
+            .iter()
+            .filter(|invocation| invocation.iter().any(|arg| arg == "envelope"))
+            .count();
+        assert_eq!(listings, 1, "exactly one sweep listing: {records:?}");
+
+        // Release the listing: sweep #1 reads the registry (newest =
+        // d2) right before each deletion.
+        std::fs::write(barrier, b"go").expect("release barrier");
+        let records = wait_for_records(Path::new(argv_log), 4)
+            .await
+            .expect("sweep #1 deletion recorded");
+        assert_eq!(
+            &records[3][5..],
+            ["delete", "-m", "Drafts", "d1", "--json"],
+            "the stale keep's own copy is a stray under the registry-newest rule"
+        );
+        // Give the (single-delete) sweep a moment to end, then prove
+        // d2 was never targeted.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let records = recorded_argv(Path::new(argv_log));
+        let deletes_d2 = records
+            .iter()
+            .any(|invocation| invocation.iter().any(|arg| arg == "d2"));
+        assert!(
+            !deletes_d2,
+            "the newest confirmed copy must survive the stale sweep: {records:?}"
+        );
+    });
+}
+
+/// The bespoke script's argv protocol (NUL-separated args, one newline
+/// per invocation), read straight from its own record path.
+fn recorded_argv(path: &std::path::Path) -> Vec<Vec<String>> {
+    let bytes = std::fs::read(path).unwrap_or_default();
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|invocation| !invocation.is_empty())
+        .map(|invocation| {
+            invocation
+                .split(|byte| *byte == 0)
+                .filter(|arg| !arg.is_empty())
+                .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                .collect()
+        })
+        .collect()
+}
+
+/// Poll until the bespoke script recorded `want` invocations (the same
+/// wait contract as `FakeHimalaya::wait_for_invocations`), on the async
+/// runtime so the detached sweep keeps running while we wait.
+async fn wait_for_records(path: &std::path::Path, want: usize) -> Option<Vec<Vec<String>>> {
+    for _ in 0..100 {
+        let records = recorded_argv(path);
+        if records.len() >= want {
+            return Some(records);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    None
+}
+
 #[test]
 fn save_draft_records_the_revision_before_any_remote_call() {
     // The `add` fails: the journal entry must still exist (ADR 0002 §D.1 —
