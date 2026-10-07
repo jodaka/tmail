@@ -889,8 +889,10 @@ fn operation_failure(effect: &Effect, err: BackendError) -> Option<OperationFail
         detail: sanitize(&detail),
         retry: Some(effect.retry_spec()),
         // Structural failures are never ambiguous: a send that ran is
-        // classified into SendOutcome by the backend (plan §12), and every
-        // other operation is safely retryable.
+        // classified into SendOutcome by the backend (plan §12) — its
+        // budget kill included (ticket frmm: a send timeout is
+        // delivery-ambiguous and never reaches this mapping) — and every
+        // other operation has no delivery side effect to guess about.
         ambiguous: false,
     })
 }
