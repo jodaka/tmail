@@ -608,7 +608,10 @@ async fn run_event_loop(
                         }
                     }
                     for action in events::coalesce(batch, &hits, state) {
-                        tracing::debug!(?action, "dispatch");
+                        // Shape only, never content: the discriminant
+                        // keeps composed text, editor payloads, and
+                        // decoded messages out of the log file.
+                        tracing::debug!(action = action.discriminant(), "dispatch");
                         let effects = reducer::reduce(state, action);
                         handle_effects(state, manager, assets, effects).await?;
                         sync_mouse_capture(state, &mut capture_applied);

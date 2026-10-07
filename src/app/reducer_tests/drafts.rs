@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::app::operation::{CacheOperation, DraftOperation, MailOperation};
-use std::sync::Arc;
 
 #[test]
 fn enter_in_other_mailboxes_still_opens_the_reader() {
@@ -833,6 +832,149 @@ fn send_success_after_leaving_still_resolves_the_draft() {
     assert_eq!(effect_parts(&effects).1.summary(), "Cleaning up sent draft");
 }
 
+/// Install a second, different draft into the composer slot (as opening
+/// one from the Drafts list would leave it), without touching routes the
+/// reducer owns: the slot now holds `subject`/`message_id`, not the sent
+/// draft.
+fn install_other_draft(s: &mut AppState, subject: &str, message_id: &str) {
+    let mut draft = crate::domain::Draft {
+        subject: String::from(subject),
+        ..crate::domain::Draft::default()
+    };
+    draft.message_id = Some(String::from(message_id));
+    draft.remote_id = Some(MessageId(String::from("copy-other")));
+    s.session.composer = Some(crate::app::composer::ComposerState::from_draft(draft));
+    if !matches!(s.active_route(), Some(Route::Composer)) {
+        s.session.routes.push(Route::Composer);
+    }
+    s.session.focus = Focus::Composer;
+}
+
+/// The sent draft's cleanup operation of a confirmed send.
+fn sent_cleanup(effects: &[Effect]) -> (OperationId, crate::domain::DraftSnapshot) {
+    let (id, kind) = effect_parts(effects);
+    match kind {
+        OperationKind::Draft(DraftOperation::DeleteDraft {
+            draft,
+            reason: DraftRemovalReason::Sent,
+        }) => (id, (*draft).clone()),
+        other => panic!("expected DeleteDraft(Sent), got {other:?}"),
+    }
+}
+
+#[test]
+fn a_completed_send_never_resolves_a_different_composer_draft() {
+    // Finding 1 regression: the user sent draft A, left mid-send, and
+    // opened draft B; A's Sent outcome must clean up A only. B's slot,
+    // route, and focus must survive untouched.
+    let mut s = state();
+    sendable(&mut s);
+    tick(&mut s, 0); // clock so the send mints the stable identity
+    let (id, message) = expect_send(&reduce(&mut s, Action::Send));
+    let sent_id = message.message_id.clone().expect("minted at send");
+    assert_eq!(
+        s.session
+            .composer
+            .as_ref()
+            .unwrap()
+            .draft
+            .message_id
+            .as_deref(),
+        Some(sent_id.as_str()),
+        "the draft carries the sent identity"
+    );
+    // The draft was clean (fields set directly), so leaving parks it.
+    reduce(&mut s, Action::BackOrCancel);
+    assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
+    // Draft B takes the slot and the composer screen.
+    install_other_draft(&mut s, "Draft B", "<b@tmail.local>");
+    let effects = complete_send(&mut s, id, SendOutcome::Sent);
+    // B is still composing: same slot, same route, editable again.
+    let composer = s.session.composer.as_ref().unwrap();
+    assert_eq!(composer.draft.subject, "Draft B", "B stays in the slot");
+    assert!(!composer.sending, "B was never frozen by A's send");
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    assert_eq!(s.session.focus, Focus::Composer);
+    // The cleanup resolves the sent draft by its own identity.
+    let (cleanup_id, snapshot) = sent_cleanup(&effects);
+    assert_eq!(snapshot.message_id.as_deref(), Some(sent_id.as_str()));
+    assert!(s.session.operations.get(cleanup_id).is_some());
+}
+
+#[test]
+fn a_send_retry_freezes_only_the_sent_draft() {
+    // The retry used to freeze whichever draft occupied the slot, so a
+    // later success deleted it. A different draft stays editable and is
+    // never touched by the retried send's completion.
+    let mut s = state();
+    sendable(&mut s);
+    tick(&mut s, 0);
+    let (id, message) = expect_send(&reduce(&mut s, Action::Send));
+    let sent_id = message.message_id.clone().expect("minted at send");
+    complete_send(
+        &mut s,
+        id,
+        SendOutcome::Unknown {
+            code: Some(1),
+            detail: String::from("connection reset"),
+        },
+    );
+    // Draft B lands in the slot while the modal is still open (a fetch
+    // result falls through the error modal).
+    install_other_draft(&mut s, "Draft B", "<b@tmail.local>");
+    let effects = reduce(&mut s, Action::RetryError);
+    let (retry_id, _) = expect_send(&effects);
+    let composer = s.session.composer.as_ref().unwrap();
+    assert!(
+        !composer.sending,
+        "B is not the retried draft and stays editable"
+    );
+    let effects = complete_send(&mut s, retry_id, SendOutcome::Sent);
+    // B is still composing after the retried send confirmed.
+    let composer = s.session.composer.as_ref().unwrap();
+    assert_eq!(composer.draft.subject, "Draft B");
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    let (_, snapshot) = sent_cleanup(&effects);
+    assert_eq!(
+        snapshot.message_id.as_deref(),
+        Some(sent_id.as_str()),
+        "the retried send still cleans up its own draft"
+    );
+}
+
+#[test]
+fn a_send_mints_the_draft_identity_when_missing() {
+    // A fresh, never-saved draft sent directly: the send gives it the
+    // stable identity (ADR 0002 §D.6), so a leave-time forced save after
+    // the send started journals and pushes under the same envelope the
+    // confirmed-send cleanup sweeps.
+    let mut s = state();
+    sendable(&mut s);
+    tick(&mut s, 0); // clock
+    assert!(
+        s.session
+            .composer
+            .as_ref()
+            .unwrap()
+            .draft
+            .message_id
+            .is_none(),
+        "precondition: never saved, no identity yet"
+    );
+    let (id, message) = expect_send(&reduce(&mut s, Action::Send));
+    let sent_id = message.message_id.expect("minted at send");
+    let composer = s.session.composer.as_ref().unwrap();
+    assert_eq!(composer.draft.message_id.as_deref(), Some(sent_id.as_str()));
+    assert!(
+        composer.draft.local_id.is_some(),
+        "the journal key is minted with it"
+    );
+    // The confirmed send resolves the draft by that identity.
+    let effects = complete_send(&mut s, id, SendOutcome::Sent);
+    let (_, snapshot) = sent_cleanup(&effects);
+    assert_eq!(snapshot.message_id.as_deref(), Some(sent_id.as_str()));
+}
+
 #[test]
 fn sent_draft_cleanup_failure_never_claims_a_failed_send() {
     let mut s = state();
@@ -906,13 +1048,19 @@ fn ambiguous_send_opens_the_duplicate_warning_and_keeps_the_draft() {
     assert!(dialog.ambiguous, "the modal must carry the ambiguity flag");
     assert_eq!(dialog.code, Some(1));
     assert!(dialog.detail.contains("SMTP DATA failed"));
-    // Retry stays available, replaying the exact frozen message.
-    assert_eq!(
-        dialog.retry.as_ref().map(|spec| spec.kind.clone()),
-        Some(OperationKind::Draft(DraftOperation::Send {
-            message: Arc::new(message),
-        }))
-    );
+    // Retry stays available, replaying the exact frozen message bytes.
+    let retry = dialog
+        .retry
+        .as_ref()
+        .map(|spec| spec.kind.clone())
+        .expect("retry available");
+    let OperationKind::Draft(DraftOperation::Send {
+        message: replay, ..
+    }) = &retry
+    else {
+        panic!("expected a send retry, got {retry:?}");
+    };
+    assert_eq!(**replay, message);
     // The draft is intact and editable again; nothing claimed success.
     let composer = s.session.composer.as_ref().unwrap();
     assert!(!composer.sending);

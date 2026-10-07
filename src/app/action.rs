@@ -262,3 +262,100 @@ pub enum Action {
     },
     Quit,
 }
+
+impl Action {
+    /// The variant name for logs, payload-free. Dispatch logging used to
+    /// `Debug`-print whole actions, which carried every typed character
+    /// (the wizard's password field included — its masking is
+    /// render-only), draft bodies, and whole decoded messages. Tracing
+    /// must see only the shape an action took, never its content.
+    pub fn discriminant(&self) -> &'static str {
+        match self {
+            Action::MoveUp => "MoveUp",
+            Action::MoveDown => "MoveDown",
+            Action::PagePrevious => "PagePrevious",
+            Action::PageNext => "PageNext",
+            Action::Activate => "Activate",
+            Action::BackOrCancel => "BackOrCancel",
+            Action::FocusNext => "FocusNext",
+            Action::FocusPrevious => "FocusPrevious",
+            Action::OpenSearch => "OpenSearch",
+            Action::SearchEdit(_) => "SearchEdit",
+            Action::SubmitSearch => "SubmitSearch",
+            Action::ComposerEdit(_) => "ComposerEdit",
+            Action::DialogEdit(_) => "DialogEdit",
+            Action::AttachmentBrowse(_) => "AttachmentBrowse",
+            Action::Wizard(_) => "Wizard",
+            Action::LoadDrafts => "LoadDrafts",
+            Action::Compose => "Compose",
+            Action::Reply => "Reply",
+            Action::ReplyAll => "ReplyAll",
+            Action::Forward => "Forward",
+            Action::Archive => "Archive",
+            Action::Trash => "Trash",
+            Action::ToggleStar => "ToggleStar",
+            Action::MarkUnread => "MarkUnread",
+            Action::MarkRead => "MarkRead",
+            Action::ToggleSelected => "ToggleSelected",
+            Action::SelectAll => "SelectAll",
+            Action::Refresh => "Refresh",
+            Action::ToggleMouseCapture => "ToggleMouseCapture",
+            Action::OpenThemePicker => "OpenThemePicker",
+            Action::OpenAccountSwitcher => "OpenAccountSwitcher",
+            Action::Send => "Send",
+            Action::SaveAttachment => "SaveAttachment",
+            Action::OpenAttachment => "OpenAttachment",
+            Action::LeaveComposer => "LeaveComposer",
+            Action::DiscardDraft => "DiscardDraft",
+            Action::OpenHelp => "OpenHelp",
+            Action::EditExternal => "EditExternal",
+            Action::EditorFinished { .. } => "EditorFinished",
+            Action::RetryError => "RetryError",
+            Action::DismissError => "DismissError",
+            Action::Click(_) => "Click",
+            Action::BackendCompleted(_) => "BackendCompleted",
+            Action::Tick { .. } => "Tick",
+            Action::SetTerminalFocus(_) => "SetTerminalFocus",
+            Action::Resize { .. } => "Resize",
+            Action::Quit => "Quit",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::wizard::WizardAction;
+
+    #[test]
+    fn typed_characters_never_reach_the_discriminant() {
+        // Every typed character must stay out of the dispatch log: the
+        // wizard's password field masks at render only, so a payload in
+        // a debug log line is a keystroke logger.
+        for action in [
+            Action::SearchEdit(SearchEdit::Char('ё')),
+            Action::ComposerEdit(ComposerEdit::Char('ё')),
+            Action::DialogEdit(DialogEdit::Char('ё')),
+            Action::Wizard(WizardAction::Edit(DialogEdit::Char('ё'))),
+        ] {
+            let line = format!("action={} dispatch", action.discriminant());
+            assert!(!line.contains('ё'), "payload leaked: {line}");
+        }
+    }
+
+    #[test]
+    fn backend_completions_log_only_the_variant() {
+        // A completed operation's payload (whole messages, pages, drafts,
+        // the external editor's full text) stays out of the log line.
+        let action = Action::EditorFinished {
+            id: OperationId(u64::MAX),
+            result: Ok(String::from("secret draft body")),
+        };
+        assert_eq!(action.discriminant(), "EditorFinished");
+        let line = format!("action={}", action.discriminant());
+        assert!(
+            !line.contains("secret draft body"),
+            "payload leaked: {line}"
+        );
+    }
+}

@@ -40,9 +40,16 @@ pub enum DraftOperation {
     },
     /// Deliver one serialized message through the Himalaya stdin contract
     /// (plan §14, Phase 7). The message is frozen at send time; retries
-    /// replay the exact bytes under a new operation id. Shared, as with
-    /// the draft payloads.
-    Send { message: Arc<OutboundMessage> },
+    /// replay the exact bytes under a new operation id. `draft` freezes
+    /// the sent draft's own identity at send start (ids and content): it
+    /// is what the confirmed-send cleanup resolves, so a completion that
+    /// lands after the user left and opened a different draft deletes the
+    /// *sent* draft, never the one now on screen. Shared, as with the
+    /// other draft payloads.
+    Send {
+        message: Arc<OutboundMessage>,
+        draft: Arc<DraftSnapshot>,
+    },
 }
 
 impl DraftOperation {

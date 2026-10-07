@@ -194,9 +194,16 @@ pub fn save_account(path: &Path, draft: &DraftAccount) -> Result<SaveReport, Str
     let existing = std::fs::read_to_string(path);
     let created = existing.is_err();
     let mut doc = match existing {
-        Ok(text) => text
-            .parse::<DocumentMut>()
-            .map_err(|err| format!("existing config is not valid TOML: {err}"))?,
+        Ok(text) => text.parse::<DocumentMut>().map_err(|err| {
+            // The error text quotes the offending line, which may hold
+            // a stored credential (a malformed `password.raw` is a
+            // common hand-edit mistake): sanitize like every other
+            // surfaced detail.
+            format!(
+                "existing config is not valid TOML: {}",
+                crate::domain::sanitize::sanitize(&err.to_string())
+            )
+        })?,
         // Fresh file: start from an empty document.
         Err(_) => DocumentMut::new(),
     };

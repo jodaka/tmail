@@ -1882,13 +1882,30 @@ mod tests {
 
     #[test]
     fn issues_carry_no_secret_values() {
-        // A malformed line quoting a secret-shaped value must not surface
-        // the value in the reported detail.
+        // A malformed line quoting a secret must not surface the value in
+        // the reported detail: the TOML error echoes the offending line,
+        // and the dotted `password.raw` shape is what tmail itself writes.
         let (config, issues) = parse_with_issues(
-            "[tmail]\naccount = \"probe\"\npassword = \"hunter2 )\"\n",
+            "[accounts.probe]\nimap.sasl.plain.password.raw = \"hunter2\n",
             None,
         );
         let _ = config;
+        assert!(
+            issues.iter().any(|issue| issue.contains("not valid TOML")),
+            "the malformed file must be reported: {issues:?}"
+        );
+        let joined = issues.join("\n");
+        assert!(!joined.contains("hunter2"), "leaked: {joined}");
+    }
+
+    #[test]
+    fn issues_carry_no_dotted_password_cmd() {
+        // The `password.cmd` variant is credentials-adjacent config: the
+        // value never surfaces through a parse error either.
+        let (_config, issues) = parse_with_issues(
+            "[accounts.probe]\nsmtp.sasl.plain.password.cmd = \"op read hunter2\n",
+            None,
+        );
         let joined = issues.join("\n");
         assert!(!joined.contains("hunter2"), "leaked: {joined}");
     }

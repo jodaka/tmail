@@ -778,7 +778,7 @@ fn sendable(s: &mut AppState) {
 fn expect_send(effects: &[Effect]) -> (OperationId, OutboundMessage) {
     match effects {
         [effect] => match &effect.kind {
-            OperationKind::Draft(DraftOperation::Send { message }) => {
+            OperationKind::Draft(DraftOperation::Send { message, .. }) => {
                 (effect.id, (**message).clone())
             }
             other => panic!("expected a Send effect, got {other:?}"),

@@ -328,7 +328,9 @@ pub(crate) fn back_or_cancel(state: &mut AppState) -> Vec<Effect> {
         return leave_composer(state);
     }
     if let Some(op) = state.session.operations.cancel_foreground() {
-        tracing::info!(id = %op.id, kind = ?op.kind, "cancelled foreground operation");
+        // Payload-free label only: `?op.kind` would print the whole
+        // operation payload — a draft snapshot's body and recipients.
+        tracing::info!(id = %op.id, kind = op.kind.summary(), "cancelled foreground operation");
         state.set_status(format!("{} — cancelled", op.kind.summary()));
         return Vec::new();
     }

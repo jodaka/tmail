@@ -20,6 +20,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::address::{Address, parse_address_list};
+use crate::domain::draft::Draft;
+use crate::domain::message::bare_message_id;
 
 /// The outcome of one send attempt (plan §12). `code` is the Himalaya exit
 /// status when a child process ran and exited (`None` when it did not).
@@ -195,6 +197,22 @@ impl OutboundMessage {
     /// Total recipient count across the three fields (tests, logs).
     pub fn recipient_count(&self) -> usize {
         self.to.len() + self.cc.len() + self.bcc.len()
+    }
+}
+
+/// Whether `draft` is the draft `message` was composed from: matched on
+/// the stable RFC `Message-ID` both carry (ADR 0002 §D.6), in bare form
+/// like every other draft/list identity comparison. Both `None` means the
+/// send ran before any identity was minted (no clock yet): the composer
+/// slot can only hold the sent draft itself then — a parked dirty draft
+/// cannot be replaced while the clock that secures it is missing — so the
+/// slot resolves as the sent draft, the only direction that closes the
+/// composer after a confirmed send.
+pub fn sent_draft_is(draft: &Draft, message: &OutboundMessage) -> bool {
+    match (&draft.message_id, &message.message_id) {
+        (Some(draft_id), Some(sent_id)) => bare_message_id(draft_id) == bare_message_id(sent_id),
+        (None, None) => true,
+        _ => false,
     }
 }
 

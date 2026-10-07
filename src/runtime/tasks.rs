@@ -405,8 +405,10 @@ async fn run_draft_call(
             )
             .await
         }
-        DraftOperation::Send { message } => {
-            // Shared, not copied (issue 6m97): as with `SaveDraft`.
+        DraftOperation::Send { message, .. } => {
+            // Shared, not copied (issue 6m97): as with `SaveDraft`. The
+            // carried draft snapshot belongs to the reducer's confirmed-send
+            // cleanup; the backend only needs the message.
             let message = Arc::clone(message);
             run_call(
                 effect,
@@ -1720,6 +1722,20 @@ mod tests {
                     )
                     .expect("valid recipients")
                 ),
+                draft: Arc::new(crate::domain::DraftSnapshot {
+                    local_id: crate::domain::DraftId(String::from("local-1")),
+                    message_id: Some(String::from("<1@tmail.local>")),
+                    in_reply_to: None,
+                    references: None,
+                    remote_id: None,
+                    to: String::from("dest@example.com"),
+                    cc: String::new(),
+                    bcc: String::new(),
+                    subject: String::new(),
+                    body: String::new(),
+                    attachments: Vec::new(),
+                    revision: 1,
+                }),
             }
         )));
         assert!(!uses_backend_process(&OperationKind::Cache(

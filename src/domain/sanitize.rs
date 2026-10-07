@@ -103,6 +103,29 @@ fn redact_labeled_values(chars: &[char], redacted: &mut [bool]) {
                 continue;
             }
             let mut cursor = index + key.len();
+            // Optional dotted tail between the key and its separator
+            // (`password.raw`, `secret.id`): the value after the separator
+            // is still the secret — this is the exact key shape tmail
+            // writes, `imap.sasl.plain.password.raw = "…"`, and the one
+            // TOML parse errors echo back verbatim. A dotted tail of a
+            // non-secret label (`password.length`) redacts too: failing
+            // safe is the documented direction.
+            loop {
+                while cursor < chars.len() && (chars[cursor] == ' ' || chars[cursor] == '\t') {
+                    cursor += 1;
+                }
+                if chars.get(cursor) == Some(&'.') {
+                    cursor += 1;
+                    while cursor < chars.len()
+                        && (chars[cursor].is_ascii_alphanumeric()
+                            || matches!(chars[cursor], '_' | '-'))
+                    {
+                        cursor += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
             while cursor < chars.len() && (chars[cursor] == ' ' || chars[cursor] == '\t') {
                 cursor += 1;
             }
@@ -201,6 +224,33 @@ mod tests {
         assert_eq!(
             sanitize("{\"client_secret\": \"abc\"}"),
             "{\"client_secret\": \"███\"}"
+        );
+    }
+
+    #[test]
+    fn dotted_tail_keys_are_redacted() {
+        // The key shape tmail itself writes (`config/write.rs`): a bare
+        // `password.raw`/`password.cmd` under the account table. A TOML
+        // parse error echoes this line verbatim, so the sanitizer must
+        // treat the dotted key like a plain one.
+        assert_eq!(
+            sanitize("imap.sasl.plain.password.raw = \"hunter2\""),
+            "imap.sasl.plain.password.raw = \"███████\""
+        );
+        assert_eq!(
+            sanitize("smtp.sasl.plain.password.cmd = \"op read secret\""),
+            "smtp.sasl.plain.password.cmd = \"██████████████\""
+        );
+        // A dotted tail of a non-secret label redacts too: failing safe
+        // is the documented direction.
+        assert_eq!(
+            sanitize("password.length = 12, next"),
+            "password.length = ██, next"
+        );
+        // The quoted-key JSON shape with a dotted tail stays covered.
+        assert_eq!(
+            sanitize("{\"password.raw\": \"abc\"}"),
+            "{\"password.raw\": \"███\"}"
         );
     }
 

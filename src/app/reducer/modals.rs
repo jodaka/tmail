@@ -49,12 +49,12 @@ pub(crate) fn clear_expired_status(
 }
 
 /// Handle `action` while any modal is open. Returns `None` when no modal
-/// is open (the caller falls through to normal handling). The attachment
-/// dialog likewise falls through for `BackendCompleted`: the pending
-/// validation result must land while the dialog is up. The error modal
-/// (issue 8859) falls through too — successes apply behind it and
-/// background failures land in the status line — and queues a *foreground*
-/// failure into the open dialog instead of dropping it.
+/// is open (the caller falls through to normal handling). Every overlay
+/// lets `Action::BackendCompleted` fall through — results are not input,
+/// and a swallowed result would leak its registry entry and drop the
+/// confirmation it carries. On top of that fall-through, the error modal
+/// (issue 8859) queues a *foreground* failure into the open dialog
+/// instead of dropping it.
 pub(crate) fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
     match state.session.overlay {
         Some(Overlay::Error(_)) => match action {
@@ -77,12 +77,23 @@ pub(crate) fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<
             }
             _ => Some(error_modal_reduce(state, action)),
         },
-        Some(Overlay::ConfirmDiscard(_)) => Some(discard_modal_reduce(state, action)),
+        Some(Overlay::ConfirmDiscard(_)) => match action {
+            // Results must land while the dialog is up (an archive/trash
+            // or autosave in flight); the dialog otherwise swallows
+            // everything.
+            Action::BackendCompleted(_) => None,
+            _ => Some(discard_modal_reduce(state, action)),
+        },
         Some(Overlay::AttachmentExplorer(_)) => match action {
             Action::BackendCompleted(_) => None,
             _ => Some(attachment_dialog_reduce(state, action)),
         },
-        Some(Overlay::ThemePicker(_)) => Some(theme_picker_reduce(state, action)),
+        Some(Overlay::ThemePicker(_)) => match action {
+            // Results must land while the picker is up (an operation in
+            // flight behind it); the picker otherwise swallows everything.
+            Action::BackendCompleted(_) => None,
+            _ => Some(theme_picker_reduce(state, action)),
+        },
         Some(Overlay::AccountSwitcher(_)) => match action {
             // Results must land while the switcher is open (a refresh or
             // preview in flight); the popup otherwise swallows everything.
@@ -384,12 +395,17 @@ pub(crate) fn error_modal_reduce(state: &mut AppState, action: &Action) -> Vec<E
                         // stored snapshot unchanged — the safe direction
                         // is to preserve, never discard.
                     }
-                    OperationKind::Draft(DraftOperation::Send { .. }) => {
+                    OperationKind::Draft(DraftOperation::Send { message, .. }) => {
                         // A send retry re-delivers the frozen bytes
                         // verbatim (plan §12: the intent is replayed
-                        // unchanged, under a new id). The composer freezes
-                        // again while the replay runs.
-                        if let Some(composer) = state.session.composer.as_mut() {
+                        // unchanged, under a new id). Only the sent
+                        // draft's own composer freezes again while the
+                        // replay runs — the user may have opened a
+                        // different draft since the failure, and that
+                        // draft must stay editable.
+                        if let Some(composer) = state.session.composer.as_mut()
+                            && crate::domain::sent_draft_is(&composer.draft, message)
+                        {
                             composer.sending = true;
                         }
                     }

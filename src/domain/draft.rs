@@ -189,6 +189,36 @@ impl Draft {
             && self.last_edit_at.is_some_and(|at| now - at >= delay)
     }
 
+    /// Mint the stable identities when missing: the journal key
+    /// (`local_id`) and the bracketed RFC `Message-ID` (ADR 0002 §D.6),
+    /// sharing one stamp+salt so add-then-delete matching stays coherent
+    /// (ticket tfc3). Called at the first save ([`Draft::start_save`]) and
+    /// at the first send, so a sent message always carries tmail's stable
+    /// identity and the sent-draft cleanup can sweep every copy by
+    /// envelope — including one a leave-time forced save pushes after the
+    /// send started.
+    pub fn mint_identities(&mut self, now: DateTime<FixedOffset>) {
+        if self.local_id.is_some() {
+            return;
+        }
+        // Ticket tfc3: a wall-clock stamp alone can collide — two drafts
+        // started in the same nanosecond, or a clock rewind across
+        // sessions landing on a recorded stamp (silently overwriting the
+        // other draft's journal file). Mix in a random 32-bit suffix; the
+        // stamp keeps ids sortable by creation time.
+        let stamp = now
+            .timestamp_nanos_opt()
+            .unwrap_or(now.timestamp_millis() * 1_000_000);
+        let salt = fastrand::u32(..);
+        self.local_id = Some(DraftId(format!("local-{stamp}-{salt:08x}")));
+        if self.message_id.is_none() {
+            self.message_id = Some(format!(
+                "<{stamp}.{salt:08x}.draft{}>",
+                crate::domain::MESSAGE_ID_SUFFIX
+            ));
+        }
+    }
+
     /// Begin a save of the current revision: mint the stable identities on
     /// first use and freeze a snapshot for the backend. A draft reopened
     /// from the Drafts mailbox already carries the copy's `Message-ID` —
@@ -196,25 +226,7 @@ impl Draft {
     /// second one (ADR 0002 §D.3).
     pub fn start_save(&mut self, now: DateTime<FixedOffset>) -> DraftSnapshot {
         self.save = DraftSaveState::Saving;
-        if self.local_id.is_none() {
-            // Ticket tfc3: a wall-clock stamp alone can collide — two
-            // drafts started in the same nanosecond, or a clock rewind
-            // across sessions landing on a recorded stamp (silently
-            // overwriting the other draft's journal file). Mix in a
-            // random 32-bit suffix; the stamp keeps ids sortable by
-            // creation time.
-            let stamp = now
-                .timestamp_nanos_opt()
-                .unwrap_or(now.timestamp_millis() * 1_000_000);
-            let salt = fastrand::u32(..);
-            self.local_id = Some(DraftId(format!("local-{stamp}-{salt:08x}")));
-            if self.message_id.is_none() {
-                self.message_id = Some(format!(
-                    "<{stamp}.{salt:08x}.draft{}>",
-                    crate::domain::MESSAGE_ID_SUFFIX
-                ));
-            }
-        }
+        self.mint_identities(now);
         self.snapshot()
     }
 

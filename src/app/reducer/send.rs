@@ -23,10 +23,15 @@ pub(crate) fn send_from_composer(state: &mut AppState) -> Vec<Effect> {
         tracing::debug!("send ignored outside the composer");
         return Vec::new();
     }
-    let Some(composer) = state.session.composer.as_ref() else {
+    if state.session.composer.as_ref().is_none() {
         return Vec::new();
-    };
-    if composer.sending {
+    }
+    if state
+        .session
+        .composer
+        .as_ref()
+        .is_some_and(|composer| composer.sending)
+    {
         tracing::debug!("send ignored: one is already in flight");
         return Vec::new();
     }
@@ -34,6 +39,17 @@ pub(crate) fn send_from_composer(state: &mut AppState) -> Vec<Effect> {
         state.set_status("A send is already in progress");
         return Vec::new();
     }
+    // A send mints the draft's stable identity when it has none yet
+    // (ADR 0002 §D.6): the sent bytes then carry the draft's Message-ID,
+    // so the confirmed-send cleanup can sweep every copy by envelope —
+    // including one a leave-time forced save pushes after the send
+    // started, under the same identity.
+    if let (Some(composer), Some(now)) = (state.session.composer.as_mut(), state.session.clock) {
+        composer.draft.mint_identities(now);
+    }
+    let Some(composer) = state.session.composer.as_ref() else {
+        return Vec::new();
+    };
     let draft = &composer.draft;
     // Attached files ride through by path (plan §15, Phase 8.2): the
     // backend reads the bytes when it serializes the MIME.
@@ -65,6 +81,11 @@ pub(crate) fn send_from_composer(state: &mut AppState) -> Vec<Effect> {
             return Vec::new();
         }
     };
+    // The send's cleanup resolves the draft that was sent, by the
+    // identity frozen here — never whatever the composer slot holds when
+    // the outcome lands (the user may have left and opened a different
+    // draft in between).
+    let sent_draft = Arc::new(draft.snapshot());
     if let Some(composer) = state.session.composer.as_mut() {
         composer.sending = true;
     }
@@ -75,6 +96,7 @@ pub(crate) fn send_from_composer(state: &mut AppState) -> Vec<Effect> {
             .operations
             .start(OperationKind::Draft(DraftOperation::Send {
                 message: Arc::new(message),
+                draft: sent_draft,
             })),
     ]
 }
@@ -82,15 +104,17 @@ pub(crate) fn send_from_composer(state: &mut AppState) -> Vec<Effect> {
 /// Apply a classified send outcome (plan §12). Only [`SendOutcome::Sent`]
 /// is definitive; every other outcome opens the modal and keeps the draft
 /// (plan §19 Phase 7: failed send keeps the draft intact). `message` is
-/// the frozen payload, replayed verbatim by retries.
+/// the frozen payload, replayed verbatim by retries; `sent_draft` is the
+/// sent draft's frozen identity, what the confirmation resolves.
 pub(crate) fn send_completed(
     state: &mut AppState,
     outcome: &crate::domain::SendOutcome,
     message: Arc<crate::domain::OutboundMessage>,
+    sent_draft: Arc<crate::domain::DraftSnapshot>,
 ) -> Vec<Effect> {
     use crate::domain::SendOutcome;
     match outcome {
-        SendOutcome::Sent => confirm_send(state),
+        SendOutcome::Sent => confirm_send(state, &message, sent_draft),
         other => {
             // The draft stays exactly as it was, editable again; the modal
             // carries the typed retry intent.
@@ -107,7 +131,13 @@ pub(crate) fn send_completed(
                         detail
                     }
                 },
-                retry: Some(OperationKind::Draft(DraftOperation::Send { message }).retry_spec()),
+                retry: Some(
+                    OperationKind::Draft(DraftOperation::Send {
+                        message,
+                        draft: sent_draft,
+                    })
+                    .retry_spec(),
+                ),
                 ambiguous: other.is_ambiguous(),
             };
             // The specific send status must survive the modal opening
@@ -129,26 +159,39 @@ pub(crate) fn send_completed(
 /// (ADR 0002 §D.4). That cleanup is best-effort (`DraftRemovalReason::Sent`):
 /// delivery is already confirmed, so a leftover copy must never claim a
 /// failure afterwards.
-pub(crate) fn confirm_send(state: &mut AppState) -> Vec<Effect> {
+///
+/// The composer resolves only when it still holds the sent draft itself:
+/// the user may have left mid-send and opened a different draft, and that
+/// draft must never be deleted by another send's completion. Either way
+/// the cleanup runs on the sent draft's own frozen identity.
+pub(crate) fn confirm_send(
+    state: &mut AppState,
+    message: &crate::domain::OutboundMessage,
+    sent_draft: Arc<crate::domain::DraftSnapshot>,
+) -> Vec<Effect> {
+    use crate::domain::sent_draft_is;
     state.set_status("Message sent");
-    // The composer may have been left mid-send (Esc saves/leaves); the
-    // draft data — with its stable ids — is what gets resolved here.
-    let snapshot = state
+    if state
         .session
         .composer
-        .take()
-        .map(|composer| composer.draft.snapshot());
-    close_composer_route(state);
-    match snapshot {
-        Some(snapshot) => vec![state.session.operations.start(OperationKind::Draft(
-            DraftOperation::DeleteDraft {
-                draft: Arc::new(snapshot),
-                reason: DraftRemovalReason::Sent,
-            },
-        ))],
-        None => {
-            tracing::debug!("send confirmed without a draft to resolve");
-            Vec::new()
-        }
+        .as_ref()
+        .is_some_and(|composer| sent_draft_is(&composer.draft, message))
+    {
+        state.session.composer = None;
+        close_composer_route(state);
+    } else {
+        tracing::debug!(
+            message_id = ?message.message_id,
+            "send confirmed; the composer holds a different draft and stays"
+        );
     }
+    vec![
+        state
+            .session
+            .operations
+            .start(OperationKind::Draft(DraftOperation::DeleteDraft {
+                draft: sent_draft,
+                reason: DraftRemovalReason::Sent,
+            })),
+    ]
 }

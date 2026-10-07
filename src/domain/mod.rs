@@ -33,4 +33,6 @@ pub use message::{
 };
 pub use page::{Page, PageRequest, SearchRequest};
 pub use reply::{ReplyKind, Seed, seed_forward, seed_reply};
-pub use send::{OutboundAttachment, OutboundMessage, OutgoingContent, SendBlocker, SendOutcome};
+pub use send::{
+    OutboundAttachment, OutboundMessage, OutgoingContent, SendBlocker, SendOutcome, sent_draft_is,
+};

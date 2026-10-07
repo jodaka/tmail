@@ -220,7 +220,7 @@ fn complete_draft_result(
         DraftOperation::SaveDraft { draft } => save_draft_completed(state, &draft, result),
         DraftOperation::LoadDrafts => complete_load_drafts(state, result),
         DraftOperation::DeleteDraft { reason, .. } => complete_delete_draft(state, result, &reason),
-        DraftOperation::Send { message } => complete_send(state, result, message),
+        DraftOperation::Send { message, draft } => complete_send(state, result, message, draft),
     }
 }
 
@@ -813,15 +813,19 @@ pub(crate) fn complete_delete_draft(
 
 /// Apply a classified send result. A structural refusal (missing identity,
 /// spawn I/O) means nothing was transmitted: the draft stays intact and
-/// editable (plan §19 Phase 7: failed send keeps it).
+/// editable (plan §19 Phase 7: failed send keeps it). `sent_draft` is the
+/// sent draft's frozen identity, what a confirmed send resolves.
 pub(crate) fn complete_send(
     state: &mut AppState,
     result: OperationResult,
     message: Arc<crate::domain::OutboundMessage>,
+    sent_draft: Arc<crate::domain::DraftSnapshot>,
 ) -> Vec<Effect> {
     let id = result.id;
     match result.outcome {
-        Ok(OperationOutcome::SendOutcome(outcome)) => send_completed(state, &outcome, message),
+        Ok(OperationOutcome::SendOutcome(outcome)) => {
+            send_completed(state, &outcome, message, sent_draft)
+        }
         Ok(_) => unexpected_payload(id, "send"),
         Err(failure) => {
             if let Some(composer) = state.session.composer.as_mut() {

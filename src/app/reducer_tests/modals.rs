@@ -387,8 +387,9 @@ fn the_picker_intercepts_every_other_input() {
     use crate::app::action::DialogEdit;
     let mut s = picker_state();
     no_effects(&reduce(&mut s, Action::OpenThemePicker));
-    // A modal swallows all input (plan §9): shortcuts, edits, and backend
-    // completions must not leak into the app behind the dialog.
+    // A modal swallows all input (plan §9): shortcuts and edits must not
+    // leak into the app behind the dialog. Backend completions are not
+    // input: they fall through and apply (their dedicated test below).
     no_effects(&reduce(&mut s, Action::Compose));
     assert!(
         s.session.composer.is_none(),
@@ -401,6 +402,52 @@ fn the_picker_intercepts_every_other_input() {
         Action::AttachmentBrowse(AttachmentBrowse::Down),
     ));
     assert_eq!(s.settings.theme_index, 0, "nothing moved the preview");
+}
+
+#[test]
+fn backend_completions_apply_while_the_theme_picker_is_open() {
+    // The picker must not swallow results: a swallowed backend completion
+    // leaked its registry entry forever — the foreground spinner never
+    // cleared and a retrying key press coalesced against the stale entry.
+    let mut s = picker_state();
+    let id = s
+        .session
+        .operations
+        .start(OperationKind::Mail(MailOperation::Archive(
+            MessageLocator {
+                mailbox: inbox_id(),
+                id: MessageId(String::from("m1")),
+                message_id: None,
+            },
+        )))
+        .id;
+    no_effects(&reduce(&mut s, Action::OpenThemePicker));
+    assert!(matches!(s.session.overlay, Some(Overlay::ThemePicker(_))));
+    // The move confirmation lands while the picker is up: it applies.
+    let effects = complete_done(&mut s, id);
+    assert!(
+        !effects.is_empty(),
+        "the move confirmation applied (page re-sync followed), got {effects:?}"
+    );
+    assert!(
+        s.session.operations.get(id).is_none(),
+        "the registry entry is consumed — no leak"
+    );
+    assert!(
+        matches!(s.session.overlay, Some(Overlay::ThemePicker(_))),
+        "the picker stays open"
+    );
+    // After the picker closes, the same press starts a fresh operation
+    // instead of coalescing against the stale entry.
+    no_effects(&reduce(&mut s, Action::Activate));
+    assert!(s.session.overlay.is_none());
+    assert_eq!(s.session.focus, Focus::MessageList);
+    let (second, kind) = expect_kind(&reduce(&mut s, Action::Archive));
+    assert!(
+        matches!(&kind, OperationKind::Mail(MailOperation::Archive(_))),
+        "kind: {kind:?}"
+    );
+    assert_ne!(second, id, "a new operation, not the stale one");
 }
 
 #[test]

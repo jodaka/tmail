@@ -717,6 +717,34 @@ fn discard_dialog_swallows_unrelated_input() {
 }
 
 #[test]
+fn backend_completions_apply_while_the_discard_dialog_is_open() {
+    // The dialog must not swallow results: a swallowed autosave
+    // confirmation left the draft stuck on `Saving` (autosave suppressed)
+    // and leaked the registry entry forever.
+    let mut s = state();
+    compose(&mut s);
+    tick(&mut s, 0);
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('x')));
+    let (save_id, snapshot) = expect_save(&tick(&mut s, 2));
+    // The user opens the discard dialog while the autosave runs.
+    no_effects(&reduce(&mut s, Action::DiscardDraft));
+    assert!(matches!(
+        s.session.overlay,
+        Some(Overlay::ConfirmDiscard(_))
+    ));
+    complete_save_ok(&mut s, save_id, snapshot.revision, "copy-1");
+    // The confirmation applied behind the dialog: the draft is clean and
+    // the registry consumed the entry — no leak.
+    let composer = s.session.composer.as_ref().unwrap();
+    assert_eq!(composer.draft.save, crate::domain::DraftSaveState::Saved);
+    assert!(s.session.operations.get(save_id).is_none());
+    assert!(
+        matches!(s.session.overlay, Some(Overlay::ConfirmDiscard(_))),
+        "the dialog stays open"
+    );
+}
+
+#[test]
 fn discard_of_a_never_saved_draft_still_needs_confirmation() {
     let mut s = state();
     compose(&mut s);
