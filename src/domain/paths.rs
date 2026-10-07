@@ -22,6 +22,33 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// The root of all Tmail-owned private state (ticket 3y7d): the container
+/// the drafts journal, the page cache, and the logs all live under.
+/// `$TMAIL_DATA_DIR` itself when set (subsystems append their scope
+/// there), else the platform user-data location's `tmail` directory
+/// (`~/Library/Application Support/tmail` on macOS, `~/AppData/Roaming/
+/// tmail` on Windows, `~/.local/share/tmail` elsewhere). `None` when no
+/// location is known (`$TMAIL_DATA_DIR` unset and no home directory).
+///
+/// Every writer under this container creates through the private file
+/// modes ([`crate::domain::private_fs`]), so local co-users never read it.
+pub fn tmail_data_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("TMAIL_DATA_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    let home = home_dir()?;
+    let mut dir = home;
+    dir.push(if cfg!(target_os = "macos") {
+        "Library/Application Support"
+    } else if cfg!(windows) {
+        "AppData/Roaming"
+    } else {
+        ".local/share"
+    });
+    dir.push("tmail");
+    Some(dir)
+}
+
 /// Best-effort media type for a filename (send side, plan §15: the MIME
 /// part must carry a type). A deliberately small, conventional map;
 /// unknown extensions send as `application/octet-stream`, which every

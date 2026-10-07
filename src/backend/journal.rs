@@ -108,23 +108,11 @@ impl DraftJournal {
     /// `None` when no home is known; saving then fails loudly instead of
     /// silently vanishing.
     pub fn open_default(account: Option<&str>) -> Option<Self> {
-        let drafts = if let Some(dir) = std::env::var_os("TMAIL_DATA_DIR") {
-            PathBuf::from(dir).join("drafts")
-        } else {
-            let home = crate::domain::paths::home_dir()?;
-            let mut dir = home;
-            dir.push(if cfg!(target_os = "macos") {
-                "Library/Application Support"
-            } else if cfg!(windows) {
-                "AppData/Roaming"
-            } else {
-                ".local/share"
-            });
-            dir.push("tmail");
-            dir.push("drafts");
-            dir
-        };
-        Some(Self::open_scoped(drafts, account))
+        // One shared container with the page cache and the logs (issues
+        // c0n0/haeb): a wrong per-module copy of the platform rules is
+        // how the states drift apart.
+        let container = crate::domain::paths::tmail_data_dir()?;
+        Some(Self::open_scoped(container.join("drafts"), account))
     }
 
     /// [`DraftJournal::open`] for the account scope of `root`: with an

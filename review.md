@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 10 | Medium | runtime/logging | World-readable, predictable log dir (`$TMPDIR/tmail/log`) on Linux; symlink-following writes |
 | 11 | Medium | backend/drafts | A detached stray-draft sweep can delete the newest remote draft revision |
 | 12 | Medium | domain/address | Quoted display names containing `,`/`;` do not round-trip; send is refused and drafts mangle/drop them |
 | 13 | Medium | app/attachments | Saved-attachment path is recorded against the *currently selected* chip, not the saved one |
@@ -56,20 +55,6 @@
 ---
 
 ## Detailed findings
-
-### 10. Medium — World-readable log directory
-
-**Location:** `src/runtime/logging.rs:31-33,70-77`
-
-```rust
-pub fn log_dir() -> PathBuf {
-    std::env::temp_dir().join("tmail").join("log")
-}
-```
-
-On Linux `temp_dir()` is `/tmp` (shared); the directory is created with default permissions and `tracing_appender` opens files with default modes. Any local user can read logs (account names, paths, error text); a local attacker who pre-creates `tmail.log.<date>` as a symlink can redirect appends. macOS' per-user `$TMPDIR` mitigates but does not remove the pattern.
-
-**Fix:** use `private_fs` (0700/0600) and place logs under the app data dir or `XDG_STATE_HOME`.
 
 ### 11. Medium — Stray-draft sweep can delete the newest revision
 
@@ -237,6 +222,6 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 
 ## Suggested priority
 
-2. Findings 10–11 (log perms, draft sweep) — resource/integrity hardening.
+2. Finding 11 (draft sweep) — resource/integrity hardening.
 4. Findings 12–23 — behavioral bugs clustered around composer/draft/cache lifecycles; each needs a regression test.
 5. Remaining Low items — batch fixes with the surrounding code.

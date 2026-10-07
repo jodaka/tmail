@@ -219,25 +219,11 @@ impl PageCache {
     /// on macOS, `~/.local/share/tmail/cache` elsewhere). `None` when no
     /// home is known — caching stays off.
     pub fn open_default(account: Option<&str>, limits: CacheLimits) -> Option<Self> {
-        if let Some(dir) = std::env::var_os("TMAIL_DATA_DIR") {
-            return Some(Self::scoped(
-                PathBuf::from(dir).join("cache"),
-                account,
-                limits,
-            ));
-        }
-        let home = crate::domain::paths::home_dir()?;
-        let mut dir = home;
-        dir.push(if cfg!(target_os = "macos") {
-            "Library/Application Support"
-        } else if cfg!(windows) {
-            "AppData/Roaming"
-        } else {
-            ".local/share"
-        });
-        dir.push("tmail");
-        dir.push("cache");
-        Some(Self::scoped(dir, account, limits))
+        // One shared container with the drafts journal and the logs
+        // (issues haeb/c0n0): a wrong per-module copy of the platform
+        // rules is how the states drift apart.
+        let container = crate::domain::paths::tmail_data_dir()?;
+        Some(Self::scoped(container.join("cache"), account, limits))
     }
 
     /// Root plus the account scope segment. `container` (the shared
