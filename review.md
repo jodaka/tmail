@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 17 | Medium | app/wizard | `Tick` during the wizard runs the auto-refresh timer, spawning backend children behind the wizard |
 | 18 | Medium | backend/process | Unbounded memory: child stdout/stderr, incoming attachment reads, stdin payload clones |
 | 19 | Medium | config/write | Any config-read error is treated as "file missing"; symlinked config files are silently replaced |
 | 20 | Medium | main/terminal | `--configure` success output is printed into the alternate screen and erased on exit |
@@ -49,12 +48,6 @@
 ---
 
 ## Detailed findings
-
-### 17. Medium — Auto-refresh runs behind the wizard
-
-**Location:** `src/app/wizard.rs:456-458`; `src/app/reducer/search_refresh.rs:128-170`
-
-`wizard_reduce` forwards `Action::Tick` to `reduce_unwizarded` → `tick` → `auto_refresh_tick`. `conflicts()` checks overlays, composer, and foreground operations, but not the wizard. With `--configure` on a config whose `refresh_interval_seconds > 0`, the timer fires `request_visible_page_background` and unconditionally starts `LoadMailboxes` in the background, spawning himalaya child processes behind the wizard (results are then dropped by `wizard_completed`). The test `wizard/tests.rs:586` only covers `Refresh`/`LoadDrafts`.
 
 ### 18. Medium — Unbounded memory in process and attachment paths
 
