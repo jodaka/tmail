@@ -8,7 +8,7 @@
 //! reducer allocated, so every request and result is traceable and
 //! cancellable (plan §11).
 
-use crate::app::operation::{OperationId, OperationKind, RetrySpec};
+use crate::app::operation::{OperationId, OperationKind, OperationOrigin, RetrySpec};
 
 /// One typed backend request, ready for the operation manager.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +17,12 @@ pub struct Effect {
     pub id: OperationId,
     /// The typed request to launch.
     pub kind: OperationKind,
+    /// Whether the reducer started this as interactive work or as
+    /// background consequence (timer refresh, ticket wxtx preview).
+    /// Carried on the effect because the manager decides which permit
+    /// pool the request queues on (ticket d5rf): decorative work must
+    /// never take the slot interactive work is about to wait for.
+    pub origin: OperationOrigin,
 }
 
 impl Effect {
@@ -24,5 +30,10 @@ impl Effect {
     /// retry gets a fresh id from the registry.
     pub fn retry_spec(&self) -> RetrySpec {
         self.kind.retry_spec()
+    }
+
+    /// True when this effect carries background-origin work.
+    pub fn is_background(&self) -> bool {
+        matches!(self.origin, OperationOrigin::Background)
     }
 }

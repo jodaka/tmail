@@ -436,7 +436,7 @@ impl OperationRegistry {
         if origin == OperationOrigin::Foreground {
             self.foreground = Some(id);
         }
-        crate::app::effect::Effect { id, kind }
+        crate::app::effect::Effect { id, kind, origin }
     }
 
     /// Ids of in-flight operations that `kind` supersedes.

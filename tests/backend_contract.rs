@@ -1564,7 +1564,9 @@ fn attachment_save_fails_safely_on_bad_output() {
 // ── Wizard credential test (ADR 0003 §3.4/W7) ────────────────────────────
 
 use tmail::app::effect::Effect;
-use tmail::app::operation::{AccountOperation, MailOperation, OperationKind, OperationOutcome};
+use tmail::app::operation::{
+    AccountOperation, MailOperation, OperationKind, OperationOrigin, OperationOutcome,
+};
 use tmail::app::wizard::DraftAccountConfig;
 use tmail::config::write::{DraftAccount, SecretStorage};
 use tmail::runtime::tasks::OperationManager;
@@ -1607,6 +1609,7 @@ fn run_test_account(
         );
         let effect = Effect {
             id: OperationId(77),
+            origin: OperationOrigin::Foreground,
             kind: OperationKind::Account(AccountOperation::TestAccount {
                 draft: Box::new(draft),
             }),
@@ -1779,6 +1782,7 @@ fn wizard_test_account_cancellation_suppresses_the_result() {
         token.cancel();
         let effect = Effect {
             id: OperationId(78),
+            origin: OperationOrigin::Foreground,
             kind: OperationKind::Account(AccountOperation::TestAccount {
                 draft: Box::new(draft),
             }),
@@ -1818,6 +1822,7 @@ fn wizard_save_account_operation_reports_the_saved_file() {
         );
         let effect = Effect {
             id: OperationId(79),
+            origin: OperationOrigin::Foreground,
             kind: OperationKind::Account(AccountOperation::SaveAccount {
                 path: path.clone(),
                 draft: Box::new(draft),
@@ -1883,6 +1888,7 @@ fn wizard_save_account_provisions_missing_special_mailboxes() {
         );
         let effect = Effect {
             id: OperationId(80),
+            origin: OperationOrigin::Foreground,
             kind: OperationKind::Account(AccountOperation::SaveAccount {
                 path: path.clone(),
                 draft: Box::new(draft),
@@ -1968,6 +1974,7 @@ fn bulk_mark_read_runs_one_flag_invocation_for_the_whole_batch() {
             .collect();
         let effect = Effect {
             id: OperationId(80),
+            origin: OperationOrigin::Foreground,
             kind: OperationKind::Mail(MailOperation::SetReadBulk {
                 locators,
                 read: true,

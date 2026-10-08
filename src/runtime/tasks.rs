@@ -40,7 +40,50 @@ use crate::domain::sanitize::sanitize;
 /// search, the previews, and one or two interactive operations all make
 /// progress. Queued operations acquire a permit before dispatching; the
 /// spawn itself stays unbounded so cancellation tokens stay live.
+///
+/// The budget is *split in two* (ticket d5rf): interactive work gets
+/// [`FOREGROUND_PERMITS`] and background-origin work gets the rest. Both
+/// pools draw from the same total, so concurrent mail-server sessions
+/// never exceed this number, but a background preview can no longer
+/// occupy the last slot an interactive operation is about to wait for.
 const MAX_CONCURRENT_BACKEND_CALLS: usize = 4;
+
+/// How much of [`MAX_CONCURRENT_BACKEND_CALLS`] is reserved for
+/// foreground work (ticket d5rf). Whatever is left serves background work:
+/// with the default budget, two previews may run while two interactive
+/// operations stay reservable, and pressing Enter never waits behind
+/// decoration.
+const FOREGROUND_PERMITS: usize = 2;
+
+/// The two halves of the backend budget.
+#[derive(Debug, Clone)]
+struct PermitPools {
+    /// Background-origin child processes (previews, timer refreshes).
+    background: Arc<Semaphore>,
+    /// Interactive child processes — what the user is waiting on.
+    foreground: Arc<Semaphore>,
+}
+
+impl PermitPools {
+    fn new() -> Self {
+        Self {
+            background: Arc::new(Semaphore::new(
+                MAX_CONCURRENT_BACKEND_CALLS - FOREGROUND_PERMITS,
+            )),
+            foreground: Arc::new(Semaphore::new(FOREGROUND_PERMITS)),
+        }
+    }
+
+    /// The pool this effect queues on. Background-origin work is
+    /// deliberately kept off the interactive pool (ticket d5rf).
+    fn for_effect(&self, effect: &Effect) -> &Semaphore {
+        if effect.is_background() {
+            &self.background
+        } else {
+            &self.foreground
+        }
+    }
+}
 
 /// Whether the effect dispatches a mail-backend child process (issue
 /// p723): only those queue on the bounded pool. The pool bounds
@@ -89,8 +132,10 @@ pub struct OperationManager {
     /// Bounds the concurrently *dispatching* backend children (issue
     /// 1v38, gated by [`uses_backend_process`] — issue p723): only tasks
     /// running a mail-backend child process acquire one permit and hold it
-    /// to completion; local work dispatches without one.
-    permits: Arc<Semaphore>,
+    /// to completion; local work dispatches without one. Split by origin
+    /// (ticket d5rf), so a background preview never occupies the permit an
+    /// interactive operation is about to wait for.
+    permits: PermitPools,
     results: UnboundedSender<OperationResult>,
 }
 
@@ -111,7 +156,7 @@ impl OperationManager {
             discoverer,
             tester,
             cache,
-            permits: Arc::new(Semaphore::new(MAX_CONCURRENT_BACKEND_CALLS)),
+            permits: PermitPools::new(),
             results,
         }
     }
@@ -120,15 +165,20 @@ impl OperationManager {
     /// registry (`AppState.session.operations`), so `Esc` reaches the child process.
     ///
     /// Only effects that dispatch a mail-backend child process acquire one
-    /// of the manager's [`MAX_CONCURRENT_BACKEND_CALLS`] permits first
-    /// (issue 1v38, gated per [`uses_backend_process`]): a burst of backend
-    /// calls queues on the pool instead of stacking unbounded concurrent
-    /// IMAP sessions the server would reject, while local work (cache
-    /// I/O, notifications, platform opens) dispatches immediately (issue
-    /// p723). The spawn itself is unbounded, so a queued task still
-    /// observes its cancellation token and exits silently — the permit (if
-    /// taken) drops and the result is suppressed exactly like a cancelled
-    /// in-flight operation.
+    /// permit first (issue 1v38, gated per [`uses_backend_process`]): a
+    /// burst of backend calls queues on the pool instead of stacking
+    /// unbounded concurrent IMAP sessions the server would reject, while
+    /// local work (cache I/O, notifications, platform opens) dispatches
+    /// immediately (issue p723). The spawn itself is unbounded, so a queued
+    /// task still observes its cancellation token and exits silently — the
+    /// permit (if taken) drops and the result is suppressed exactly like a
+    /// cancelled in-flight operation.
+    ///
+    /// Ticket d5rf: the pool is chosen by the effect's origin, so a
+    /// background preview queues on its own smaller pool and can never
+    /// occupy the permit an interactive operation is about to wait for.
+    /// The two pools share the [`MAX_CONCURRENT_BACKEND_CALLS`] budget, so
+    /// concurrent mail-server sessions never exceed it.
     ///
     /// Ticket xvcp: cancellation is observed at the pool gate too — the
     /// acquire races the token, and the dispatch is re-checked once the
@@ -142,7 +192,7 @@ impl OperationManager {
         let discoverer = Arc::clone(&self.discoverer);
         let tester = Arc::clone(&self.tester);
         let cache = self.cache.clone();
-        let permits = Arc::clone(&self.permits);
+        let permits = self.permits.clone();
         let results = self.results.clone();
         let id = effect.id;
         tokio::spawn(async move {
@@ -153,6 +203,7 @@ impl OperationManager {
             // the cancellation token (ticket xvcp): a cancelled entry
             // leaves the queue without a permit instead of dispatching on
             // the next free slot.
+            let pool = permits.for_effect(&effect);
             let _permit = if uses_backend_process(&effect.kind) {
                 tokio::select! {
                     _ = ctx.cancellation.cancelled() => {
@@ -160,7 +211,7 @@ impl OperationManager {
                         return;
                     }
                     permit = async {
-                        permits
+                        pool
                             .acquire()
                             .await
                             .expect("semaphore never closed")
@@ -1023,7 +1074,7 @@ impl AccountTester for InertTester {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::operation::OperationId;
+    use crate::app::operation::{OperationId, OperationOrigin};
     use crate::backend::BackendResult;
     use crate::domain::{
         Mailbox, MailboxId, Message, MessageId, MessageLocator, MessageSummary, Page, PageRequest,
@@ -1347,9 +1398,18 @@ mod tests {
             Effect {
                 id: OperationId(id),
                 kind,
+                origin: OperationOrigin::Foreground,
             },
             CancellationToken::new(),
         )
+    }
+
+    /// The same, started as *background* work (ticket d5rf: what queues on
+    /// the background permit pool).
+    fn effect_background(kind: OperationKind) -> (Effect, CancellationToken) {
+        let (mut effect, token) = effect(kind);
+        effect.origin = OperationOrigin::Background;
+        (effect, token)
     }
 
     #[tokio::test]
@@ -1530,18 +1590,29 @@ mod tests {
         });
         let (manager, _rx) = manager(Arc::clone(&backend) as _);
 
-        // Launch a burst well past the pool size.
+        // Launch a burst well past the pool size, half of it background
+        // origin (ticket d5rf): the interactive half queues on the
+        // interactive pool, the background half on its own, and neither
+        // stacks past the shared budget.
         let burst = 8;
         let mut tokens = Vec::new();
         for i in 0..burst {
             let token = CancellationToken::new();
             let (effect, _) = effect(OperationKind::Mail(MailOperation::LoadMailboxes));
+            let effect = if i % 2 == 1 {
+                Effect {
+                    origin: OperationOrigin::Background,
+                    ..effect
+                }
+            } else {
+                effect
+            };
             manager.launch(effect, ctx(i as u64, &token));
             tokens.push(token);
         }
 
-        // The pool admits exactly `MAX_CONCURRENT_BACKEND_CALLS`; the rest
-        // must stay queued (no more occupants ever).
+        // The shared budget admits exactly `MAX_CONCURRENT_BACKEND_CALLS`;
+        // the rest must stay queued (no more occupants ever).
         let deadline = Duration::from_secs(5);
         tokio::time::timeout(
             deadline,
@@ -1550,13 +1621,206 @@ mod tests {
         .await
         .expect("the pool admits the bounded count")
         .expect("watch sender alive");
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Let any queued entry that could still be admitted run: if the
+        // bound were the *sum* of two independent pools, the peak would
+        // climb past the budget here.
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let peak = *probe_rx.borrow();
         assert_eq!(
             peak, MAX_CONCURRENT_BACKEND_CALLS,
             "queued calls must wait instead of stacking"
         );
         assert!(peak < burst, "the burst must not run all at once");
+    }
+
+    /// Ticket d5rf: a background preview must never occupy the permit an
+    /// interactive operation is about to wait for. The reducer admits
+    /// `MAX_IN_FLIGHT_PREVIEWS` (6) previews against a budget of
+    /// `MAX_CONCURRENT_BACKEND_CALLS` (4) split into 2 + 2, so before the
+    /// fix a foreground `LoadPage` waited behind queue of decorative work.
+    #[tokio::test]
+    async fn interactive_work_never_waits_behind_background_previews() {
+        let backend = Arc::new(FakeBackend {
+            // Holders park in `list_mailboxes`; the interactive call under
+            // test goes through `list_messages` and returns at once.
+            mailboxes_delay: Duration::from_secs(30),
+            messages_delay: Duration::ZERO,
+            error: None,
+            drafts: Vec::new(),
+        });
+        let (manager, mut rx) = manager(Arc::clone(&backend) as _);
+
+        // More background holders than the background pool holds: the
+        // surplus queues behind them.
+        for i in 0..6 {
+            let (effect, _token) =
+                effect_background(OperationKind::Mail(MailOperation::LoadMailboxes));
+            let id = effect.id;
+            manager.launch(effect, ctx(i, &CancellationToken::new()));
+            assert_eq!(id, OperationId(7), "the test helper's fixed id");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The interactive call: on the old single pool this waited for a
+        // parked holder to finish.
+        let (effect, token) = effect(OperationKind::Mail(MailOperation::LoadPage(page_request(
+            "inbox",
+        ))));
+        let id = effect.id;
+        manager.launch(effect, ctx(90, &token));
+        let result = tokio::time::timeout(Duration::from_millis(2000), rx.recv())
+            .await
+            .expect("interactive work must not wait behind previews")
+            .expect("interactive work succeeds");
+        assert_eq!(result.id, id);
+        assert!(matches!(result.outcome, Ok(OperationOutcome::Page(_))));
+    }
+
+    /// The interactive half of the split admits at most
+    /// [`FOREGROUND_PERMITS`] children, however large the burst.
+    #[tokio::test]
+    async fn the_interactive_pool_is_bounded_by_its_own_budget() {
+        struct CountingBackend {
+            probe: tokio::sync::watch::Sender<usize>,
+        }
+
+        #[async_trait::async_trait]
+        impl MailBackend for CountingBackend {
+            async fn list_mailboxes(&self, _req: RequestContext) -> BackendResult<Vec<Mailbox>> {
+                let now = self.probe.borrow().wrapping_add(1);
+                let _ = self.probe.send(now);
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Ok(Vec::new())
+            }
+
+            async fn list_messages(
+                &self,
+                _req: RequestContext,
+                _page: PageRequest,
+            ) -> BackendResult<Page<MessageSummary>> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn search_messages(
+                &self,
+                _req: RequestContext,
+                _request: SearchRequest,
+            ) -> BackendResult<Page<MessageSummary>> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn get_message(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+            ) -> BackendResult<Message> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn set_read(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+                _read: bool,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn set_starred(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+                _starred: bool,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn archive(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn trash(
+                &self,
+                _req: RequestContext,
+                _locator: MessageLocator,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn save_draft(
+                &self,
+                _req: RequestContext,
+                _draft: crate::domain::DraftSnapshot,
+            ) -> BackendResult<MessageId> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn load_drafts(
+                &self,
+                _req: RequestContext,
+            ) -> BackendResult<Vec<crate::domain::RestoredDraft>> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn delete_draft(
+                &self,
+                _req: RequestContext,
+                _draft: crate::domain::DraftSnapshot,
+            ) -> BackendResult<()> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn send_message(
+                &self,
+                _req: RequestContext,
+                _message: crate::domain::OutboundMessage,
+            ) -> BackendResult<crate::domain::SendOutcome> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn read_attachment(
+                &self,
+                _req: RequestContext,
+                _path: std::path::PathBuf,
+            ) -> BackendResult<crate::domain::DraftAttachment> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+
+            async fn save_attachment(
+                &self,
+                _req: RequestContext,
+                _request: crate::domain::AttachmentRequest,
+            ) -> BackendResult<std::path::PathBuf> {
+                Err(BackendError::InvalidRequest(String::from("unused")))
+            }
+        }
+
+        let (probe_tx, mut probe_rx) = tokio::sync::watch::channel(0usize);
+        let backend = Arc::new(CountingBackend { probe: probe_tx });
+        let (manager, _rx) = manager(Arc::clone(&backend) as _);
+
+        for i in 0..8 {
+            let (effect, _) = effect(OperationKind::Mail(MailOperation::LoadMailboxes));
+            manager.launch(effect, ctx(i as u64, &CancellationToken::new()));
+        }
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            probe_rx.wait_for(|c| *c >= FOREGROUND_PERMITS),
+        )
+        .await
+        .expect("the interactive pool admits its budget")
+        .expect("watch sender alive");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            *probe_rx.borrow(),
+            FOREGROUND_PERMITS,
+            "an interactive burst must not stack past the interactive pool"
+        );
     }
 
     #[tokio::test]
@@ -1720,14 +1984,24 @@ mod tests {
             tx,
         );
 
-        // 1. Occupy every permit: four backend children park inside the
-        //    fake, so the pool is at capacity and stays there.
+        // 1. Occupy every permit: `MAX_CONCURRENT_BACKEND_CALLS` backend
+        //    children park inside the fake, so both pools are at capacity
+        //    and stay there (ticket d5rf: interactive bookings fill the
+        //    interactive pool, the rest fill the background one).
         for i in 0..MAX_CONCURRENT_BACKEND_CALLS {
             let token = CancellationToken::new();
             let (effect, _) = effect_with_id(
                 OperationKind::Mail(MailOperation::LoadMailboxes),
                 100 + i as u64,
             );
+            let effect = if i < FOREGROUND_PERMITS {
+                effect
+            } else {
+                Effect {
+                    origin: OperationOrigin::Background,
+                    ..effect
+                }
+            };
             manager.launch(effect, ctx(i as u64, &token));
         }
         tokio::time::timeout(
@@ -1765,12 +2039,9 @@ mod tests {
             .enumerate()
             .map(|(i, kind)| {
                 let (effect, token) = effect_with_id(kind.clone(), 200 + i as u64);
+                let id = effect.id;
                 manager.launch(effect, ctx(i as u64, &token));
-                Effect {
-                    id: OperationId(200 + i as u64),
-                    kind: kind.clone(),
-                }
-                .id
+                id
             })
             .collect();
 
@@ -1904,13 +2175,16 @@ mod tests {
         });
         let (manager, mut rx) = manager(backend);
         let mut holder_tokens = Vec::new();
-        for id in 1..=4 {
+        // One holder per interactive permit: the pool the queued entry
+        // below actually waits on (ticket d5rf splits the budget, so
+        // filling only the interactive half is what occupies it).
+        for id in 1..=FOREGROUND_PERMITS as u64 {
             let (effect, token) =
                 effect_with_id(OperationKind::Mail(MailOperation::LoadMailboxes), id);
             manager.launch(effect, ctx(id, &token));
             holder_tokens.push(token);
         }
-        // All four dispatched behind the pool.
+        // Every interactive permit is dispatched behind the pool.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let (queued_effect, queued_token) =
@@ -2170,7 +2444,7 @@ mod tests {
 mod cache_tests {
     use super::*;
     use crate::app::effect::Effect;
-    use crate::app::operation::{OperationId, OperationOutcome};
+    use crate::app::operation::{OperationId, OperationOrigin, OperationOutcome};
     use crate::app::page_cache::{CacheLimits, PageCache};
     use crate::backend::BackendResult;
     use crate::domain::{
@@ -2352,6 +2626,7 @@ mod cache_tests {
             Effect {
                 id: OperationId(7),
                 kind,
+                origin: OperationOrigin::Foreground,
             },
             CancellationToken::new(),
         )
