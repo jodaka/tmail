@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 19 | Medium | config/write | Any config-read error is treated as "file missing"; symlinked config files are silently replaced |
 | 20 | Medium | main/terminal | `--configure` success output is printed into the alternate screen and erased on exit |
 | 21 | Medium | wizard/alias | Gmail accounts are offered a bogus `Junk` folder, created and aliased |
 | 22 | Medium | app/state | Previews/saved attachments keyed by `MessageId` alone — cross-mailbox collisions |
@@ -47,12 +46,6 @@
 ---
 
 ## Detailed findings
-
-### 19. Medium — Config-read errors misclassified; symlinked configs clobbered
-
-**Location:** `src/config/write.rs:193-202,371-410`
-
-`let created = existing.is_err();` treats permission-denied, invalid UTF-8, and `EISDIR` as "fresh file", then `create_new(true)` fails with a misleading `EEXIST`. Separately, the atomic replace uses `rename(2)`, which replaces a symlink itself rather than its target: dotfile-managed configs (stow/chezmoi) silently detach, and later re-linking can resurrect stale content and lose the account. Use `symlink_metadata`/`canonicalize` and distinguish `NotFound` from other read errors.
 
 ### 20. Medium — `--configure` output erased
 
