@@ -23,11 +23,15 @@ pub const ALIAS_ROLES: [&str; 6] = ["inbox", "sent", "drafts", "trash", "junk", 
 
 /// Gmail's fixed well-known folders: `(role, mailbox name)`. `inbox`
 /// is always emitted (`INBOX` is mandated by IMAP), the rest only
-/// when the listing contains the folder.
-const GMAIL_PRESET: [(&str, &str); 4] = [
+/// when the listing contains the folder. `junk` maps to Gmail's real
+/// system spam folder — omitting it used to leave the role unresolved,
+/// so the confirm screen always offered creating a bogus `Junk` folder
+/// on Gmail (review finding 21).
+const GMAIL_PRESET: [(&str, &str); 5] = [
     ("sent", "[Gmail]/Sent Mail"),
     ("drafts", "[Gmail]/Drafts"),
     ("trash", "[Gmail]/Trash"),
+    ("junk", "[Gmail]/Spam"),
     ("archive", "[Gmail]/All Mail"),
 ];
 
@@ -197,6 +201,7 @@ mod tests {
             "[Gmail]/Drafts",
             "[Gmail]/Trash",
             "[Gmail]/All Mail",
+            "[Gmail]/Spam",
         ]);
 
         let aliases = derive_aliases(&listing, Some(Provider::Gmail));
@@ -208,9 +213,31 @@ mod tests {
                 ("sent".into(), "[Gmail]/Sent Mail".into()),
                 ("drafts".into(), "[Gmail]/Drafts".into()),
                 ("trash".into(), "[Gmail]/Trash".into()),
+                ("junk".into(), "[Gmail]/Spam".into()),
                 ("archive".into(), "[Gmail]/All Mail".into()),
             ]
         );
+    }
+
+    #[test]
+    fn gmail_listing_resolves_every_role_so_no_folder_is_provisioned() {
+        // Review finding 21: with Gmail's real system folders listed,
+        // `missing_special_roles` must offer nothing — before the
+        // `[Gmail]/Spam` mapping the unresolved `junk` role always
+        // offered creating a bogus `Junk` folder that Gmail itself never
+        // carries, with no per-folder deselection on the confirm screen.
+        let listing = names(&[
+            "INBOX",
+            "[Gmail]/Sent Mail",
+            "[Gmail]/Drafts",
+            "[Gmail]/Trash",
+            "[Gmail]/Spam",
+            "[Gmail]/All Mail",
+        ]);
+
+        let missing = missing_special_roles(&listing, Some(Provider::Gmail));
+
+        assert!(missing.is_empty());
     }
 
     #[test]
