@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 21 | Medium | wizard/alias | Gmail accounts are offered a bogus `Junk` folder, created and aliased |
 | 22 | Medium | app/state | Previews/saved attachments keyed by `MessageId` alone — cross-mailbox collisions |
 | 23 | Medium | wizard | Stale discovery results apply off-screen; `e`/`r` are not gated while discovering |
 | 24 | Low | wizard | Repeated `Enter` on Confirm starts concurrent account saves (no busy gate) |
@@ -45,12 +44,6 @@
 ---
 
 ## Detailed findings
-
-### 21. Medium — Bogus Gmail `Junk` folder
-
-**Location:** `src/discovery/alias.rs:27-32,84-95`
-
-`GMAIL_PRESET` omits the `junk` role, so `missing_special_roles` always offers `junk → "Junk"` for Gmail. `prepare_confirm` stores it in `create_missing`, and the save flow creates the folder and writes `mailbox.alias.junk = "Junk"`. Gmail's real spam folder is `[Gmail]/Spam`, and the W6 preview offers no per-folder deselection, so the user cannot avoid creating the folder.
 
 ### 22. Medium — Session caches keyed by `MessageId` only
 
