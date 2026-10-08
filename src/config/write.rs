@@ -191,8 +191,23 @@ pub fn file_shared_readable(path: &Path) -> bool {
 /// On failure nothing partial is left behind — the caller surfaces the
 /// sanitized message.
 pub fn save_account(path: &Path, draft: &DraftAccount) -> Result<SaveReport, String> {
-    let existing = std::fs::read_to_string(path);
-    let created = existing.is_err();
+    // Dotfile managers (stow, chezmoi, yadm) keep the config as a symlink
+    // into their own tree: the write must happen *through* the link and
+    // the atomic replace must swap the link's target, never the link
+    // itself — renaming over a symlink silently detaches the user's
+    // source of truth, and re-linking later drops or resurrects stale
+    // accounts (review finding 19). Every filesystem touch below —
+    // merge read, permission probe, rename, and the post-write
+    // validation — travels the one resolved destination.
+    let target = resolve_write_target(path)?;
+    let existing = std::fs::read_to_string(&target);
+    // "Fresh file" must mean the file genuinely does not exist (review
+    // finding 19): a permission-denied read, invalid UTF-8, or a
+    // directory at the path previously fell into the fresh branch and
+    // failed at `create_new` with a misleading `EEXIST` (`File exists`,
+    // although nothing had been learned about the file). Those surfaces
+    // carry their own sanitized error now.
+    let created = matches!(&existing, Err(err) if err.kind() == std::io::ErrorKind::NotFound);
     let mut doc = match existing {
         Ok(text) => text.parse::<DocumentMut>().map_err(|err| {
             // The error text quotes the offending line, which may hold
@@ -205,7 +220,14 @@ pub fn save_account(path: &Path, draft: &DraftAccount) -> Result<SaveReport, Str
             )
         })?,
         // Fresh file: start from an empty document.
-        Err(_) => DocumentMut::new(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
+        Err(err) => {
+            return Err(format!(
+                "existing config at `{}` could not be read: {}",
+                target.display(),
+                crate::domain::sanitize::sanitize(&err.to_string())
+            ));
+        }
     };
 
     // `default = true` only when no *other* account has it: replacing
@@ -213,7 +235,7 @@ pub fn save_account(path: &Path, draft: &DraftAccount) -> Result<SaveReport, Str
     // default of a different account stays authoritative.
     let set_default = !other_account_has_default(&doc, &draft.name);
 
-    let warning = if draft.secret.stores_secret() && !created && file_shared_readable(path) {
+    let warning = if draft.secret.stores_secret() && !created && file_shared_readable(&target) {
         Some(format!(
             "existing config is readable by others; run chmod 600 {}",
             path.display()
@@ -225,15 +247,76 @@ pub fn save_account(path: &Path, draft: &DraftAccount) -> Result<SaveReport, Str
     let (account, container) = build_account_item(draft, set_default)?;
     insert_account(&mut doc, draft.name.as_str(), account, container)?;
 
-    write_document(path, &doc, created)?;
+    write_document(&target, &doc, created)?;
 
-    validate_written(path, &draft.name)?;
+    validate_written(&target, &draft.name)?;
 
     Ok(SaveReport {
+        // The report names the path the user knows (the wizard snapshot
+        // and the preview carry it too); the resolved destination is an
+        // implementation detail of where the bytes actually live.
         path: path.to_path_buf(),
         created,
         permissions_warning: warning,
     })
+}
+
+/// Where `path`'s content actually lives (or would be created): follows
+/// the final component's symlink chain so any write replaces the target
+/// file and never the link. A *missing* tail ends the walk — the
+/// fresh-file branch then creates the file at the resolved place, which
+/// puts a first save behind a stow-style dangling link into the
+/// dotfile tree where it belongs. Existing plain files return their own
+/// path unchanged. The walk is bounded: a symlink cycle is a broken
+/// setup, reported instead of spun on.
+fn resolve_write_target(path: &Path) -> Result<PathBuf, String> {
+    /// Beyond this many hops the chain is a cycle (or a broken setup);
+    /// real dotfile layouts never nest links more deeply.
+    const MAX_SYMLINK_HOPS: usize = 32;
+
+    let mut current = path.to_path_buf();
+    let mut hops = 0usize;
+    loop {
+        let meta = match std::fs::symlink_metadata(&current) {
+            Ok(meta) => meta,
+            // A missing tail (or a dangling link the walk is standing at):
+            // the caller creates the file here, through the link.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(current),
+            Err(err) => {
+                return Err(format!(
+                    "existing config at `{}` could not be examined: {}",
+                    current.display(),
+                    crate::domain::sanitize::sanitize(&err.to_string())
+                ));
+            }
+        };
+        if !meta.is_symlink() {
+            return Ok(current);
+        }
+        hops += 1;
+        if hops > MAX_SYMLINK_HOPS {
+            return Err(format!(
+                "config path `{}` is behind more than {MAX_SYMLINK_HOPS} symlink hops",
+                path.display()
+            ));
+        }
+        let link = std::fs::read_link(&current).map_err(|err| {
+            format!(
+                "config link `{}` could not be resolved: {}",
+                current.display(),
+                err
+            )
+        })?;
+        let parent = current.parent().unwrap_or_else(|| Path::new(""));
+        current = if link.is_absolute() {
+            link
+        } else {
+            // A relative link resolves against the directory it sits in
+            // (kernel semantics); `..` segments stay for the kernel like
+            // every real file open does.
+            parent.join(&link)
+        };
+    }
 }
 
 /// Builds the `[accounts.<name>]` item from a TOML fragment string
@@ -859,5 +942,124 @@ imap.server = \"imaps://imap.example.com:993\"
                 "the replacement must keep the original mode"
             );
         }
+    }
+
+    #[test]
+    fn an_existing_config_that_cannot_be_read_is_not_fresh() {
+        // Review finding 19: a directory at the path used to count as a
+        // fresh file (`existing.is_err()`), so the save died at
+        // `create_new` with a misleading `File exists (EEXIST)` after
+        // pretending the clearly-present path was empty. The real read
+        // error surfaces now, and nothing is created or clobbered.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::create_dir(&path).expect("seed a directory at the path");
+
+        let err =
+            save_account(&path, &gmail_raw_draft("gmail")).expect_err("a directory cannot merge");
+        assert!(
+            err.contains("could not be read"),
+            "the actual read error must surface: {err}"
+        );
+        assert!(path.is_dir(), "the path must not be clobbered");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_config_is_written_through_not_detached() {
+        // Review finding 19: dotfile managers (stow, chezmoi) keep the
+        // config as a symlink into their own tree. The atomic replace
+        // used to rename over the link itself — silently detaching the
+        // source of truth (a later re-link would drop the fresh account
+        // or resurrect stale content). The write now lands at the link's
+        // target and the link survives byte-for-byte.
+        let repo = tempfile::tempdir().expect("repo");
+        let real = repo.path().join("dotfiles/tmail.toml");
+        std::fs::create_dir_all(repo.path().join("dotfiles")).expect("repo tree");
+        std::fs::write(&real, "[accounts.old]\nemail = \"old@example.com\"\n").expect("seed");
+
+        let home = tempfile::tempdir().expect("home");
+        let link = home.path().join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let report = save_account(&link, &gmail_raw_draft("gmail")).expect("save succeeds");
+        assert!(!report.created, "the file existed (through the link)");
+        assert_eq!(report.path, link, "the report names the user route");
+        // Still a symlink, still pointing at the managed file…
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_link(&link).expect("target"), real);
+        // …whose content received the merge…
+        let text = std::fs::read_to_string(&real).expect("written through the link");
+        assert!(text.contains("[accounts.old]"), "managed file holds old");
+        assert!(text.contains("[accounts.gmail]"), "managed file holds new");
+        // …and the target of the link is a regular file (never a
+        // migrated link standing where it used to point).
+        assert!(
+            !std::fs::symlink_metadata(&real)
+                .expect("target")
+                .file_type()
+                .is_symlink(),
+            "the managed file must remain a real file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_config_creates_at_its_target() {
+        // Review finding 19, first-save flavor: the link exists, the
+        // managed file does not yet. The fresh file must be created *at
+        // the resolved target* — repos the link describes — so the
+        // dotfile manager tracks it from birth, while the link keeps
+        // pointing where it always did.
+        let repo = tempfile::tempdir().expect("repo");
+        let real = repo.path().join("dotfiles/tmail.toml");
+        std::fs::create_dir_all(repo.path().join("dotfiles")).expect("repo tree");
+
+        let home = tempfile::tempdir().expect("home");
+        let link = home.path().join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).expect("dangling link");
+
+        let report = save_account(&link, &gmail_raw_draft("gmail")).expect("save succeeds");
+        assert!(report.created, "the target genuinely did not exist");
+        // The link survives and its target now holds the fresh config.
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_link(&link).expect("target"), real);
+        assert!(real.is_file(), "fresh file created at the managed path");
+        let text = std::fs::read_to_string(&real).expect("written at the target");
+        assert!(text.contains("[accounts.gmail]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_broken_symlink_walk_is_refused() {
+        // A self-referential link is a broken (or adversarial) setup: the
+        // walk must give up with a clean error, never spin.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&path, &path).expect("self link");
+
+        let err =
+            save_account(&path, &gmail_raw_draft("gmail")).expect_err("a cycle cannot resolve");
+        assert!(
+            err.contains("symlink") || err.contains("could not be"),
+            "a clear refusal: {err}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("link")
+                .file_type()
+                .is_symlink(),
+            "nothing was written, the cycle path is untouched"
+        );
     }
 }
