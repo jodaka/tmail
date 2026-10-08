@@ -182,10 +182,19 @@ pub(crate) fn page_step(state: &mut AppState, delta: i64) -> Vec<Effect> {
 /// the renderer draws, so the reducer's clamp always matches the frame.
 /// The fixed header never scrolls (ticket 6864): the viewport is the rows
 /// under it and the clamp tracks the body alone.
+///
+/// A resize may leave `reader_scroll` past the end of the re-flowed body
+/// (ticket gfpq: the reducer deliberately no longer re-flows the document
+/// to learn its new length — that is a full HTML parse per resize event,
+/// and a window drag emits dozens). The anchor is therefore normalized to
+/// `max` *before* the delta applies, so the first scroll after a resize
+/// moves the viewport by exactly one step instead of being swallowed by
+/// the stale offset.
 pub(crate) fn scroll_reader(state: &mut AppState, delta: i64) {
     let (viewport, total) = reader_scroll_bounds(state);
     let max = (total - viewport).max(0);
-    let next = (state.reader_scroll as i64 + delta).clamp(0, max);
+    let base = (state.reader_scroll as i64).min(max);
+    let next = (base + delta).clamp(0, max);
     state.reader_scroll = next as usize;
 }
 
@@ -199,20 +208,6 @@ pub(crate) fn reader_scroll_bounds(state: &AppState) -> (i64, i64) {
         .max(1) as i64;
     let total = crate::app::reader::scroll_line_count(state, width) as i64;
     (viewport, total)
-}
-
-/// Reflow on terminal resize (plan §13/§19 Phase 5): the document re-wraps
-/// at the new reader width inside the renderer, and the scroll anchor is
-/// clamped to the re-flowed body length so the viewport can never point
-/// past the end of the document (the fixed header never scrolls, ticket
-/// 6864).
-pub(crate) fn clamp_reader_scroll(state: &mut AppState) {
-    if !matches!(state.active_route(), Some(Route::Message(_))) {
-        return;
-    }
-    let (viewport, total) = reader_scroll_bounds(state);
-    let max = (total - viewport).max(0);
-    state.reader_scroll = (state.reader_scroll as i64).clamp(0, max) as usize;
 }
 
 /// Shift `list_scroll` so the selection stays on screen. Row geometry comes

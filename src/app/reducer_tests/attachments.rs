@@ -863,7 +863,7 @@ fn resize_updates_size() {
 }
 
 #[test]
-fn resize_clamps_reader_scroll_after_reflow() {
+fn resize_hands_the_reflowed_budget_to_the_frame_and_the_next_scroll() {
     let mut s = state();
     let (id, _) = open_reader(&mut s);
     complete_message_ok(&mut s, id);
@@ -878,8 +878,10 @@ fn resize_clamps_reader_scroll_after_reflow() {
     );
     let deep = crate::app::reader::scroll_line_count(&s, narrow);
     s.reader_scroll = deep;
-    // Shrinking the width re-wraps and changes the document length; the
-    // anchor must respect the re-flowed budget.
+    // Shrinking the width re-wraps and changes the document length. The
+    // reducer no longer rebuilds the document to learn the new length —
+    // that was one full body parse per resize event (ticket gfpq) — so the
+    // anchor survives the resize untouched, by design.
     reduce(
         &mut s,
         Action::Resize {
@@ -893,26 +895,17 @@ fn resize_clamps_reader_scroll_after_reflow() {
         .max(1) as i64;
     let total = crate::app::reader::scroll_line_count(&s, width) as i64;
     let max = (total - viewport).max(0) as usize;
-    assert!(
-        s.reader_scroll <= max,
-        "scroll {} must clamp to {max}",
-        s.reader_scroll
+    assert_eq!(
+        s.reader_scroll, deep,
+        "resize must not touch the anchor (the frame clamps it)"
     );
-    // Growing the window never resurrects an out-of-range anchor either.
-    reduce(
-        &mut s,
-        Action::Resize {
-            width: 152,
-            height: 40,
-        },
-    );
-    let width = crate::view::layout::reader_width(s.session.size);
-    let viewport = crate::view::layout::reader_rows_visible(s.session.size)
-        .saturating_sub(crate::app::reader::header_line_count(&s, width))
-        .max(1) as i64;
-    let total = crate::app::reader::scroll_line_count(&s, width) as i64;
-    let max = (total - viewport).max(0) as usize;
-    assert!(s.reader_scroll <= max);
+    // The budget is honored where it is consumed: the next reader scroll
+    // normalizes the stale anchor to the real maximum before stepping, so
+    // the viewport moves instead of the step being swallowed.
+    reduce(&mut s, Action::MoveDown);
+    assert_eq!(s.reader_scroll, max, "the first scroll clamps to {max}");
+    reduce(&mut s, Action::MoveUp);
+    assert_eq!(s.reader_scroll, max.saturating_sub(1));
 }
 
 #[test]

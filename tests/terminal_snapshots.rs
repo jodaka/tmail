@@ -1048,6 +1048,41 @@ fn reader_scrolls_body_with_reducer_state() {
     );
 }
 
+/// Ticket gfpq: a resize leaves the reducer's `reader_scroll` anchor past
+/// the end of the re-flowed body — the reducer no longer rebuilds the
+/// document to learn its length (that was a full HTML parse per resize
+/// event). The frame must clamp the anchor itself, so the view stays at
+/// the bottom instead of jumping to the last line.
+#[test]
+fn reader_clamps_a_stale_scroll_anchor_at_render_time() {
+    let mut state = reader_state(0);
+    state.session.size = (152, 40);
+    let width = state.session.size.0 as usize;
+    let total = tmail::app::reader::scroll_line_count(&state, width);
+    // An anchor far past the end: what a terminal that grew taller (or a
+    // body that re-flopped shorter) leaves behind.
+    state.reader_scroll = total + 500;
+    let text = draw_after(&mut state, &[], 152, 40);
+    // The clamped view shows the last *viewport* lines, not the last line
+    // alone: an anchor past the end must not collapse the view onto it.
+    let visible_lines = text.matches("body line ").count();
+    assert!(
+        visible_lines > 1,
+        "the view must not collapse onto the last line ({visible_lines} visible):\n{text}"
+    );
+    // The body lines are contiguous, so the first visible one is fixed by
+    // how many are drawn.
+    let first_visible = 40 - visible_lines + 1;
+    assert!(
+        text.contains(&format!("body line {first_visible:02}")),
+        "expected the last {visible_lines} lines to start at {first_visible}:\n{text}"
+    );
+    assert!(
+        !text.contains("body line 01"),
+        "top of body should be scrolled away:\n{text}"
+    );
+}
+
 /// A body link is accent+underline; the hit map addresses its drawn
 /// columns, and a click focuses it before a second click opens it (ticket
 /// hc9n) — the same two-step rhythm as rows and chips.

@@ -12,7 +12,9 @@
 //! scrollbar that appears only when the body overflows the viewport.
 //! The document model itself lives in `app::reader`, shared with the
 //! reducer's scroll clamp, so what is drawn and what the clamp allows can
-//! never disagree.
+//! never disagree. The frame clamps the anchor itself against the document
+//! it just built (ticket gfpq), which is what lets the reducer skip
+//! re-flowing the body on every resize event.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -109,6 +111,12 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, theme: &Theme, header: &[Rea
 /// recording happen together here: both walk the same [`LinkRuns`] map, so
 /// a click can never land on a different link than the one drawn (ticket
 /// hc9n).
+///
+/// The scroll anchor comes from the reducer-maintained `reader_scroll`,
+/// clamped here against the document just built and the viewport height.
+/// That clamp is what lets the reducer skip re-flowing the body on every
+/// resize event (ticket gfpq): a resize leaves the anchor past the end
+/// until the next scroll, and the frame stays correct regardless.
 fn render_body(
     frame: &mut Frame<'_>,
     body_area: Rect,
@@ -120,7 +128,10 @@ fn render_body(
     let body = &doc.lines;
     let viewport = body_area.height as usize;
     let total = body.len();
-    let start = state.reader_scroll.min(total.saturating_sub(1));
+    // Same clamp the reducer applies, computed from what is actually drawn:
+    // `total - viewport`, never below zero.
+    let max_scroll = total.saturating_sub(viewport);
+    let start = state.reader_scroll.min(max_scroll);
     let scrolling = total > viewport;
     // A visible scrollbar reserves its column: body text clips one column
     // short so text and scrollbar never overlap. When the message fits,

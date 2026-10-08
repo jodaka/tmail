@@ -480,3 +480,114 @@ fn the_message_store_effect_shares_the_open_allocation() {
         "state and the store effect must hold the same allocation"
     );
 }
+
+/// Ticket gfpq: the reader frame clamps the anchor against the document it
+/// builds, so the reducer must not rebuild the document on resize.
+/// Before the fix, `resize` called `clamp_reader_scroll`, which forced a
+/// full document build (and therefore a full body parse) purely to learn
+/// the new line count — one parse per resize event, and a window drag
+/// emits one event per pixel.
+#[test]
+fn resize_does_not_rebuild_the_reader_document() {
+    let mut s = state();
+    s.selection = 1;
+    let (id, _) = open_reader(&mut s);
+    let summary = s.open_summary().expect("reader open").clone();
+    let _ = reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(mock::mock_message(
+                &summary,
+            )))),
+        }),
+    );
+    // Build the document at the current geometry, as the frame would.
+    let width = crate::view::layout::reader_width(s.session.size);
+    let _ = crate::app::reader::scroll_line_count(&s, width);
+    let cached_width = s
+        .caches
+        .reader_doc
+        .borrow()
+        .as_ref()
+        .map(|cached| cached.width)
+        .expect("the document is cached after the first build");
+    // A resize storm: a dozen geometries, none of which is drawn.
+    for w in 100..112u16 {
+        reduce(
+            &mut s,
+            Action::Resize {
+                width: w,
+                height: 40,
+            },
+        );
+    }
+    let final_width = crate::view::layout::reader_width(s.session.size);
+    assert_ne!(
+        final_width, cached_width,
+        "the resize must change the width"
+    );
+    {
+        let cached = s.caches.reader_doc.borrow();
+        let cached = cached.as_ref().expect("still cached");
+        assert_eq!(
+            cached.width, cached_width,
+            "resize must not rebuild the document at a new width"
+        );
+    }
+    // The anchor is untouched: normalizing it is the next scroll's job.
+    assert_eq!(s.reader_scroll, 0, "resize must not clamp the anchor");
+}
+
+/// The companion to the above: because the anchor can outlive the body it
+/// indexes, the first scroll after the geometry changed normalizes it to
+/// the real maximum first. Without that, a stale anchor swallows the step
+/// and the viewport does not move.
+#[test]
+fn the_first_reader_scroll_after_a_resize_steps_from_the_clamped_anchor() {
+    let mut s = state();
+    s.selection = 1;
+    let (id, _) = open_reader(&mut s);
+    let summary = s.open_summary().expect("reader open").clone();
+    let _ = reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Message(Box::new(mock::mock_message(
+                &summary,
+            )))),
+        }),
+    );
+    // Seek to the bottom the way a reader would, in a short terminal (the
+    // mock body then overflows by a lot).
+    reduce(
+        &mut s,
+        Action::Resize {
+            width: 152,
+            height: 20,
+        },
+    );
+    let (viewport, total) = reader_scroll_bounds(&s);
+    assert!(total > viewport, "the mock body must overflow the viewport");
+    s.reader_scroll = total as usize;
+    // Growing the window taller shrinks the maximum scroll (a bigger
+    // viewport) while the body still overflows, so the anchor is now past
+    // the end — exactly what a resize leaves behind.
+    reduce(
+        &mut s,
+        Action::Resize {
+            width: 152,
+            height: 30,
+        },
+    );
+    let (viewport, total) = reader_scroll_bounds(&s);
+    let max = (total - viewport).max(0);
+    assert!(max >= 1, "the body must still overflow: max={max}");
+    assert!(s.reader_scroll as i64 > max, "the anchor must be stale");
+    reduce(&mut s, Action::MoveUp);
+    assert_eq!(
+        s.reader_scroll,
+        max.saturating_sub(1) as usize,
+        "one step up from the clamped anchor, not from the stale one"
+    );
+}

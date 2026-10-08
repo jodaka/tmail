@@ -256,8 +256,14 @@ pub const MAX_BATCH: usize = 256;
 ///   list after Esc closed the message.
 /// - **Ticks collapse to one per batch**: the cadence is a heartbeat, not
 ///   a work queue (the event loop's own timer uses missed-tick delay).
+/// - **Consecutive resizes collapse to the last one**: a window drag emits
+///   one `Resize` per pixel, none of which is ever drawn except the final
+///   geometry, and each one would otherwise re-flow the reader document
+///   (ticket gfpq). Only the last of a run matters.
 ///
-/// Clicks and resizes pass through untouched.
+/// Clicks and a lone resize pass through untouched; a *run* of resizes
+/// keeps only its last geometry, dispatched in arrival order relative to
+/// the events around it.
 pub fn coalesce(batch: Vec<Event>, hits: &mouse::HitMap, state: &AppState) -> Vec<Action> {
     let mut actions = Vec::with_capacity(batch.len());
     let mut key_seen = false;
@@ -267,6 +273,15 @@ pub fn coalesce(batch: Vec<Event>, hits: &mouse::HitMap, state: &AppState) -> Ve
     // Pending net movement of the trailing move-run (up is negative),
     // flushed as plain actions before any other action dispatches.
     let mut run: i64 = 0;
+    // A resize already collapsed into the batch: every later consecutive
+    // one replaces it, until some other action intervenes and the
+    // intermediate geometry stops being observable (ticket gfpq).
+    let mut pending_resize: Option<Action> = None;
+    let flush_resize = |actions: &mut Vec<Action>, pending: &mut Option<Action>| {
+        if let Some(action) = pending.take() {
+            actions.push(action);
+        }
+    };
     for event in batch {
         let action = match event {
             Event::Key(key) => {
@@ -286,7 +301,12 @@ pub fn coalesce(batch: Vec<Event>, hits: &mouse::HitMap, state: &AppState) -> Ve
                 mouse::to_action(mouse_event, hits, state)
             }
             Event::Focus(focused) => Some(Action::SetTerminalFocus(focused)),
-            Event::Resize { width, height } => Some(Action::Resize { width, height }),
+            Event::Resize { width, height } => {
+                // Ticket gfpq: an intermediate width is never drawn, so
+                // keep only the newest of the run.
+                pending_resize = Some(Action::Resize { width, height });
+                None
+            }
             Event::Tick => {
                 if tick_seen {
                     continue;
@@ -298,16 +318,29 @@ pub fn coalesce(batch: Vec<Event>, hits: &mouse::HitMap, state: &AppState) -> Ve
             }
         };
         match action {
-            Some(Action::MoveUp) => run -= 1,
-            Some(Action::MoveDown) => run += 1,
+            Some(Action::MoveUp) => {
+                // The resize that preceded the run changed the geometry the
+                // run scrolls, so it dispatches first.
+                flush_resize(&mut actions, &mut pending_resize);
+                run -= 1;
+            }
+            Some(Action::MoveDown) => {
+                flush_resize(&mut actions, &mut pending_resize);
+                run += 1;
+            }
             Some(other) => {
+                // Any other action flushes both pending runs: a movement
+                // before it belongs to the same geometry, and the
+                // interaction this batch opened must see it.
                 flush_run(&mut actions, &mut run);
+                flush_resize(&mut actions, &mut pending_resize);
                 actions.push(other);
             }
             None => {}
         }
     }
     flush_run(&mut actions, &mut run);
+    flush_resize(&mut actions, &mut pending_resize);
     actions
 }
 
@@ -461,6 +494,70 @@ mod tests {
                 width: 80,
                 height: 24
             }]
+        );
+    }
+
+    /// Ticket gfpq: a window drag emits one `Resize` per pixel. Only the
+    /// final geometry is ever drawn, and each intermediate one would
+    /// re-flow the reader document, so a run collapses to its last.
+    #[test]
+    fn consecutive_resizes_collapse_to_the_last_one() {
+        let state = mock_initial_state();
+        let events = vec![
+            Event::Resize {
+                width: 80,
+                height: 24,
+            },
+            Event::Resize {
+                width: 81,
+                height: 24,
+            },
+            Event::Resize {
+                width: 82,
+                height: 24,
+            },
+            Event::Resize {
+                width: 90,
+                height: 30,
+            },
+        ];
+        assert_eq!(
+            coalesce(events, &mouse::HitMap::default(), &state),
+            vec![Action::Resize {
+                width: 90,
+                height: 30
+            }]
+        );
+    }
+
+    /// The collapsed run keeps its arrival order relative to the events
+    /// around it: a resize that preceded a keystroke must dispatch before
+    /// it (the keystroke sees the new geometry), and a resize that
+    /// followed one must dispatch after it.
+    #[test]
+    fn a_collapsed_resize_run_keeps_its_arrival_order() {
+        let state = mock_initial_state();
+        let resize = |width: u16| Event::Resize { width, height: 24 };
+        let events = vec![
+            resize(80),
+            resize(81),
+            key(KeyCode::Down),
+            resize(90),
+            wheel(MouseEventKind::ScrollDown),
+        ];
+        assert_eq!(
+            coalesce(events, &mouse::HitMap::default(), &state),
+            vec![
+                Action::Resize {
+                    width: 81,
+                    height: 24
+                },
+                Action::MoveDown,
+                Action::Resize {
+                    width: 90,
+                    height: 24
+                },
+            ]
         );
     }
 

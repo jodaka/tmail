@@ -263,8 +263,13 @@ fn resize(state: &mut AppState, width: u16, height: u16) -> Vec<Effect> {
         }
     }
     // A smaller window may have pushed the selection off screen.
+    // The reader anchor is deliberately *not* clamped here (ticket gfpq):
+    // learning the re-flowed body length means rebuilding the document,
+    // which is a full HTML parse per resize event — a window drag emits
+    // dozens. The reader frame clamps against the lines it just built, so
+    // the view stays correct, and the next reader scroll normalizes the
+    // anchor (`scroll_reader`).
     keep_selection_visible(state);
-    clamp_reader_scroll(state);
     keep_mailbox_visible(state);
     effects
 }
