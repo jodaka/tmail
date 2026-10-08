@@ -158,8 +158,15 @@ pub(crate) fn selected_attachment(state: &AppState) -> Option<(usize, &crate::do
 /// one-line body preview the background previews produce, ticket wxtx),
 /// and mark unread mail read after successful load (plan §19 Phase 4) as a
 /// separate, retryable flag operation whose confirmation updates the list.
-pub(crate) fn message_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
-    let snippet = crate::view::rich::preview_text(&message);
+///
+/// The snippet arrives with the message, derived off the runtime by the
+/// manager (ticket j3zr): it is a full body conversion, so this function
+/// must never run it on the frame thread.
+pub(crate) fn message_loaded(
+    state: &mut AppState,
+    message: Message,
+    snippet: Option<String>,
+) -> Vec<Effect> {
     let message_id = message.id.clone();
     let has_attachments = !message.attachments.is_empty();
     // The message was fully fetched this session: never re-requested for
@@ -615,9 +622,9 @@ pub(crate) fn complete_cache_preview_load(
         return Vec::new();
     };
     match result.outcome {
-        Ok(OperationOutcome::CachedMessage(message)) => {
+        Ok(OperationOutcome::MessagePreview { message, preview }) => {
             state.caches.preview_requested.insert(summary.id.clone());
-            match crate::view::rich::preview_text(&message) {
+            match preview {
                 Some(text) => {
                     state
                         .caches
@@ -677,7 +684,14 @@ pub(crate) fn complete_cache_preview_load(
 /// cache the message for an instant open, and roll the fetch window. A
 /// result for a message no longer listed (mailbox switched, row moved) is
 /// dropped — but still cached, so it helps if the message returns.
-pub(crate) fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effect> {
+///
+/// The snippet arrives with the message, derived off the runtime by the
+/// manager (ticket j3zr).
+pub(crate) fn preview_loaded(
+    state: &mut AppState,
+    message: Message,
+    snippet: Option<String>,
+) -> Vec<Effect> {
     // The message was fully fetched this session: never re-requested for
     // a preview, even when its body carries no preview text (marking here
     // also closes the race with the store effect below — a cache read
@@ -687,7 +701,6 @@ pub(crate) fn preview_loaded(state: &mut AppState, message: Message) -> Vec<Effe
     // shared allocation (ticket pa64): the preview path never deep-copies
     // the body.
     let message_id = message.id.clone();
-    let snippet = crate::view::rich::preview_text(&message);
     let has_attachments = !message.attachments.is_empty();
     // Ticket haeb: cache the fetched message (bounded by [tmail.cache]) —
     // as an effect, so the write never blocks the reducer. Shared, not

@@ -157,7 +157,9 @@ fn complete_cache_page(
     )
 }
 
-/// Complete an in-flight cache message read (reader or preview path).
+/// Complete an in-flight cache message read on the **reader** path
+/// (`CacheMessageLoad`): the body renders immediately and a background
+/// convergence fetch follows.
 fn complete_cache_message(
     s: &mut AppState,
     id: OperationId,
@@ -168,6 +170,24 @@ fn complete_cache_message(
         Action::BackendCompleted(OperationResult {
             id,
             outcome: Ok(OperationOutcome::CachedMessage(Box::new(message))),
+        }),
+    )
+}
+
+/// Complete an in-flight cache read on the **preview** path
+/// (`CachePreviewLoad`), which the manager answers with the message and its
+/// derived one-line preview together (ticket j3zr): the read and the
+/// conversion share one blocking-pool hop.
+fn complete_cache_preview(
+    s: &mut AppState,
+    id: OperationId,
+    message: crate::domain::Message,
+) -> Vec<Effect> {
+    reduce(
+        s,
+        Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(fetched_outcome(message)),
         }),
     )
 }
@@ -334,15 +354,26 @@ fn open_modal(s: &mut AppState, detail: &str) -> (OperationId, PageRequest) {
 /// follow-up effects the reducer emitted (e.g. the mark-read operation).
 fn complete_message_ok(s: &mut AppState, id: OperationId) -> Vec<Effect> {
     let summary = s.open_summary().expect("reader open").clone();
-    let message = mock::mock_message(&summary);
     let effects = reduce(
         s,
         Action::BackendCompleted(OperationResult {
             id,
-            outcome: Ok(OperationOutcome::Message(Box::new(message))),
+            outcome: Ok(fetched_outcome(mock::mock_message(&summary))),
         }),
     );
     settle_cache_stores(s, effects)
+}
+
+/// The payload the manager now ships for a fetched or cached message (ticket
+/// j3zr): the message with its one-line list preview attached, derived off
+/// the runtime. Tests build it exactly the way the manager does, so what
+/// reaches the reducer is the real shape.
+fn fetched_outcome(message: Message) -> OperationOutcome {
+    let preview = crate::view::rich::preview_text(&message);
+    OperationOutcome::MessagePreview {
+        message: Box::new(message),
+        preview,
+    }
 }
 
 /// Complete an in-flight mutation with a `Done` outcome. Returns the
@@ -897,12 +928,11 @@ fn complete_preview_ok(
     id: OperationId,
     summary: &crate::domain::MessageSummary,
 ) -> Vec<Effect> {
-    let message = mock::mock_message(summary);
     let effects = reduce(
         s,
         Action::BackendCompleted(OperationResult {
             id,
-            outcome: Ok(OperationOutcome::Message(Box::new(message))),
+            outcome: Ok(fetched_outcome(mock::mock_message(summary))),
         }),
     );
     settle_cache_stores(s, effects)

@@ -53,7 +53,7 @@ fn cached_page_serves_instantly_and_the_fresh_load_still_runs() {
     let reads = expect_cache_preview_reads(&effects);
     assert_eq!(reads.len(), 1, "the cached page's single row is read");
     let first = s.messages.items[0].clone();
-    no_effects(&complete_cache_message(
+    no_effects(&complete_cache_preview(
         &mut s,
         reads[0].0,
         mock::mock_message(&first),
@@ -235,9 +235,7 @@ fn preview_result_fills_the_list_snippet_and_caches_the_message() {
         &mut s,
         Action::BackendCompleted(OperationResult {
             id,
-            outcome: Ok(OperationOutcome::Message(Box::new(mock::mock_message(
-                &summary,
-            )))),
+            outcome: Ok(fetched_outcome(mock::mock_message(&summary))),
         }),
     );
     // The row now carries its one-line body preview…
@@ -288,7 +286,7 @@ fn preview_fetch_reconciles_the_row_attachment_flag() {
         &mut s,
         Action::BackendCompleted(OperationResult {
             id,
-            outcome: Ok(OperationOutcome::Message(Box::new(message))),
+            outcome: Ok(fetched_outcome(message)),
         }),
     );
     let row = s
@@ -352,7 +350,7 @@ fn cached_copies_reconcile_the_row_attachment_flag_without_a_fetch() {
         .find(|(_, locator)| locator.id == first.id)
         .expect("the cached row is read too");
     // The hit serves the preview and reconciles the flag with no fetch.
-    let effects = complete_cache_message(&mut s, *first_read, message);
+    let effects = complete_cache_preview(&mut s, *first_read, message);
     assert!(
         expect_previews(&effects)
             .iter()
@@ -395,7 +393,7 @@ fn opening_a_message_reconciles_the_row_attachment_flag() {
         &mut s,
         Action::BackendCompleted(OperationResult {
             id: convergence_id,
-            outcome: Ok(OperationOutcome::Message(Box::new(message))),
+            outcome: Ok(fetched_outcome(message)),
         }),
     );
     assert!(

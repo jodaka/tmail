@@ -145,9 +145,7 @@ fn reader_from_search_returns_to_the_same_results() {
         &mut s,
         Action::BackendCompleted(OperationResult {
             id: load_id,
-            outcome: Ok(OperationOutcome::Message(Box::new(mock::mock_message(
-                &selected,
-            )))),
+            outcome: Ok(fetched_outcome(mock::mock_message(&selected))),
         }),
     );
     let read_effects = settle_cache_stores(&mut s, read_effects);

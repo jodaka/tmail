@@ -414,7 +414,7 @@ fn stale_message_result_after_close_is_dropped() {
         &mut s,
         Action::BackendCompleted(OperationResult {
             id,
-            outcome: Ok(OperationOutcome::Message(Box::new(message))),
+            outcome: Ok(fetched_outcome(message)),
         }),
     );
     assert!(

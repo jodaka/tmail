@@ -280,14 +280,17 @@ async fn run_mail_call(
             )
             .await
         }
-        // Reader load, draft reopen (the reducer turns the fetched copy
-        // into a composer draft), list preview (ticket wxtx), and the
-        // list-initiated reply/forward seed share one backend call and
-        // one payload shape.
-        MailOperation::LoadMessage(locator)
-        | MailOperation::OpenDraft(locator)
-        | MailOperation::Preview(locator)
-        | MailOperation::SeedComposer { locator, .. } => {
+        // Reader load and list preview (ticket wxtx): the manager derives
+        // the list row's one-line preview on the blocking pool, so the
+        // reducer never spends a frame on a full body conversion (ticket
+        // j3zr).
+        MailOperation::LoadMessage(locator) | MailOperation::Preview(locator) => {
+            run_message_call(backend, effect, ctx, locator).await
+        }
+        // Draft reopen and the list-initiated composer seed share the same
+        // backend call and payload shape, but neither ever renders a list
+        // row, so no preview is derived for them.
+        MailOperation::OpenDraft(locator) | MailOperation::SeedComposer { locator, .. } => {
             run_call(
                 effect,
                 ctx,
@@ -771,9 +774,21 @@ async fn run_cache_call(
         CacheOperation::CachePreviewLoad { locator } => {
             let mailbox = locator.mailbox.clone();
             let id = locator.id.0.clone();
-            let message = run_cache(cache, move |cache| cache.load_message(&mailbox, &id)).await;
-            Some(Ok(match message {
-                Some(message) => OperationOutcome::CachedMessage(Box::new(message)),
+            // The preview derivation rides the same blocking-pool hop as
+            // the read itself (ticket j3zr): one row's snippet is a full
+            // HTML→text pass, and a page starts many of these at once.
+            let served = run_cache(cache, move |cache| {
+                cache.load_message(&mailbox, &id).map(|message| {
+                    let preview = crate::view::rich::preview_text(&message);
+                    (message, preview)
+                })
+            })
+            .await;
+            Some(Ok(match served {
+                Some((message, preview)) => OperationOutcome::MessagePreview {
+                    message: Box::new(message),
+                    preview,
+                },
                 None => OperationOutcome::CacheMiss,
             }))
         }
@@ -827,15 +842,21 @@ where
 }
 
 /// Run one backend call through the shared outcome/error translation:
-/// success builds the typed outcome via `build`, failure maps through
-/// [`operation_failure`] with `None` on cancellation. Collapses the
-/// per-kind copies of the same success/error match.
-async fn run_call<F, Fut, T>(
+/// success maps `value` through `build`, failure maps through
+/// [`operation_failure`], and `None` means the operation was cancelled
+/// while it waited for a permit ([`OperationManager::launch`] leaves the
+/// queue silently in that case). Collapses the per-kind copies of the same
+/// success/error match.
+///
+/// Generic over the mapped type so a caller that needs the raw value first
+/// — [`run_message_call`] derives the list preview off the runtime before
+/// building an outcome — can take it without a stand-in mapping.
+async fn run_call<F, Fut, T, O>(
     effect: &Effect,
     ctx: &RequestContext,
     call: F,
-    build: impl Fn(T) -> OperationOutcome,
-) -> Option<Result<OperationOutcome, OperationFailure>>
+    build: impl Fn(T) -> O,
+) -> Option<Result<O, OperationFailure>>
 where
     F: FnOnce(RequestContext) -> Fut,
     Fut: std::future::Future<Output = crate::backend::BackendResult<T>>,
@@ -844,6 +865,49 @@ where
         Ok(value) => Some(Ok(build(value))),
         Err(err) => operation_failure(effect, err).map(Err),
     }
+}
+
+/// Fetch one full message and derive the list row's preview with it,
+/// off the runtime (ticket j3zr).
+///
+/// The preview is a full HTML→text conversion over the body — tens of
+/// milliseconds for a large message — and the runtime is single-threaded
+/// (plan §3), so running it inline here would stall the frame loop. The
+/// decode of the child output already hops to the pool (`decode_on_pool`),
+/// and this is the same trade one argument later: the message crosses
+/// into the reducer with everything the list row needs attached.
+///
+/// `None` means the operation was cancelled while it waited for a permit,
+/// exactly as [`run_call`] reports it.
+async fn run_message_call(
+    backend: &Arc<dyn MailBackend>,
+    effect: &Effect,
+    ctx: &RequestContext,
+    locator: &crate::domain::MessageLocator,
+) -> Option<Result<OperationOutcome, OperationFailure>> {
+    let locator = locator.clone();
+    let fetched = run_call(effect, ctx, move |c| backend.get_message(c, locator), |m| m).await?;
+    let outcome = match fetched {
+        Err(failure) => Err(failure),
+        Ok(message) => {
+            let derived = tokio::task::spawn_blocking(move || {
+                let preview = crate::view::rich::preview_text(&message);
+                (message, preview)
+            })
+            .await;
+            match derived {
+                Ok((message, preview)) => Ok(OperationOutcome::MessagePreview {
+                    message: Box::new(message),
+                    preview,
+                }),
+                Err(join) => Err(plain_failure(
+                    effect,
+                    &format!("message preview task failed: {join}"),
+                )),
+            }
+        }
+    };
+    Some(outcome)
 }
 
 /// A structural failure that is not a [`BackendError`] (file I/O in the
@@ -2308,6 +2372,51 @@ mod cache_tests {
             is_starred: false,
             has_attachments: false,
         }
+    }
+
+    /// Ticket j3zr: a preview cache read answers with the message *and* its
+    /// one-line snippet, derived inside the same blocking-pool hop as the
+    /// read. Before this, the reducer called `preview_text` itself — a full
+    /// HTML→text conversion on the frame thread, once per visible row.
+    /// The payload shape is the contract: the reducer can no longer parse a
+    /// body even if it wanted to.
+    #[tokio::test]
+    async fn a_preview_read_carries_the_derived_snippet() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
+        let mut message = Message {
+            id: MessageId(String::from("m1")),
+            mailbox_id: MailboxId(String::from("INBOX")),
+            headers: crate::domain::MessageHeaders::default(),
+            plain_body: Some(String::from("first body line\nsecond body line")),
+            html_body: Some(String::from("<p><b>first</b> body line</p>")),
+            attachments: Vec::new(),
+        };
+        message.headers.subject = String::from("m1");
+        cache.store_message(&MailboxId(String::from("INBOX")), "m1", &message);
+        let (manager, mut rx) = manager_with_cache(Some(cache));
+        let (effect, token) = effect(OperationKind::Cache(CacheOperation::CachePreviewLoad {
+            locator: MessageLocator {
+                mailbox: MailboxId(String::from("INBOX")),
+                id: MessageId(String::from("m1")),
+                message_id: None,
+            },
+        }));
+        manager.launch(effect, ctx(7, &token));
+        let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("result")
+            .expect("result");
+        let Ok(OperationOutcome::MessagePreview { message, preview }) = result.outcome else {
+            panic!(
+                "expected a message-with-preview payload: {:?}",
+                result.outcome
+            );
+        };
+        assert_eq!(message.id.0, "m1");
+        // HTML wins over plain, and the markup is gone — the very
+        // derivation `view::rich::preview_text` performs.
+        assert_eq!(preview.as_deref(), Some("first body line"));
     }
 
     #[tokio::test]

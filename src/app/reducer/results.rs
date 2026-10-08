@@ -526,7 +526,9 @@ pub(crate) fn complete_load_message(
     }
     let id = result.id;
     match result.outcome {
-        Ok(OperationOutcome::Message(message)) => message_loaded(state, *message),
+        Ok(OperationOutcome::MessagePreview { message, preview }) => {
+            message_loaded(state, *message, preview)
+        }
         Ok(_) => unexpected_payload(id, "message"),
         Err(failure) => {
             // A background convergence fetch of an already-cached message
@@ -584,7 +586,9 @@ pub(crate) fn complete_open_draft(
 pub(crate) fn complete_preview(state: &mut AppState, result: OperationResult) -> Vec<Effect> {
     let id = result.id;
     match result.outcome {
-        Ok(OperationOutcome::Message(message)) => preview_loaded(state, *message),
+        Ok(OperationOutcome::MessagePreview { message, preview }) => {
+            preview_loaded(state, *message, preview)
+        }
         Ok(_) => unexpected_payload(id, "preview"),
         Err(failure) => {
             tracing::debug!(

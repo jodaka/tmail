@@ -206,7 +206,7 @@ fn disk_cached_messages_fill_previews_without_fetching() {
             .get(&locator.id)
             .expect("the earlier session fetched this message")
             .clone();
-        followups.extend(complete_cache_message(&mut s, id, message));
+        followups.extend(complete_cache_preview(&mut s, id, message));
     }
     no_effects(&followups);
     assert_eq!(
@@ -460,9 +460,7 @@ fn the_message_store_effect_shares_the_open_allocation() {
         &mut s,
         Action::BackendCompleted(OperationResult {
             id: load_id,
-            outcome: Ok(OperationOutcome::Message(Box::new(mock::mock_message(
-                &summary,
-            )))),
+            outcome: Ok(fetched_outcome(mock::mock_message(&summary))),
         }),
     );
     let store = effects
@@ -497,9 +495,7 @@ fn resize_does_not_rebuild_the_reader_document() {
         &mut s,
         Action::BackendCompleted(OperationResult {
             id,
-            outcome: Ok(OperationOutcome::Message(Box::new(mock::mock_message(
-                &summary,
-            )))),
+            outcome: Ok(fetched_outcome(mock::mock_message(&summary))),
         }),
     );
     // Build the document at the current geometry, as the frame would.
@@ -553,9 +549,7 @@ fn the_first_reader_scroll_after_a_resize_steps_from_the_clamped_anchor() {
         &mut s,
         Action::BackendCompleted(OperationResult {
             id,
-            outcome: Ok(OperationOutcome::Message(Box::new(mock::mock_message(
-                &summary,
-            )))),
+            outcome: Ok(fetched_outcome(mock::mock_message(&summary))),
         }),
     );
     // Seek to the bottom the way a reader would, in a short terminal (the
@@ -589,5 +583,49 @@ fn the_first_reader_scroll_after_a_resize_steps_from_the_clamped_anchor() {
         s.reader_scroll,
         max.saturating_sub(1) as usize,
         "one step up from the clamped anchor, not from the stale one"
+    );
+}
+
+/// Ticket j3zr: the snippet arrives with the message, derived off the
+/// runtime by the manager. The reducer must apply *that* string — not one
+/// it derives itself — so a payload carrying a hand-made preview proves
+/// the derivation really moved out of `reduce` (and off the frame thread).
+#[test]
+fn the_reader_applies_the_snippet_the_manager_sent() {
+    let mut s = state();
+    s.selection = 1;
+    // The mock seed pre-fills snippets; clearing them makes the delivered
+    // one the only candidate for the row.
+    for item in &mut s.messages.items {
+        item.snippet = None;
+    }
+    let (id, _) = open_reader(&mut s);
+    let summary = s.open_summary().expect("reader open").clone();
+    let message = mock::mock_message(&summary);
+    let effects = reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::MessagePreview {
+                message: Box::new(message),
+                preview: Some(String::from("derived off the runtime")),
+            }),
+        }),
+    );
+    // The store follows the load; the snippet itself is what matters here.
+    let _ = settle_cache_stores(&mut s, effects);
+    assert_eq!(
+        s.messages
+            .items
+            .iter()
+            .find(|item| item.id == summary.id)
+            .and_then(|item| item.snippet.as_deref()),
+        Some("derived off the runtime"),
+        "the reducer must apply the delivered snippet verbatim"
+    );
+    assert_eq!(
+        s.caches.previews.get(&summary.id).map(String::as_str),
+        Some("derived off the runtime"),
+        "the session preview must match the delivered snippet too"
     );
 }

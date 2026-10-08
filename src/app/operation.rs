@@ -224,6 +224,19 @@ pub enum OperationOutcome {
     Page(Page<MessageSummary>),
     /// One fetched full message (plan §19 Phase 4).
     Message(Box<Message>),
+    /// One fetched or cached full message *with the list row's one-line
+    /// preview already derived* (ticket j3zr).
+    ///
+    /// The preview is a full HTML→text pass over the body — tens of
+    /// milliseconds on a large message — so the manager derives it on the
+    /// blocking pool, where the message is decoded or read, rather than
+    /// letting the reducer spend a frame on it. The derivation is the same
+    /// `view::rich::preview_text` the reducer used to call inline; it has
+    /// only moved.
+    MessagePreview {
+        message: Box<Message>,
+        preview: Option<String>,
+    },
     /// A mutation confirmed by the backend; the reducer applies the state
     /// change its own operation kind describes (flags echo only the
     /// affected values, ADR 0001 finding 6).
