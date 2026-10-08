@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 18 | Medium | backend/process | Unbounded memory: child stdout/stderr, incoming attachment reads, stdin payload clones |
 | 19 | Medium | config/write | Any config-read error is treated as "file missing"; symlinked config files are silently replaced |
 | 20 | Medium | main/terminal | `--configure` success output is printed into the alternate screen and erased on exit |
 | 21 | Medium | wizard/alias | Gmail accounts are offered a bogus `Junk` folder, created and aliased |
@@ -48,12 +47,6 @@
 ---
 
 ## Detailed findings
-
-### 18. Medium — Unbounded memory in process and attachment paths
-
-**Location:** `src/backend/himalaya/process.rs:162,173-186`; `src/backend/himalaya/mod.rs:920-930`
-
-Child stdout/stderr are drained with `read_to_end` and no size cap (the 30 s budget is a time bound, not a size bound); `save_attachment` does `std::fs::read` of the downloaded file with no size limit (outgoing attachments are capped at 25 MiB; incoming are not); every send/draft push clones the full stdin payload (`to_vec`). A hostile/buggy backend or a huge incoming attachment can OOM the process.
 
 ### 19. Medium — Config-read errors misclassified; symlinked configs clobbered
 
