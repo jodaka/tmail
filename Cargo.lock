@@ -2919,7 +2919,7 @@ dependencies = [
 
 [[package]]
 name = "tmail"
-version = "0.8.8"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "async-trait",
