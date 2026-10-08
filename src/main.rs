@@ -302,6 +302,13 @@ async fn session(
     )
     .await?;
 
+    // Tear the terminal down before anything prints: the guard's Drop
+    // leaves the alternate screen, and a message printed while it is
+    // still up — the `--configure` result and the Esc-cancel note are
+    // exactly that — would be wiped on the way out (review finding 20).
+    // The teardown is also why the error path (the fatal match in `run`)
+    // prints readable output: restoration happens in the same Drop there.
+    drop(assets.guard.take());
     // Terminal restoration (guarded Drop) leaves the window title set;
     // hand the session's original title back (best-effort, popped from
     // the title stack pushed by `enable`).
