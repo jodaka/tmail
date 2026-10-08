@@ -2,9 +2,11 @@
 //!
 //! Every invocation uses `tokio::process::Command` with argv arrays only —
 //! never a shell string — with stdout/stderr piped and drained by dedicated
-//! tasks so a full pipe can never deadlock. `kill_on_drop(true)` is set as
-//! a safety net, and the request's cancellation token terminates the owned
-//! child with an exact-pid SIGKILL (the pattern proven by the Phase 0
+//! bounded tasks so a full pipe can never deadlock and a chatty child can
+//! never grow our memory without limit (a backend pouring more than the
+//! pipe caps below is killed and reported by typed error). `kill_on_drop(true)`
+//! is set as a safety net, and the request's cancellation token terminates
+//! the owned child with an exact-pid SIGKILL (the pattern proven by the Phase 0
 //! probe), so cancelling never leaks a running himalaya or widens the kill
 //! to unrelated processes (plan §21).
 
@@ -41,6 +43,31 @@ const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 /// The budget is per child run — a bulk operation looping over mailbox
 /// groups gets it per group, never a shared total.
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Size caps for one child run's captured pipes (byte streams, not
+/// commands): a backend that pours more into a pipe than a decode can
+/// plausibly want is misbehaving, and buffering it whole would be an
+/// unbounded-memory DoS on our own process (determinism of the review
+/// finding: the 30 s budget bounds time, not bytes).
+///
+/// `stdout` comfortably covers the largest legitimate dumps: a full
+/// `message read` JSON with parts carrying binaries is the outlier — a
+/// message respecting the outgoing draft-attachment budget (25 MiB)
+/// serialized as JSON number arrays stays well under half this. Anything
+/// beyond is reported by typed error instead of buffered. `stderr`
+/// carries diagnostics only (`error_detail`), so a meager megabyte is
+/// already far more than an error line needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutputPipeCaps {
+    stdout: usize,
+    stderr: usize,
+}
+
+const MIB: usize = 1024 * 1024;
+const OUTPUT_PIPE_CAPS: OutputPipeCaps = OutputPipeCaps {
+    stdout: 128 * MIB,
+    stderr: MIB,
+};
 
 /// Terminate the child (and ideally its whole tree) on cancellation, and
 /// log whatever could not be killed (ticket 8s0g: the `kill(2)` result was
@@ -108,24 +135,38 @@ pub(crate) async fn run(
 }
 
 /// [`run`] with a stdin payload: how serialized drafts/mail reach himalaya
-/// (plan §11: "Pipe serialized mail to stdin when required").
+/// (plan §11: "Pipe serialized mail to stdin when required"). The payload
+/// moves in — the writer task owns its bytes, so a several-MiB draft or
+/// send never exists twice (review finding 18).
 pub(crate) async fn run_with_stdin(
     program: &str,
     args: &[String],
-    input: Option<&[u8]>,
+    input: Option<Vec<u8>>,
     token: &CancellationToken,
 ) -> BackendResult<ChildOutput> {
     run_bounded(program, args, input, token, CALL_TIMEOUT).await
 }
 
 /// [`run_with_stdin`] with an explicit budget (tests exercise the timeout
-/// path with a short one).
+/// path with a short one) and pipe caps (tests exercise the breach path
+/// with small ones).
 async fn run_bounded(
     program: &str,
     args: &[String],
-    input: Option<&[u8]>,
+    input: Option<Vec<u8>>,
     token: &CancellationToken,
     budget: std::time::Duration,
+) -> BackendResult<ChildOutput> {
+    run_bounded_with_caps(program, args, input, token, budget, OUTPUT_PIPE_CAPS).await
+}
+
+async fn run_bounded_with_caps(
+    program: &str,
+    args: &[String],
+    input: Option<Vec<u8>>,
+    token: &CancellationToken,
+    budget: std::time::Duration,
+    caps: OutputPipeCaps,
 ) -> BackendResult<ChildOutput> {
     tracing::debug!(program, args = ?args, stdin = input.is_some(), "spawning himalaya");
     let mut command = Command::new(program);
@@ -166,9 +207,9 @@ async fn run_bounded(
         })?;
 
     // Write stdin from a dedicated task so a child that never reads cannot
-    // block us either. The payload is owned so the writer task is 'static.
-    let owned_input: Option<Vec<u8>> = input.map(<[u8]>::to_vec);
-    let stdin_task = match (owned_input, child.stdin.take()) {
+    // block us either. The payload moved in — the writer task owns its
+    // bytes, no duplicate copy ships.
+    let stdin_task = match (input, child.stdin.take()) {
         (Some(bytes), Some(mut pipe)) => Some(tokio::spawn(async move {
             use tokio::io::AsyncWriteExt;
             pipe.write_all(&bytes).await?;
@@ -177,19 +218,41 @@ async fn run_bounded(
         _ => None,
     };
 
-    // Drain pipes from separate tasks so a chatty child can never block us.
+    // The read cap is tripped when a reader meets it mid-stream (either
+    // pipe): the token wakes the select below, which kills the child —
+    // its truncated bytes are unusable for any decode, and leaving it
+    // running would only block it forever on a full pipe.
+    let output_breach = CancellationToken::new();
+    // Drain pipes from separate bounded tasks so a chatty child can never
+    // block us, and can never grow our memory without limit either.
     let stdout_task = child.stdout.take().map(|mut pipe| {
+        let breach = output_breach.clone();
         tokio::spawn(async move {
-            let mut buf = Vec::new();
-            pipe.read_to_end(&mut buf).await?;
-            Ok::<_, std::io::Error>(buf)
+            match read_capped(&mut pipe, caps.stdout).await {
+                Ok(bytes) => Ok(bytes),
+                Err(ReaderError::TooLarge) => {
+                    breach.cancel();
+                    Err(std::io::Error::other(String::from(
+                        "child stdout exceeded the pipe cap",
+                    )))
+                }
+                Err(ReaderError::Io(err)) => Err(err),
+            }
         })
     });
     let stderr_task = child.stderr.take().map(|mut pipe| {
+        let breach = output_breach.clone();
         tokio::spawn(async move {
-            let mut buf = Vec::new();
-            pipe.read_to_end(&mut buf).await?;
-            Ok::<_, std::io::Error>(buf)
+            match read_capped(&mut pipe, caps.stderr).await {
+                Ok(bytes) => Ok(bytes),
+                Err(ReaderError::TooLarge) => {
+                    breach.cancel();
+                    Err(std::io::Error::other(String::from(
+                        "child stderr exceeded the pipe cap",
+                    )))
+                }
+                Err(ReaderError::Io(err)) => Err(err),
+            }
         })
     });
 
@@ -200,6 +263,25 @@ async fn run_bounded(
         _ = token.cancelled() => {
             terminate(&mut child, pid, stdin_task, stdout_task, stderr_task).await;
             Err(BackendError::Cancelled)
+        }
+        // The pipe caps are byte ceilings, not conclusions: a reader met
+        // its cap mid-stream, the truncated bytes are unusable for any
+        // decode, and the child must die now rather than block forever on
+        // a full pipe (review finding 18).
+        _ = output_breach.cancelled() => {
+            tracing::warn!(
+                program,
+                stdout_cap = caps.stdout,
+                stderr_cap = caps.stderr,
+                "backend child output exceeded the pipe caps; killing the child"
+            );
+            terminate(&mut child, pid, stdin_task, stdout_task, stderr_task).await;
+            Err(BackendError::InvalidOutput(format!(
+                "`{program}` wrote more than {} (stdout) or {} (stderr) over its pipes; \
+                 the run was killed instead of buffering the rest",
+                crate::ui::text::human_size(caps.stdout as u64),
+                crate::ui::text::human_size(caps.stderr as u64),
+            )))
         }
         // Ticket 183r: a hung child (a blackholing server) releases its
         // permit after the budget instead of holding it forever. The
@@ -293,6 +375,42 @@ async fn join_reader(
         )))
     })?;
     Ok(bytes)
+}
+
+/// Why a bounded read stopped.
+enum ReaderError {
+    /// The stream failed on the way (a pipe error of its own).
+    Io(std::io::Error),
+    /// `cap` bytes were read and the stream kept talking: EOF is nowhere
+    /// in sight, and the extra bytes would only sit in memory. The caller
+    /// kills the child — truncation makes the capture unusable anyway.
+    TooLarge,
+}
+
+/// Read `pipe` to EOF, collecting at most `cap` bytes. Reading in fixed
+/// chunks bounds the buffer's growth to the cap; reading everything a
+/// child emits (`read_to_end`) is how a misbehaving backend becomes an
+/// OOM. Reaching the cap is deliberately *not* treated as EOF: that would
+/// leave an over-producing child writing into a pipe nobody drains, which
+/// wedges it until the timeout kills it — the breach signal instead lets
+/// the parent kill it immediately and report the real cause.
+async fn read_capped(
+    pipe: &mut (impl tokio::io::AsyncRead + Unpin),
+    cap: usize,
+) -> Result<Vec<u8>, ReaderError> {
+    const READ_CHUNK: usize = 64 * 1024;
+    let mut buffer = Vec::new();
+    let mut chunk = vec![0u8; READ_CHUNK];
+    loop {
+        let read = pipe.read(&mut chunk).await.map_err(ReaderError::Io)?;
+        if read == 0 {
+            return Ok(buffer);
+        }
+        if buffer.len().saturating_add(read) > cap {
+            return Err(ReaderError::TooLarge);
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
 }
 
 /// Decode one successful child run into the expected DTO (ADR 0001 finding
@@ -449,6 +567,75 @@ mod timeout_tests {
         cancel.cancel();
         let err = wait.await.expect_err("cancelled");
         assert!(matches!(err, BackendError::Cancelled), "got {err:?}");
+    }
+
+    /// The stdin payload the caller owns reaches the child whole — the
+    /// writer task holds the moved bytes, no clone ships (review
+    /// finding 18).
+    #[tokio::test]
+    async fn the_stdin_payload_reaches_the_child_unmoved() {
+        let payload = b"hello stdin".to_vec();
+        let output = run_bounded("cat", &[], Some(payload), &token(), Duration::from_secs(10))
+            .await
+            .expect("cat runs");
+        assert_eq!(output.code, Some(0));
+        assert_eq!(output.stdout, b"hello stdin");
+    }
+
+    /// A chatty child runs into the pipe cap: the run dies promptly with
+    /// the typed output error instead of sinking gigabytes into RSS, and
+    /// the child is killed rather than wedged on a full pipe (review
+    /// finding 18).
+    #[tokio::test]
+    async fn an_output_flood_over_the_caps_is_killed_and_reported() {
+        let started = std::time::Instant::now();
+        let err = run_bounded_with_caps(
+            "sh",
+            &["-c".into(), "yes tmail-breath".into()],
+            None,
+            &token(),
+            std::time::Duration::from_secs(30),
+            OutputPipeCaps {
+                stdout: MIB,
+                stderr: MIB,
+            },
+        )
+        .await
+        .expect_err("a flood must be refused");
+        match &err {
+            BackendError::InvalidOutput(detail) => {
+                assert!(
+                    detail.contains("wrote more than 1.0 MB (stdout) or 1.0 MB (stderr)"),
+                    "{detail}"
+                );
+            }
+            other => panic!("expected an output-cap InvalidOutput, got {other:?}"),
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the breach kills the child promptly, not at the timeout"
+        );
+    }
+
+    /// A deliberately truncated capture disables itself: below the caps a
+    /// normal child is decoded whole, proving the cap lives on the byte
+    /// count the pipes carry, not on the budget wall clock.
+    #[tokio::test]
+    async fn output_under_the_caps_decodes_whole() {
+        let output = run_bounded_with_caps(
+            "sh",
+            &["-c".into(), "head -c 65536 /dev/zero | tr '\\0' 'x'".into()],
+            None,
+            &token(),
+            std::time::Duration::from_secs(10),
+            OutputPipeCaps {
+                stdout: 128 * 1024,
+                stderr: 1024,
+            },
+        )
+        .await
+        .expect("a cap-sized output still decodes");
+        assert_eq!(output.stdout.len(), 65536);
     }
 
     /// Ticket xvcp: a request whose token is already cancelled must never

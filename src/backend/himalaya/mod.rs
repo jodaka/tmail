@@ -709,9 +709,12 @@ impl MailBackend for HimalayaCliBackend {
             "draft",
         );
         let output = process::run_with_stdin(
+            // The RFC 5322 bytes move in: run_with_stdin owns the payload
+            // through the writer task, so a several-MiB draft never
+            // exists twice (review finding 18).
             &self.program,
             &argv,
-            Some(message.as_slice()),
+            Some(message),
             &ctx.cancellation,
         )
         .await?;
@@ -910,7 +913,7 @@ impl MailBackend for HimalayaCliBackend {
             )
         };
         let output =
-            match process::run_with_stdin(&self.program, &argv, Some(&bytes), &ctx.cancellation)
+            match process::run_with_stdin(&self.program, &argv, Some(bytes), &ctx.cancellation)
                 .await
             {
                 Ok(output) => output,
@@ -1008,18 +1011,6 @@ impl MailBackend for HimalayaCliBackend {
                     request.part_id
                 ))
             })?;
-        // The download can be tens of megabytes: the read hops to the
-        // blocking pool so the single-threaded runtime never stalls.
-        let bytes = blocking(move || {
-            std::fs::read(&source).map_err(|err| {
-                BackendError::File(format!(
-                    "`{}` could not be read after download: {err}",
-                    source.display()
-                ))
-            })
-        })
-        .await?;
-
         // 3. Destination name: the caller's display filename (reduced to a
         //    single component — traversal is impossible), else the row's,
         //    else a part-id fallback.
@@ -1027,10 +1018,18 @@ impl MailBackend for HimalayaCliBackend {
             request.filename.as_deref().or(row.filename.as_deref()),
             request.part_id,
         );
-        // The collision-checked write lands on the blocking pool with the
-        // payload moved in (single-threaded runtime).
-        let byte_count = bytes.len();
-        let final_path = blocking(move || write_collision_safe(&dir, &name, &bytes)).await?;
+        // The save streams source → destination chunk by chunk on the
+        // blocking pool: the backend is untrusted, so the confined tempdir
+        // row may name an arbitrarily large file, and reading it whole
+        // would be an unbounded-memory event (review finding 18). Only
+        // one chunk lives in RSS at a time. Saving a big attachment to
+        // disk is legitimate, so the copy carries no size ceiling —
+        // unlike the outgoing read path, which must buffer and therefore
+        // caps at `MAX_DRAFT_ATTACHMENT_BYTES`.
+        let bytes_source = source.clone();
+        let target = dir.clone();
+        let (final_path, byte_count) =
+            blocking(move || stream_attachment_copy(&bytes_source, &target, &name)).await?;
         tracing::info!(
             part = request.part_id,
             bytes = byte_count,
@@ -1519,44 +1518,79 @@ fn destination_component(filename: Option<&str>, part_id: usize) -> String {
         .unwrap_or_else(|| format!("attachment-{part_id}"))
 }
 
-/// Write `bytes` to `dir/name` without ever overwriting (plan §15
-/// acceptance): an atomic `create_new` write, walking `name (1).ext`,
-/// `name (2).ext`, … when the name is taken. Deterministic and
-/// crash-safe — a partially written file can never masquerade as the
+/// Stream a downloaded attachment from its tempdir source into the
+/// downloads directory through [`stream_collision_safe`]. Only one chunk
+/// lives in memory at a time — the file size never multiplies into RSS —
+/// and the returned byte count is what actually moved.
+fn stream_attachment_copy(source: &Path, dir: &Path, name: &str) -> BackendResult<(PathBuf, u64)> {
+    const COPY_CHUNK_BYTES: usize = 64 * 1024;
+    use std::io::Read;
+    let mut reader = std::fs::File::open(source).map_err(|err| {
+        BackendError::File(format!(
+            "`{}` could not be read after download: {err}",
+            source.display()
+        ))
+    })?;
+    let mut chunk = vec![0u8; COPY_CHUNK_BYTES];
+    stream_collision_safe(dir, name, &mut |file| {
+        let mut written = 0u64;
+        loop {
+            let read = reader.read(&mut chunk)?;
+            if read == 0 {
+                return Ok(written);
+            }
+            written += read as u64;
+            std::io::Write::write_all(file, &chunk[..read])?;
+        }
+    })
+}
+
+/// Open one collision-safe `create_new` file for `dir/name` — walking
+/// `name (1).ext`, `name (2).ext`, … when the name is taken — and hand
+/// the `write` closure the opened target exactly once. Returns the final
+/// path and the byte count the closure reported. Deterministic and
+/// crash-safe: a partially written file can never masquerade as the
 /// previous one because a collision-rename never reuses an existing path.
-fn write_collision_safe(dir: &Path, name: &str, bytes: &[u8]) -> BackendResult<PathBuf> {
-    use std::io::Write;
-    let write_new = |path: &Path| -> Result<PathBuf, (PathBuf, std::io::Error)> {
-        let mut file = std::fs::OpenOptions::new()
+fn stream_collision_safe(
+    dir: &Path,
+    name: &str,
+    write: &mut dyn FnMut(&mut std::fs::File) -> std::io::Result<u64>,
+) -> BackendResult<(PathBuf, u64)> {
+    let mut attempt = |candidate: std::path::PathBuf| -> BackendResult<Option<(PathBuf, u64)>> {
+        let mut file = match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(path)
-            .map_err(|err| (path.to_path_buf(), err))?;
-        file.write_all(bytes)
-            .map_err(|err| (path.to_path_buf(), err))?;
-        Ok(path.to_path_buf())
+            .open(&candidate)
+        {
+            Ok(file) => file,
+            // A race (taken between the check and the open, or the numbered
+            // walk itself) falls through to the next candidate.
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+            Err(err) => {
+                return Err(BackendError::File(format!(
+                    "`{}` could not be written: {err}",
+                    candidate.display()
+                )));
+            }
+        };
+        let written = write(&mut file).map_err(|err| {
+            BackendError::File(format!(
+                "`{}` could not be written: {err}",
+                candidate.display()
+            ))
+        })?;
+        Ok(Some((candidate, written)))
     };
-    let path = dir.join(name);
     // Fast path: the plain name is free. A race (taken between the check
     // and the open) surfaces as AlreadyExists and falls through to the
     // numbered walk.
-    if !path.exists()
-        && let Ok(saved) = write_new(&path)
-    {
+    if let Some(saved) = attempt(dir.join(name))? {
         return Ok(saved);
     }
     let (stem, ext) = split_stem_ext(name);
     for index in 1..=COLLISION_WALK_LIMIT {
-        let candidate = dir.join(format!("{stem} ({index}){ext}"));
-        match write_new(&candidate) {
-            Ok(saved) => return Ok(saved),
-            Err((_, err)) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err((failed, err)) => {
-                return Err(BackendError::File(format!(
-                    "`{}` could not be written: {err}",
-                    failed.display()
-                )));
-            }
+        if let Some(saved) = attempt(dir.join(format!("{stem} ({index}){ext}")))? {
+            return Ok(saved);
         }
     }
     Err(BackendError::File(format!(
@@ -2350,21 +2384,80 @@ mod attachment_tests {
         std::fs::write(dir.join("file.bin"), b"v1").expect("seed");
 
         // First save takes the plain name when free.
-        let first = write_collision_safe(&dir, "other.bin", b"a").expect("writes");
-        assert_eq!(first, dir.join("other.bin"));
+        let first =
+            stream_collision_safe(&dir, "other.bin", &mut bytes_writer(b"a")).expect("writes");
+        assert_eq!(first.0, dir.join("other.bin"));
+        assert_eq!(first.1, 1);
         // Second save walks to a numbered name; the first is untouched.
-        let second = write_collision_safe(&dir, "other.bin", b"bb").expect("writes");
-        assert_eq!(second, dir.join("other (1).bin"));
-        assert_eq!(std::fs::read(&first).unwrap(), b"a");
-        assert_eq!(std::fs::read(&second).unwrap(), b"bb");
+        let second =
+            stream_collision_safe(&dir, "other.bin", &mut bytes_writer(b"bb")).expect("writes");
+        assert_eq!(second.0, dir.join("other (1).bin"));
         // Extensions survive the walk; dotfiles number as whole names.
-        let third = write_collision_safe(&dir, "file.bin", b"ccc").expect("writes");
-        assert_eq!(third, dir.join("file (1).bin"));
+        let third =
+            stream_collision_safe(&dir, "file.bin", &mut bytes_writer(b"ccc")).expect("writes");
+        assert_eq!(third.0, dir.join("file (1).bin"));
         std::fs::write(dir.join(".zshenv"), b"old").expect("seed dotfile");
-        let fourth = write_collision_safe(&dir, ".zshenv", b"d").expect("writes");
-        assert_eq!(fourth, dir.join(".zshenv (1)"));
+        let fourth =
+            stream_collision_safe(&dir, ".zshenv", &mut bytes_writer(b"d")).expect("writes");
+        assert_eq!(fourth.0, dir.join(".zshenv (1)"));
+        assert_eq!(fourth.1, 1);
         assert_eq!(std::fs::read(dir.join("file.bin")).unwrap(), b"v1");
         assert_eq!(std::fs::read(dir.join(".zshenv")).unwrap(), b"old");
+    }
+
+    #[test]
+    fn streamed_attachment_copy_preserves_the_stream_whole() {
+        // Review finding 18: the saver no longer reads the downloaded file
+        // whole — the stream copies chunk by chunk, byte counts match, and
+        // colliding names walk exactly like the previous whole-file write.
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let source = temp.path().join("part.bin");
+        let payload: Vec<u8> = (0..250_000usize).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&source, &payload).expect("seed source");
+
+        let downloads = tempfile::TempDir::new().expect("downloads dir");
+        let (path, written) =
+            stream_attachment_copy(&source, downloads.path(), "part.bin").expect("copies");
+        assert_eq!(written, payload.len() as u64);
+        assert_eq!(std::fs::read(&path).unwrap(), payload);
+
+        // A same-named file already there is never overwritten; the walk
+        // numbers the new one and the count reflects the real stream.
+        std::fs::write(downloads.path().join("part.bin"), b"old").expect("seed collision");
+        let (walked, count) =
+            stream_attachment_copy(&source, downloads.path(), "part.bin").expect("copies");
+        assert_eq!(walked, downloads.path().join("part (1).bin"));
+        assert_eq!(count, payload.len() as u64);
+        assert_eq!(
+            std::fs::read(downloads.path().join("part.bin")).unwrap(),
+            b"old"
+        );
+        assert_eq!(std::fs::read(&walked).unwrap(), payload);
+    }
+
+    #[test]
+    fn streamed_attachment_copy_reports_a_missing_source() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let downloads = tempfile::TempDir::new().expect("downloads dir");
+        let err = stream_attachment_copy(&temp.path().join("absent"), downloads.path(), "x.bin")
+            .expect_err("missing source");
+        assert!(
+            err.to_string().contains("could not be read after download"),
+            "{err}"
+        );
+    }
+
+    /// The sink the collision-safe test writes through: a static byte
+    /// payload, reported as written in full.
+    fn bytes_writer(
+        bytes: &'static [u8],
+    ) -> impl FnMut(&mut std::fs::File) -> std::io::Result<u64> {
+        let payload = bytes.to_vec();
+        move |file: &mut std::fs::File| {
+            use std::io::Write;
+            file.write_all(&payload)?;
+            Ok(payload.len() as u64)
+        }
     }
 }
 
