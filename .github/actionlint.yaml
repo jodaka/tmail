@@ -1,0 +1,7 @@
+# GitHub-hosted runner labels that are newer than actionlint's built-in
+# list (v1.7.12 knows Ubuntu up to 24.04 and flags 26.04 as unknown).
+# Declaring them here keeps `actionlint` clean until it catches up.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm

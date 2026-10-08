@@ -40,7 +40,7 @@ concurrency:
 jobs:
   bump:
     name: Bump version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       version: ${{ steps.bump.outputs.version }}
       tag: ${{ steps.bump.outputs.tag }}
@@ -102,18 +102,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Explicit Ubuntu versions (not ubuntu-latest): release binaries
+          # inherit the runner's glibc, so the baseline must not drift.
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-26.04
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+            os: ubuntu-26.04
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
+            os: ubuntu-26.04-arm
           - target: aarch64-unknown-linux-musl
-            os: ubuntu-24.04-arm
+            os: ubuntu-26.04-arm
           # Windows port (issue sd7v): msvc ABI — no extra tools, the
           # windows-latest runner ships MSVC. The tar.gz stays tar.gz:
           # Windows 10+ ships bsdtar, so
@@ -163,7 +165,7 @@ jobs:
   publish:
     name: Publish release
     needs: [bump, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       VERSION: ${{ needs.bump.outputs.version }}
     steps:
@@ -214,7 +216,7 @@ jobs:
     # set the repository variable TAP_REPO=<owner>/<name> and the TAP_TOKEN
     # secret (a fine-grained PAT with Contents: read/write on the tap).
     if: ${{ vars.TAP_REPO != '' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       VERSION: ${{ needs.bump.outputs.version }}
       TAP_REPO: ${{ vars.TAP_REPO }}
