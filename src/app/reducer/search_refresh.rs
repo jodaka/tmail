@@ -141,13 +141,17 @@ pub(crate) fn auto_refresh_tick(
         return Vec::new();
     }
     // The timer never interrupts interactive work: it stands down while a
-    // modal is open, the composer is on screen, or a *foreground* operation
-    // is in flight (ticket wxtx: silent background preview fetches do not
-    // block it), and retries on the next tick once they clear. The first
-    // tick arms the timer (the reducer has no clock before then).
+    // modal is open, the composer is on screen, the setup wizard owns the
+    // session ("Background refreshes must not touch a mailbox list while
+    // it is active — there is no account yet", ADR 0003), or a
+    // *foreground* operation is in flight (ticket wxtx: silent background
+    // preview fetches do not block it), and retries on the next tick once
+    // they clear. The first tick arms the timer (the reducer has no clock
+    // before then).
     fn conflicts(state: &AppState) -> bool {
         state.session.overlay.is_some()
             || matches!(state.active_route(), Some(Route::Composer))
+            || state.session.wizard.is_some()
             || state.session.operations.has_foreground()
     }
     if conflicts(state) {

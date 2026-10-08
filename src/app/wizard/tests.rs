@@ -597,6 +597,32 @@ fn warmup_is_suppressed_while_the_wizard_is_active() {
 }
 
 #[test]
+fn auto_refresh_tick_fires_nothing_behind_the_wizard() {
+    // Review 17: `Tick` reaches `auto_refresh_tick` through the wizard's
+    // pass-through; before the wizard joined its conflict list, an
+    // elapsed interval fired a background page listing behind the setup
+    // screens — spawning himalaya children whose results
+    // `wizard_completed` drops. The timer must stand down instead.
+    let mut state = state();
+    state.settings.refresh_interval_seconds = 60;
+    // The first tick arms the timer; nothing fires.
+    no_effects(&reduce(
+        &mut state,
+        Action::Tick {
+            now: Box::new(crate::app::mock::now()),
+        },
+    ));
+    // The interval elapses while the wizard is open: silent.
+    no_effects(&reduce(
+        &mut state,
+        Action::Tick {
+            now: Box::new(crate::app::mock::now() + chrono::Duration::seconds(60)),
+        },
+    ));
+    assert!(state.session.operations.is_empty());
+}
+
+#[test]
 fn unknown_and_stale_results_are_rejected() {
     let mut state = state();
     wizard_mut(&mut state).email.address = TextField::new("u@example.com");
