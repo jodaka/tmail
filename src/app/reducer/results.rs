@@ -232,9 +232,10 @@ fn complete_files_result(
     match op {
         FileOperation::ReadAttachment { path } => attachment_validated(state, &path, result),
         FileOperation::ListAttachmentFiles { .. } => attachment_listing_ready(state, result),
-        FileOperation::SaveAttachment { open_after, .. } => {
-            complete_save_attachment(state, result, open_after)
-        }
+        FileOperation::SaveAttachment {
+            request,
+            open_after,
+        } => complete_save_attachment(state, &request, result, open_after),
     }
 }
 
@@ -837,18 +838,20 @@ pub(crate) fn complete_send(
     }
 }
 
-/// Apply a finished attachment save; `open_after` chains the platform
-/// opener on the confirmed path — which may be a collision-renamed name,
-/// so the chain uses exactly what was written (Phase 8.5).
+/// Apply a finished attachment save; the request froze the message and
+/// part at press time, and `open_after` chains the platform opener on the
+/// confirmed path — which may be a collision-renamed name, so the chain
+/// uses exactly what was written (Phase 8.5).
 pub(crate) fn complete_save_attachment(
     state: &mut AppState,
+    request: &crate::domain::AttachmentRequest,
     result: OperationResult,
     open_after: bool,
 ) -> Vec<Effect> {
     let id = result.id;
     match result.outcome {
         Ok(OperationOutcome::SavedPath(path)) => {
-            attachment_saved(state, &path);
+            attachment_saved(state, request, &path);
             let open = open_after.then(|| path.clone());
             match open {
                 Some(open) => vec![state.session.operations.start(OperationKind::Platform(

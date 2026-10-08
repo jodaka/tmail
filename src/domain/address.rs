@@ -110,16 +110,40 @@ pub struct AddressEntry {
 
 /// Tokenize an address field into entries (empty entries between
 /// separators are skipped, not errors) and validate each one.
+///
+/// Quote-aware: a double quote opens or closes a quoted display name, and
+/// `,`/`;` inside quotes are literal entry characters (mirroring what
+/// [`Address::to_field`] emits for names that contain separators). No
+/// escape sequences exist in this grammar — `to_field` degrades names with
+/// embedded quotes to the bare address — so every `"` simply toggles the
+/// quoted state; an unterminated quote keeps the rest of the field inside
+/// one entry.
 pub fn address_entries(input: &str) -> Vec<AddressEntry> {
     let mut entries = Vec::new();
     let mut start = None;
+    let mut quoted = false;
     for (index, ch) in input.char_indices() {
-        if ch == ',' || ch == ';' {
-            if let Some(begin) = start.take() {
-                push_entry(input, begin..index, &mut entries);
+        match ch {
+            '"' => {
+                if start.is_none() {
+                    // The entry range starts at the first visible
+                    // character of the entry, the opening quote included.
+                    // While a quote is open, `start` is always set, so a
+                    // closing quote never resets the entry boundary.
+                    start = Some(index);
+                }
+                quoted = !quoted;
             }
-        } else if start.is_none() && !ch.is_whitespace() {
-            start = Some(index);
+            ',' | ';' if !quoted => {
+                if let Some(begin) = start.take() {
+                    push_entry(input, begin..index, &mut entries);
+                }
+            }
+            _ => {
+                if start.is_none() && !ch.is_whitespace() {
+                    start = Some(index);
+                }
+            }
         }
     }
     if let Some(begin) = start {
@@ -280,6 +304,57 @@ mod tests {
         assert!(entries[0].valid);
         assert!(!entries[1].valid);
         assert!(entries[2].valid);
+    }
+
+    #[test]
+    fn entries_keep_quoted_names_with_separators_whole() {
+        let input = "\"Orlov, Maksim\" <m.orlov@mailbox.org>, ada@x.io";
+        let entries = address_entries(input);
+        assert_eq!(entries.len(), 2, "the comma inside quotes is literal");
+        assert!(entries.iter().all(|e| e.valid));
+        assert_eq!(
+            &input[entries[0].range.clone()],
+            "\"Orlov, Maksim\" <m.orlov@mailbox.org>"
+        );
+        let parsed = parse_address_list(input);
+        assert_eq!(
+            parsed[0].as_ref(),
+            Ok(&addr("Orlov, Maksim", "m.orlov@mailbox.org"))
+        );
+        assert_eq!(parsed[1].as_ref().unwrap().email, "ada@x.io");
+    }
+
+    #[test]
+    fn entries_handle_quotes_in_mixed_fields() {
+        // Semicolons outside quotes are separators; the quoted comma and
+        // the quoted semicolon are literal entry characters.
+        let input = "\"Has; comma, and semicolon\" <n@x.io>; \"Gómez, Ana\" <g@y.io>, z@z.io";
+        let parsed = parse_address_list(input);
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(
+            parsed[0].as_ref(),
+            Ok(&addr("Has; comma, and semicolon", "n@x.io"))
+        );
+        assert_eq!(parsed[1].as_ref(), Ok(&addr("Gómez, Ana", "g@y.io")));
+        assert_eq!(parsed[2].as_ref().unwrap().email, "z@z.io");
+    }
+
+    #[test]
+    fn field_list_round_trips_through_the_list_parser() {
+        let list = vec![
+            addr("Orlov, Maksim", "m@example.org"),
+            addr("Ada Lovelace", "ada@x.org"),
+        ];
+        let field = to_field_list(&list);
+        assert_eq!(
+            field,
+            "\"Orlov, Maksim\" <m@example.org>, Ada Lovelace <ada@x.org>"
+        );
+        let parsed: Vec<Address> = parse_address_list(&field)
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .expect("the seeded field parses back");
+        assert_eq!(parsed, list);
     }
 
     #[test]

@@ -737,7 +737,12 @@ async fn run_cache_call(
             let query = query.clone();
             let offset = *offset;
             run_cache_store(cache, move |cache| {
-                cache.evict(&mailbox, query.as_deref(), offset)
+                match offset {
+                    // One named page under one query namespace…
+                    Some(offset) => cache.evict(&mailbox, query.as_deref(), offset),
+                    // …or the whole mailbox sweep (review 14).
+                    None => cache.evict_mailbox(&mailbox),
+                }
             })
             .await;
             Some(Ok(OperationOutcome::Done))

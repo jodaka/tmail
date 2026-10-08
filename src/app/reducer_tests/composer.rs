@@ -61,11 +61,38 @@ fn composer_focus_cycles_fields_and_actions() {
     );
 }
 
+/// The forced `SaveDraft` of a dirty parked draft among the other effects
+/// a switch/action produces (review 15).
+fn expect_save_in(effects: &[Effect]) -> crate::domain::DraftSnapshot {
+    effects
+        .iter()
+        .find_map(|e| match &e.kind {
+            OperationKind::Draft(DraftOperation::SaveDraft { draft }) => Some((**draft).clone()),
+            _ => None,
+        })
+        .expect("a forced SaveDraft effect")
+}
+
+/// No `SaveDraft` among the effects: an in-flight save of the same
+/// revision is not duplicated (plan §14 coalescing).
+fn assert_no_save(effects: &[Effect]) {
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e.kind,
+            OperationKind::Draft(DraftOperation::SaveDraft { .. })
+        )),
+        "no duplicate save, got {effects:?}"
+    );
+}
+
 #[test]
 fn composing_sidebar_focus_moves_the_folder_cursor_and_switches() {
     let mut s = state();
     compose(&mut s);
     reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('d')));
+    // The clock ticks before the switch: a dirty parked draft can then be
+    // secured with a forced save (review 15).
+    let _ = tick(&mut s, 0);
     // Tab out to the sidebar (from the last control), then walk the folder
     // cursor onto Drafts and switch to it.
     s.session.composer.as_mut().unwrap().field = ComposerField::Discard;
@@ -78,6 +105,10 @@ fn composing_sidebar_focus_moves_the_folder_cursor_and_switches() {
     no_effects(&reduce(&mut s, Action::OpenSearch));
     assert_eq!(s.session.focus, Focus::Sidebar);
     let effects = reduce(&mut s, Action::Activate);
+    // The switch forced a save of the dirty draft before tearing the
+    // composer route down (review 15).
+    let snap = expect_save_in(&effects);
+    assert_eq!(snap.to, "d");
     let (cache_id, ..) = expect_cache_list_load(&effects);
     let (id, req) = expect_page(&complete_cache_miss(&mut s, cache_id));
     assert_eq!(req.mailbox_id.0, "drafts");
@@ -90,6 +121,99 @@ fn composing_sidebar_focus_moves_the_folder_cursor_and_switches() {
     compose(&mut s);
     assert_eq!(s.session.composer.as_ref().unwrap().draft.to, "");
     assert_eq!(s.session.focus, Focus::Composer);
+}
+
+/// The switch refuses while the dirty parked draft cannot be secured yet —
+/// before the first tick — instead of losing the edits (review 15); retry
+/// a moment later (any tick) succeeds.
+#[test]
+fn a_switch_with_an_unsecurable_dirty_draft_is_refused_until_the_clock_runs() {
+    let mut s = state();
+    compose(&mut s);
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('d')));
+    // Tab out to the sidebar and try to switch: no clock yet.
+    s.session.composer.as_mut().unwrap().field = ComposerField::Discard;
+    reduce(&mut s, Action::FocusNext);
+    no_effects(&reduce(&mut s, Action::Activate));
+    assert_eq!(
+        s.session.status.message.as_deref(),
+        Some("Still starting up — try again in a moment")
+    );
+    assert!(
+        matches!(s.active_route(), Some(Route::Composer)),
+        "the composer view stays open"
+    );
+    assert_eq!(s.session.composer.as_ref().unwrap().draft.to, "d");
+    // After a tick the switch secures the draft and navigates.
+    let _ = tick(&mut s, 0);
+    let effects = reduce(&mut s, Action::Activate);
+    expect_save_in(&effects);
+}
+
+/// A parked draft the switch just secured is not saved twice when `c`
+/// replaces the slot: the forced save is already in flight for the same
+/// revision (review 15, plan §14 coalescing).
+#[test]
+fn composing_again_does_not_duplicate_the_switchs_inflight_save() {
+    let mut s = state();
+    compose(&mut s);
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('d')));
+    s.session.composer.as_mut().unwrap().field = ComposerField::Discard;
+    reduce(&mut s, Action::FocusNext);
+    let _ = tick(&mut s, 0);
+    let switch_effects = reduce(&mut s, Action::Activate);
+    expect_save_in(&switch_effects);
+    // Switching away (routes rebuild), then composing again: the parked
+    // revision is covered by the in-flight save, and the slot is replaced
+    // with a blank draft.
+    let effects = reduce(&mut s, Action::Compose);
+    assert_no_save(&effects);
+    assert_eq!(s.session.composer.as_ref().unwrap().draft.to, "");
+    assert_eq!(s.session.focus, Focus::Composer);
+}
+
+/// A reply seed landing while the switch's forced save is still in flight
+/// installs the seeded draft without a duplicate save (review 15, plan
+/// §14 coalescing).
+#[test]
+fn a_landing_seed_does_not_duplicate_the_switchs_inflight_save() {
+    let mut s = state();
+    compose(&mut s);
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('d')));
+    s.session.composer.as_mut().unwrap().field = ComposerField::Discard;
+    // The seed's source row must be captured before the switch empties
+    // the page.
+    let summary = s.messages.items[0].clone();
+    let message = mock::mock_message(&summary);
+    reduce(&mut s, Action::FocusNext);
+    let _ = tick(&mut s, 0);
+    let switch_effects = reduce(&mut s, Action::Activate);
+    expect_save_in(&switch_effects);
+    let seed_id = s
+        .session
+        .operations
+        .start(OperationKind::Mail(MailOperation::SeedComposer {
+            locator: summary.into_locator(),
+            kind: SeedKind::Reply,
+        }))
+        .id;
+    let effects = reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id: seed_id,
+            outcome: Ok(OperationOutcome::Message(Box::new(message))),
+        }),
+    );
+    assert_no_save(&effects);
+    // The seeded draft took the slot: a reply quotes the original into the
+    // body and addresses the original sender, never the parked copy.
+    let composer = s.session.composer.as_ref().unwrap();
+    assert!(
+        composer.draft.body.contains("wrote:"),
+        "the seed replaced the parked copy, body: {:?}",
+        composer.draft.body
+    );
+    assert!(composer.draft.to != "d", "the parked copy is gone");
 }
 
 #[test]
@@ -191,6 +315,9 @@ fn esc_leaves_the_composer_and_preserves_the_draft() {
 fn compose_again_starts_a_blank_new_email() {
     let mut s = state();
     compose(&mut s);
+    // Ticks precede user input in the running app; the leave then secures
+    // the dirty draft with a forced save (review 15).
+    let _ = tick(&mut s, 0);
     reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('d')));
     reduce(&mut s, Action::BackOrCancel);
     // The draft data survives the leave (it stays for the Drafts list).
@@ -454,9 +581,17 @@ fn startup_restores_the_last_safe_draft_from_the_journal() {
     // The body editor carries the restored text (trailing newline intact).
     assert_eq!(composer.body.lines(), ["typed before the crash", ""]);
     // Composing still starts a blank new email (ticket v5x8): the
-    // restored draft continues from the Drafts list, while the in-memory
-    // copy autosaves its unconfirmed revision (next test).
-    compose(&mut s);
+    // restored draft continues from the Drafts list. Ticks precede user
+    // input in the running app, so `c` first secures the unconfirmed
+    // revision with the same forced save the leave/switch use (review
+    // 15) — the heal starts at the replacement, not on the autosave gap.
+    let _ = tick(&mut s, 0);
+    // `c` secures the restored unconfirmed revision with the same forced
+    // save the leave and the switch use (review 15), then opens blank.
+    let compose_effects = reduce(&mut s, Action::Compose);
+    let snap = expect_save_in(&compose_effects);
+    assert_eq!(snap.revision, 5, "the save covers the restored revision");
+    assert_eq!(snap.to, "max@x.io");
     assert_eq!(
         s.session.composer.as_ref().unwrap().draft.to,
         "",

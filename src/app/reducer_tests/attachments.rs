@@ -44,6 +44,44 @@ fn d_saves_the_selected_attachment_with_a_frozen_request() {
     );
 }
 
+/// The saved path is recorded under the request's frozen `(message, part)`
+/// identity (plan §15 Phase 8.4): moving the chip focus while the save is
+/// in flight must not attach the path to the wrong part (review 13).
+#[test]
+fn the_saved_path_is_recorded_for_the_saved_part_not_the_current_one() {
+    let mut s = reader_with_attachments();
+    let (id, kind) = effect_parts(&reduce(&mut s, Action::SaveAttachment));
+    let OperationKind::Files(FileOperation::SaveAttachment { request, .. }) = kind else {
+        panic!("expected SaveAttachment");
+    };
+    assert_eq!(request.part_id, 3);
+    // The reader focus moves to the next chip while the save runs.
+    reduce(&mut s, Action::FocusNext);
+    reduce(&mut s, Action::FocusNext);
+    assert_eq!(s.reader_focus, Some(ReaderFocus::Attachment(1)));
+    let final_path = PathBuf::from("/home/u/Downloads/report (1).pdf");
+    reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::SavedPath(final_path.clone())),
+        }),
+    );
+    assert_eq!(
+        s.caches
+            .saved_attachments
+            .get(&(request.locator.id.clone(), 3)),
+        Some(&final_path),
+        "the path lands under the saved chip, not the focused one"
+    );
+    assert!(
+        !s.caches
+            .saved_attachments
+            .contains_key(&(request.locator.id, 5)),
+        "the chip that was focused at completion never received the path"
+    );
+}
+
 #[test]
 fn saving_targets_the_cursor_chip_by_part_id() {
     let mut s = reader_with_attachments();

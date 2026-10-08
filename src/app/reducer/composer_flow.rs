@@ -2,7 +2,9 @@
 //! park, secure, leave, autosave, and the crash-safe draft plumbing.
 use std::sync::Arc;
 
-use super::navigation::{close_reader, keep_mailbox_visible, request_page};
+use super::navigation::{
+    Secured, close_reader, keep_mailbox_visible, request_page, secure_parked_draft,
+};
 use super::search_refresh::leave_search;
 use crate::app::action::SearchEdit;
 use crate::app::composer::ComposerState;
@@ -107,18 +109,29 @@ pub(crate) fn editor_finished(
 
 /// Open the composer with a blank new email (the `c` key and the sidebar
 /// Compose button, plan §19 Phase 6, ticket v5x8). A draft left open
-/// earlier stays preserved in `AppState.session.composer` — its forced save on
-/// leave keeps the Drafts-mailbox copy current — but composing again
-/// always starts clean: the saved draft is reopened explicitly from the
-/// Drafts list. Already composing is a no-op; only one composer exists
-/// at a time.
+/// earlier stays preserved in `AppState.session.composer` — the mailbox
+/// switch and the leave both secure it — but composing again always starts
+/// clean: the saved draft is reopened explicitly from the Drafts list.
+/// Replacing a parked *dirty* draft secures it first (review 15); before
+/// the first tick that is impossible, so the compose is refused for that
+/// instant, exactly as `open_draft_message` refuses. Already composing is
+/// a no-op; only one composer exists at a time.
 pub(crate) fn open_composer(state: &mut AppState) -> Vec<Effect> {
     if matches!(state.active_route(), Some(Route::Composer)) {
         return Vec::new();
     }
+    let mut effects = Vec::new();
+    match secure_parked_draft(state) {
+        Secured::Save(effect) => effects.push(effect),
+        Secured::Cannot => {
+            state.set_status("Still starting up — try again in a moment");
+            return Vec::new();
+        }
+        Secured::Nothing => {}
+    }
     state.session.composer = Some(ComposerState::new());
     open_composer_screen(state);
-    Vec::new()
+    effects
 }
 
 /// Push the composer route and hand it focus, showing whatever draft
@@ -269,6 +282,21 @@ pub(crate) fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Ve
     {
         return Vec::new();
     }
+    // The switch tears the composer route down and leaves the draft parked
+    // in the slot; secure a dirty one first (review 15), the way every site
+    // that later replaces the parked copy does (`open_draft_message`, the
+    // `c` blank compose, a landing reply seed). Before the first tick the
+    // save cannot be stamped, so the switch is refused for that instant,
+    // as `open_draft_message` refuses a draft open.
+    let mut effects = Vec::new();
+    match secure_parked_draft(state) {
+        Secured::Save(effect) => effects.push(effect),
+        Secured::Cannot => {
+            state.set_status("Still starting up — try again in a moment");
+            return Vec::new();
+        }
+        Secured::Nothing => {}
+    }
     // A reader, search, or composer open on top is replaced by the new
     // mailbox: the stack is rebuilt around the new root mailbox route — a
     // reader may sit above a search route — and the search's stashed
@@ -303,7 +331,8 @@ pub(crate) fn switch_mailbox(state: &mut AppState, mailbox_id: &MailboxId) -> Ve
     // each holds a backend permit until its child finishes — kill them so
     // the new mailbox's page load (and everything else) gets the pool.
     state.session.operations.cancel_previews();
-    request_page(state, 0)
+    effects.extend(request_page(state, 0));
+    effects
 }
 
 /// `Esc`: cancel foreground work, close an overlay, or go back — in that

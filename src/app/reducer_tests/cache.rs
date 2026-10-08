@@ -813,9 +813,10 @@ fn an_already_in_target_flag_change_stores_nothing() {
     );
 }
 
-/// A confirmed move evicts the cached page for the visible identity: the
-/// local post-move page cannot be stored truthfully (backend ids shift),
-/// so a warm start must re-fetch instead of resurrecting the moved row.
+/// A confirmed move evicts the source mailbox's stored pages (the sweep
+/// covers every query namespace and offset): the local post-move page
+/// cannot be stored truthfully (backend ids shift), so a warm start must
+/// re-fetch instead of resurrecting the moved row.
 #[test]
 fn a_confirmed_move_evicts_the_cached_page() {
     let mut s = state();
@@ -831,7 +832,9 @@ fn a_confirmed_move_evicts_the_cached_page() {
     let (_, req) = find_page(&effects);
     assert_eq!(req.mailbox_id.0, "inbox");
     assert_eq!(req.offset, 0);
-    // …and the eviction targets the exact cached identity.
+    // …and the eviction targets the source mailbox's whole page set, not
+    // a single offset that stops existing the moment the view moves
+    // (review 14).
     let evicts: Vec<&Effect> = effects
         .iter()
         .filter(|e| {
@@ -854,8 +857,52 @@ fn a_confirmed_move_evicts_the_cached_page() {
     };
     assert_eq!(mailbox.0, "inbox");
     assert_eq!(query.as_deref(), None);
-    assert_eq!(*offset, 0);
+    assert_eq!(*offset, None, "the sweep covers every offset");
     assert!(s.messages.items.iter().all(|m| m.id != target));
+}
+
+/// A mailbox switched after the move started must not redirect the
+/// eviction: the locators name the source mailbox, so the sweep targets
+/// it, and the newly visible mailbox's cached pages are untouched
+/// (review 14).
+#[test]
+fn a_confirmed_move_after_a_mailbox_switch_still_evicts_the_source() {
+    let mut s = state();
+    s.selection = 1; // m2 lives in the roster's inbox.
+    let source = s.selected_message().unwrap().mailbox_id.clone();
+    let (id, _kind) = expect_kind(&reduce(&mut s, Action::Archive));
+    // The user switches to `sent` while the move runs.
+    s.session.focus = Focus::Sidebar;
+    reduce(&mut s, Action::MoveDown);
+    reduce(&mut s, Action::Activate);
+    assert_eq!(
+        s.active_route().unwrap().mailbox_id().unwrap().0,
+        "sent",
+        "fixture: a different mailbox is displayed now"
+    );
+    let effects = complete_done(&mut s, id);
+    let evicts: Vec<&CacheOperation> = effects
+        .iter()
+        .filter_map(|e| match &e.kind {
+            OperationKind::Cache(op @ CacheOperation::CacheListEvict { .. }) => Some(op),
+            _ => None,
+        })
+        .collect();
+    let [evict] = &evicts[..] else {
+        panic!("expected exactly one page eviction, got {effects:?}");
+    };
+    let CacheOperation::CacheListEvict {
+        mailbox,
+        query: _,
+        offset: _,
+    } = evict
+    else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(
+        mailbox, &source,
+        "the sweep targets the moved rows' mailbox"
+    );
 }
 
 /// A background refresh whose page is identical to the displayed one

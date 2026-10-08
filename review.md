@@ -10,10 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 12 | Medium | domain/address | Quoted display names containing `,`/`;` do not round-trip; send is refused and drafts mangle/drop them |
-| 13 | Medium | app/attachments | Saved-attachment path is recorded against the *currently selected* chip, not the saved one |
-| 14 | Medium | app/cache | Move confirmation evicts the wrong cached page (visible mailbox instead of the source mailbox) |
-| 15 | Medium | app/composer | Switching mailboxes drops the composer view without securing a dirty draft |
 | 16 | Medium | app/startup | A mailbox listing arriving while a root composer is open replaces the routes; focus stays on the hidden composer |
 | 17 | Medium | app/wizard | `Tick` during the wizard runs the auto-refresh timer, spawning backend children behind the wizard |
 | 18 | Medium | backend/process | Unbounded memory: child stdout/stderr, incoming attachment reads, stdin payload clones |
@@ -54,36 +50,6 @@
 ---
 
 ## Detailed findings
-
-### 12. Medium — Quoted comma names break address lists
-
-**Location:** `src/domain/address.rs:23-36` (`to_field`), `:113-157` (`address_entries`, `parse_address_list`), `:161-167` (`to_field_list`)
-
-`to_field` correctly emits `"Orlov, Maksim" <m@example.org>`, but `address_entries` splits on every `,`/`;` with no quote awareness. Seeding a reply to such a sender produces one invalid entry (`"Orlov`) and one mangled valid entry (`Maksim" <m@example.org>`). The send gate (`OutboundMessage::with_attachments`) then refuses the whole message as `InvalidAddresses`, and draft serialization (`header_addresses`, `filter_map(Result::ok)`) silently drops/mangles the entry. The unit test only checks `parse_entry(&to_field())`, never the list path.
-
-**Fix:** make the tokenizer quote-aware (or stop emitting quoted forms without teaching the parser the same grammar).
-
-### 13. Medium — Attachment saved-path recorded against the wrong chip
-
-**Location:** `src/app/reducer/actions.rs:333-345`; caller `src/app/reducer/results.rs:839-847`
-
-`complete_save_attachment` discards the request (`{ open_after, .. }`) and calls `attachment_saved`, which recomputes `selected_attachment(state)`. If the user moves the reader chip focus while the save is in flight, the final path is stored under the newly selected part id; a later `o` on that chip opens the wrong file, and the map is wrong for the rest of the session.
-
-**Fix:** carry `(locator, part_id)` through the result and record under that key.
-
-### 14. Medium — Move confirmation evicts the wrong page
-
-**Location:** `src/app/reducer/message_results.rs:296-308`
-
-Eviction uses `visible_list_identity(state)` and `state.messages.offset` — i.e. whatever list is visible when the confirmation lands. If the user switched mailboxes (or paged) after starting the move, the source mailbox's cached page — the one containing the moved row — is never evicted, while the current mailbox's page is needlessly dropped. The locators in the result carry the correct mailbox but are not used.
-
-**Fix:** evict per locator mailbox (and the offset(s) that actually held the rows).
-
-### 15. Medium — Mailbox switch can drop an unsaved composer
-
-**Location:** `src/app/reducer/composer_flow.rs:264-307`; `src/app/reducer/navigation.rs:115-122`
-
-`switch_mailbox` clears the route stack and leaves `session.composer` parked, but unlike `open_draft_message`/`draft_message_loaded` it never secures a dirty draft. A later `c` (or list reply/forward through `install_seed`, which only checks the route) replaces the slot outright. Recovery depends on the autosave debounce and requires a clock tick; edits made within the debounce window (or before the first tick) are lost. The test at `reducer_tests/composer.rs:65` codifies the overwrite without asserting the draft was saved.
 
 ### 16. Medium — Cold-start listing clobbers a root composer
 

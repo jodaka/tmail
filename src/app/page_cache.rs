@@ -315,6 +315,32 @@ impl PageCache {
         }
     }
 
+    /// Drop every stored page for the mailbox — all queries and offsets
+    /// (review 14). A confirmed move evicts per source mailbox, and the
+    /// view having changed since the move started means the reducer can
+    /// no longer name the page the moved row lived on (nor the search
+    /// namespace it was served under), so the confirmed-move eviction
+    /// sweeps the mailbox directory: at most
+    /// [`MAX_FILES_PER_MAILBOX`] page files, warm-start re-fetch alone
+    /// replaces them. A missing mailbox directory has nothing to sweep.
+    pub fn evict_mailbox(&self, mailbox: &MailboxId) {
+        let dir = self.root.join(key_part(&mailbox.0));
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return;
+        };
+        for path in entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        {
+            if let Err(err) = fs::remove_file(&path)
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::debug!(path = %path.display(), %err, "cache: evict failed");
+            }
+        }
+    }
+
     /// Keep at most [`MAX_FILES_PER_MAILBOX`] files for this mailbox,
     /// dropping the oldest modifications first.
     fn prune(&self, mailbox: &MailboxId) {
@@ -621,6 +647,34 @@ mod tests {
             cache.load(&mailbox, None, 0, 20).is_some(),
             "unrelated identity kept"
         );
+    }
+
+    /// The mailbox sweep (review 14) removes pages under every query
+    /// namespace and offset — the reducer can no longer name them once
+    /// the view moved — and leaves other mailboxes' pages alone. An
+    /// absent mailbox has nothing to sweep.
+    #[test]
+    fn the_mailbox_sweep_drops_every_stored_page() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cache = PageCache::open(dir.path().to_path_buf(), CacheLimits::default());
+        let inbox = MailboxId(String::from("inbox"));
+        let archive = MailboxId(String::from("archive"));
+
+        cache.store(&inbox, None, &page(0));
+        cache.store(&inbox, None, &page(20));
+        cache.store(&inbox, Some("hello"), &page(0));
+        cache.store(&archive, None, &page(0));
+
+        cache.evict_mailbox(&inbox);
+        assert!(cache.load(&inbox, None, 0, 20).is_none());
+        assert!(cache.load(&inbox, None, 20, 20).is_none());
+        assert!(cache.load(&inbox, Some("hello"), 0, 20).is_none());
+        assert!(
+            cache.load(&archive, None, 0, 20).is_some(),
+            "another mailbox's pages are untouched"
+        );
+        // Sweeping an absent mailbox is a no-op.
+        cache.evict_mailbox(&MailboxId(String::from("gone")));
     }
 
     #[test]

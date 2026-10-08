@@ -32,17 +32,23 @@ pub enum CacheOperation {
         query: Option<String>,
         page: Arc<Page<MessageSummary>>,
     },
-    /// Drop one cached page (ticket kkaq): after a confirmed move the
+    /// Drop cached pages (ticket kkaq): after a confirmed move the
     /// stored copy lists a message that left the mailbox, and the local
     /// post-move page cannot be stored truthfully (backend ids shift, so
     /// the follow-up re-sync owns the next write). Evicting makes a warm
-    /// start re-fetch instead of resurrecting the moved row. The file name
-    /// carries no limit, so one identity (mailbox + query + offset)
-    /// evicts every limit variant.
+    /// start re-fetch instead of resurrecting the moved row. The file
+    /// name carries no limit, so one identity (mailbox + query + offset)
+    /// evicts every limit variant. `Some(offset)` names the one stored
+    /// page under `query`; `None` sweeps every stored page of the
+    /// mailbox, all query namespaces included (review 14): a confirmed
+    /// move evicts per *source* mailbox — taken from the locators — and
+    /// a mailbox switch or page change after the move started means the
+    /// reducer can no longer name the offsets (or the search-query
+    /// namespace) that held the moved row.
     CacheListEvict {
         mailbox: MailboxId,
         query: Option<String>,
-        offset: usize,
+        offset: Option<usize>,
     },
     /// Serve the cached mailbox listing (ticket haeb, off-thread I/O): a
     /// hit renders the sidebar instantly and the fresh listing still
@@ -116,19 +122,31 @@ impl CacheOperation {
                     query: older_query,
                     ..
                 },
-            )
-            | (
+            ) => newer_mailbox == older_mailbox && newer_query == older_query,
+            (
                 CacheOperation::CacheListEvict {
                     mailbox: newer_mailbox,
                     query: newer_query,
-                    ..
+                    offset: newer_offset,
                 },
                 CacheOperation::CacheListEvict {
                     mailbox: older_mailbox,
                     query: older_query,
-                    ..
+                    offset: older_offset,
                 },
-            ) => newer_mailbox == older_mailbox && newer_query == older_query,
+            ) => {
+                newer_mailbox == older_mailbox
+                    && match (newer_offset, older_offset) {
+                        // A mailbox-wide sweep covers every query and
+                        // offset; a named page never supersedes it (the
+                        // sweep may be the only one that would have
+                        // removed the other files).
+                        (Some(_), None) => false,
+                        // The sweep supersedes anything for the mailbox.
+                        (None, _) => true,
+                        (Some(newer), Some(older)) => newer == older && newer_query == older_query,
+                    }
+            }
             (CacheOperation::CacheMailboxesLoad, CacheOperation::CacheMailboxesLoad)
             | (
                 CacheOperation::CacheMailboxesStore { .. },

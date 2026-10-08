@@ -1,7 +1,7 @@
 //! Reply / forward seeding (plan §14, Phase 7.3): fetch the source
 //! message, turn it into a seeded draft, and open the composer — from the
 //! reader and from the list.
-use super::navigation::composer_open;
+use super::navigation::{Secured, composer_open, secure_parked_draft};
 use crate::app::composer::ComposerState;
 use crate::app::effect::Effect;
 use crate::app::focus::Focus;
@@ -142,6 +142,10 @@ pub(crate) fn seed_from_list(
 /// a composer draft with the same domain seeding the reader uses, one
 /// composer rule intact (an older fetch whose composer already opened by
 /// a newer seed is superseded away operation-wise, so this runs once).
+/// A parked copy left by a closed composer route is secured before the
+/// seed replaces it (review 15) — and a copy that cannot be secured yet
+/// (no tick stamp at startup) drops the seed, exactly as a fetched
+/// `OpenDraft` result does.
 pub(crate) fn install_seed(
     state: &mut AppState,
     message: crate::domain::Message,
@@ -150,8 +154,21 @@ pub(crate) fn install_seed(
     if refuse_open_composer(state) {
         return Vec::new();
     }
+    let mut effects = Vec::new();
+    match secure_parked_draft(state) {
+        Secured::Save(effect) => effects.push(effect),
+        Secured::Cannot => {
+            tracing::debug!(
+                id = %message.id.0,
+                "seed dropped: the parked draft cannot be secured yet"
+            );
+            return Vec::new();
+        }
+        Secured::Nothing => {}
+    }
     let (seed, status) = seed_for(&message, kind, state.settings.account_email.as_deref());
-    open_seeded_composer(state, seed, status)
+    open_seeded_composer(state, seed, status);
+    effects
 }
 
 /// Install a seeded draft in the composer, pushing the composer route on

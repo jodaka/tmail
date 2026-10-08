@@ -291,18 +291,31 @@ pub(crate) fn message_moved(state: &mut AppState, locators: &[MessageLocator]) -
     // The stale cached page must not resurrect the moved row on a warm
     // start (ticket kkaq): the local post-move page cannot be stored
     // truthfully (backend ids shift, so the re-sync below owns the next
-    // write), so the cached copy for this identity is evicted — every
-    // limit variant with it, since the file name carries none.
+    // write), so the stored copies are evicted — every limit variant with
+    // them, since the file name carries none. The eviction names the
+    // *source* mailboxes from the locators, never the visible list
+    // (review 14): a mailbox switch or page change since the move started
+    // makes the visible page innocent and the moved row's page
+    // unnameable — neither its offset nor whether it was served in a
+    // search namespace is known after the fact — so each source mailbox's
+    // whole stored-page set goes (bounded by the per-mailbox file cap);
+    // a warm start re-fetches it.
     let mut effects = request_visible_page(state, state.messages.offset);
-    if let Some((mailbox, query)) = visible_list_identity(state) {
+    let mut sources: Vec<MailboxId> = Vec::new();
+    for locator in locators {
+        if !sources.contains(&locator.mailbox) {
+            sources.push(locator.mailbox.clone());
+        }
+    }
+    for mailbox in sources {
         effects.push(
             state
                 .session
                 .operations
                 .start_background(OperationKind::Cache(CacheOperation::CacheListEvict {
                     mailbox,
-                    query,
-                    offset: state.messages.offset,
+                    query: None,
+                    offset: None,
                 })),
         );
     }

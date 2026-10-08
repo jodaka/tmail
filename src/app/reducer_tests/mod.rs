@@ -499,9 +499,11 @@ fn reader_with_non_web_link() -> AppState {
     s.session.focus = Focus::Reader;
     s
 }
-/// Open the composer and return the state (asserts the route/focus).
+/// Open the composer and return the state (asserts the route/focus). The
+/// forced save a replacement securing emits (review 15) is not asserted
+/// here — the dedicated tests cover it.
 fn compose(s: &mut AppState) -> &mut crate::app::composer::ComposerState {
-    no_effects(&reduce(s, Action::Compose));
+    reduce(s, Action::Compose);
     assert_eq!(s.session.routes.len(), 2);
     assert!(matches!(s.active_route(), Some(Route::Composer)));
     assert_eq!(s.session.focus, Focus::Composer);

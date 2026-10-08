@@ -327,20 +327,22 @@ pub(crate) fn open_reader_link(state: &mut AppState, width: usize, index: usize)
     ]
 }
 
-/// Apply a finished attachment save: record the path for `Open` reuse and
-/// tell the user where the file actually landed (the backend may have
-/// collision-renamed it — that path, never the requested one, is shown).
-pub(crate) fn attachment_saved(state: &mut AppState, path: &std::path::Path) -> Vec<Effect> {
-    let Some(message) = state.open_message.as_loaded() else {
-        return Vec::new();
-    };
-    let Some((_, attachment)) = selected_attachment(state) else {
-        return Vec::new();
-    };
-    state
-        .caches
-        .saved_attachments
-        .insert((message.id.clone(), attachment.part_id), path.to_path_buf());
+/// Apply a finished attachment save: record the path under the request's
+/// frozen `(message, part)` identity and tell the user where the file
+/// actually landed (the backend may have collision-renamed it — that
+/// path, never the requested one, is shown). The key must come from the
+/// request, not from the reader's *current* chip: the focus may have moved
+/// (or the message closed) while the save was in flight, and `Open`
+/// matches on the message/part that was saved, not on what is focused now.
+pub(crate) fn attachment_saved(
+    state: &mut AppState,
+    request: &crate::domain::AttachmentRequest,
+    path: &std::path::Path,
+) -> Vec<Effect> {
+    state.caches.saved_attachments.insert(
+        (request.locator.id.clone(), request.part_id),
+        path.to_path_buf(),
+    );
     state.set_status(format!("Saved to {}", path.display()));
     Vec::new()
 }
