@@ -167,13 +167,8 @@ jobs:
     needs: [bump, build]
     runs-on: ubuntu-26.04
     env:
-      VERSION: ${{ needs.bump.outputs.version }}
+      TAG: ${{ needs.bump.outputs.tag }}
     steps:
-      - uses: actions/download-artifact@v8
-        with:
-          path: dist
-          merge-multiple: true
-
       - uses: actions/checkout@v7
         with:
           # Full history (and tags) so the changelog can walk back to the
@@ -181,15 +176,45 @@ jobs:
           # outputs are gone; fall back to the dispatched branch, whose
           # head carries the bump commit (bump pushes HEAD to the same ref
           # atomically with the tag).
+          #
+          # This must stay before download-artifact: checkout deletes the
+          # contents of a workspace directory it does not recognize as its
+          # own, which would wipe the downloaded dist/.
           ref: ${{ needs.bump.outputs.tag || github.ref_name }}
           fetch-depth: 0
+
+      - name: Resolve release tag and version
+        id: release
+        run: |
+          set -euo pipefail
+
+          # On a re-run of failed jobs the bump outputs are empty, but the
+          # checked out commit still carries the release tag, so derive it
+          # from the history instead of failing.
+          tag="${TAG:-}"
+          if [ -z "$tag" ]; then
+            tag="$(git describe --tags --abbrev=0)"
+            echo "::warning::bump job outputs missing (job re-run); derived $tag from the checked out commit"
+          fi
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::could not determine release tag (got: '$tag')"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Generate changelog from commits
         run: |
           set -euo pipefail
-          python3 .github/scripts/generate_changelog.py | tee release-notes.md
+          python3 .github/scripts/generate_changelog.py --tag "${{ steps.release.outputs.tag }}" \
+            | tee release-notes.md
 
       - name: Generate checksums
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
           cd dist
@@ -199,8 +224,8 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ needs.bump.outputs.tag }}
-          name: tmail v${{ needs.bump.outputs.version }}
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: tmail v${{ steps.release.outputs.version }}
           body_path: release-notes.md
           fail_on_unmatched_files: true
           files: dist/*
