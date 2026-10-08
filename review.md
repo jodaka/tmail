@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 16 | Medium | app/startup | A mailbox listing arriving while a root composer is open replaces the routes; focus stays on the hidden composer |
 | 17 | Medium | app/wizard | `Tick` during the wizard runs the auto-refresh timer, spawning backend children behind the wizard |
 | 18 | Medium | backend/process | Unbounded memory: child stdout/stderr, incoming attachment reads, stdin payload clones |
 | 19 | Medium | config/write | Any config-read error is treated as "file missing"; symlinked config files are silently replaced |
@@ -50,12 +49,6 @@
 ---
 
 ## Detailed findings
-
-### 16. Medium — Cold-start listing clobbers a root composer
-
-**Location:** `src/app/reducer/message_results.rs:350-361,405-421`
-
-The cold/warm decision is `!matches!(routes.first(), Some(Route::Mailbox(_)))`. A composer opened at the root (`routes == [Composer]`, explicitly supported) counts as cold, so the arriving mailbox listing replaces `routes` with a mailbox route. `session.composer` survives and `session.focus` remains `Composer`: keystrokes keep editing an invisible draft while the mailbox screen is drawn, and `Esc` in that state falls through to `quit_requested`.
 
 ### 17. Medium — Auto-refresh runs behind the wizard
 
@@ -163,7 +156,7 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 ## Test-quality observations
 
 - `reducer_tests/cache.rs:926` registers only `MailOperation::Preview` when testing switch cancellation, missing the `CachePreviewLoad` stage that survives a mailbox switch (finding 22).- `reducer_tests/composer.rs:65` codifies the composer overwrite on mailbox switch without asserting the parked draft was secured (finding 15).
-- No test drives a foreground failure arriving while help/chooser/switcher/mailboxes is open (finding 25), a cold listing arriving over a root composer (finding 16), or `Tick` during the wizard (finding 17).
+- No test drives a foreground failure arriving while help/chooser/switcher/mailboxes is open (finding 25) or `Tick` during the wizard (finding 17).
 - Attachment tests never move the reader focus between `SaveAttachment` start and completion (finding 13).
 - The suite otherwise shows unusually good discipline: process cancellation/timeouts, sanitization, private-FS modes, journal atomicity, keymap parsing, and reducer state machines all have direct tests. The gaps above cluster exactly where two subsystems interact (overlay vs. result routing; composer identity vs. send completion).
 

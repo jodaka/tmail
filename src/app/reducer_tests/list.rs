@@ -411,6 +411,74 @@ fn mailboxes_failure_keeps_a_failed_sidebar_and_refresh_reloads() {
 }
 
 #[test]
+fn cold_listing_roots_the_fresh_mailbox_beneath_a_root_composer() {
+    // Review 16: the composer may open at the root, before any mailbox
+    // loaded; the startup listing arriving behind it used to replace the
+    // whole stack with a mailbox route — keystrokes kept editing an
+    // invisible draft, and `Esc` fell through to `quit_requested`. The
+    // fresh mailbox roots *beneath* the composer instead.
+    let mut s = AppState::initial(mock::PAGE_SIZE);
+    no_effects(&reduce(&mut s, Action::Compose));
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('d')));
+    let (id, kind) = boot(&mut s);
+    assert_eq!(kind, mailboxes_kind());
+    let effects = reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Mailboxes(mock::mock_mailboxes())),
+        }),
+    );
+    // The page read targets the mailbox that just rooted beneath the
+    // composer; the composer route, focus, and draft all survive.
+    let (cache_id, mailbox, query, offset, _, fresh_background_on_hit) =
+        expect_cache_list_load(&effects);
+    assert_eq!(mailbox.0, "inbox");
+    assert_eq!(query, None);
+    assert_eq!(offset, 0);
+    assert!(fresh_background_on_hit);
+    assert_eq!(s.session.routes.len(), 2);
+    assert!(matches!(s.session.routes[0], Route::Mailbox(_)));
+    assert!(matches!(s.session.routes[1], Route::Composer));
+    assert_eq!(s.session.focus, Focus::Composer);
+    assert_eq!(s.session.composer.as_ref().unwrap().draft.to, "d");
+    assert!(matches!(s.mailboxes, Loadable::Loaded(_)));
+    // The page beneath keeps filling while the composer is on screen.
+    let (page_op, req) = expect_page(&complete_cache_miss(&mut s, cache_id));
+    assert_eq!(req.mailbox_id.0, "inbox");
+    complete_page_ok(&mut s, page_op, &req, 0);
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    // `Esc` lands on the mailbox screen: it must pop the composer, never
+    // fall through to `quit_requested` (review 16).
+    reduce(&mut s, Action::BackOrCancel);
+    assert!(matches!(s.active_route(), Some(Route::Mailbox(_))));
+    assert_eq!(s.session.focus, Focus::MessageList);
+    assert!(!s.session.quit_requested);
+}
+
+#[test]
+fn cold_listing_without_mailboxes_keeps_a_root_composer() {
+    // Review 16 companion: an account with no folders must not clear the
+    // root composer's route either — an empty stack under `Focus::Composer`
+    // would strand the compose exactly as the arrival used to.
+    let mut s = AppState::initial(mock::PAGE_SIZE);
+    no_effects(&reduce(&mut s, Action::Compose));
+    let (id, _) = boot(&mut s);
+    let effects = reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id,
+            outcome: Ok(OperationOutcome::Mailboxes(Vec::new())),
+        }),
+    );
+    no_effects_except_cache_stores(&mut s, &effects);
+    assert!(matches!(s.active_route(), Some(Route::Composer)));
+    assert_eq!(s.session.focus, Focus::Composer);
+    assert!(matches!(s.mailboxes, Loadable::Loaded(_)));
+}
+
+#[test]
 fn fresh_mailbox_listing_keeps_the_composer_open() {
     // The reported bug (ticket sazy): a cached listing roots the UI at
     // startup, the user presses `c` and types, then the fresh listing

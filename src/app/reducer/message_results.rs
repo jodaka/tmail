@@ -352,20 +352,26 @@ pub(crate) fn sync_row_attachments(
     }
 }
 
-/// Apply the fetched mailbox listing (plan §19 Phase 2). Cold start — no
-/// mailbox displayed yet — picks the Inbox (or first usable), roots the
-/// route stack there, and loads its first page. Warm start — a mailbox is
-/// already displayed (the cached listing at startup, ticket haeb, or a
-/// previous load) — updates the sidebar data in place only: routes, the
-/// visible page, the list selection, and the scroll are never touched, so
-/// a background listing can never kick the user out of the composer or
-/// reset their cursor (ticket sazy).
+/// Apply the fetched mailbox listing (plan §19 Phase 2). Cold start —
+/// nothing on the stack — picks the Inbox (or first usable), roots the
+/// route stack there, and loads its first page. Warm start — an
+/// established context: a mailbox is already displayed (the cached
+/// listing at startup, ticket haeb, or a previous load), possibly under a
+/// reader, search, or composer the user opened while the fetch ran —
+/// updates the sidebar data in place only: routes, the visible page, the
+/// list selection, and the scroll are never touched, so a background
+/// listing can never kick the user out of the composer or reset their
+/// cursor (ticket sazy).
 pub(crate) fn mailboxes_loaded(state: &mut AppState, mailboxes: Vec<Mailbox>) -> Vec<Effect> {
-    // Cold start: no mailbox context established yet (empty stack). Warm
-    // start: the stack is rooted at a mailbox — possibly under a reader,
-    // search, or composer the user opened while the fetch ran; those all
-    // stay.
-    if !matches!(state.session.routes.first(), Some(Route::Mailbox(_))) {
+    // Cold start: nothing on the stack — or the stack is a root composer
+    // (opened before any mailbox loaded, review 16), which counts as
+    // established context, so the listing roots the mailbox *beneath* the
+    // composer instead of replacing it. Warm start: the stack is rooted
+    // at a mailbox — possibly under a reader, search, or composer the
+    // user opened while the fetch ran; those all stay.
+    if state.session.routes.is_empty()
+        || matches!(state.session.routes.first(), Some(Route::Composer))
+    {
         state.mailboxes = Loadable::Loaded(mailboxes.clone());
         return apply_mailbox_listing(state, mailboxes);
     }
@@ -423,7 +429,16 @@ pub(crate) fn apply_mailbox_listing(state: &mut AppState, mailboxes: Vec<Mailbox
     match chosen {
         Some(index) => {
             let mailbox_id = mailboxes[index].id.clone();
-            state.session.routes = vec![Route::Mailbox(MailboxRoute { mailbox_id })];
+            // A root composer (review 16) keeps its route: the fresh
+            // listing slots the mailbox *beneath* it (the composer is
+            // always the topmost route), so the draft — its focus, its
+            // edits, and its `Esc` — never lose the view, and the
+            // mailbox screen fills in behind it for the return trip.
+            state.session.routes = if matches!(state.active_route(), Some(Route::Composer)) {
+                vec![Route::Mailbox(MailboxRoute { mailbox_id }), Route::Composer]
+            } else {
+                vec![Route::Mailbox(MailboxRoute { mailbox_id })]
+            };
             state.mailbox_selection = index;
             keep_mailbox_visible(state);
             state.selection = 0;
@@ -434,8 +449,12 @@ pub(crate) fn apply_mailbox_listing(state: &mut AppState, mailboxes: Vec<Mailbox
         }
         None => {
             // The account genuinely has no mailboxes; an empty list
-            // is a valid state, not an error (plan §16).
-            state.session.routes.clear();
+            // is a valid state, not an error (plan §16). A root
+            // composer keeps its route: clearing it would strand the
+            // draft exactly as the arrival used to (review 16).
+            if !matches!(state.active_route(), Some(Route::Composer)) {
+                state.session.routes.clear();
+            }
             state.messages = Page::empty(state.messages.limit);
             Vec::new()
         }

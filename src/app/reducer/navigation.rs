@@ -397,11 +397,16 @@ pub(crate) fn request_visible_page_background(state: &mut AppState, offset: usiz
     vec![state.session.operations.start_background(operation)]
 }
 
-/// Start a page load for the active route's mailbox and return its effect.
+/// Start a page load for the visible list's mailbox and return its effect.
 /// The registry supersedes any page request still in flight for the same
 /// mailbox (and cancels it), so only the newest result can win.
 pub(crate) fn request_page(state: &mut AppState, offset: usize) -> Vec<Effect> {
-    let Some(mailbox_id) = state.active_route().and_then(Route::mailbox_id).cloned() else {
+    // The page serves the mailbox the visible list belongs to (ticket
+    // sazy): reader and composer routes are overlays a page load may
+    // finish behind, so the target is the nearest mailbox route beneath
+    // them — a page arriving over a root composer still fills the list
+    // beneath it (review 16).
+    let Some(mailbox_id) = visible_mailbox_page(state).cloned() else {
         return Vec::new();
     };
     let operation = OperationKind::Mail(MailOperation::LoadPage(PageRequest {
