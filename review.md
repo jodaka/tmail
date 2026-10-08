@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 20 | Medium | main/terminal | `--configure` success output is printed into the alternate screen and erased on exit |
 | 21 | Medium | wizard/alias | Gmail accounts are offered a bogus `Junk` folder, created and aliased |
 | 22 | Medium | app/state | Previews/saved attachments keyed by `MessageId` alone — cross-mailbox collisions |
 | 23 | Medium | wizard | Stale discovery results apply off-screen; `e`/`r` are not gated while discovering |
@@ -46,12 +45,6 @@
 ---
 
 ## Detailed findings
-
-### 20. Medium — `--configure` output erased
-
-**Location:** `src/main.rs:305-313,677-697`; `src/runtime/terminal.rs:77-85,159-164`
-
-`finish_session` prints the saved path (`println!`, `main.rs:687`) or the cancel message (`eprintln!`, `:692`) while `assets` (owning the `TerminalGuard`) is still alive, i.e. while the alternate screen is active. The guard's `Drop` then runs `LeaveAlternateScreen`, discarding the output. The wizard's manual `--configure` success path and the Esc-cancel message are therefore invisible to the user.
 
 ### 21. Medium — Bogus Gmail `Junk` folder
 
