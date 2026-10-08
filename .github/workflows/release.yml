@@ -8,7 +8,8 @@
 # The `bump` job edits Cargo.toml + Cargo.lock, commits, and tags v<X.Y.Z>.
 # The `build` job produces release binaries for every supported target, and
 # the `publish` job attaches tarballs plus SHA256 checksums to the GitHub
-# release for the new tag. The `homebrew-tap` job syncs Formula/tmail.rb
+# release for the new tag, with a changelog assembled from the commits
+# since the previous release. The `homebrew-tap` job syncs Formula/tmail.rb
 # into the Homebrew tap so `brew install` picks up the new version.
 name: Release
 
@@ -60,45 +61,15 @@ jobs:
           set -euo pipefail
 
           current="$(cargo read-manifest | jq -r .version)"
-          new="$(python3 - "$current" "$BUMP" <<'PY'
-          import sys
 
-          major, minor, patch = (int(part) for part in sys.argv[1].split("."))
-          bump = sys.argv[2]
-          if bump == "patch":
-              patch += 1
-          elif bump == "minor":
-              minor += 1
-              patch = 0
-          elif bump == "major":
-              major += 1
-              minor = 0
-              patch = 0
-          else:
-              sys.exit(f"unknown bump kind: {bump}")
-          print(f"{major}.{minor}.{patch}")
-          PY
-          )"
+          # Rewrite the top-level [package] version in Cargo.toml and print
+          # the new version.
+          new="$(python3 .github/scripts/bump_version.py "$BUMP")"
 
           if git rev-parse -q --verify "refs/tags/v$new" >/dev/null; then
             echo "::error::tag v$new already exists; delete it or bump a different component"
             exit 1
           fi
-
-          # Rewrite the top-level [package] version in Cargo.toml.
-          python3 - "$new" <<'PY'
-          import re
-          import sys
-
-          new = sys.argv[1]
-          with open("Cargo.toml") as f:
-              text = f.read()
-          pattern = re.compile(r'(?m)^(version\s*=\s*")([^"]+)(")')
-          if len(pattern.findall(text)) != 1:
-              sys.exit("expected exactly one top-level version key in Cargo.toml")
-          with open("Cargo.toml", "w") as f:
-              f.write(pattern.sub(rf"\g<1>{new}\g<3>", text, count=1))
-          PY
 
           # Sync the workspace member version in Cargo.lock without touching
           # third-party dependency versions. No --offline: fresh runners have
@@ -201,6 +172,21 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - uses: actions/checkout@v7
+        with:
+          # Full history (and tags) so the changelog can walk back to the
+          # previous release commit. On a re-run of failed jobs the bump
+          # outputs are gone; fall back to the dispatched branch, whose
+          # head carries the bump commit (bump pushes HEAD to the same ref
+          # atomically with the tag).
+          ref: ${{ needs.bump.outputs.tag || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Generate changelog from commits
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/generate_changelog.py | tee release-notes.md
+
       - name: Generate checksums
         run: |
           set -euo pipefail
@@ -213,13 +199,16 @@ jobs:
         with:
           tag_name: ${{ needs.bump.outputs.tag }}
           name: tmail v${{ needs.bump.outputs.version }}
-          generate_release_notes: true
+          body_path: release-notes.md
           fail_on_unmatched_files: true
           files: dist/*
 
   homebrew-tap:
     name: Update Homebrew tap
-    needs: publish
+    # `bump` is not strictly needed to run after `publish` (which already
+    # depends on it), but listing it keeps `needs.bump.outputs` valid for
+    # the expressions below.
+    needs: [bump, publish]
     # Opt-in until the tap exists: create the tap repository (e.g.
     # jodaka/homebrew-tap, public, with an empty Formula/ directory), then
     # set the repository variable TAP_REPO=<owner>/<name> and the TAP_TOKEN
@@ -255,7 +244,7 @@ jobs:
             echo "::warning::bump job outputs missing (job re-run); deriving version from the latest published release"
             VERSION="$(curl -sS --fail-with-body -H "Authorization: Bearer ${GH_TOKEN}" \
               "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest" \
-              | python3 -c "import json, sys; print(json.load(sys.stdin)['tag_name'].removeprefix('v'))")"
+              | jq -r '.tag_name | ltrimstr("v")')"
             echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           fi
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
@@ -265,7 +254,10 @@ jobs:
           # round-trip; works while the repository is private too).
           api="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}"
           asset_id="$(curl -sS --fail-with-body -H "Authorization: Bearer ${GH_TOKEN}" "$api" \
-            | python3 -c "import json, sys; print({a['name']: a['id'] for a in json.load(sys.stdin)['assets']}['SHA256SUMS-v${VERSION}.txt'])")"
+            | jq -r --arg name "SHA256SUMS-v${VERSION}.txt" \
+              '.assets[] | select(.name == $name) | .id')"
+          [ -n "$asset_id" ] \
+            || { echo "::error::release v${VERSION} has no SHA256SUMS-v${VERSION}.txt asset"; exit 1; }
           curl -sS --fail-with-body -L -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/octet-stream" \
             -o SHA256SUMS.txt "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
@@ -273,55 +265,7 @@ jobs:
           git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git" tap
           mkdir -p tap/Formula
           cp Formula/tmail.rb tap/Formula/tmail.rb
-
-          # Patch the copied formula to the new release: rewrite the
-          # version line (release URLs interpolate it) and each sha256
-          # line, matched by the target triple in the preceding URL.
-          python3 - "$VERSION" <<'PY'
-          import re
-          import sys
-
-          version = sys.argv[1]
-          sums = {}
-          with open("SHA256SUMS.txt") as f:
-              for line in f:
-                  digest, name = line.split(maxsplit=1)
-                  sums[name.strip()] = digest
-
-          path = "tap/Formula/tmail.rb"
-          with open(path) as f:
-              text = f.read()
-          text, count = re.subn(
-              r'(?m)^  version "[^"]+"$', f'  version "{version}"', text
-          )
-          if count != 1:
-              sys.exit(f"expected exactly one version line, patched {count}")
-
-          triple = re.compile(
-              r'tmail-v[^"]*-(aarch64-apple-darwin|x86_64-apple-darwin'
-              r'|x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu)\.tar\.gz"'
-          )
-          sha = re.compile(r'^(\s*sha256 ")([0-9a-f]{64})(")$')
-          lines = text.split("\n")
-          pending = None
-          patched = 0
-          for i, line in enumerate(lines):
-              match = triple.search(line)
-              if match:
-                  pending = match.group(1)
-                  continue
-              match = sha.match(line)
-              if match and pending:
-                  asset = f"tmail-v{version}-{pending}.tar.gz"
-                  lines[i] = f'{match.group(1)}{sums[asset]}{match.group(3)}'
-                  patched += 1
-                  pending = None
-          if patched != 4:
-              sys.exit(f"expected 4 sha256 lines, patched {patched}")
-
-          with open(path, "w") as f:
-              f.write("\n".join(lines))
-          PY
+          python3 .github/scripts/patch_homebrew_formula.py "$VERSION"
 
           cd tap
           git config user.name "github-actions[bot]"
