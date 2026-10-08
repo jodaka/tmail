@@ -11,9 +11,11 @@
 //! - `himalaya` (or `TMAIL_HIMALAYA`) not on the machine → the test prints
 //!   a skip notice and returns, so the suite stays portable (plan's
 //!   "where supported" wording);
-//! - maildir text search is unsupported by himalaya 2.1.0 (text filters
-//!   match nothing; flag filters do) — the search test encodes that
-//!   evidence instead of assuming IMAP-like full-text behavior.
+//! - himalaya 2.2.x implements search locally in every backend, maildir
+//!   included (2.2.0 "added back the search feature"), so text and flag
+//!   filters both match over the temporary Maildir — 2.1.0 (text filters
+//!   delegated to the server, maildir has none) is out of the suite's
+//!   scope.
 //!
 //! Every test builds its own hermetic environment; nothing outside the
 //! temporary directory is touched.
@@ -365,9 +367,9 @@ fn drafts_save_journal_and_discard_round_trip() {
 fn search_behavior_matches_maildir_capabilities() {
     let Some(env) = env() else { return };
 
-    // Text search on maildir matches nothing (himalaya 2.1.0: text
-    // filters are delegated to the server; maildir has none). The
-    // request still completes with a valid empty page.
+    // Full-text search (himalaya 2.2.x runs the query DSL locally, maildir
+    // included): the normalized any-field query finds the seeded message
+    // by every one of the fields the normalizer covers.
     let page = block(env.backend.search_messages(
         ctx(),
         SearchRequest {
@@ -378,18 +380,28 @@ fn search_behavior_matches_maildir_capabilities() {
         },
     ))
     .expect("search must not error");
-    assert!(
-        page.items.is_empty(),
-        "maildir text search matches nothing; got {:?}",
-        page.items.iter().map(|m| &m.subject).collect::<Vec<_>>()
-    );
+    assert_eq!(page.items.len(), 1, "full-text search matches");
+    assert_eq!(page.items[0].message_id.as_deref(), Some(MESSAGE_ID));
 
-    // Flag filters do work on maildir: after starring, a flag-filtered
-    // search finds the message ("where supported"). The query must be
-    // written in the bare DSL token form ("flag flagged"); the backend's
-    // normalizer recognizes DSL queries by exact predicate tokens, so
-    // parentheses would make it a full-text query (which maildir cannot
-    // match).
+    // A text query matching nothing stays a valid empty page.
+    let page = block(env.backend.search_messages(
+        ctx(),
+        SearchRequest {
+            mailbox_id: env.inbox_id.clone(),
+            query: String::from("NopeNowhere"),
+            offset: 0,
+            limit: 20,
+        },
+    ))
+    .expect("empty search must not error");
+    assert!(page.items.is_empty(), "no match, no error");
+
+    // Flag filters also apply locally: after starring, a flag-filtered
+    // search finds the message. The query must be written in the bare DSL
+    // token form ("flag flagged"); the backend's normalizer recognizes DSL
+    // queries by exact predicate tokens, so parentheses would make it a
+    // full-text query (which would *also* match here — but the flag
+    // filter is the clause under test).
     let locator = env.locator();
     block(env.backend.set_starred(ctx(), locator, true)).expect("star");
 
@@ -405,4 +417,5 @@ fn search_behavior_matches_maildir_capabilities() {
     .expect("flag search");
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].message_id.as_deref(), Some(MESSAGE_ID));
+    assert!(page.items[0].is_starred, "the flag itself is carried");
 }
