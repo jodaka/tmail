@@ -46,6 +46,16 @@ page_size_auto = true
 page_size = 50
 # Periodic background refresh, 0 disables. Foreground work is never preempted.
 refresh_interval_seconds = 60
+# How many mail-server child processes (`himalaya`) may run at once
+# across all work: page loads, previews, searches, and bulk actions share
+# this budget (issue 1v38). Half — rounded up — is reserved for
+# interactive work; the rest runs background decoration: list previews
+# and the timer refresh. The list-preview rolling window is twice the
+# background share (one generation of previews runs while the next is
+# queued), so raising this value loads message texts faster. Accepted
+# 2–16; values above ~15 risk tripping per-user session caps on the
+# server (Gmail ~15) with confusing auth errors.
+# max_concurrent_backend_calls = 6
 
 [tmail.composer]
 # "builtin", "$EDITOR", or an explicit command like "nvim".

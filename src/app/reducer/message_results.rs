@@ -574,11 +574,6 @@ pub(crate) fn apply_page(
 
 // ── List previews (ticket wxtx) ──────────────────────────────────────────
 
-/// How many preview fetches may run at once: a page can hold dozens of
-/// rows, and each fetch spawns a himalaya child, so the window rolls —
-/// queued rows start as in-flight fetches complete.
-pub(crate) const MAX_IN_FLIGHT_PREVIEWS: usize = 6;
-
 /// Satisfy the visible rows' previews (ticket wxtx): rows without a
 /// snippet get one cache read each (off-thread, ticket haeb). A read that
 /// hits serves the preview straight from the cached copy — no backend
@@ -651,10 +646,14 @@ pub(crate) fn complete_cache_preview_load(
             // (ticket j0ca): the page's budget (reset on every page
             // apply) and the session's. An exhausted budget degrades to
             // "no snippet" — a preview is decorative context, never
-            // required data.
+            // required data. The rolling window derives from
+            // `[tmail.mail].max_concurrent_backend_calls` (ticket 49eq,
+            // twice the background share) and arrives through the
+            // settings at startup.
             if state.caches.preview_fetches_for_page >= MAX_PREVIEW_FETCHES_PER_PAGE
                 || state.caches.preview_fetches_for_session >= MAX_PREVIEW_FETCHES_PER_SESSION
-                || state.session.operations.previews_in_flight() >= MAX_IN_FLIGHT_PREVIEWS
+                || state.session.operations.previews_in_flight()
+                    >= state.settings.max_in_flight_previews
             {
                 return Vec::new();
             }

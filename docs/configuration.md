@@ -30,6 +30,7 @@ any other file are ignored.**
 | `[tmail.mail].page_size_auto` | bool | `true` | Size each page to the number of message rows the terminal can show (ticket kjfq): the whole page fits the list without scrolling, and resizing re-loads the page. When `true`, `page_size` is ignored. |
 | `[tmail.mail].page_size` | integer | `50` | Rows per page of the message list with `page_size_auto = false` (explicit pagination with ←/→). Must be positive. A page longer than the list shows a vertical scrollbar. |
 | `[tmail.mail].refresh_interval_seconds` | integer | `60` | Periodic background refresh; `0` disables the timer. Never preempts foreground work or the composer. |
+| `[tmail.mail].max_concurrent_backend_calls` | integer | `6` | How many mail-server child processes (`himalaya`) may run at once across all work (page loads, list previews, searches, bulk actions share the budget). Half — rounded up — stays reservable for interactive work; the background remainder serves decorations (list previews, timer refresh), and the rolling preview window is twice that share (one generation of previews runs while the next is queued), so raising this value loads message texts faster. Must be between 2 and 16: above the bound, servers cap concurrent sessions per user (Gmail ~15) and answer with confusing auth errors. |
 | `[tmail.composer].editor` | string | `"builtin"` | `"builtin"`, `"$EDITOR"` (resolved from the environment), or a plain command like `nvim` (program + arguments, **no shell metacharacters** — Tmail never spawns a shell). The external-editor flow itself ships in Phase 11; the value is validated at startup either way. |
 | `[tmail.composer].autosave_delay_ms` | integer | `2000` | Draft autosave debounce for the builtin editor. Accepted range: 100–600000. |
 | `[tmail.attachments].downloads_dir` | string | `$HOME/Downloads` | Directory used by *save attachment*. Must be absolute or start with `~/` (Tmail expands `~` itself, never via a shell). May not exist yet; must not be an existing file. |
@@ -104,7 +105,7 @@ detected problem together (never just the first), then refuses to start:
 
 - file exists but is not valid TOML (parse errors are sanitized)
 - `[tmail].account` names a missing `[accounts.*]` table
-- invalid `page_size`, `refresh_interval_seconds`, or `autosave_delay_ms`
+- invalid `page_size`, `refresh_interval_seconds`, `max_concurrent_backend_calls`, or `autosave_delay_ms`
 - invalid `editor` (empty, unknown program, shell metacharacters, `$EDITOR` unset)
 - invalid `downloads_dir` (relative path, or an existing file)
 - unknown `[tmail.theme].name`

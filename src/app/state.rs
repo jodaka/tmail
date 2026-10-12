@@ -179,6 +179,14 @@ pub struct Settings {
     /// resolved from the config at startup. `None` means the builtin
     /// editor: `Ctrl+E` is inert.
     pub editor_command: Option<Vec<String>>,
+    /// `[tmail.mail].max_concurrent_backend_calls` (ticket 49eq): the
+    /// backend-call budget distilled to the number the reducer can act
+    /// on — the rolling list-preview window, twice the background share
+    /// of the budget, i.e. how many list-preview fetches may be in
+    /// flight at once. Every other concurrency knob is derived at the
+    /// operation manager from the same config number; only this one
+    /// crosses the reducer boundary.
+    pub max_in_flight_previews: usize,
     /// Whether terminal mouse capture is currently active (plan §10,
     /// `[tmail].mouse`). Set from the config at startup and flipped by
     /// `Action::ToggleMouseCapture`; the runtime applies the actual
@@ -203,12 +211,14 @@ pub struct Settings {
 pub(crate) const MAX_SESSION_PREVIEWS: usize = 1024;
 
 /// Total full-message preview fetches one displayed page may start
-/// (ticket j0ca): the rolling window (`MAX_IN_FLIGHT_PREVIEWS`) bounds
-/// concurrency only, so a page of N rows would eventually spawn N full
-/// `message read` children — the dominant backend cost while browsing.
-/// At the cap rows keep no snippet: previews are decorative context
-/// (ticket wxtx), and every row stays individually openable. Twice the
-/// rolling window: the first screenful of interesting rows.
+/// (ticket j0ca): the rolling window (derived from
+/// `[tmail.mail].max_concurrent_backend_calls`, see
+/// `Settings.max_in_flight_previews`) bounds concurrency only, so a page
+/// of N rows would eventually spawn N full `message read` children — the
+/// dominant backend cost while browsing. At the cap rows keep no snippet:
+/// previews are decorative context (ticket wxtx), and every row stays
+/// individually openable. Kept at the tuned default regardless of the
+/// concurrency knob: it is a total-work bound, not a rate bound.
 pub(crate) const MAX_PREVIEW_FETCHES_PER_PAGE: usize = 12;
 
 /// Total full-message preview fetches a session may start (ticket j0ca):
@@ -413,6 +423,11 @@ impl AppState {
                 notifications: crate::config::Notifications::Off,
                 editor_command: None,
                 mouse_capture: false,
+                // The derived preview window for the configured default
+                // budget (seed_state overwrites with the real config).
+                max_in_flight_previews: crate::config::max_in_flight_previews(
+                    crate::config::DEFAULT_MAX_CONCURRENT_BACKEND_CALLS,
+                ),
                 themes: vec![
                     (String::from("default"), Theme::default_dark()),
                     (String::from("light"), Theme::default_light()),

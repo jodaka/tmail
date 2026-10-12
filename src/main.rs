@@ -257,7 +257,10 @@ async fn session(
     tracing::info!(size = ?state.session.size, "shell started (real backend)");
 
     // Backend results re-enter the reducer as actions; the manager spawns
-    // one cancellable task per effect.
+    // one cancellable task per effect. The permit pools are sized from the
+    // configured `[tmail.mail].max_concurrent_backend_calls` (ticket 49eq):
+    // the derived foreground/background split throttles the concurrent
+    // mail-server children the way issue 1v38 requires.
     let (result_tx, mut result_rx) = mpsc::unbounded_channel();
     let manager = OperationManager::new(
         Arc::clone(&backend),
@@ -271,7 +274,8 @@ async fn session(
         )),
         page_cache,
         result_tx,
-    );
+    )
+    .with_backend_call_budget(config.mail.max_concurrent_backend_calls);
 
     if wizard_needed {
         start_wizard(&mut state, invocation);
@@ -462,6 +466,13 @@ fn seed_state(
         notifications: config.notifications,
         editor_command: config.composer.editor_command.clone(),
         mouse_capture: config.mouse,
+        // The list-preview rolling window (ticket 49eq): twice the
+        // background share of the configured backend-call budget — one
+        // generation of previews runs on the background permit pool while
+        // the next one is already queued and ready to dispatch.
+        max_in_flight_previews: tmail::config::max_in_flight_previews(
+            config.mail.max_concurrent_backend_calls,
+        ),
         themes,
         theme_index,
     };

@@ -41,20 +41,19 @@ use crate::domain::sanitize::sanitize;
 /// progress. Queued operations acquire a permit before dispatching; the
 /// spawn itself stays unbounded so cancellation tokens stay live.
 ///
-/// The budget is *split in two* (ticket d5rf): interactive work gets
-/// [`FOREGROUND_PERMITS`] and background-origin work gets the rest. Both
-/// pools draw from the same total, so concurrent mail-server sessions
-/// never exceed this number, but a background preview can no longer
-/// occupy the last slot an interactive operation is about to wait for.
-const MAX_CONCURRENT_BACKEND_CALLS: usize = 4;
-
-/// How much of [`MAX_CONCURRENT_BACKEND_CALLS`] is reserved for
-/// foreground work (ticket d5rf). Whatever is left serves background work:
-/// with the default budget, two previews may run while two interactive
-/// operations stay reservable, and pressing Enter never waits behind
-/// decoration.
-const FOREGROUND_PERMITS: usize = 2;
-
+/// The budget is *split in two* (ticket d5rf): interactive work gets the
+/// foreground half and background-origin work gets the rest — half is
+/// rounded *up* for the interactive pool so pressing Enter never waits
+/// behind decoration. Both pools draw from the same total, so concurrent
+/// mail-server sessions never exceed the total, but a background preview
+/// can no longer occupy the last slot an interactive operation is about
+/// to wait for.
+///
+/// Configurable (`[tmail.mail].max_concurrent_backend_calls`, ticket
+/// 49eq): the caller passes the validated budget from the config file, so
+/// a user with a fast terminal connection can raise the pool. Bounds and
+/// the default live in [`crate::config`] next to the parser.
+///
 /// The two halves of the backend budget.
 #[derive(Debug, Clone)]
 struct PermitPools {
@@ -65,12 +64,19 @@ struct PermitPools {
 }
 
 impl PermitPools {
-    fn new() -> Self {
+    fn new(budget: usize) -> Self {
+        // The config parser clamps the budget into
+        // `[MIN_CONCURRENT_BACKEND_CALLS, MAX_CONCURRENT_BACKEND_CALLS]`,
+        // so both halves are non-empty: a background pool of zero permits
+        // would park previews and the timer refresh forever, and an empty
+        // foreground one would park every interactive operation.
+        debug_assert!(
+            crate::config::MIN_CONCURRENT_BACKEND_CALLS <= budget,
+            "the backend-call budget must contain a foreground and a background slot"
+        );
         Self {
-            background: Arc::new(Semaphore::new(
-                MAX_CONCURRENT_BACKEND_CALLS - FOREGROUND_PERMITS,
-            )),
-            foreground: Arc::new(Semaphore::new(FOREGROUND_PERMITS)),
+            background: Arc::new(Semaphore::new(crate::config::background_permits(budget))),
+            foreground: Arc::new(Semaphore::new(crate::config::foreground_permits(budget))),
         }
     }
 
@@ -91,7 +97,8 @@ impl PermitPools {
 /// purely local work — cache file I/O, notifications, attachment-file
 /// walks, platform opens — never touches the mail server, and holding a
 /// permit for it would only invert priorities: a page-apply cache flood
-/// could starve an interactive `LoadPage` (the pool holds four permits),
+/// could starve an interactive `LoadPage` (the pool holds the whole
+/// interactive budget),
 /// and a hung child would starve cache hits in return. Denylist, so a
 /// new backend arm defaults to permitted (safe direction: the pool
 /// bounds the dispatching, not the spawn).
@@ -134,12 +141,18 @@ pub struct OperationManager {
     /// running a mail-backend child process acquire one permit and hold it
     /// to completion; local work dispatches without one. Split by origin
     /// (ticket d5rf), so a background preview never occupies the permit an
-    /// interactive operation is about to wait for.
+    /// interactive operation is about to wait for. Sized from the
+    /// configured `[tmail.mail].max_concurrent_backend_calls` budget
+    /// (ticket 49eq).
     permits: PermitPools,
     results: UnboundedSender<OperationResult>,
 }
 
 impl OperationManager {
+    /// Build a manager with the documented default backend-call budget
+    /// (see [`crate::config::DEFAULT_MAX_CONCURRENT_BACKEND_CALLS`]);
+    /// size the pools from a configured budget with
+    /// [`OperationManager::with_backend_call_budget`].
     pub fn new(
         backend: Arc<dyn MailBackend>,
         opener: Arc<dyn PathOpener>,
@@ -156,9 +169,19 @@ impl OperationManager {
             discoverer,
             tester,
             cache,
-            permits: PermitPools::new(),
+            permits: PermitPools::new(crate::config::DEFAULT_MAX_CONCURRENT_BACKEND_CALLS),
             results,
         }
+    }
+
+    /// Size the permit pools from a configured
+    /// `[tmail.mail].max_concurrent_backend_calls` value (ticket 49eq):
+    /// the validated budget from the config file, so a user with a fast
+    /// terminal connection can raise the pool. Production callers chain
+    /// this right after [`OperationManager::new`]; tests keep the default.
+    pub fn with_backend_call_budget(mut self, backend_call_budget: usize) -> Self {
+        self.permits = PermitPools::new(backend_call_budget);
+        self
     }
 
     /// Launch one effect. The cancellation token comes from the operation
@@ -177,8 +200,8 @@ impl OperationManager {
     /// Ticket d5rf: the pool is chosen by the effect's origin, so a
     /// background preview queues on its own smaller pool and can never
     /// occupy the permit an interactive operation is about to wait for.
-    /// The two pools share the [`MAX_CONCURRENT_BACKEND_CALLS`] budget, so
-    /// concurrent mail-server sessions never exceed it.
+    /// The two pools share the configured backend-call budget (ticket
+    /// 49eq), so concurrent mail-server sessions never exceed it.
     ///
     /// Ticket xvcp: cancellation is observed at the pool gate too — the
     /// acquire races the token, and the dispatch is re-checked once the
@@ -1071,6 +1094,17 @@ impl AccountTester for InertTester {
     }
 }
 
+/// The configured budget the test managers build with (ticket 49eq):
+/// the documented `[tmail.mail].max_concurrent_backend_calls` default.
+#[cfg(test)]
+const MAX_CONCURRENT_BACKEND_CALLS: usize = crate::config::DEFAULT_MAX_CONCURRENT_BACKEND_CALLS;
+
+/// The interactive half of [`MAX_CONCURRENT_BACKEND_CALLS`], per the
+/// config split (half rounded up, ticket d5rf).
+#[cfg(test)]
+const FOREGROUND_PERMITS: usize =
+    crate::config::foreground_permits(crate::config::DEFAULT_MAX_CONCURRENT_BACKEND_CALLS);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1286,6 +1320,9 @@ mod tests {
     /// No test drives `TestAccount` through the manager yet: the fake
     /// (`super::InertTester`) refuses everything so an accidental call
     /// is loud.
+    /// The managers build with the documented default budget: see the
+    /// module-level test constants `MAX_CONCURRENT_BACKEND_CALLS` and
+    /// `FOREGROUND_PERMITS` (ticket 49eq).
     fn manager(
         backend: Arc<dyn MailBackend>,
     ) -> (OperationManager, UnboundedReceiver<OperationResult>) {
@@ -1633,10 +1670,30 @@ mod tests {
         assert!(peak < burst, "the burst must not run all at once");
     }
 
+    #[test]
+    fn the_configured_budget_scales_the_pools() {
+        // The configured `[tmail.mail].max_concurrent_backend_calls`
+        // (ticket 49eq) splits into both pools; half rounded up is the
+        // interactive share, so an odd budget still keeps the background
+        // remainder at least one.
+        let pools = PermitPools::new(10);
+        assert_eq!(pools.foreground.available_permits(), 5);
+        assert_eq!(pools.background.available_permits(), 5);
+
+        let pools = PermitPools::new(7);
+        assert_eq!(pools.foreground.available_permits(), 4);
+        assert_eq!(pools.background.available_permits(), 3);
+
+        // The validated floor: one slot per pool.
+        let pools = PermitPools::new(2);
+        assert_eq!(pools.foreground.available_permits(), 1);
+        assert_eq!(pools.background.available_permits(), 1);
+    }
+
     /// Ticket d5rf: a background preview must never occupy the permit an
     /// interactive operation is about to wait for. The reducer admits
-    /// `MAX_IN_FLIGHT_PREVIEWS` (6) previews against a budget of
-    /// `MAX_CONCURRENT_BACKEND_CALLS` (4) split into 2 + 2, so before the
+    /// the configured preview window (ticket 49eq: the default budget 6
+    /// splits into 3 + 3 with the rolling window of 6) so before the
     /// fix a foreground `LoadPage` waited behind queue of decorative work.
     #[tokio::test]
     async fn interactive_work_never_waits_behind_background_previews() {

@@ -35,6 +35,53 @@ pub const DEFAULT_PAGE_SIZE_AUTO: bool = true;
 /// `[tmail.mail].mail.refresh_interval_seconds = 0` disables the timer.
 pub const DEFAULT_REFRESH_INTERVAL_SECONDS: u64 = 60;
 
+/// Default `[tmail.mail].max_concurrent_backend_calls`: how many backend
+/// (`himalaya`) child processes Tmail may run at once (issue 1v38). With
+/// the derived split (see [`foreground_permits`]) the default gives three
+/// interactive and three background slots — the background pool runs list
+/// previews one-and-a-half times faster than the old hard-coded budget of
+/// four did, while staying well under the per-user session caps mail
+/// servers impose (Gmail ~15).
+pub const DEFAULT_MAX_CONCURRENT_BACKEND_CALLS: usize = 6;
+/// Lower bound of `[tmail.mail].max_concurrent_backend_calls`: the budget
+/// splits into an interactive and a background pool, so it needs at least
+/// two slots — a background pool of zero would park previews and the
+/// timer refresh forever (they can only queue on their own pool).
+pub const MIN_CONCURRENT_BACKEND_CALLS: usize = 2;
+
+/// Upper bound of `[tmail.mail].max_concurrent_backend_calls` (issue 1v38):
+/// each slot is one `himalaya` child process = one mail-server session,
+/// and servers cap concurrent sessions per user (Gmail ~15). Higher
+/// budgets risk confusing auth errors rather than more speed.
+pub const MAX_CONCURRENT_BACKEND_CALLS: usize = 16;
+
+/// The interactive share of a backend-call budget: half the slots, rounded
+/// up — pressing Enter never waits behind a thicker queue than exactly the
+/// background remainder it chose to have.
+pub const fn foreground_permits(total: usize) -> usize {
+    total.div_ceil(2)
+}
+
+/// The background share of a backend-call budget: whatever remains after
+/// [`foreground_permits`] — decorations (list previews, timer refresh)
+/// queue here so they never eat an interactive slot. Precondition: the
+/// total validated by [`MIN_CONCURRENT_BACKEND_CALLS`] ≥ 2 (otherwise the
+/// background pool is empty and decorative work parks).
+pub const fn background_permits(total: usize) -> usize {
+    total - foreground_permits(total)
+}
+
+/// The rolling list-preview window derived from a backend-call budget:
+/// twice the [`background_permits`] share (ticket 49eq). The background
+/// pool runs one half-generation while the other is already queued, so a
+/// permit frees with the next fetch ready to dispatch — previews never
+/// wait for the reducer's completion round trip. With the documented
+/// default budget of 6 this is the window the hard-coded version shipped
+/// (6 in flight against 3 permits).
+pub const fn max_in_flight_previews(total: usize) -> usize {
+    2 * background_permits(total)
+}
+
 /// Bounds of `[tmail.composer].composer.autosave_delay_ms`: below the floor every
 /// keystroke would race a save; above the ceiling the debounce is not a
 /// debounce any more (plan §17: invalid autosave values are reported).
@@ -287,7 +334,9 @@ pub struct Config {
     pub ui: UiConfig,
 }
 
-/// `[tmail.mail]`: pagination and background refresh.
+/// `[tmail.mail]`: page size, refresh cadence, and the backend-call
+/// budget (nothing here is per-account, so Tmail reads it from the root
+/// `[tmail]` table the same way for every account).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MailConfig {
     /// `[tmail.mail].mail.page_size`, defaulting to [`DEFAULT_PAGE_SIZE`]; a
@@ -302,6 +351,15 @@ pub struct MailConfig {
     /// the periodic background-refresh interval; `0` disables the timer.
     /// Absent defaults to 60; a negative value disables (treated as 0).
     pub refresh_interval_seconds: u64,
+    /// `[tmail.mail].max_concurrent_backend_calls` (issue 1v38, default
+    /// [`DEFAULT_MAX_CONCURRENT_BACKEND_CALLS`]): how many backend child
+    /// processes run at once, split by [`foreground_permits`] into an
+    /// interactive and a background pool. The rolling list-preview window
+    /// is twice the background share (see [`max_in_flight_previews`]).
+    /// Absent uses the default; a value
+    /// outside [`MIN_CONCURRENT_BACKEND_CALLS`]…[`MAX_CONCURRENT_BACKEND_CALLS`]
+    /// reports an issue and falls back to the default.
+    pub max_concurrent_backend_calls: usize,
 }
 
 /// `[tmail.composer]`.
@@ -385,6 +443,7 @@ impl Default for Config {
                 page_size: DEFAULT_PAGE_SIZE,
                 page_size_auto: DEFAULT_PAGE_SIZE_AUTO,
                 refresh_interval_seconds: DEFAULT_REFRESH_INTERVAL_SECONDS,
+                max_concurrent_backend_calls: DEFAULT_MAX_CONCURRENT_BACKEND_CALLS,
             },
             composer: ComposerConfig {
                 editor: String::from("builtin"),
@@ -639,6 +698,7 @@ pub fn parse_with_account(
     );
     parse_page_size(tmail, &mut config, &mut issues);
     parse_refresh_interval(tmail, &mut config, &mut issues);
+    parse_backend_concurrency(tmail, &mut config, &mut issues);
     parse_autosave_delay(tmail, &mut config, &mut issues);
     parse_editor(tmail, &mut config, &mut issues);
     parse_theme(tmail, &mut config, &mut issues);
@@ -722,6 +782,35 @@ fn parse_refresh_interval(
         None => issues.push(format!(
             "[tmail.mail].mail.refresh_interval_seconds must be an integer; using {DEFAULT_REFRESH_INTERVAL_SECONDS}"
         )),
+    }
+}
+
+fn parse_backend_concurrency(
+    tmail: Option<&toml::Value>,
+    config: &mut Config,
+    issues: &mut LoadIssues,
+) {
+    let value = tmail_value(tmail, &["mail", "max_concurrent_backend_calls"]);
+    let not_integer = format!(
+        "[tmail.mail].max_concurrent_backend_calls must be an integer; \
+         using {DEFAULT_MAX_CONCURRENT_BACKEND_CALLS}"
+    );
+    let invalid = |n: i64| {
+        format!(
+            "[tmail.mail].max_concurrent_backend_calls must be between \
+             {MIN_CONCURRENT_BACKEND_CALLS} and {MAX_CONCURRENT_BACKEND_CALLS}, \
+             not {n}; using {DEFAULT_MAX_CONCURRENT_BACKEND_CALLS}"
+        )
+    };
+    match get_nonneg_int(value, not_integer, invalid, issues) {
+        Err(()) | Ok(None) => {}
+        Ok(Some(n))
+            if (MIN_CONCURRENT_BACKEND_CALLS as i64..=MAX_CONCURRENT_BACKEND_CALLS as i64)
+                .contains(&n) =>
+        {
+            config.mail.max_concurrent_backend_calls = n as usize;
+        }
+        Ok(Some(n)) => issues.push(invalid(n)),
     }
 }
 
@@ -1537,6 +1626,66 @@ mod tests {
         let (config, issues) = parse_with_issues(text, None);
         assert!(config.mail.page_size_auto, "default applies");
         assert!(!issues.is_empty(), "the problem is reported");
+    }
+
+    #[test]
+    fn backend_concurrency_defaults_to_six_and_parses_values() {
+        // Absent: the tuned default (issue 1v38): three interactive slots
+        // and three background ones for previews and the timer refresh.
+        let config = parse("", None);
+        assert_eq!(config.mail.max_concurrent_backend_calls, 6);
+        assert_eq!(foreground_permits(6), 3);
+        assert_eq!(background_permits(6), 3);
+
+        let text = "[tmail.mail]\nmax_concurrent_backend_calls = 10\n";
+        let config = parse(text, None);
+        assert_eq!(config.mail.max_concurrent_backend_calls, 10);
+        assert_eq!((foreground_permits(10), background_permits(10)), (5, 5));
+        // The reducer's rolling window: twice the background share, so
+        // the default stays the shipped six (ticket 49eq).
+        assert_eq!(max_in_flight_previews(10), 10);
+        assert_eq!(max_in_flight_previews(6), 6);
+
+        // Odd budgets lean interactive: ceil is the foreground share.
+        assert_eq!((foreground_permits(7), background_permits(7)), (4, 3));
+        assert_eq!(background_permits(2), 1, "the validated floor");
+    }
+
+    #[test]
+    fn backend_concurrency_out_of_range_reports_and_falls_back() {
+        // Below the floor a background pool of zero permits would park
+        // previews and the timer refresh forever (ticket 49eq).
+        for invalid_value in [0, 1, 17, 32] {
+            let text = format!("[tmail.mail]\nmax_concurrent_backend_calls = {invalid_value}\n");
+            let (config, issues) = parse_with_issues(&text, None);
+            assert_eq!(
+                config.mail.max_concurrent_backend_calls, DEFAULT_MAX_CONCURRENT_BACKEND_CALLS,
+                "default applies for {invalid_value}"
+            );
+            assert!(
+                issues.iter().any(|issue| issue.contains(&format!(
+                    "must be between {MIN_CONCURRENT_BACKEND_CALLS} \
+                         and {MAX_CONCURRENT_BACKEND_CALLS}, not {invalid_value}"
+                ))),
+                "issue reported for {invalid_value}: {issues:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn backend_concurrency_non_integer_reports() {
+        let text = "[tmail.mail]\nmax_concurrent_backend_calls = \"lots\"\n";
+        let (config, issues) = parse_with_issues(text, None);
+        assert_eq!(
+            config.mail.max_concurrent_backend_calls, DEFAULT_MAX_CONCURRENT_BACKEND_CALLS,
+            "default applies"
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("must be an integer; using 6")),
+            "issues: {issues:?}"
+        );
     }
 
     #[test]
