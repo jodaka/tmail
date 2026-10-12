@@ -211,22 +211,20 @@ pub struct Settings {
 pub(crate) const MAX_SESSION_PREVIEWS: usize = 1024;
 
 /// Total full-message preview fetches one displayed page may start
-/// (ticket j0ca): the rolling window (derived from
+/// (ticket j0ca, retuned ticket 7c0m): the page's own row count. A page
+/// of N rows spawns at most N full `message read` children per display —
+/// each row at most once — while the rolling window (derived from
 /// `[tmail.mail].max_concurrent_backend_calls`, see
-/// `Settings.max_in_flight_previews`) bounds concurrency only, so a page
-/// of N rows would eventually spawn N full `message read` children — the
-/// dominant backend cost while browsing. At the cap rows keep no snippet:
-/// previews are decorative context (ticket wxtx), and every row stays
-/// individually openable. Kept at the tuned default regardless of the
-/// concurrency knob: it is a total-work bound, not a rate bound.
-pub(crate) const MAX_PREVIEW_FETCHES_PER_PAGE: usize = 12;
-
-/// Total full-message preview fetches a session may start (ticket j0ca):
-/// a long browsing session across many mailboxes stays bounded even
-/// though each page refreshes its own budget. Same degrade-as-decorative
-/// direction: exhausted budget keeps rows snippet-less.
-pub(crate) const MAX_PREVIEW_FETCHES_PER_SESSION: usize = 64;
-
+/// `Settings.max_in_flight_previews`) and the background permit pool
+/// bound how many run *at once*. Re-fetch storms are impossible by
+/// construction (`preview_requested` marks a row satisfied from the
+/// moment its fetch starts, and `MAX_SESSION_PREVIEWS` bounds the
+/// session maps), so a count larger than the page's rows never helps:
+/// an exhausted budget left rows snippet-less forever (observed on a
+/// real mailbox: 12-per-page left 5-8 rows empty, the fixed 64-per-session
+/// budget ran dry by the 5th page and previews stopped for the rest of
+/// the session). Previews stay decorative context (ticket wxtx) and every
+/// row remains individually openable.
 /// Session-local caches: everything here exists to avoid re-fetching or
 /// re-building work the backend already produced. Cleared implicitly when
 /// the session ends. The on-disk page cache (ticket haeb) lives in the
@@ -240,14 +238,11 @@ pub struct CacheBundle {
     /// *earlier* session counts, so startup never re-fetches known mail.
     pub preview_requested: HashSet<MessageId>,
     /// Full-message preview fetches started for the *displayed* page
-    /// (ticket j0ca): the per-page budget, reset whenever the displayed
-    /// page is replaced. Cache reads are free and uncounted — only
-    /// backend fetches consume it.
+    /// (ticket j0ca, retuned ticket 7c0m): the per-page budget, reset
+    /// whenever the displayed page is replaced. The cap is the page's
+    /// own row count (see the retune note on `apply_page`). Cache reads
+    /// are free and uncounted — only backend fetches consume it.
     pub(crate) preview_fetches_for_page: usize,
-    /// Full-message preview fetches started this session (ticket j0ca):
-    /// the session budget, never reset. Both caps degrade to "no
-    /// snippet" — a preview is decorative context, never required data.
-    pub(crate) preview_fetches_for_session: usize,
     /// One-line body previews this session (ticket wxtx), keyed by backend
     /// message id. `MessageSummary.snippet` does not survive a page load —
     /// fresh envelope listings carry none — so `apply_page` restores
@@ -437,7 +432,6 @@ impl AppState {
             caches: CacheBundle {
                 preview_requested: HashSet::new(),
                 preview_fetches_for_page: 0,
-                preview_fetches_for_session: 0,
                 previews: HashMap::new(),
                 saved_attachments: HashMap::new(),
                 reader_doc: RefCell::new(None),

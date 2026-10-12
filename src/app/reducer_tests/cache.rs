@@ -565,21 +565,22 @@ fn preview_fetches_roll_within_the_window() {
 }
 
 /// The per-page budget caps total full-message preview fetches for one
-/// displayed page (ticket j0ca): beyond the cap the remaining rows keep
-/// no snippet — a preview is decorative, not required data. Each started
-/// fetch completes immediately, so the rolling window never blocks and
-/// the total budget is what stops the fetches.
+/// displayed page at the page's own row count (ticket j0ca, retuned
+/// ticket 7c0m): every row may fetch once, never more, and re-fetch
+/// storms stay impossible (`preview_requested` marks satisfied rows).
+/// Each started fetch completes immediately, so the rolling window never
+/// blocks and the count is what stops the fetches.
 #[test]
 fn preview_fetches_are_capped_per_page() {
     let mut s = state();
-    // A page with more rows than the per-page budget (12).
+    let rows = 16;
     let mut page = crate::domain::Page {
         items: Vec::new(),
         offset: 0,
         limit: 20,
         total: Some(16),
     };
-    for i in 0..16 {
+    for i in 0..rows {
         let mut summary = mock::mock_page(&inbox_id(), 0, 1).items.remove(0);
         summary.id = MessageId(format!("p{i}"));
         summary.snippet = None;
@@ -627,26 +628,38 @@ fn preview_fetches_are_capped_per_page() {
         }
     }
     assert_eq!(
-        started, 12,
-        "exactly the per-page budget of fetches started"
+        started, rows,
+        "every row of the page fetched once, none starved"
     );
     assert_eq!(
-        s.caches.preview_fetches_for_page, 12,
-        "the page budget is spent"
+        s.caches.preview_fetches_for_page, rows,
+        "the page budget is spent at the page's row count"
     );
-    assert_eq!(
-        s.caches.preview_fetches_for_session, 12,
-        "the session budget counts the same fetches"
+    // An extra miss for a still-listed row cannot start a fetch once the
+    // page's rows are all spent (a failed fetch never unmarks its row,
+    // so this exercises the guard directly).
+    let row = s.messages.items[0].clone();
+    let read = s.session.operations.start_background(OperationKind::Cache(
+        CacheOperation::CachePreviewLoad {
+            locator: row.into_locator(),
+        },
+    ));
+    let effects = complete_cache_miss(&mut s, read.id);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e.kind, OperationKind::Mail(MailOperation::Preview(_)))),
+        "an exhausted page budget starts no fetch, got {effects:?}"
     );
+    assert_eq!(s.caches.preview_fetches_for_page, rows);
 }
 
 /// The per-page budget resets when a new page is applied (ticket j0ca):
-/// a fresh page fetches its own rows again, while the session budget
-/// keeps counting.
+/// a fresh page fetches its own rows again, with a fresh budget.
 #[test]
 fn a_new_page_refills_the_per_page_budget() {
     let mut s = state();
-    s.caches.preview_fetches_for_page = crate::app::state::MAX_PREVIEW_FETCHES_PER_PAGE;
+    s.caches.preview_fetches_for_page = 99; // an exhausted page budget
     // A genuinely different page (fresh ids): an identical page compares
     // equal and changes nothing (ticket sazy).
     let mut fresh = mock::mock_page(&inbox_id(), 0, mock::PAGE_SIZE);
@@ -689,32 +702,7 @@ fn a_new_page_refills_the_per_page_budget() {
             .any(|e| matches!(e.kind, OperationKind::Mail(MailOperation::Preview(_)))),
         "a fresh page starts fetching again, got {effects:?}"
     );
-    assert_eq!(
-        s.caches.preview_fetches_for_session, 1,
-        "session still counts"
-    );
-}
-
-/// The session budget, once exhausted, stops preview fetches for the
-/// rest of the session (ticket j0ca) even on fresh pages.
-#[test]
-fn an_exhausted_session_budget_stops_preview_fetches() {
-    let mut s = state();
-    s.caches.preview_fetches_for_session = crate::app::state::MAX_PREVIEW_FETCHES_PER_SESSION;
-    let row = s.messages.items[0].clone();
-    let read = s.session.operations.start_background(OperationKind::Cache(
-        CacheOperation::CachePreviewLoad {
-            locator: row.into_locator(),
-        },
-    ));
-    let effects = complete_cache_miss(&mut s, read.id);
-    assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e.kind, OperationKind::Mail(MailOperation::Preview(_)))),
-        "no fetch starts once the session budget is spent, got {effects:?}"
-    );
-    assert_eq!(s.caches.preview_fetches_for_session, 64);
+    assert_eq!(s.caches.preview_fetches_for_page, 1);
 }
 
 // ── Mutation invalidation (ticket kkaq) ──────────────────────────────────

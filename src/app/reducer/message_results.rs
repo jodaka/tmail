@@ -11,9 +11,7 @@ use crate::app::operation::{
     CacheOperation, MailOperation, OperationKind, OperationOutcome, OperationResult,
 };
 use crate::app::route::{MailboxRoute, Route};
-use crate::app::state::{
-    AppState, Loadable, MAX_PREVIEW_FETCHES_PER_PAGE, MAX_PREVIEW_FETCHES_PER_SESSION, ReaderFocus,
-};
+use crate::app::state::{AppState, Loadable, ReaderFocus};
 use crate::domain::{Mailbox, MailboxId, MailboxRole, Message, MessageLocator, Page};
 
 /// Local flag application after a confirmed flag operation. The list row
@@ -642,23 +640,23 @@ pub(crate) fn complete_cache_preview_load(
         Ok(OperationOutcome::CacheMiss) => {
             // Genuinely unknown: fetch in the background, once, within
             // the rolling window (the live count, so concurrent
-            // completions cannot overshoot) and inside the total budgets
-            // (ticket j0ca): the page's budget (reset on every page
-            // apply) and the session's. An exhausted budget degrades to
-            // "no snippet" — a preview is decorative context, never
-            // required data. The rolling window derives from
+            // completions cannot overshoot) and inside the per-page
+            // budget (ticket j0ca, retuned ticket 7c0m): the page may
+            // fetch at most one preview per row per display, and the
+            // budget resets when the displayed page is replaced. An
+            // exhausted budget degrades to "no snippet" — a preview is
+            // decorative context, never required data. The rolling
+            // window derives from
             // `[tmail.mail].max_concurrent_backend_calls` (ticket 49eq,
             // twice the background share) and arrives through the
             // settings at startup.
-            if state.caches.preview_fetches_for_page >= MAX_PREVIEW_FETCHES_PER_PAGE
-                || state.caches.preview_fetches_for_session >= MAX_PREVIEW_FETCHES_PER_SESSION
+            if state.caches.preview_fetches_for_page >= state.messages.items.len()
                 || state.session.operations.previews_in_flight()
                     >= state.settings.max_in_flight_previews
             {
                 return Vec::new();
             }
             state.caches.preview_fetches_for_page += 1;
-            state.caches.preview_fetches_for_session += 1;
             state.caches.preview_requested.insert(summary.id.clone());
             vec![
                 state
