@@ -673,34 +673,52 @@ mod timeout_tests {
         assert!(!path.exists(), "the child must not have run");
     }
 
-    /// The timed-out child is actually gone: no zombie `sleep` lingers
-    /// after the run reports failure (the pool stays usable, no leaked
-    /// process holding a pipe).
+    /// The timed-out child is actually gone: the exact process the run
+    /// spawned is reaped by the time the typed error is returned, leaving
+    /// no zombie `sleep` holding a pipe (the pool stays usable). The child
+    /// records its own pid, so the check names that process instead of
+    /// counting every `sleep` on the host — CI runner machinery and
+    /// sibling tests run `sleep`s of their own.
     #[tokio::test]
     async fn the_timed_out_child_is_reaped() {
+        let pid_file = tempfile::Builder::new()
+            .prefix("tmail-reaped-child")
+            .tempfile()
+            .expect("temp file");
+        let path = pid_file.path().to_path_buf();
+        drop(pid_file);
         let err = run_bounded(
-            "sleep",
-            &["100".into()],
+            "sh",
+            &[
+                "-c".into(),
+                format!("echo $$ > '{}'; exec sleep 100", path.display()),
+            ],
             None,
             &token(),
-            std::time::Duration::from_millis(150),
+            // A generous budget: the pid write races nothing (it lands at
+            // exec), so the extra wall time only absorbs slow runner
+            // scheduling before the timeout kills the child.
+            std::time::Duration::from_secs(1),
         )
         .await
         .expect_err("timed out");
         assert!(matches!(err, BackendError::Timeout { .. }));
-        // Give the SIGKILL a moment, then count our sleeping children.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let output = run(
-            "sh",
-            &[
-                "-c".into(),
-                "ps -eo comm= | grep -c '^sleep$' || true".into(),
-            ],
-            &token(),
-        )
-        .await
-        .expect("ps runs");
-        let count = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        assert_eq!(count, "0", "the killed child left a process behind");
+        // The reap is part of the teardown: `terminate` waits for the
+        // killed child within the grace before returning the error, so a
+        // pid that still answers (alive or zombie) is a leaked process.
+        let pid: i32 = std::fs::read_to_string(&path)
+            .expect("the child recorded its pid before sleeping")
+            .trim()
+            .parse()
+            .expect("a numeric pid");
+        // SAFETY: signal 0 probes the pid without delivering a signal.
+        let probe = unsafe { libc::kill(pid, 0) };
+        let err = std::io::Error::last_os_error();
+        assert_eq!(probe, -1, "the killed child is still alive");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ESRCH),
+            "the killed child left a process behind: {err}"
+        );
     }
 }
