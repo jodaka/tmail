@@ -68,16 +68,20 @@ fn the_saved_path_is_recorded_for_the_saved_part_not_the_current_one() {
         }),
     );
     assert_eq!(
-        s.caches
-            .saved_attachments
-            .get(&(request.locator.id.clone(), 3)),
+        s.caches.saved_attachments.get(&(
+            request.locator.mailbox.clone(),
+            request.locator.id.clone(),
+            3
+        )),
         Some(&final_path),
         "the path lands under the saved chip, not the focused one"
     );
     assert!(
-        !s.caches
-            .saved_attachments
-            .contains_key(&(request.locator.id, 5)),
+        !s.caches.saved_attachments.contains_key(&(
+            request.locator.mailbox.clone(),
+            request.locator.id.clone(),
+            5
+        )),
         "the chip that was focused at completion never received the path"
     );
 }
@@ -194,9 +198,10 @@ fn enter_reuses_a_session_saved_attachment_path() {
     let mut s = reader_with_attachments();
     let saved = PathBuf::from("/home/u/Downloads/report.pdf");
     let message_id = s.open_message.as_loaded().unwrap().id.clone();
+    let mailbox = s.open_message.as_loaded().unwrap().mailbox_id.clone();
     s.caches
         .saved_attachments
-        .insert((message_id, 3), saved.clone());
+        .insert((mailbox, message_id, 3), saved.clone());
     let effects = reduce(&mut s, Action::Activate);
     let (_, kind) = effect_parts(&effects);
     assert_eq!(
@@ -204,6 +209,29 @@ fn enter_reuses_a_session_saved_attachment_path() {
         OperationKind::Platform(PlatformOperation::OpenPath { path: saved }),
         "Enter opens a saved file without a second download"
     );
+}
+
+/// A session path saved under a twin message of ANOTHER mailbox must
+/// never be reused (review 22): the reuse key is mailbox-scoped, matching
+/// the per-mailbox scope of backend ids.
+#[test]
+fn a_twin_message_in_another_mailbox_never_reuses_the_saved_path() {
+    let mut s = reader_with_attachments();
+    let saved = PathBuf::from("/home/u/Downloads/twin.pdf");
+    let (message_id, message_mailbox) = {
+        let message = s.open_message.as_loaded().unwrap();
+        (message.id.clone(), message.mailbox_id.clone())
+    };
+    // The twin lives in another mailbox under the same backend id.
+    let twin_key = (MailboxId(String::from("other")), message_id.clone(), 3);
+    s.caches.saved_attachments.insert(twin_key, saved);
+    let effects = reduce(&mut s, Action::SaveAttachment);
+    let (_, kind) = effect_parts(&effects);
+    let OperationKind::Files(FileOperation::SaveAttachment { request, .. }) = kind else {
+        panic!("expected a fresh SaveAttachment, got {kind:?}");
+    };
+    assert_eq!(request.locator.id, message_id, "the open message's chip");
+    assert_eq!(request.locator.mailbox, message_mailbox);
 }
 
 #[test]
@@ -330,9 +358,10 @@ fn o_reuses_a_path_saved_this_session_without_a_second_save() {
     let mut s = reader_with_attachments();
     let saved = PathBuf::from("/home/u/Downloads/report.pdf");
     let message_id = s.open_message.as_loaded().unwrap().id.clone();
+    let mailbox = s.open_message.as_loaded().unwrap().mailbox_id.clone();
     s.caches
         .saved_attachments
-        .insert((message_id, 3), saved.clone());
+        .insert((mailbox, message_id, 3), saved.clone());
     let effects = reduce(&mut s, Action::OpenAttachment);
     // Straight to the opener — no download, no duplicate file.
     let (_, kind) = effect_parts(&effects);

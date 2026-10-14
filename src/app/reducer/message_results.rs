@@ -166,10 +166,13 @@ pub(crate) fn message_loaded(
     snippet: Option<String>,
 ) -> Vec<Effect> {
     let message_id = message.id.clone();
+    // The cache keys pair mailbox + id (review 22): ids are per-mailbox.
+    let open_mailbox = message.mailbox_id.clone();
+    let cache_key = (open_mailbox.clone(), message_id.clone());
     let has_attachments = !message.attachments.is_empty();
     // The message was fully fetched this session: never re-requested for
     // a preview, even when its body carries no preview text.
-    state.caches.preview_requested.insert(message_id.clone());
+    state.caches.preview_requested.insert(cache_key.clone());
     // Ticket haeb: cache the viewed message (bounded by [tmail.cache]) —
     // as an effect, so the write never blocks the reducer. The message is
     // shared, not copied (ticket pa64): state and the store effect hold
@@ -198,18 +201,21 @@ pub(crate) fn message_loaded(
         // it instead of re-fetching the message (ticket wxtx).
         state
             .caches
-            .insert_preview(message_id.clone(), snippet.clone());
+            .insert_preview(cache_key.clone(), snippet.clone());
         if let Some(Route::Message(route)) = state.session.routes.last_mut()
             && route.summary.id == message_id
             && route.summary.snippet.is_none()
         {
             route.summary.snippet = Some(snippet.clone());
         }
+        // The page row fills only when it belongs to the message's own
+        // mailbox (review 22): the id is per-mailbox, and a cross-mailbox
+        // twin must not adopt this message's snippet.
         if let Some(summary) = state
             .messages
             .items
             .iter_mut()
-            .find(|s| s.id == message_id && s.snippet.is_none())
+            .find(|s| s.id == message_id && s.mailbox_id == open_mailbox)
         {
             summary.snippet = Some(snippet);
         }
@@ -559,10 +565,14 @@ pub(crate) fn apply_page(
     // A fresh envelope listing carries no snippets (ADR 0001 finding 2),
     // so restore what this session already previewed: a periodic refresh
     // or a page change must render the same previews it replaces, never
-    // clear them (ticket wxtx).
+    // clear them (ticket wxtx). Keys pair mailbox + id (review 22): an
+    // id-only key could serve another mailbox's twin row.
     for item in &mut state.messages.items {
         if item.snippet.is_none()
-            && let Some(text) = state.caches.previews.get(&item.id)
+            && let Some(text) = state
+                .caches
+                .previews
+                .get(&(item.mailbox_id.clone(), item.id.clone()))
         {
             item.snippet = Some(text.clone());
         }
@@ -583,7 +593,13 @@ pub(crate) fn start_missing_previews(state: &mut AppState) -> Vec<Effect> {
         .messages
         .items
         .iter()
-        .filter(|s| s.snippet.is_none() && !state.caches.preview_requested.contains(&s.id))
+        .filter(|s| {
+            s.snippet.is_none()
+                && !state
+                    .caches
+                    .preview_requested
+                    .contains(&(s.mailbox_id.clone(), s.id.clone()))
+        })
         .map(|summary| {
             state
                 .session
@@ -604,24 +620,26 @@ pub(crate) fn complete_cache_preview_load(
     locator: &MessageLocator,
     result: OperationResult,
 ) -> Vec<Effect> {
+    // Match the row the read was dispatched for by mailbox + id (review
+    // 22): backend ids are per-mailbox, and a result that survived a
+    // mailbox switch must never fill the new mailbox's same-id twin.
     let Some(summary) = state
         .messages
         .items
         .iter()
-        .find(|s| s.id == locator.id)
+        .find(|s| s.id == locator.id && s.mailbox_id == locator.mailbox)
         .cloned()
     else {
         tracing::debug!(id = %locator.id.0, "preview cache read for an unlisted row");
         return Vec::new();
     };
+    let cache_key = (locator.mailbox.clone(), locator.id.clone());
     match result.outcome {
         Ok(OperationOutcome::MessagePreview { message, preview }) => {
-            state.caches.preview_requested.insert(summary.id.clone());
+            state.caches.preview_requested.insert(cache_key.clone());
             match preview {
                 Some(text) => {
-                    state
-                        .caches
-                        .insert_preview(summary.id.clone(), text.clone());
+                    state.caches.insert_preview(cache_key.clone(), text.clone());
                     if let Some(item) = state.messages.items.iter_mut().find(|s| s.id == summary.id)
                     {
                         item.snippet = Some(text);
@@ -657,7 +675,7 @@ pub(crate) fn complete_cache_preview_load(
                 return Vec::new();
             }
             state.caches.preview_fetches_for_page += 1;
-            state.caches.preview_requested.insert(summary.id.clone());
+            state.caches.preview_requested.insert(cache_key);
             vec![
                 state
                     .session
@@ -689,16 +707,19 @@ pub(crate) fn preview_loaded(
     message: Message,
     snippet: Option<String>,
 ) -> Vec<Effect> {
+    // The derived values are computed before the message moves into its
+    // shared allocation (ticket pa64): the preview path never deep-copies
+    // the body. The marker and the preview store are keyed by mailbox +
+    // id (review 22): backend ids are per-mailbox, so a bare id would
+    // suppress or satisfy another mailbox's twin row.
+    let message_id = message.id.clone();
+    let cache_key = (message.mailbox_id.clone(), message_id.clone());
+    let has_attachments = !message.attachments.is_empty();
     // The message was fully fetched this session: never re-requested for
     // a preview, even when its body carries no preview text (marking here
     // also closes the race with the store effect below — a cache read
     // that ran before the write would otherwise re-fetch it).
-    state.caches.preview_requested.insert(message.id.clone());
-    // The derived values are computed before the message moves into its
-    // shared allocation (ticket pa64): the preview path never deep-copies
-    // the body.
-    let message_id = message.id.clone();
-    let has_attachments = !message.attachments.is_empty();
+    state.caches.preview_requested.insert(cache_key.clone());
     // Ticket haeb: cache the fetched message (bounded by [tmail.cache]) —
     // as an effect, so the write never blocks the reducer. Shared, not
     // copied (ticket pa64).
@@ -714,18 +735,26 @@ pub(crate) fn preview_loaded(
             })),
     ];
     if let Some(text) = snippet {
-        state
-            .caches
-            .insert_preview(message_id.clone(), text.clone());
+        state.caches.insert_preview(cache_key.clone(), text.clone());
     }
     // The parsed message knows attachments better than the envelope did
     // (ticket r84f: IMAP envelopes carry no body structure, so the flag
     // was false and the paperclip never rendered). The row's snippet,
-    // when still missing, fills from the preview computed above.
-    if let Some(summary) = state.messages.items.iter_mut().find(|s| s.id == message_id) {
+    // when still missing, fills from the preview computed above. The row
+    // must also belong to the message's mailbox (review 22).
+    if let Some(summary) = state
+        .messages
+        .items
+        .iter_mut()
+        .find(|s| s.id == message_id && s.mailbox_id == message.mailbox_id)
+    {
         summary.has_attachments = has_attachments;
         if summary.snippet.is_none() {
-            summary.snippet = state.caches.previews.get(&message_id).cloned();
+            summary.snippet = state
+                .caches
+                .previews
+                .get(&(message.mailbox_id.clone(), message_id.clone()))
+                .cloned();
         }
     }
     effects.extend(start_missing_previews(state));

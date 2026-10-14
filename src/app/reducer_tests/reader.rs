@@ -218,18 +218,16 @@ fn disk_cached_messages_fill_previews_without_fetching() {
         4,
         "previews fill from the cached copies"
     );
-    assert!(
-        s.messages
-            .items
-            .iter()
-            .all(|m| s.caches.previews.contains_key(&m.id))
-    );
-    assert!(
-        s.messages
-            .items
-            .iter()
-            .all(|m| s.caches.preview_requested.contains(&m.id))
-    );
+    assert!(s.messages.items.iter().all(|m| {
+        s.caches
+            .previews
+            .contains_key(&(m.mailbox_id.clone(), m.id.clone()))
+    }));
+    assert!(s.messages.items.iter().all(|m| {
+        s.caches
+            .preview_requested
+            .contains(&(m.mailbox_id.clone(), m.id.clone()))
+    }));
 }
 
 #[test]
@@ -624,7 +622,10 @@ fn the_reader_applies_the_snippet_the_manager_sent() {
         "the reducer must apply the delivered snippet verbatim"
     );
     assert_eq!(
-        s.caches.previews.get(&summary.id).map(String::as_str),
+        s.caches
+            .previews
+            .get(&(summary.mailbox_id.clone(), summary.id.clone()))
+            .map(String::as_str),
         Some("derived off the runtime"),
         "the session preview must match the delivered snippet too"
     );

@@ -225,34 +225,50 @@ pub(crate) const MAX_SESSION_PREVIEWS: usize = 1024;
 /// budget ran dry by the 5th page and previews stopped for the rest of
 /// the session). Previews stay decorative context (ticket wxtx) and every
 /// row remains individually openable.
+/// Session-cache identity for one message: the mailbox it was listed in
+/// plus the backend message id. Backend ids are per-mailbox (the same id
+/// addresses different messages in different folders), so every
+/// session-local message cache must be keyed by the pair, never the id
+/// alone (review 22): an id-only key let a late result or a reused path
+/// cross mailboxes and serve the twin's content.
+pub type MessageCacheKey = (MailboxId, MessageId);
+
 /// Session-local caches: everything here exists to avoid re-fetching or
 /// re-building work the backend already produced. Cleared implicitly when
 /// the session ends. The on-disk page cache (ticket haeb) lives in the
 /// operation manager — cache I/O must never run on the reducer thread.
 #[derive(Clone)]
 pub struct CacheBundle {
-    /// Message ids whose list preview (ticket wxtx) was already satisfied
-    /// this session — fetched, in flight, or served from the on-disk
-    /// message cache. One request per message, ever: a failed preview is
-    /// accepted (it is decorative context), and a message fetched in an
-    /// *earlier* session counts, so startup never re-fetches known mail.
-    pub preview_requested: HashSet<MessageId>,
+    /// Message locators whose list preview (ticket wxtx) was already
+    /// satisfied this session — fetched, in flight, or served from the
+    /// on-disk message cache. One request per message, ever: a failed
+    /// preview is accepted (it is decorative context), and a message
+    /// fetched in an *earlier* session counts, so startup never re-fetches
+    /// known mail. Keyed by (mailbox, id) (review 22): backend ids are
+    /// per-mailbox, and a bare id would suppress or satisfy the twin row
+    /// of another mailbox.
+    pub preview_requested: HashSet<MessageCacheKey>,
     /// Full-message preview fetches started for the *displayed* page
     /// (ticket j0ca, retuned ticket 7c0m): the per-page budget, reset
     /// whenever the displayed page is replaced. The cap is the page's
     /// own row count (see the retune note on `apply_page`). Cache reads
     /// are free and uncounted — only backend fetches consume it.
     pub(crate) preview_fetches_for_page: usize,
-    /// One-line body previews this session (ticket wxtx), keyed by backend
-    /// message id. `MessageSummary.snippet` does not survive a page load —
+    /// One-line body previews this session (ticket wxtx), keyed by
+    /// (mailbox, backend message id) — review 22: ids are per-mailbox, so
+    /// an id-only key could serve another mailbox's twin row.
+    /// `MessageSummary.snippet` does not survive a page load —
     /// fresh envelope listings carry none — so `apply_page` restores
     /// previews from here: a periodic refresh or a page change renders the
     /// same rows it replaced, without re-fetching anything.
-    pub previews: HashMap<MessageId, String>,
+    pub previews: HashMap<MessageCacheKey, String>,
     /// Paths where attachments were saved this session, keyed by
-    /// (message id, part id) (plan §15). `Open` reuses the saved file
-    /// instead of writing a duplicate; cleared implicitly with the state.
-    pub saved_attachments: HashMap<(MessageId, usize), PathBuf>,
+    /// (mailbox, message id, part id) (plan §15, review 22). `Open` reuses
+    /// the saved file instead of writing a duplicate; cleared implicitly
+    /// with the state. The mailbox is part of the key because backend ids
+    /// collide across mailboxes — a twin row must not reuse the path of
+    /// the message the user actually saved from.
+    pub saved_attachments: HashMap<(MailboxId, MessageId, usize), PathBuf>,
     /// Cached scrollable reader document (perf, `ui::screens::reader`
     /// `CachedReaderDoc`): building it re-parses the whole message HTML,
     /// and it used to run twice per wheel event — once in the reducer's
@@ -269,12 +285,12 @@ impl CacheBundle {
     /// markers bounded (ticket kkaq): at [`MAX_SESSION_PREVIEWS`] both
     /// clear, so a long session cannot grow the maps without bound, and
     /// the visible rows simply re-fetch their snippets.
-    pub(crate) fn insert_preview(&mut self, id: MessageId, snippet: String) {
-        if self.previews.len() >= MAX_SESSION_PREVIEWS && !self.previews.contains_key(&id) {
+    pub(crate) fn insert_preview(&mut self, key: MessageCacheKey, snippet: String) {
+        if self.previews.len() >= MAX_SESSION_PREVIEWS && !self.previews.contains_key(&key) {
             self.previews.clear();
             self.preview_requested.clear();
         }
-        self.previews.insert(id, snippet);
+        self.previews.insert(key, snippet);
     }
 }
 

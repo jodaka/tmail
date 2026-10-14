@@ -935,16 +935,21 @@ fn session_previews_are_bounded() {
     for i in 0..crate::app::state::MAX_SESSION_PREVIEWS {
         let mut row = base.clone();
         row.id = MessageId(format!("p{i}"));
-        s.caches
-            .insert_preview(row.id.clone(), format!("snippet {i}"));
+        s.caches.insert_preview(
+            (row.mailbox_id.clone(), row.id.clone()),
+            format!("snippet {i}"),
+        );
     }
     assert_eq!(
         s.caches.previews.len(),
         crate::app::state::MAX_SESSION_PREVIEWS
     );
     // One more distinct preview over the cap clears both maps…
-    s.caches
-        .insert_preview(MessageId(String::from("overflow")), String::from("snippet"));
+    let overflow_mailbox = base.mailbox_id.clone();
+    s.caches.insert_preview(
+        (overflow_mailbox, MessageId(String::from("overflow"))),
+        String::from("snippet"),
+    );
     // …the request markers with them…
     assert!(s.caches.preview_requested.is_empty());
     // …and the inserted snippet lands in the fresh map.
@@ -1002,4 +1007,197 @@ fn a_mailbox_switch_cancels_outstanding_previews() {
     assert!(s.session.operations.get(preview2.id).is_none());
     // …and unrelated work is untouched.
     assert!(s.session.operations.get(page_id).is_some());
+}
+
+// ── Cross-mailbox cache identity (review 22) ──────────────────────────
+
+/// One displayed row of mailbox `new` whose backend id collides with the
+/// same id the `old` mailbox's operations address (review 22: ids are
+/// per-mailbox). Built from the inbox fixture because the mock pages of
+/// unknown mailboxes are empty.
+fn displaced_row(mailbox: &MailboxId, twin: &MessageId) -> MessageSummary {
+    let mut row = mock::mock_page(&inbox_id(), 0, 1).items.remove(0);
+    row.id = twin.clone();
+    row.mailbox_id = mailbox.clone();
+    row.snippet = None;
+    row
+}
+
+/// A cache read dispatched against another mailbox's locator never fills
+/// a same-id row of the displayed page (review 22): `switch_mailbox`
+/// cancels `MailOperation::Preview` but leaves `CachePreviewLoad` reads
+/// alive, and backend ids are per-mailbox — the id addresses a different
+/// message once the page is replaced. Before the fix the read matched by
+/// bare id, painted the old mailbox's snippet onto the new twin, and
+/// marked the twin as already-previewed.
+#[test]
+fn a_late_cache_read_for_another_mailbox_never_fills_a_same_id_row() {
+    let mut s = state();
+    let old = MailboxId(String::from("old"));
+    let new = MailboxId(String::from("new"));
+    let twin = MessageId(String::from("twin"));
+    s.messages.items = vec![displaced_row(&new, &twin)];
+
+    // The old mailbox's cache read registers through the registry so the
+    // result routes exactly as a real late completion would.
+    let read = s
+        .session
+        .operations
+        .start_background(OperationKind::Cache(CacheOperation::CachePreviewLoad {
+            locator: crate::domain::MessageLocator {
+                mailbox: old.clone(),
+                id: twin.clone(),
+                message_id: None,
+            },
+        }))
+        .id;
+    let message = mock::mock_message(&displaced_row(&old, &twin));
+    let effects = reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id: read,
+            outcome: Ok(fetched_outcome(message)),
+        }),
+    );
+
+    // Dropped: the row stays snippet-less, and the session maps gained
+    // nothing for either mailbox key.
+    no_effects(&effects);
+    assert!(s.messages.items[0].snippet.is_none());
+    assert_eq!(s.caches.previews.len(), 0);
+    assert!(s.caches.preview_requested.is_empty());
+}
+
+/// The still-working half: a read for the DISPLAYED mailbox's twin serves
+/// its row while the other mailbox twin's cached preview stays in the map
+/// untouched — mailbox-scoped keys keep twins apart, never suppress.
+#[test]
+fn a_cache_read_matches_its_own_mailboxes_twin_only() {
+    let mut s = state();
+    let old = MailboxId(String::from("old"));
+    let new = MailboxId(String::from("new"));
+    let twin = MessageId(String::from("twin"));
+    s.messages.items = vec![displaced_row(&new, &twin)];
+
+    // The session already previewed the old mailbox's twin.
+    s.caches
+        .insert_preview((old.clone(), twin.clone()), String::from("old text"));
+
+    let read = s
+        .session
+        .operations
+        .start_background(OperationKind::Cache(CacheOperation::CachePreviewLoad {
+            locator: crate::domain::MessageLocator {
+                mailbox: new.clone(),
+                id: twin.clone(),
+                message_id: None,
+            },
+        }))
+        .id;
+    let message = mock::mock_message(&displaced_row(&new, &twin));
+    let _ = reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id: read,
+            outcome: Ok(fetched_outcome(message)),
+        }),
+    );
+
+    // The displayed twin's row and map entry filled; the old twin's
+    // preview is intact under its own key.
+    assert_eq!(
+        s.caches
+            .previews
+            .get(&(old, twin.clone()))
+            .map(String::as_str),
+        Some("old text"),
+        "the other mailbox's cached preview is untouched"
+    );
+    assert!(s.caches.previews.contains_key(&(new, twin.clone())));
+    assert!(s.messages.items[0].snippet.is_some());
+}
+
+/// A full-message preview fetch for the OLD mailbox (one that slipped
+/// past `cancel_previews`) must not paint the displayed same-id row —
+/// `preview_loaded` matches rows by mailbox + id.
+#[test]
+fn a_late_preview_fetch_for_another_mailbox_never_fills_the_displayed_row() {
+    let mut s = state();
+    let old = MailboxId(String::from("old"));
+    let new = MailboxId(String::from("new"));
+    let twin = MessageId(String::from("twin"));
+    s.messages.items = vec![displaced_row(&new, &twin)];
+
+    let fetch = s
+        .session
+        .operations
+        .start_background(OperationKind::Mail(MailOperation::Preview(
+            crate::domain::MessageLocator {
+                mailbox: old.clone(),
+                id: twin.clone(),
+                message_id: None,
+            },
+        )))
+        .id;
+    let message = mock::mock_message(&displaced_row(&old, &twin));
+    let effects = reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id: fetch,
+            outcome: Ok(fetched_outcome(message)),
+        }),
+    );
+
+    // The displayed twin is untouched. The fetch did happen for the old
+    // mailbox's own twin, so that key alone carries the result (and its
+    // caches write effects are fine to emit — the old twin is real).
+    let fills = effects
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                OperationKind::Cache(CacheOperation::CacheMessageStore { .. })
+            )
+        })
+        .count();
+    assert_eq!(fills, 1, "the fetch is cached under the old mailbox only");
+    assert!(s.messages.items[0].snippet.is_none());
+    assert!(
+        !s.caches.previews.contains_key(&(new, twin)),
+        "the new mailbox gained nothing"
+    );
+}
+
+/// The mirror of the above: the same late fetch for the DISPLAYED
+/// mailbox's twin still fills its row — mailbox-scoped matching did not
+/// break the normal path.
+#[test]
+fn a_late_preview_fetch_still_fills_its_own_mailboxes_row() {
+    let mut s = state();
+    let new = MailboxId(String::from("new"));
+    let twin = MessageId(String::from("twin"));
+    s.messages.items = vec![displaced_row(&new, &twin)];
+
+    let fetch = s
+        .session
+        .operations
+        .start_background(OperationKind::Mail(MailOperation::Preview(
+            crate::domain::MessageLocator {
+                mailbox: new.clone(),
+                id: twin.clone(),
+                message_id: None,
+            },
+        )))
+        .id;
+    let message = mock::mock_message(&displaced_row(&new, &twin));
+    let _ = reduce(
+        &mut s,
+        Action::BackendCompleted(OperationResult {
+            id: fetch,
+            outcome: Ok(fetched_outcome(message)),
+        }),
+    );
+
+    assert!(s.messages.items[0].snippet.is_some());
+    assert!(s.caches.previews.contains_key(&(new, twin)));
 }

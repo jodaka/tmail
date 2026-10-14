@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 22 | Medium | app/state | Previews/saved attachments keyed by `MessageId` alone — cross-mailbox collisions |
 | 23 | Medium | wizard | Stale discovery results apply off-screen; `e`/`r` are not gated while discovering |
 | 24 | Low | wizard | Repeated `Enter` on Confirm starts concurrent account saves (no busy gate) |
 | 25 | Low | app/overlays | An error modal opened over another overlay restores focus to a vanished overlay |
@@ -44,12 +43,6 @@
 ---
 
 ## Detailed findings
-
-### 22. Medium — Session caches keyed by `MessageId` only
-
-**Location:** `src/app/state.rs:231,246,250`; `src/app/reducer/message_results.rs:526-533,570-584`
-
-`previews`, `preview_requested`, and `saved_attachments` use bare `MessageId` keys, while backend ids are per-mailbox (`MessageLocator` always pairs mailbox+id). `cancel_previews` only cancels `MailOperation::Preview`, leaving `CacheOperation::CachePreviewLoad` reads alive across `switch_mailbox`, and completion looks up rows by `s.id == locator.id` without comparing `mailbox_id`. Same-id rows in a different mailbox can receive another mailbox's snippet/attachment path. The cache test only registers `MailOperation::Preview`, missing the cache stage.
 
 ### 23. Medium — Stale discovery result / ungated override keys
 
@@ -120,7 +113,7 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 
 ## Test-quality observations
 
-- `reducer_tests/cache.rs:926` registers only `MailOperation::Preview` when testing switch cancellation, missing the `CachePreviewLoad` stage that survives a mailbox switch (finding 22).- `reducer_tests/composer.rs:65` codifies the composer overwrite on mailbox switch without asserting the parked draft was secured (finding 15).
+- `reducer_tests/cache.rs:926` registers only `MailOperation::Preview` when testing switch cancellation, missing the `CachePreviewLoad` stage that survives a mailbox switch (fixed with finding 22: the cache stage now has its own regression tests, `a_late_cache_read_for_another_mailbox_never_fills_a_same_id_row` and siblings).- `reducer_tests/composer.rs:65` codifies the composer overwrite on mailbox switch without asserting the parked draft was secured (finding 15).
 - No test drives a foreground failure arriving while help/chooser/switcher/mailboxes is open (finding 25) or `Tick` during the wizard (finding 17).
 - Attachment tests never move the reader focus between `SaveAttachment` start and completion (finding 13).
 - The suite otherwise shows unusually good discipline: process cancellation/timeouts, sanitization, private-FS modes, journal atomicity, keymap parsing, and reducer state machines all have direct tests. The gaps above cluster exactly where two subsystems interact (overlay vs. result routing; composer identity vs. send completion).
@@ -137,5 +130,5 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 
 ## Suggested priority
 
-2. Findings 12–23 — behavioral bugs clustered around composer/draft/cache lifecycles; each needs a regression test.
+2. Findings 12–23 — behavioral bugs clustered around composer/draft/cache lifecycles; each needs a regression test. (Remaining: finding 23.)
 5. Remaining Low items — batch fixes with the surrounding code.

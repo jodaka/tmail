@@ -285,7 +285,14 @@ pub(crate) fn open_selected_attachment(state: &mut AppState) -> Vec<Effect> {
     let Some((_, attachment)) = selected_attachment(state) else {
         return Vec::new();
     };
-    let key = (message.id.clone(), attachment.part_id);
+    // Keyed by mailbox + id + (plan §15, review 22): backend ids collide
+    // across mailboxes, so a twin message in another mailbox must not
+    // reuse the twin's saved file path.
+    let key = (
+        message.mailbox_id.clone(),
+        message.id.clone(),
+        attachment.part_id,
+    );
     if let Some(path) = state.caches.saved_attachments.get(&key).cloned() {
         tracing::debug!(path = %path.display(), "opening previously saved attachment");
         return vec![state.session.operations.start(OperationKind::Platform(
@@ -340,7 +347,11 @@ pub(crate) fn attachment_saved(
     path: &std::path::Path,
 ) -> Vec<Effect> {
     state.caches.saved_attachments.insert(
-        (request.locator.id.clone(), request.part_id),
+        (
+            request.locator.mailbox.clone(),
+            request.locator.id.clone(),
+            request.part_id,
+        ),
         path.to_path_buf(),
     );
     state.set_status(format!("Saved to {}", path.display()));
