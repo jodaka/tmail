@@ -14,8 +14,6 @@
 | 28 | Low | runtime/tasks | Raw URL logged unsanitized at debug (`tasks.rs:494`) |
 | 29 | Low | main/signals | Signals are deferred while the external editor runs (Ctrl-Z in the editor suspends on return) |
 | 30 | Low | view/ui | `u16` overflow in overlay math at absurd terminal widths (debug panic) |
-| 31 | Low | backend/map | `tz_hour.abs()` / minute math can panic or wrap on malformed backend date fields |
-| 32 | Low | domain/draft | `start_save`'s overflow fallback overflows eagerly exactly when it is used |
 | 33 | Low | domain/draft | `confirm_saved` overwrites `remote_id` from a stale confirmation |
 | 34 | Low | backend/journal | Account scope name `".."` escapes the journal root |
 | 35 | Low | domain/paths | `expand_tilde` corrupts non-UTF-8 paths |
@@ -58,8 +56,6 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 
 ### 31-35. Low — Backend/domain robustness
 
-- `backend/himalaya/map.rs:239`: `raw.tz_hour.abs() * 60 + raw.tz_minute as i32` panics on `i32::MIN` (debug) and wraps for large fields; `tz_minute as i32` also wraps. The function promises "never a panic".
-- `domain/draft.rs:206-208`: `unwrap_or(now.timestamp_millis() * 1_000_000)` evaluates eagerly and overflows exactly for the out-of-nanos-range dates where `timestamp_nanos_opt()` is `None`.
 - `domain/draft.rs:226-232`: `confirm_saved` guards `saved_revision` against stale confirmations but unconditionally overwrites `remote_id`, so an old confirmation can point at a copy a newer save deleted.
 - `backend/journal.rs:137-150,222-237`: the scope sanitizer preserves `.`, so an account named `..` escapes the drafts root; config/CLI-controlled, but it defeats the sanitizer's stated purpose.
 - `domain/paths.rs:101-108`: `to_string_lossy()` + `home.join(rest)` replaces non-UTF-8 bytes with U+FFFD, pointing at a different file.
