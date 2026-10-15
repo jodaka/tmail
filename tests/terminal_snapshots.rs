@@ -3302,6 +3302,48 @@ fn wizard_email_screen_shows_validation_error_in_place() {
 }
 
 #[test]
+fn wizard_smtpless_error_on_w4_renders_fully_without_clipping() {
+    // Review finding 43: the W4 no-SMTP error must both point at the
+    // server list and fit inside the 80-wide content column (plus the
+    // two-character marker), so no terminal-width clipping hides the
+    // tail of the instruction.
+    let mut state = wizard_state();
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.email.address.value = String::from("u@gmail.com");
+    }
+    let submit = reducer::reduce(&mut state, Action::Wizard(WizardAction::SubmitEmail));
+    let id = submit[0].id;
+    let mut smtpless = gmail_service();
+    smtpless.smtp = None;
+    // Drive the real flow: discovery → service select → credentials →
+    // submit (the failing test attempt) — then render at 80 columns.
+    reducer::reduce(&mut state, discovered_result(id, vec![smtpless]));
+    reducer::reduce(&mut state, Action::Wizard(WizardAction::SelectService));
+    if let Some(wizard) = state.session.wizard.as_mut() {
+        wizard.credentials.username.value = String::from("u@gmail.com");
+        wizard.credentials.password.value = String::from("pw");
+    }
+    reducer::reduce(&mut state, Action::Wizard(WizardAction::SubmitCredentials));
+    reducer::reduce(&mut state, Action::Wizard(WizardAction::SubmitCredentials));
+    let text = text_of(&buffer_after(&mut state, &[], 80, 24));
+
+    assert!(
+        text.contains("no SMTP server"),
+        "the no-SMTP flag is visible: {text}"
+    );
+    let full = "the candidate has no SMTP server; Esc returns to the server list to edit it";
+    assert!(
+        text.contains(full),
+        "the whole instruction renders unclipped at 80 columns: {text}"
+    );
+    assert_eq!(
+        tmail::app::wizard::WizardStep::Credentials,
+        state.session.wizard.as_ref().expect("wizard active").step,
+        "stays on the credentials screen"
+    );
+}
+
+#[test]
 fn wizard_discovery_screen_lists_ranked_services_with_source_labels() {
     let mut state = wizard_state();
     if let Some(wizard) = state.session.wizard.as_mut() {

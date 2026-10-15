@@ -952,7 +952,7 @@ fn submit_credentials(wizard: &mut WizardState, state: &mut AppState) -> Vec<Eff
         // `e` types into the focused field — the edit shortcut lives on
         // W2, the server list. Point the user there.
         wizard.last_error = Some(String::from(
-            "the candidate has no SMTP server; step back with Esc to the server list and edit the servers there",
+            "the candidate has no SMTP server; Esc returns to the server list to edit it",
         ));
         return Vec::new();
     };
