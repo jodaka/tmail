@@ -14,7 +14,6 @@
 | 28 | Low | runtime/tasks | Raw URL logged unsanitized at debug (`tasks.rs:494`) |
 | 29 | Low | main/signals | Signals are deferred while the external editor runs (Ctrl-Z in the editor suspends on return) |
 | 30 | Low | view/ui | `u16` overflow in overlay math at absurd terminal widths (debug panic) |
-| 33 | Low | domain/draft | `confirm_saved` overwrites `remote_id` from a stale confirmation |
 | 34 | Low | backend/journal | Account scope name `".."` escapes the journal root |
 | 35 | Low | domain/paths | `expand_tilde` corrupts non-UTF-8 paths |
 | 36 | Low | config/write | A failed fresh-file save can leave a partial config on disk |
@@ -56,7 +55,6 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 
 ### 31-35. Low — Backend/domain robustness
 
-- `domain/draft.rs:226-232`: `confirm_saved` guards `saved_revision` against stale confirmations but unconditionally overwrites `remote_id`, so an old confirmation can point at a copy a newer save deleted.
 - `backend/journal.rs:137-150,222-237`: the scope sanitizer preserves `.`, so an account named `..` escapes the drafts root; config/CLI-controlled, but it defeats the sanitizer's stated purpose.
 - `domain/paths.rs:101-108`: `to_string_lossy()` + `home.join(rest)` replaces non-UTF-8 bytes with U+FFFD, pointing at a different file.
 
