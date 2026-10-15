@@ -539,7 +539,13 @@ fn wizard_action(state: &mut AppState, action: &WizardAction) -> Vec<Effect> {
             }
         }
         WizardAction::OverrideServers => {
-            if wizard.step == WizardStep::Discovery && !wizard.discovery.override_open {
+            // Gates (review 23): the shortcut lives only on W2, and while
+            // detection runs the spinner replaces the whole screen — an
+            // override form opened now would be edited invisibly.
+            if wizard.step == WizardStep::Discovery
+                && !wizard.discovery.override_open
+                && !wizard.discovery.discovering
+            {
                 open_override(&mut wizard);
                 Vec::new()
             } else {
@@ -550,7 +556,21 @@ fn wizard_action(state: &mut AppState, action: &WizardAction) -> Vec<Effect> {
             }
         }
         WizardAction::RerunDiscovery => {
-            if wizard.step == WizardStep::Discovery && !wizard.discovery.override_open {
+            // Gates (review 23): `r` is a W2 shortcut that must not fire
+            // while a discovery is already running — the workers ignore
+            // cancellation, so each press would add an unbounded hidden
+            // 15 s lookup on top of the spinner.
+            if wizard.step == WizardStep::Discovery
+                && !wizard.discovery.override_open
+                && !wizard.discovery.discovering
+            {
+                // The previous run should never still be registered once
+                // `discovering` is false, but cancelling it (instead of
+                // just overwriting `in_flight`) keeps the registry honest
+                // if a result has not drained yet.
+                if let Some(id) = wizard.in_flight.take() {
+                    state.session.operations.cancel(id);
+                }
                 wizard.last_error = None;
                 wizard.discovery.discovering = true;
                 wizard.discovery.services.clear();
@@ -693,6 +713,16 @@ fn submit_email(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> {
     wizard.last_error = None;
     wizard.discovery.gmail_hint = is_google_domain(&email);
     wizard.step = WizardStep::Discovery;
+    // A fresh W2 starts clean (review 23): a stale override form left
+    // from any earlier discovery would render folded into the new one —
+    // the fields are rebuilt from the current email whenever the user
+    // opens the form (or an empty result opens it automatically).
+    wizard.discovery.override_open = false;
+    wizard.discovery.override_fields = [
+        TextField::new(String::new()),
+        TextField::new(String::new()),
+        TextField::new(String::new()),
+    ];
     wizard.discovery.discovering = true;
     wizard.discovery.services.clear();
     wizard.discovery.service_index = 0;
@@ -990,6 +1020,15 @@ fn cancel_wizard(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> 
             state.session.quit_requested = true;
         }
         WizardStep::Discovery => {
+            // Review 23: the discovery fetch must die with the screen it
+            // was started for — like the Testing arm below. Leaving it
+            // running painted a late Err onto the Email screen and folded
+            // an late empty result's override form into stale state.
+            if let Some(id) = wizard.in_flight.take() {
+                state.session.operations.cancel(id);
+            }
+            wizard.discovery.discovering = false;
+            wizard.discovery.override_open = false;
             wizard.step = WizardStep::Email;
             wizard.last_error = None;
         }
@@ -1048,6 +1087,22 @@ fn wizard_completed(state: &mut AppState, result: &OperationResult) -> Vec<Effec
         return Vec::new();
     }
     wizard.in_flight = None;
+    // The screen must still be the one that started this operation
+    // (review 23): each submit sets its own step before starting the op,
+    // so a DiscoverConfig result only applies while W2 is displayed.
+    // Without the guard, the staleness bugs the `cancel_wizard` fix
+    // closes could survive any future in_flight bookkeeping slip.
+    let step = wizard.step;
+    let kind_matches_step = match &kind {
+        OperationKind::Account(AccountOperation::DiscoverConfig { .. }) => {
+            step == WizardStep::Discovery
+        }
+        OperationKind::Account(AccountOperation::SaveAccount { .. }) => step == WizardStep::Confirm,
+        _ => true,
+    };
+    if !kind_matches_step {
+        return Vec::new();
+    }
     match (&kind, &result.outcome) {
         (
             OperationKind::Account(AccountOperation::DiscoverConfig { .. }),

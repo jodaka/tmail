@@ -894,6 +894,151 @@ fn a_display_name_may_contain_spaces() {
     assert_eq!(wizard(&state).credentials.display_name.value, "uA B");
 }
 
+// ── Discovery staleness and gating (review 23) ────────────────────────
+
+/// Esc from W2 kills the discovery it belongs to (review 23): a late Err
+/// must not paint the Email screen's error, and a late empty Ok must not
+/// fold an off-screen override form into the next submission.
+#[test]
+fn esc_from_discovery_cancels_the_late_results_screen_ways() {
+    let mut state = state();
+    wizard_mut(&mut state).email.address = TextField::new("u@example.com");
+    let effects = act(&mut state, WizardAction::SubmitEmail);
+    assert_eq!(wizard(&state).step, WizardStep::Discovery);
+    let token = state
+        .session
+        .operations
+        .cancellation(effects[0].id)
+        .expect("the discovery op is registered");
+
+    // Back to the email screen while detection still runs.
+    act(&mut state, WizardAction::Cancel);
+    assert_eq!(wizard(&state).step, WizardStep::Email);
+    assert!(!wizard(&state).discovery.discovering);
+    assert!(!wizard(&state).discovery.override_open);
+    // The op is gone from the registry (late results become unknown)…
+    assert!(state.session.operations.get(effects[0].id).is_none());
+    assert!(token.is_cancelled());
+
+    // …the late Err paints nothing on the Email screen…
+    let late = fail_with(&mut state, &effects, "dns exploded");
+    no_effects(&late);
+    assert!(wizard(&state).last_error.is_none());
+
+    // …and the late empty Ok does not open the override form.
+    // (The op was already finished out of the registry; a second synthetic
+    // result with a re-registered op verifies the same staleness rule.)
+    let resubmit = act(&mut state, WizardAction::SubmitEmail);
+    assert_eq!(wizard(&state).step, WizardStep::Discovery);
+    act(&mut state, WizardAction::Cancel);
+    assert!(!wizard(&state).discovery.override_open);
+    no_effects(&fail_with(&mut state, &resubmit, "gone"));
+}
+
+/// A DiscoverConfig completion applies only while W2 is the displayed
+/// step (review 23): the in_flight id alone is not enough of a guard.
+#[test]
+fn a_discovery_result_is_rejected_off_its_screen_even_with_a_registered_op() {
+    let mut state = state();
+    wizard_mut(&mut state).email.address = TextField::new("u@example.com");
+    // Register a discovery op whose id the wizard's in_flight still
+    // contains, but force the step off W2 (a future in_flight bookkeeping
+    // slip must not resurrect the review 23 leak).
+    let effect =
+        state
+            .session
+            .operations
+            .start(OperationKind::Account(AccountOperation::DiscoverConfig {
+                email: String::from("u@example.com"),
+            }));
+    wizard_mut(&mut state).in_flight = Some(effect.id);
+    wizard_mut(&mut state).step = WizardStep::Identity;
+
+    let late = reduce(
+        &mut state,
+        Action::BackendCompleted(OperationResult {
+            id: effect.id,
+            outcome: Err(OperationFailure {
+                code: Some(1),
+                detail: String::from("late"),
+                retry: None,
+                ambiguous: false,
+            }),
+        }),
+    );
+    no_effects(&late);
+    assert!(wizard(&state).last_error.is_none());
+    assert_eq!(wizard(&state).step, WizardStep::Identity);
+}
+
+/// `e` and `r` are inert while detection runs (review 23): the spinner
+/// replaces the whole screen, so a hidden override form would be edited
+/// invisibly and additional discovery workers would pile up unbounded.
+#[test]
+fn e_and_r_do_nothing_while_discovery_runs() {
+    let mut state = state();
+    wizard_mut(&mut state).email.address = TextField::new("u@example.com");
+    let effects = act(&mut state, WizardAction::SubmitEmail);
+    assert!(wizard(&state).discovery.discovering);
+    let registered = state.session.operations.len();
+
+    // `e`: no hidden override form.
+    no_effects(&act(&mut state, WizardAction::OverrideServers));
+    assert!(!wizard(&state).discovery.override_open);
+
+    // `r`: no second discovery worker.
+    no_effects(&act(&mut state, WizardAction::RerunDiscovery));
+    assert_eq!(state.session.operations.len(), registered);
+    assert!(!effects.is_empty(), "the original detection is registered");
+    assert!(
+        state.session.operations.get(effects[0].id).is_some(),
+        "the original detection continues"
+    );
+
+    // Once the result lands, the shortcuts work again.
+    complete(&mut state, &effects, discovered(vec![gmail_service()]));
+    let again = act(&mut state, WizardAction::RerunDiscovery);
+    assert_eq!(again.len(), 1, "rerun after completion starts a fresh op");
+    // The rerun replaced the stale predecessor in_flight honestly.
+    assert!(state.session.operations.get(again[0].id).is_some());
+}
+
+/// Rerunning discovery cancels the predecessor instead of leaking it
+/// (review 23, registry hygiene half of the ungated `r` bug).
+#[test]
+fn a_discovery_rerun_replaces_the_registered_predecessor() {
+    let mut state = state();
+    wizard_mut(&mut state).email.address = TextField::new("other@example.com");
+    let first = act(&mut state, WizardAction::SubmitEmail);
+    // Complete the first run so `discovering` is false and `r` is legal.
+    complete(&mut state, &first, discovered(vec![gmail_service()]));
+    let rerun = act(&mut state, WizardAction::RerunDiscovery);
+    assert_eq!(rerun.len(), 1);
+
+    // A predecessor is still registered only in the pathological case,
+    // where the first result never drained. Re-feed it late: it was
+    // finished out of the registry by wizard_completed, so it must
+    // already be dead.
+    assert!(state.session.operations.get(first[0].id).is_none());
+}
+
+/// Esc from W2 also closes the override form (the close-the-form branch
+/// keeps precedence) — and because it returns to the email screen, the
+/// override state never leaks past the step change.
+#[test]
+fn esc_closes_the_override_before_stepping_back() {
+    let mut state = state();
+    wizard_mut(&mut state).email.address = TextField::new("u@custom.example");
+    let effects = act(&mut state, WizardAction::SubmitEmail);
+    complete(&mut state, &effects, discovered(Vec::new()));
+    assert!(wizard(&state).discovery.override_open);
+
+    act(&mut state, WizardAction::Cancel);
+    assert!(wizard(&state).step == WizardStep::Discovery);
+    assert!(!wizard(&state).discovery.override_open, "form closed first");
+    assert_eq!(wizard(&state).discovery.services.len(), 0);
+}
+
 /// Drives the wizard to the credentials screen (fields focused).
 fn drive_to_credentials(state: &mut AppState) {
     wizard_mut(state).email.address = TextField::new("u@example.com");
