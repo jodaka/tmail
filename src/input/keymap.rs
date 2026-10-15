@@ -187,7 +187,11 @@ impl ContextTable {
         table
     }
 
-    /// Replace one action's bindings (empty `specs` unbinds it).
+    /// Replace one action's bindings (empty `specs` unbinds it). A key
+    /// has exactly one owner in a context: an incoming spec still listed
+    /// by another action is taken away from it (review 26) — its old
+    /// owner's list and hint update in step, so help/status can never
+    /// advertise a binding that lookup no longer honors.
     fn set_action(&mut self, name: &str, action: Action, specs: impl IntoIterator<Item = KeySpec>) {
         if let Some(old) = self.by_action.remove(name) {
             for spec in old {
@@ -196,6 +200,7 @@ impl ContextTable {
         }
         let specs: Vec<KeySpec> = specs.into_iter().collect();
         for spec in &specs {
+            self.steal_key(spec);
             self.by_key.insert(*spec, action.clone());
         }
         if let Some(first) = specs.first() {
@@ -208,9 +213,52 @@ impl ContextTable {
         }
     }
 
+    /// Take `spec` away from every action that still lists it: the
+    /// previous owner's key list shrinks (its hint re-derives from the
+    /// first remaining key), an emptied action loses its list and hint,
+    /// and the pressed-key answer is seized for the new owner. Without
+    /// this, force-set paths (the structural restore, review 26) left the
+    /// old owner's bookkeeping claiming a key lookup now dispatches
+    /// elsewhere — `cancel`'s restored Esc coexisted with `trash`'s
+    /// help hint for the same key.
+    fn steal_key(&mut self, spec: &KeySpec) {
+        let owners: Vec<String> = self
+            .by_action
+            .iter()
+            .filter(|(_, keys)| keys.contains(spec))
+            .map(|(owner, _)| owner.clone())
+            .collect();
+        for owner in owners {
+            let Some(keys) = self.by_action.get_mut(&owner) else {
+                continue;
+            };
+            keys.retain(|key| key != spec);
+            if keys.is_empty() {
+                self.by_action.remove(&owner);
+                self.display.remove(&owner);
+            } else if let Some(first) = keys.first() {
+                self.display.insert(owner, first.display());
+            }
+        }
+        self.by_key.remove(spec);
+    }
+
     /// The keys bound to `name`, if any.
     fn keys_of(&self, name: &str) -> Option<&Vec<KeySpec>> {
         self.by_action.get(name)
+    }
+
+    /// The actions still listing `spec` (before a restore displacement,
+    /// review 26).
+    fn claimants(&self, spec: &KeySpec) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .by_action
+            .iter()
+            .filter(|(_, keys)| keys.contains(spec))
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort();
+        names
     }
 }
 
@@ -347,12 +395,29 @@ impl KeyMap {
                 .iter()
                 .map(|spec| parse_spec(spec).expect("built-in spec parses"))
                 .collect();
+            // The restore takes its default keys back even where another
+            // configured action still lists them (single ownership,
+            // review 26): say so, so the displaced action's silent loss
+            // is not a surprise.
+            let displaced: Vec<String> = specs
+                .iter()
+                .flat_map(|spec| self.global.claimants(spec))
+                .collect();
             let shown: Vec<String> = specs.iter().map(KeySpec::display).collect();
-            warnings.push(format!(
+            let mut warning = format!(
                 "[tmail.keybindings.global]: action {name:?} must keep at least one \
                  binding; its defaults were restored ({})",
                 shown.join(", ")
-            ));
+            );
+            if !displaced.is_empty() {
+                warning.push_str(&format!(
+                    "; \
+                     {} lost the restored key{}",
+                    displaced.join(", "),
+                    if displaced.len() == 1 { "" } else { "s" }
+                ));
+            }
+            warnings.push(warning);
             self.global.set_action(name, defaults.action.clone(), specs);
         }
     }
@@ -610,6 +675,87 @@ mod tests {
         );
         // …and the hint disappears with it.
         assert_eq!(keymap.hint(Some(Context::Global), "toggle_mouse"), None);
+    }
+
+    #[test]
+    fn restoring_structural_defaults_reclaims_keys_instead_of_double_binding() {
+        // Review 26: `cancel = []` releases Esc; `trash = ["Esc"]` claims
+        // it. The structural restore must take Esc back (single owner),
+        // not coexist with trash's stale list — before the fix, Esc
+        // dispatched to cancel while the help popup advertised
+        // "Trash Esc".
+        let tables = vec![KeybindingTable {
+            context: String::from("global"),
+            entries: vec![
+                (String::from("cancel"), vec![]),
+                (
+                    String::from("trash"),
+                    vec![String::from("Esc"), String::from("d")],
+                ),
+            ],
+        }];
+        let built = KeyMap::build(&tables);
+        assert!(built.errors.is_empty());
+
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        // Esc dispatches to the restored cancel…
+        assert_eq!(
+            built.keymap.lookup(&esc, Focus::MessageList),
+            Some(Action::BackOrCancel)
+        );
+        // …any claim to advertise Esc under trash — help or hint — is
+        // gone, and trash keeps its remaining `d`.
+        assert_ne!(
+            built.keymap.hint(Some(Context::Global), "trash"),
+            Some("Esc")
+        );
+        assert_eq!(
+            built.keymap.hint(Some(Context::Global), "trash"),
+            Some("d"),
+            "the remaining key finally drives the hint"
+        );
+        let trash = built
+            .keymap
+            .help_entries(Focus::MessageList)
+            .into_iter()
+            .find(|(label, _)| label == "Trash");
+        assert!(
+            trash
+                .as_ref()
+                .is_some_and(|(_, keys)| !keys.split(',').any(|k| k.contains("Esc"))),
+            "the help must not list Esc under trash: {trash:?}"
+        );
+        // A fully displaced action loses its entry outright.
+        let tables = vec![KeybindingTable {
+            context: String::from("global"),
+            entries: vec![
+                (String::from("cancel"), vec![]),
+                (String::from("trash"), vec![String::from("Esc")]),
+            ],
+        }];
+        let built = KeyMap::build(&tables);
+        assert_ne!(
+            built.keymap.hint(Some(Context::Global), "trash"),
+            Some("Esc"),
+        );
+    }
+
+    #[test]
+    fn the_structural_restore_reports_displaced_bindings() {
+        let tables = vec![KeybindingTable {
+            context: String::from("global"),
+            entries: vec![
+                (String::from("cancel"), vec![]),
+                (String::from("theme"), vec![String::from("Esc")]),
+            ],
+        }];
+        let built = KeyMap::build(&tables);
+        let restore = built
+            .warnings
+            .iter()
+            .find(|w| w.contains("cancel") && w.contains("restored"))
+            .expect("restore warning");
+        assert!(restore.contains("theme"), "{restore}");
     }
 
     #[test]
