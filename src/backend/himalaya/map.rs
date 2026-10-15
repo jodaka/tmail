@@ -236,11 +236,20 @@ fn date_header(headers: &[dto::HeaderDto], name: &str) -> Option<DateTime<FixedO
 /// sign rides on `tz_before_gmt` (fixture: `tz_before_gmt: false, tz_hour:
 /// 3` is `+03:00`); a malformed wall clock yields `None`, never a panic.
 fn fixed_datetime(raw: &dto::RawDateTimeDto) -> Option<DateTime<FixedOffset>> {
-    let minutes = raw.tz_hour.abs() * 60 + raw.tz_minute as i32;
+    // The offset fields are backend-supplied (review 31): saturate the
+    // whole pipeline instead of `abs()`/mul/add, which panic in debug on
+    // i32::MIN and wrap on huge values — failing the fn's own "never a
+    // panic" contract. `FixedOffset::east_opt` rejects any offset the
+    // saturated result cannot represent, so garbage stays a None date.
+    let minutes = raw
+        .tz_hour
+        .saturating_abs()
+        .saturating_mul(60)
+        .saturating_add(i32::try_from(raw.tz_minute).unwrap_or(i32::MAX));
     let offset_seconds = if raw.tz_before_gmt {
-        -minutes * 60
+        minutes.saturating_mul(-60)
     } else {
-        minutes * 60
+        minutes.saturating_mul(60)
     };
     let offset = FixedOffset::east_opt(offset_seconds)?;
     offset
@@ -958,5 +967,32 @@ mod tests {
             tz_minute: 0,
         });
         assert_eq!(broken, None);
+        // Malformed offset fields saturate instead of panicking/wrapping
+        // (review 31): an unrepresentable offset is None, a normal offset
+        // survives the saturating pipeline unchanged.
+        let absurd_offset = fixed_datetime(&dto::RawDateTimeDto {
+            year: 2026,
+            month: 2,
+            day: 28,
+            hour: 10,
+            minute: 3,
+            second: 40,
+            tz_before_gmt: false,
+            tz_hour: i32::MIN,
+            tz_minute: u32::MAX,
+        });
+        assert_eq!(absurd_offset, None, "saturated garbage is None, not a wrap");
+        let huge_minute = fixed_datetime(&dto::RawDateTimeDto {
+            year: 2026,
+            month: 2,
+            day: 28,
+            hour: 10,
+            minute: 3,
+            second: 40,
+            tz_before_gmt: false,
+            tz_hour: 0,
+            tz_minute: u32::MAX,
+        });
+        assert_eq!(huge_minute, None, "an overflowing minute cannot become a tz");
     }
 }

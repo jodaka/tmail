@@ -206,9 +206,16 @@ impl Draft {
         // sessions landing on a recorded stamp (silently overwriting the
         // other draft's journal file). Mix in a random 32-bit suffix; the
         // stamp keeps ids sortable by creation time.
-        let stamp = now
-            .timestamp_nanos_opt()
-            .unwrap_or(now.timestamp_millis() * 1_000_000);
+        //
+        // The fallback must be lazy and self-safe (review 32):
+        // `unwrap_or` evaluates its argument eagerly, so a clock outside
+        // chrono's i64-nanos span — exactly when the fallback runs — used
+        // to panic on the multiply itself (debug). The millis scaling is
+        // saturating, so even an absurd injected clock degrades to a
+        // bounded stamp instead of breaking identity minting.
+        let stamp =
+            now.timestamp_nanos_opt()
+                .unwrap_or_else(|| now.timestamp_millis().saturating_mul(1_000_000));
         let salt = fastrand::u32(..);
         self.local_id = Some(DraftId(format!("local-{stamp}-{salt:08x}")));
         if self.message_id.is_none() {
@@ -565,6 +572,25 @@ mod tests {
         d.note_edit(Some(at(30)));
         assert_eq!(d.save, DraftSaveState::Debouncing);
         assert!(d.autosave_due(at(32), DEFAULT_AUTOSAVE_DELAY_MS));
+    }
+
+    /// mint_identities must survive a clock anywhere the FixedOffset
+    /// domain supports (review 32): the eagerly evaluated fallback used
+    /// to panic on exactly the far-future dates where
+    /// `timestamp_nanos_opt()` is None — when the fallback was supposed
+    /// to take over.
+    #[test]
+    fn identities_mint_for_a_far_future_clock_without_panicking() {
+        let far_future = crate::domain::time::from_unix(32_503_680_000)
+            .expect("a year-3000 epoch builds");
+        let mut d = Draft::default();
+        let snap = d.start_save(far_future);
+        assert!(snap.local_id.0.starts_with("local-"), "an id mints");
+        assert!(snap.message_id.as_deref().is_some_and(|m| m.contains("@tmail.local>")));
+        // And the normal clock keeps producing the same shape of ids.
+        let mut near = Draft::default();
+        let snap = near.start_save(at(2));
+        assert!(!snap.local_id.0.is_empty());
     }
 
     #[test]
