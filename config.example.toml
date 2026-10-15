@@ -65,6 +65,8 @@ autosave_delay_ms = 2000
 
 [tmail.attachments]
 # Directory used by "save attachment" (expanded in Tmail, never via a shell).
+# Only ~ and ~/… spellings expand; anything else (~user) is rejected at startup
+# because it would silently stay a literal path.
 downloads_dir = "~/Downloads"
 
 [tmail.theme]
