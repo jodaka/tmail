@@ -442,11 +442,28 @@ fn write_document(path: &Path, doc: &DocumentMut, created: bool) -> Result<(), S
                 .map_err(|err| format!("could not create config directory: {err}"))?;
         }
         let mut file = open_new_private_file(path)?;
-        file.write_all(text.as_bytes())
-            .map_err(|err| format!("could not write config file: {err}"))
+        write_all_or_cleanup(path, &mut file, text.as_bytes())
     } else {
         write_existing_atomically(path, text.as_bytes())
     }
+}
+
+/// Write the fresh file's bytes, removing the file on any failure (review
+/// 36): a torn first write must not strand a half-size 0600 config on
+/// disk — the module promises nothing partial is left behind, and the
+/// caller never reports a created file for a failed save (the `Ok`
+/// report is where `created` lives). Generic over the writer so a failing
+/// write is unit-testable without exotic failure injection.
+fn write_all_or_cleanup<W: std::io::Write>(
+    path: &Path,
+    file: &mut W,
+    bytes: &[u8],
+) -> Result<(), String> {
+    if let Err(err) = file.write_all(bytes) {
+        let _ = std::fs::remove_file(path);
+        return Err(format!("could not write config file: {err}"));
+    }
+    Ok(())
 }
 
 /// Replace an existing file atomically (the `DraftJournal::write_atomic`
@@ -624,6 +641,35 @@ mod tests {
                 ("archive".into(), "[Gmail]/All Mail".into()),
             ],
         }
+    }
+
+    /// A failed fresh write leaves nothing on disk (review 36): the file
+    /// the save created is removed when the write tears, and the error
+    /// keeps the write failure as its cause. Exercises the cleanup through
+    /// a synthetic failing writer against the real filesystem.
+    #[test]
+    fn a_failed_fresh_write_removes_the_partial_file() {
+        struct FailWrite;
+        impl std::io::Write for FailWrite {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "ext4: no space",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        open_new_private_file(&path).expect("an empty 0600 file exists");
+        assert!(path.exists(), "precondition: created before the write");
+
+        let err = write_all_or_cleanup(&path, &mut FailWrite, b"partial bytes")
+            .expect_err("the synthetic write fails");
+        assert!(err.contains("could not write config file"), "{err}");
+        assert!(!path.exists(), "nothing partial is left behind");
     }
 
     #[test]
