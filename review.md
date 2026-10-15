@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 24 | Low | wizard | Repeated `Enter` on Confirm starts concurrent account saves (no busy gate) |
 | 25 | Low | app/overlays | An error modal opened over another overlay restores focus to a vanished overlay |
 | 26 | Low | input/keymap | Restoring structural defaults can leave one key bound to two actions; help text lies |
 | 27 | Low | input/mouse | Mouse drag release activates a click despite the documented contract |
@@ -42,10 +41,6 @@
 ---
 
 ## Detailed findings
-
-### 24. Low — Concurrent wizard saves
-
-`ConfirmSave` has no `in_flight`/busy gate and `AccountOperation::supersedes` returns false, so a second Enter starts a concurrent read-modify-write merge; the second `in_flight` overwrite hides the first completion, and Esc then cancels only the second. `WizardState::is_busy()` exists but has no callers.
 
 ### 25. Low — Focus restored to a vanished overlay
 
@@ -107,7 +102,7 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 ## Test-quality observations
 
 - `reducer_tests/cache.rs:926` registers only `MailOperation::Preview` when testing switch cancellation, missing the `CachePreviewLoad` stage that survives a mailbox switch (fixed with finding 22: the cache stage now has its own regression tests, `a_late_cache_read_for_another_mailbox_never_fills_a_same_id_row` and siblings).- `reducer_tests/composer.rs:65` codifies the composer overwrite on mailbox switch without asserting the parked draft was secured (finding 15).
-- No test drives a foreground failure arriving while help/chooser/switcher/mailboxes is open (finding 25) or `Tick` during the wizard (finding 17).
+- No test drives a foreground failure arriving while help/chooser/switcher/mailboxes is open (finding 25) — the wizard Tick half (finding 17) and the concurrent-save half (finding 24) are covered since their fixes.
 - Attachment tests never move the reader focus between `SaveAttachment` start and completion (finding 13).
 - The suite otherwise shows unusually good discipline: process cancellation/timeouts, sanitization, private-FS modes, journal atomicity, keymap parsing, and reducer state machines all have direct tests. The gaps above cluster exactly where two subsystems interact (overlay vs. result routing; composer identity vs. send completion).
 
