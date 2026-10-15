@@ -25,14 +25,14 @@ use crate::domain::sanitize::sanitize;
 
 /// Default page size when the config does not provide a usable one
 /// (plan §16/§17: explicit pagination, default 50).
-/// Default `[tmail.mail].mail.page_size` for manual pagination (ticket kjfq).
+/// Default `[tmail.mail].page_size` for manual pagination (ticket kjfq).
 pub const DEFAULT_PAGE_SIZE: usize = 50;
-/// Default `[tmail.mail].mail.page_size_auto` (ticket kjfq): size pages to the
+/// Default `[tmail.mail].page_size_auto` (ticket kjfq): size pages to the
 /// terminal so the whole page fits the list without scrolling.
 pub const DEFAULT_PAGE_SIZE_AUTO: bool = true;
 
 /// Default periodic refresh interval in seconds (plan §11/§19 Phase 9);
-/// `[tmail.mail].mail.refresh_interval_seconds = 0` disables the timer.
+/// `[tmail.mail].refresh_interval_seconds = 0` disables the timer.
 pub const DEFAULT_REFRESH_INTERVAL_SECONDS: u64 = 60;
 
 /// Default `[tmail.mail].max_concurrent_backend_calls`: how many backend
@@ -82,7 +82,7 @@ pub const fn max_in_flight_previews(total: usize) -> usize {
     2 * background_permits(total)
 }
 
-/// Bounds of `[tmail.composer].composer.autosave_delay_ms`: below the floor every
+/// Bounds of `[tmail.composer].autosave_delay_ms`: below the floor every
 /// keystroke would race a save; above the ceiling the debounce is not a
 /// debounce any more (plan §17: invalid autosave values are reported).
 pub const AUTOSAVE_DELAY_MIN_MS: u64 = 100;
@@ -339,15 +339,15 @@ pub struct Config {
 /// `[tmail]` table the same way for every account).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MailConfig {
-    /// `[tmail.mail].mail.page_size`, defaulting to [`DEFAULT_PAGE_SIZE`]; a
+    /// `[tmail.mail].page_size`, defaulting to [`DEFAULT_PAGE_SIZE`]; a
     /// non-positive or absent value falls back to the default. Ignored
     /// while [`MailConfig::page_size_auto`] is on.
     pub page_size: usize,
-    /// `[tmail.mail].mail.page_size_auto` (ticket kjfq): size each page to the
+    /// `[tmail.mail].page_size_auto` (ticket kjfq): size each page to the
     /// number of message rows the terminal can show, so the page fits the
     /// list without scrolling. On by default; overrides `page_size`.
     pub page_size_auto: bool,
-    /// `[tmail.mail].mail.refresh_interval_seconds` (plan §11/§19 Phase 9):
+    /// `[tmail.mail].refresh_interval_seconds` (plan §11/§19 Phase 9):
     /// the periodic background-refresh interval; `0` disables the timer.
     /// Absent defaults to 60; a negative value disables (treated as 0).
     pub refresh_interval_seconds: u64,
@@ -365,17 +365,17 @@ pub struct MailConfig {
 /// `[tmail.composer]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerConfig {
-    /// `[tmail.composer].composer.editor` (plan §14/§17): `"builtin"`, `"$EDITOR"`,
+    /// `[tmail.composer].editor` (plan §14/§17): `"builtin"`, `"$EDITOR"`,
     /// or an explicit command. The external-editor flow itself is Phase 11;
     /// v1 validates the value so a broken entry is reported up front.
     pub editor: String,
-    /// `[tmail.composer].composer.editor` resolved into an argv (Phase 11.4):
+    /// `[tmail.composer].editor` resolved into an argv (Phase 11.4):
     /// `None` is the builtin editor; `Some` is program + arguments,
     /// spawned directly, never a shell. Resolution: `"builtin"` → `None`;
     /// `"$EDITOR"` → the environment value split on whitespace; anything
     /// else is the value itself split on whitespace.
     pub editor_command: Option<Vec<String>>,
-    /// `[tmail.composer].composer.autosave_delay_ms` (plan §14): the draft autosave
+    /// `[tmail.composer].autosave_delay_ms` (plan §14): the draft autosave
     /// debounce for the builtin editor.
     pub autosave_delay_ms: u64,
 }
@@ -693,7 +693,7 @@ pub fn parse_with_account(
     config.mail.page_size_auto = get_bool(
         tmail_value(tmail, &["mail", "page_size_auto"]),
         true,
-        "[tmail.mail].mail.page_size_auto",
+        "[tmail.mail].page_size_auto",
         &mut issues,
     );
     parse_page_size(tmail, &mut config, &mut issues);
@@ -745,12 +745,12 @@ fn parse_page_size(tmail: Option<&toml::Value>, config: &mut Config, issues: &mu
     let value = tmail_value(tmail, &["mail", "page_size"]);
     let invalid = |n: i64| {
         format!(
-            "[tmail.mail].mail.page_size must be a positive integer, not {n}; using {DEFAULT_PAGE_SIZE}"
+            "[tmail.mail].page_size must be a positive integer, not {n}; using {DEFAULT_PAGE_SIZE}"
         )
     };
     match get_nonneg_int(
         value,
-        format!("[tmail.mail].mail.page_size must be an integer; using {DEFAULT_PAGE_SIZE}"),
+        format!("[tmail.mail].page_size must be an integer; using {DEFAULT_PAGE_SIZE}"),
         invalid,
         issues,
     ) {
@@ -775,12 +775,12 @@ fn parse_refresh_interval(
         Some(seconds) if seconds >= 0 => config.mail.refresh_interval_seconds = seconds as u64,
         Some(seconds) => {
             issues.push(format!(
-                "[tmail.mail].mail.refresh_interval_seconds must be ≥ 0, not {seconds}; using 0 (disabled)"
+                "[tmail.mail].refresh_interval_seconds must be ≥ 0, not {seconds}; using 0 (disabled)"
             ));
             config.mail.refresh_interval_seconds = 0;
         }
         None => issues.push(format!(
-            "[tmail.mail].mail.refresh_interval_seconds must be an integer; using {DEFAULT_REFRESH_INTERVAL_SECONDS}"
+            "[tmail.mail].refresh_interval_seconds must be an integer; using {DEFAULT_REFRESH_INTERVAL_SECONDS}"
         )),
     }
 }
@@ -817,11 +817,10 @@ fn parse_backend_concurrency(
 fn parse_autosave_delay(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
     let value = tmail_value(tmail, &["composer", "autosave_delay_ms"]);
     let fallback = format!("; using {DEFAULT_AUTOSAVE_DELAY_MS}");
-    let not_integer =
-        format!("[tmail.composer].composer.autosave_delay_ms must be an integer{fallback}");
+    let not_integer = format!("[tmail.composer].autosave_delay_ms must be an integer{fallback}");
     match get_nonneg_int(value, not_integer, |delay| {
         format!(
-            "[tmail.composer].composer.autosave_delay_ms must be between {AUTOSAVE_DELAY_MIN_MS} and {AUTOSAVE_DELAY_MAX_MS} ms, not {delay}{fallback}"
+            "[tmail.composer].autosave_delay_ms must be between {AUTOSAVE_DELAY_MIN_MS} and {AUTOSAVE_DELAY_MAX_MS} ms, not {delay}{fallback}"
         )
     }, issues) {
         Err(()) | Ok(None) => {}
@@ -831,7 +830,7 @@ fn parse_autosave_delay(tmail: Option<&toml::Value>, config: &mut Config, issues
             config.composer.autosave_delay_ms = delay as u64;
         }
         Ok(Some(delay)) => issues.push(format!(
-            "[tmail.composer].composer.autosave_delay_ms must be between {AUTOSAVE_DELAY_MIN_MS} and {AUTOSAVE_DELAY_MAX_MS} ms, not {delay}{fallback}"
+            "[tmail.composer].autosave_delay_ms must be between {AUTOSAVE_DELAY_MIN_MS} and {AUTOSAVE_DELAY_MAX_MS} ms, not {delay}{fallback}"
         )),
     }
 }
@@ -1061,7 +1060,7 @@ fn parse_notifications(tmail: Option<&toml::Value>, config: &mut Config, issues:
     };
 }
 
-/// `[tmail.composer].composer.editor`: `"builtin"`, `"$EDITOR"`, or an explicit
+/// `[tmail.composer].editor`: `"builtin"`, `"$EDITOR"`, or an explicit
 /// command (program + arguments, resolved without a shell — plan §14).
 fn parse_editor(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut LoadIssues) {
     let Some(value) = tmail
@@ -1072,7 +1071,7 @@ fn parse_editor(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut L
     };
     let Some(editor) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
         issues.push(String::from(
-            "[tmail.composer].composer.editor must be a non-empty string; using \"builtin\"",
+            "[tmail.composer].editor must be a non-empty string; using \"builtin\"",
         ));
         return;
     };
@@ -1083,7 +1082,7 @@ fn parse_editor(tmail: Option<&toml::Value>, config: &mut Config, issues: &mut L
         }
         Err(problem) => {
             issues.push(format!(
-                "[tmail.composer].composer.editor: {problem}; using \"builtin\""
+                "[tmail.composer].editor: {problem}; using \"builtin\""
             ));
         }
     }
@@ -1130,7 +1129,7 @@ fn validate_editor_with(editor: &str, editor_env: Option<String>) -> Result<(), 
     }
     // Explicit command: the shared plain-command rule (Tmail never
     // spawns a shell), with this caller's subject prefix in errors.
-    validate_plain_command(editor, "the [tmail.composer].composer.editor setting")
+    validate_plain_command(editor, "the [tmail.composer].editor setting")
 }
 
 /// The punctuation an argv-only plain command may carry beyond Unicode
@@ -1602,6 +1601,32 @@ mod tests {
                 .any(|issue| issue.contains(&format!("using {DEFAULT_PAGE_SIZE}"))),
             "issues: {issues:?}"
         );
+    }
+
+    /// The reported keys are the ones the parser actually reads (review
+    /// 39): a doubled context prefix ([tmail.mail].mail.page_size,
+    /// [tmail.composer].composer.editor) sent users off editing strings
+    /// the parser never sees. Locked here so the labels cannot drift.
+    #[test]
+    fn issue_messages_name_keys_that_exist() {
+        let text = concat!(
+            "[tmail.mail]\npage_size_auto = \"yes\"\n",
+            "[tmail.composer]\nautosave_delay_ms = 1\neditor = 3\n"
+        );
+        let (_, issues) = parse_with_issues(text, None);
+        assert!(!issues.is_empty(), "the malformed keys reported something");
+        for issue in &issues {
+            assert!(
+                !issue.contains("].mail.") && !issue.contains("].composer."),
+                "doubled context prefix in: {issue}"
+            );
+            assert!(
+                issue.contains("[tmail.mail].page_size_auto")
+                    || issue.contains("[tmail.composer].autosave_delay_ms")
+                    || issue.contains("[tmail.composer].editor"),
+                "recognized key spelling in: {issue}"
+            );
+        }
     }
 
     #[test]

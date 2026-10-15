@@ -481,7 +481,7 @@ fn seed_state(
     }
     // Ticket kjfq: `page_size_auto` sizes each page to the number of
     // message rows the terminal can show, so the page fits the list
-    // without scrolling; manual pagination keeps `[tmail.mail].mail.page_size`.
+    // without scrolling; manual pagination keeps `[tmail.mail].page_size`.
     // The view mode decides how many lines a message costs.
     if config.mail.page_size_auto {
         state.messages.limit =
