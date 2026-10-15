@@ -343,15 +343,36 @@ fn attribute(ct: &dto::ContentTypeDto, name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// Resolve a mailbox's role: exact `mailbox.alias` value match (against
-/// name, then id) first, then exact well-known-name heuristics.
+/// Resolve a mailbox's role: exact `mailbox.alias` value match first,
+/// then exact well-known-name heuristics.
+///
+/// The alias map is a `HashMap`, so consulting it directly made a config
+/// that points two roles at one mailbox resolve differently on every run
+/// (review 45): the candidates are instead examined in alias-key order,
+/// preferring a display-name match over the backend-id match — the same
+/// rule for every run, and identical semantics where roles don't clash.
 fn role_of(name: &str, id: &str, aliases: &HashMap<String, String>) -> Option<MailboxRole> {
-    aliases
+    let mut candidates: Vec<(&str, &str)> = aliases
         .iter()
-        .filter_map(|(key, value)| alias_role(key).map(|role| (role, value)))
-        .find(|(_, value)| *value == name || *value == id)
-        .map(|(role, _)| role)
-        .or_else(|| name_role(name).or_else(|| name_role(id)))
+        .filter(|(key, _)| alias_role(key).is_some())
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    candidates.sort_unstable();
+    for (key, value) in &candidates {
+        if *value == name
+            && let Some(role) = alias_role(key)
+        {
+            return Some(role);
+        }
+    }
+    for (key, value) in &candidates {
+        if *value == id
+            && let Some(role) = alias_role(key)
+        {
+            return Some(role);
+        }
+    }
+    name_role(name).or_else(|| name_role(id))
 }
 
 /// Himalaya's predefined `mailbox.alias` keys (config.example.toml shape).
@@ -539,6 +560,39 @@ mod tests {
             role_of("Archive", "/root/maildir/Archive", &map),
             Some(MailboxRole::Trash)
         );
+    }
+
+    /// Two roles pointing at one mailbox must resolve identically on
+    /// every run (review 45): the alias table is a `HashMap`, and direct
+    /// iteration attributed whichever role came out first — a sidebar
+    /// classification that flapped between launches. The fixed rule: a
+    /// display-name match wins over a backend-id match, and each class
+    /// consults the alias keys in sorted order.
+    #[test]
+    fn role_conflicts_resolve_deterministically() {
+        let map = aliases(&[
+            ("archive", "Mail"),
+            ("drafts", "Mail"),
+            ("sent", "Mail"),
+            ("inbox", "INBOX"),
+        ]);
+        // Same NAME for three roles: the sorted-key winner is "archive".
+        assert_eq!(
+            role_of("Mail", "/root/maildir/Mail", &map),
+            Some(MailboxRole::Archive)
+        );
+        // Same id but a DIFFERENT name: the id pass picks the sorted-key
+        // winner among the roles carrying that id — decisive and stable.
+        let map = aliases(&[("trash", "M-dump"), ("junk", "M-dump"), ("inbox", "INBOX")]);
+        // "junk" sorts before "trash": the junk role wins the shared id.
+        assert_eq!(role_of("Nobody", "M-dump", &map), Some(MailboxRole::Spam));
+        // Reversed insertion order produces the same winner.
+        let map = aliases(&[("junk", "M-dump"), ("trash", "M-dump"), ("inbox", "INBOX")]);
+        assert_eq!(role_of("Nobody", "M-dump", &map), Some(MailboxRole::Spam));
+        // Non-conflicting configs resolve exactly as before.
+        let map = aliases(&[("inbox", "INBOX"), ("sent", "Sent")]);
+        assert_eq!(role_of("INBOX", "id-a", &map), Some(MailboxRole::Inbox));
+        assert_eq!(role_of("Sent", "id-b", &map), Some(MailboxRole::Sent));
     }
 
     #[test]
