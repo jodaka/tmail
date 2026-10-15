@@ -305,6 +305,36 @@ fn a_background_failure_while_the_modal_is_open_lands_in_the_status_line() {
     );
 }
 
+/// A foreground failure landing while another popup is open replaces it
+/// in the single overlay slot (review 25); dismissing the error modal
+/// must restore the focus the popup itself recorded — a screen that still
+/// exists — never the popup's own modal Focus, which is now orphaned (Tab
+/// dead-cycles there and Esc falls through to cancel/quit).
+#[test]
+fn an_error_modal_over_a_popup_restores_the_screen_behind_it() {
+    let mut s = state();
+    let before = s.session.focus;
+    // A foreground page load starts, then help opens over the list —
+    // the load's failure will fall through the popup while it runs.
+    let (id, req) = expect_page(&reduce(&mut s, Action::PageNext));
+    no_effects(&reduce(&mut s, Action::OpenHelp));
+    assert_eq!(s.session.focus, Focus::Help);
+    let kind = page_kind(&req);
+    reduce(&mut s, failure(id, &kind, "list fetch failed"));
+    let Some(Overlay::Error(dialog)) = &s.session.overlay else {
+        panic!("the modal replaced the popup");
+    };
+    assert_eq!(
+        dialog.previous_focus, before,
+        "records the screen, not Help"
+    );
+
+    // Dismiss: back to the list, no overlay, no orphan focus.
+    reduce(&mut s, Action::DismissError);
+    assert!(s.session.overlay.is_none());
+    assert_eq!(s.session.focus, before, "the vanished popup's focus died");
+}
+
 #[test]
 fn t_opens_the_picker_with_the_cursor_on_the_active_theme() {
     let mut s = picker_state();

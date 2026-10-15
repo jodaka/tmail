@@ -869,9 +869,40 @@ pub(crate) fn proceed_with_account_switch(state: &mut AppState, target: String) 
     Vec::new()
 }
 
+/// The focus the session had underneath a replaced overlay (review 25):
+/// every dialog records where the session was when it opened, so an error
+/// modal that takes over the single overlay slot can restore a still-live
+/// screen instead of the replaced popup's own Focus variant. `None` for
+/// the Error variant — replacing the visible error routes through
+/// [`queue_error_modal_failure`] and never reaches this helper.
+fn replaced_overlay_focus(overlay: &Overlay) -> Focus {
+    match overlay {
+        Overlay::ConfirmDiscard(dialog) => dialog.previous_focus,
+        Overlay::AttachmentExplorer(dialog) => dialog.previous_focus,
+        Overlay::ThemePicker(dialog) => dialog.previous_focus,
+        Overlay::AccountSwitcher(dialog) => dialog.previous_focus,
+        Overlay::SwitchConfirm(dialog) => dialog.previous_focus,
+        Overlay::Help(dialog) => dialog.previous_focus,
+        Overlay::Mailboxes(dialog) => dialog.previous_focus,
+        Overlay::Error(_) => Focus::ErrorModal,
+    }
+}
+
 /// Open the Retry/Dismiss modal for a failed operation (plan §12).
 pub(crate) fn open_error_modal(state: &mut AppState, failure: OperationFailure) -> Vec<Effect> {
     tracing::warn!(code = ?failure.code, detail = %failure.detail, "operation failed");
+    // Foreground failures fall through several popups (help, choosers,
+    // pickers): the error modal replaces them in the single overlay slot
+    // (review 25). Recording this moment's `session.focus` would restore
+    // the replaced popup's own modal Focus on dismiss — a variant whose
+    // overlay no longer exists (dead Tab cycle, Esc then falling through
+    // to cancel/quit). The replaced dialog's own `previous_focus` is the
+    // screen the session was on before that popup opened: still alive by
+    // definition (it is the screen behind the error modal now).
+    let previous_focus = match state.session.overlay.as_ref() {
+        Some(replaced) => replaced_overlay_focus(replaced),
+        None => state.session.focus,
+    };
     state.session.overlay = Some(Overlay::Error(ErrorDialog {
         code: failure.code,
         detail: failure.detail.clone(),
@@ -880,7 +911,7 @@ pub(crate) fn open_error_modal(state: &mut AppState, failure: OperationFailure) 
         more_failures: 0,
         scroll: 0,
         button: ModalButton::Dismiss,
-        previous_focus: state.session.focus,
+        previous_focus,
     }));
     state.session.focus = Focus::ErrorModal;
     state.set_status("Operation failed");
