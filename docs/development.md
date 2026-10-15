@@ -17,8 +17,6 @@ python3 fixtures/smoke/ci_smoke.py --bin target/debug/tmail   # pty smoke (CI ru
 
 ## Repository layout
 
-- `docs/adr/` — architecture decision records
-- `docs/phase-*.md` — per-phase delivery checklists
 - `.github/workflows/ci.yml` — macOS + Linux CI (fmt, clippy, tests, pty
   smoke) plus a Windows job (fmt, clippy, tests)
 - `fixtures/himalaya/` — sanitized probe fixtures, schemas, seed/sink helpers

@@ -16,9 +16,9 @@ All checks must pass before considering a task complete.
 Do not ignore compiler, rust-analyzer, Clippy, formatting, or test errors. Fix the underlying problem rather than suppressing warnings unless suppression is explicitly justified.
 
 Do not git commit anything unless EXPLICITLY asked to do so. 
-Do not push anything anywhere unless EXPLICITLY asked to do so. 
+Do not push anything unless EXPLICITLY asked to do so. 
 
-When in doubt about anything stop and ask human, do not guess, unless EXPLICITLY asked. 
+When in doubt about anything stop and ask human, do not guess, unless EXPLICITLY asked to. 
 
 <!-- BEGIN KATA (managed by `kata init --with-agents`) -->
 ## Kata is the system of record for intent.
@@ -77,7 +77,7 @@ digraph kata {
 ~~~
 <!-- END KATA -->
 
-Do not use OpenCode's internal todo list (`todowrite` / `todoread`).
+Do not use internal todo list (`todowrite` / `todoread`).
 
 For implementation work that would normally be broken into a todo list:
 
