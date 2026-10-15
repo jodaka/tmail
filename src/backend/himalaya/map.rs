@@ -993,6 +993,9 @@ mod tests {
             tz_hour: 0,
             tz_minute: u32::MAX,
         });
-        assert_eq!(huge_minute, None, "an overflowing minute cannot become a tz");
+        assert_eq!(
+            huge_minute, None,
+            "an overflowing minute cannot become a tz"
+        );
     }
 }

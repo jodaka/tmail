@@ -213,9 +213,9 @@ impl Draft {
         // to panic on the multiply itself (debug). The millis scaling is
         // saturating, so even an absurd injected clock degrades to a
         // bounded stamp instead of breaking identity minting.
-        let stamp =
-            now.timestamp_nanos_opt()
-                .unwrap_or_else(|| now.timestamp_millis().saturating_mul(1_000_000));
+        let stamp = now
+            .timestamp_nanos_opt()
+            .unwrap_or_else(|| now.timestamp_millis().saturating_mul(1_000_000));
         let salt = fastrand::u32(..);
         self.local_id = Some(DraftId(format!("local-{stamp}-{salt:08x}")));
         if self.message_id.is_none() {
@@ -242,15 +242,27 @@ impl Draft {
     /// "success for older revision -> remain dirty and save again"); the
     /// save state re-enters debouncing so exactly one follow-up save is
     /// issued. `at` stamps the saved time from the reducer's last tick.
+    ///
+    /// A stale confirmation only keeps its soft signal — the dirty draft
+    /// triggers the follow-up save — and must NOT rewrite the copy
+    /// identity (review 33): a confirmation of an older revision arriving
+    /// after a newer save would repoint `remote_id` at a copy the newer
+    /// save already deleted/replaced, so the next save would share a dead
+    /// backend id. The newest confirmed save's id (and stamp) wins.
     pub fn confirm_saved(
         &mut self,
         revision: u64,
         remote_id: MessageId,
         at: Option<DateTime<FixedOffset>>,
     ) -> bool {
-        self.remote_id = Some(remote_id);
+        // Staleness is judged against the revision this confirmation is
+        // older than, before the guard is raised.
+        let stale = revision < self.saved_revision;
+        if !stale {
+            self.remote_id = Some(remote_id);
+        }
         self.saved_revision = self.saved_revision.max(revision);
-        if at.is_some() {
+        if !stale && at.is_some() {
             self.saved_at = at;
         }
         if self.saved_revision >= self.revision {
@@ -556,6 +568,47 @@ mod tests {
         assert_eq!(d.saved_revision, 2);
     }
 
+    /// A late confirmation of an already-superseded revision keeps its
+    /// save-again signal but must not rewrite the copy identity (review
+    /// 33): the id belongs to the newest confirmed save — an older id
+    /// points at a copy that save already deleted/replaced, and the next
+    /// save of the draft would target a dead backend id.
+    #[test]
+    fn a_stale_confirmation_never_overwrites_the_remote_identity() {
+        let mut d = Draft::default();
+        d.note_edit(Some(at(0)));
+        let snap1 = d.start_save(at(2));
+        let chain = d.confirm_saved(
+            snap1.revision,
+            MessageId(String::from("remote-1")),
+            Some(at(3)),
+        );
+        assert!(!chain);
+        // Revision 2 saves and confirms: remote-2 is the copy the sweep
+        // and the next save know about.
+        d.note_edit(Some(at(3)));
+        let snap2 = d.start_save(at(4));
+        let chain = d.confirm_saved(
+            snap2.revision,
+            MessageId(String::from("remote-2")),
+            Some(at(5)),
+        );
+        assert!(!chain);
+
+        // The old revision-1 confirmation arrives late. It still signals
+        // a follow-up save when a newer revision exists…
+        d.note_edit(Some(at(5)));
+        let stale_chain = d.confirm_saved(
+            snap1.revision,
+            MessageId(String::from("remote-1-OLD")),
+            Some(at(1)),
+        );
+        assert!(stale_chain, "the dirty draft still triggers a follow-up");
+        // …but the identity and stamp stay the newest confirmed copy's.
+        assert_eq!(d.remote_id, Some(MessageId(String::from("remote-2"))));
+        assert_eq!(d.saved_at, Some(at(5)));
+    }
+
     #[test]
     fn failure_keeps_content_and_unsaved_state() {
         let mut d = Draft {
@@ -581,12 +634,16 @@ mod tests {
     /// to take over.
     #[test]
     fn identities_mint_for_a_far_future_clock_without_panicking() {
-        let far_future = crate::domain::time::from_unix(32_503_680_000)
-            .expect("a year-3000 epoch builds");
+        let far_future =
+            crate::domain::time::from_unix(32_503_680_000).expect("a year-3000 epoch builds");
         let mut d = Draft::default();
         let snap = d.start_save(far_future);
         assert!(snap.local_id.0.starts_with("local-"), "an id mints");
-        assert!(snap.message_id.as_deref().is_some_and(|m| m.contains("@tmail.local>")));
+        assert!(
+            snap.message_id
+                .as_deref()
+                .is_some_and(|m| m.contains("@tmail.local>"))
+        );
         // And the normal clock keeps producing the same shape of ids.
         let mut near = Draft::default();
         let snap = near.start_save(at(2));
