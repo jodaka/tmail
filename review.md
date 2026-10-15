@@ -14,7 +14,6 @@
 | 29 | Low | main/signals | Signals are deferred while the external editor runs (Ctrl-Z in the editor suspends on return) |
 | 30 | Low | view/ui | `u16` overflow in overlay math at absurd terminal widths (debug panic) |
 | 35 | Low | domain/paths | `expand_tilde` corrupts non-UTF-8 paths |
-| 37 | Low | config/write | `DraftAccount.name` with `.` panics; names/aliases are interpolated unescaped into TOML |
 | 38 | Low | wizard/confirm | "Default: yes" preview contradicts the write when the collision suffix is chosen |
 | 39 | Low | config | Several startup issues name non-existent config keys |
 | 40 | Low | config | `~user` passes `downloads_dir` validation but is never expanded |
@@ -51,7 +50,6 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 
 ### 36-44. Low — Config/wizard edge cases
 
-- `config/write.rs:239-248,282-331`: `DraftAccount.name` containing `.` makes `doc["accounts"][&name]` miss and panic; name and alias keys are interpolated into a TOML fragment unescaped. Unreachable through the wizard (names are sanitized) but a public-API panic/injection.
 - `app/wizard.rs:366-371,934-938`: "Default: yes" is computed from the unsuffixed name, but the writer's default decision uses the suffixed final name — the preview can contradict the file.
 - `config/mod.rs:637,688,693,718,723,732,735,745,997`: issues name keys like `[tmail.mail].mail.page_size_auto` and `[tmail.composer].composer.editor`, which do not exist.
 - `config/mod.rs:1168-1177`: `downloads_dir` accepts any leading `~` (including `~user`), but `expand_tilde` only handles `~`/`~/`.
