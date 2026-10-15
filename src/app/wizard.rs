@@ -362,11 +362,23 @@ impl WizardState {
     /// (ADR 0003 §3.6): set only when no other account already has it.
     /// Replacing the file's default account keeps it default. (The
     /// writer recomputes the authoritative decision at save time; this
-    /// preview never contradicts it.)
+    /// preview never contradicts it.) The decision belongs to the name
+    /// the save would actually write (review 38): under a chosen
+    /// collision suffix the base name and the final name differ, and the
+    /// preview answered from the base — `gmail` claimed "Default: yes"
+    /// while the file got `gmail-2` with `default = false`.
     pub fn will_set_default(&self) -> bool {
+        let final_name = if self.confirm.name_choice_index == 1 {
+            match &self.confirm.name_choice {
+                Some(NameChoice::Suffix(suffix)) => suffix,
+                _ => &self.confirm.account_name,
+            }
+        } else {
+            &self.confirm.account_name
+        };
         match &self.config.existing_default_name {
             None => true,
-            Some(name) => name == &self.confirm.account_name,
+            Some(name) => name == final_name,
         }
     }
 

@@ -748,6 +748,50 @@ fn storage_mode_toggle_switches_the_secret_field_and_validates_the_command() {
     );
 }
 
+/// The default-account preview answers for the name the save would
+/// write (review 38): under a chosen collision suffix the base name
+/// matches the file's existing default account while the final name does
+/// not — the preview used to claim "Default: yes" while the written file
+/// carried default = false for the suffixed account.
+#[test]
+fn the_default_preview_answers_for_the_chosen_name() {
+    let mut state = state();
+    state.session.wizard = Some(WizardState::new(
+        false,
+        ConfigSnapshot {
+            save_path: Some(std::path::PathBuf::from("/tmp/tmail-test-config.toml")),
+            existing_names: vec![String::from("example")],
+            existing_default_name: Some(String::from("example")),
+            existing_shared_readable: false,
+        },
+    ));
+    drive_to_confirm(&mut state);
+    assert!(
+        wizard(&state)
+            .confirm
+            .name_choice
+            .as_ref()
+            .is_some_and(|choice| matches!(choice, NameChoice::Suffix(_))),
+        "collision detected"
+    );
+
+    // The base name replaces the existing default account → default keeps.
+    assert_eq!(wizard(&state).confirm.name_choice_index, 0);
+    assert!(
+        wizard(&state).will_set_default(),
+        "replacing the default account stays default"
+    );
+
+    // The chosen suffix is a NEW account → the existing default stays
+    // authoritative; the preview must have answered this before Enter.
+    act(&mut state, WizardAction::MoveDown);
+    assert_eq!(wizard(&state).confirm.name_choice_index, 1);
+    assert!(
+        !wizard(&state).will_set_default(),
+        "the preview contradicted the write for the suffixed name"
+    );
+}
+
 #[test]
 fn collision_suffix_is_offered_and_selected() {
     let mut state = state();
