@@ -11,7 +11,6 @@
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
 | 27 | Low | input/mouse | Mouse drag release activates a click despite the documented contract |
-| 28 | Low | runtime/tasks | Raw URL logged unsanitized at debug (`tasks.rs:494`) |
 | 29 | Low | main/signals | Signals are deferred while the external editor runs (Ctrl-Z in the editor suspends on return) |
 | 30 | Low | view/ui | `u16` overflow in overlay math at absurd terminal widths (debug panic) |
 | 35 | Low | domain/paths | `expand_tilde` corrupts non-UTF-8 paths |
@@ -38,10 +37,6 @@
 ### 27. Low — Mouse drag release activates
 
 `input/mouse.rs:89-95` treats every left `Up` as a click and hit-tests the release position. No `Down` state is tracked despite the comment promising drags never activate.
-
-### 28. Low — Raw URL logged
-
-`runtime/tasks.rs:494` logs `url = %url` for `OpenUrl` at debug without `sanitize`, bypassing the project's own rule (`domain/sanitize.rs` exists precisely to redact URL userinfo).
 
 ### 29. Low — Signals deferred during the editor
 
