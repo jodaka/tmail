@@ -206,7 +206,10 @@ impl DraftJournal {
     /// the drafts root — every character outside `[a-zA-Z0-9._-]` (a path
     /// separator included) becomes `_`. Two accounts differing only in
     /// such characters share a scope; their draft ids cannot collide
-    /// (they are minted internally), so the merge is harmless.
+    /// (they are minted internally), so the merge is harmless. A name of
+    /// only dots would otherwise be the one sanitized form that still
+    /// moves the scope (`..` is the drafts root's parent; `.` is the root
+    /// itself, review 34), so it collapses to `_` like any unusable name.
     fn journal_dir_name(account: &str) -> String {
         let mut name: String = account
             .chars()
@@ -218,7 +221,8 @@ impl DraftJournal {
                 }
             })
             .collect();
-        if name.is_empty() {
+        if name.is_empty() || name.chars().all(|c| c == '.') {
+            name.clear();
             name.push('_');
         }
         name
@@ -624,6 +628,25 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(dir.path().join("drafts").is_dir() || dir.path().file_name().is_some());
         assert_eq!(j.dir.file_name().and_then(|n| n.to_str()), Some("a_b_c"));
+    }
+
+    /// A dot-only scope name would be the one sanitized form that still
+    /// escapes: `..` resolves to the drafts root's parent (review 34).
+    /// It collapses to `_`; ordinary dots inside a name are unaffected.
+    #[test]
+    fn journal_scope_rejects_dot_only_names() {
+        assert_eq!(DraftJournal::journal_dir_name(".."), "_");
+        assert_eq!(DraftJournal::journal_dir_name("."), "_");
+        assert_eq!(DraftJournal::journal_dir_name("..."), "_");
+        assert_eq!(DraftJournal::journal_dir_name("gmail.copy"), "gmail.copy");
+        // End to end: the `..` account stays inside the drafts root.
+        let dir = tempfile::TempDir::new().unwrap();
+        let parent = dir.path();
+        let root = parent.join("drafts-root");
+        let j = DraftJournal::open_scoped(root.clone(), Some(".."));
+        j.record(&snapshot("local-1", 1, "kept inside")).unwrap();
+        assert_eq!(j.dir, root.join("_"), "the scope never left the root");
+        assert_eq!(j.load_all().unwrap().len(), 1);
     }
 
     #[test]
