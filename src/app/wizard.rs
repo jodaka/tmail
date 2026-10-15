@@ -960,6 +960,15 @@ fn confirm_save(wizard: &mut WizardState, state: &mut AppState) -> Vec<Effect> {
     if wizard.step != WizardStep::Confirm {
         return Vec::new();
     }
+    // One save at a time (review 24): a second Enter while a save runs
+    // would read-modify-write the same config concurrently, overwrite
+    // `in_flight` (dropping the first save's completion as an unknown id)
+    // and leave Esc cancelling only the latest copy. `is_busy` covers the
+    // save in flight plus any stale testing/discovery state; the retry
+    // path (Esc first) or a completion clears it before a new save.
+    if wizard.is_busy() {
+        return Vec::new();
+    }
     // The collision choice may rename the account (ADR 0003 §3.6).
     if wizard.confirm.name_choice_index == 1
         && let Some(NameChoice::Suffix(suffix)) = wizard.confirm.name_choice.clone()

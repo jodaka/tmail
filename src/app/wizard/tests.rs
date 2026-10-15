@@ -571,6 +571,56 @@ fn save_failure_stays_on_confirm_and_reports() {
     ));
 }
 
+/// A second Enter while a save is in flight starts nothing (review 24):
+/// two concurrent SaveAccount writes would race the same config file, the
+/// second `in_flight` overwrite would drop the first save's completion,
+/// and Esc would cancel only the latest copy.
+#[test]
+fn a_second_confirm_enter_while_saving_starts_nothing() {
+    let mut state = state();
+    drive_to_confirm(&mut state);
+    let save = act(&mut state, WizardAction::ConfirmSave);
+    assert!(matches!(
+        save.first().expect("save effect").kind,
+        OperationKind::Account(AccountOperation::SaveAccount { .. })
+    ));
+
+    // Repeated Enter: idle. No second operation was registered.
+    no_effects(&act(&mut state, WizardAction::ConfirmSave));
+    assert_eq!(state.session.operations.len(), 1, "never a second save");
+
+    // Esc still cancels the single save; a fresh save then restarts.
+    let token = state
+        .session
+        .operations
+        .cancellation(save[0].id)
+        .expect("save registered");
+    no_effects(&act(&mut state, WizardAction::Cancel));
+    assert!(token.is_cancelled());
+    let retry = act(&mut state, WizardAction::ConfirmSave);
+    assert!(matches!(
+        retry.first().expect("restart").kind,
+        OperationKind::Account(AccountOperation::SaveAccount { .. })
+    ));
+}
+
+/// After a save completes (either outcome) Enter starts a fresh save
+/// again — the busy gate clears with the operation (review 24).
+#[test]
+fn confirm_enter_is_reusable_after_the_save_finishes() {
+    let mut state = state();
+    drive_to_confirm(&mut state);
+    let save = act(&mut state, WizardAction::ConfirmSave);
+    fail_with(&mut state, &save, "disk full");
+    assert_eq!(wizard(&state).step, WizardStep::Confirm);
+
+    let retry = act(&mut state, WizardAction::ConfirmSave);
+    assert!(matches!(
+        retry.first().expect("save effect").kind,
+        OperationKind::Account(AccountOperation::SaveAccount { .. })
+    ));
+}
+
 fn drive_to_confirm(state: &mut AppState) {
     wizard_mut(state).email.address = TextField::new("u@example.com");
     let effects = act(state, WizardAction::SubmitEmail);
