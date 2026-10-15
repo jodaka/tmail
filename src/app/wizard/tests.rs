@@ -1000,7 +1000,49 @@ fn a_display_name_may_contain_spaces() {
     assert_eq!(wizard(&state).credentials.display_name.value, "uA B");
 }
 
-// ── Discovery staleness and gating (review 23) ────────────────────────
+#[test]
+fn e_on_a_text_step_types_a_character_it_does_not_edit_servers() {
+    // Review finding 43's behavioral contract: on the W4/credentials
+    // screen (a text-entry step), the `e` key types into the focused
+    // field — it must not open the server-edit form or step back. The
+    // updated hint relies on exactly this wording being true.
+    let mut state = state();
+    drive_to_credentials(&mut state);
+    assert_eq!(wizard(&state).step, WizardStep::Credentials);
+
+    // Username row focused: `e` becomes a typed character.
+    act(&mut state, WizardAction::OverrideServers);
+    assert_eq!(wizard(&state).credentials.username.value, "u@example.come");
+    assert!(
+        !wizard(&state).discovery.override_open,
+        "no override form opens from W4"
+    );
+    assert_eq!(wizard(&state).step, WizardStep::Credentials);
+
+    // Tab to the storage row, then again to the secret row: `e` there
+    // lands in the password field (the fold-back delivers it to the
+    // focused text field, not the storage toggle).
+    act(&mut state, WizardAction::FocusNext);
+    assert_eq!(wizard(&state).credentials.credentials_index, 1);
+    act(&mut state, WizardAction::FocusNext);
+    act(&mut state, WizardAction::OverrideServers);
+    assert_eq!(
+        wizard(&state).credentials.storage_mode,
+        StorageMode::Raw,
+        "storage mode unchanged"
+    );
+    // The focused secret row (index 2) receives the character when the
+    // storage mode is Raw (password editing).
+    assert_eq!(wizard(&state).credentials.credentials_index, 2);
+    assert_eq!(wizard(&state).credentials.password.value, "e");
+    assert!(!wizard(&state).discovery.override_open);
+
+    // And Esc from W4 steps back to W3 identity (not a hidden edit).
+    act(&mut state, WizardAction::Cancel);
+    assert_eq!(wizard(&state).step, WizardStep::Identity);
+}
+
+// ── Discovery staleness and gating (review 23) ────────────────────────────
 
 /// Esc from W2 kills the discovery it belongs to (review 23): a late Err
 /// must not paint the Email screen's error, and a late empty Ok must not
