@@ -598,7 +598,10 @@ async fn run_platform_call(
             }
         }
         PlatformOperation::OpenUrl { url } => {
-            tracing::debug!(url = %url, "opening link with platform handler");
+            // The logged representation is masked (review 28): a URL can
+            // carry userinfo (`https://user:pass@host`), and the debug
+            // log must not preserve it — the dispatched URL is unchanged.
+            tracing::debug!(url = %sanitize(url), "opening link with platform handler");
             // Spawned directly (argv, no shell); the opener itself refuses
             // non-web schemes before dispatching (ticket hc9n).
             match opener.open_url(url).await {

@@ -324,7 +324,10 @@ pub(crate) fn open_reader_link(state: &mut AppState, width: usize, index: usize)
         state.set_status(format!("Cannot open link: {}", sanitize(&url)));
         return Vec::new();
     }
-    tracing::debug!(url = %url, "opening link in the platform browser");
+    // The logged representation is masked (review 28) — a URL can carry
+    // userinfo and the debug log must not preserve it. The dispatched URL
+    // is unchanged.
+    tracing::debug!(url = %sanitize(&url), "opening link in the platform browser");
     state.set_status("Opening link…");
     vec![
         state
