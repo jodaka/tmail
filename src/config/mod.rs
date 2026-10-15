@@ -1255,6 +1255,19 @@ fn parse_downloads_dir(tmail: Option<&toml::Value>, config: &mut Config, issues:
 /// missing directory is fine — the save path creates it on demand.
 fn validate_downloads_dir(dir: &Path) -> Result<(), String> {
     let text = dir.to_string_lossy();
+    // Reject `~user` spellings up front: `expand_tilde` only understands the
+    // bare `~` and `~/…` forms, so anything else starting with `~` would pass
+    // here and silently stay literal downstream.
+    if text != "~"
+        && text
+            .strip_prefix('~')
+            .is_some_and(|rest| !rest.starts_with('/'))
+    {
+        return Err(format!(
+            "{value:?} uses a ~-form other than ~ or ~/… (only those are expanded in Tmail, never via a shell)",
+            value = text
+        ));
+    }
     // Absolute by the platform's own rules (`/…`, `~/…`, or a Windows
     // drive-absolute `C:\…`).
     if !text.starts_with('~') && !dir.is_absolute() {
@@ -2044,6 +2057,39 @@ mod tests {
         assert_eq!(config.downloads_dir, None);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].contains("absolute path"));
+    }
+
+    #[test]
+    fn tilde_user_downloads_dir_reports_because_it_never_expands() {
+        // Review finding 40: `~user` passed validation but `expand_tilde`
+        // leaves it literal, so the save path would target a literal
+        // `~ada/…` directory. Such spellings must be rejected up front.
+        for value in ["~ada/x", "~ada", "~x"] {
+            let text = format!("[tmail.attachments]\ndownloads_dir = \"{value}\"\n");
+            let (config, issues) = parse_with_issues(&text, None);
+            assert_eq!(config.downloads_dir, None, "~user form {value:?} rejected");
+            assert_eq!(issues.len(), 1);
+            assert!(
+                issues[0].contains("other than ~ or ~/"),
+                "message for {value:?}: {}",
+                issues[0]
+            );
+        }
+    }
+
+    #[test]
+    fn supported_tilde_downloads_dir_forms_still_validate() {
+        let text = "[tmail.attachments]\ndownloads_dir = \"~/My Downloads\"\n";
+        let (config, issues) = parse_with_issues(text, None);
+        assert!(issues.is_empty(), "~subdir accepted: {issues:?}");
+        assert_eq!(config.downloads_dir, Some(PathBuf::from("~/My Downloads")));
+
+        let text = "[tmail.attachments]\ndownloads_dir = \"~\"\n";
+        let (_, issues) = parse_with_issues(text, None);
+        assert!(
+            issues.is_empty() || !issues[0].contains("other than ~ or ~/"),
+            "bare ~ not rejected by the tilde-form check: {issues:?}"
+        );
     }
 
     #[test]
