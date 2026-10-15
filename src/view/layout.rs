@@ -2,7 +2,9 @@
 //!
 //! Reference size is 152×40 (mockup title bar). Three modes:
 //! - **Full** (≥120 cols): sidebar + primary and secondary metadata.
-//! - **Compact** (90–119 cols): sidebar hidden, snippet/tags hidden.
+//! - **Compact** (90–119 cols): sidebar hidden; the message list renders
+//!   exactly as in the full layout (issue tmail#7h3r — the title button
+//!   relocates the hidden sidebar's Tab stop, issue brnw).
 //! - **Too small**: a clear minimum-size message instead of overlapping
 //!   widgets.
 

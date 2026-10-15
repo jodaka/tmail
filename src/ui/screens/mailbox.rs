@@ -34,9 +34,10 @@ use crate::ui::theme::Theme;
 const MARKER_ICON_COLUMNS: usize = 3;
 const CELL_GAP: usize = 2;
 const DATE_CELL_W: usize = 8;
-/// Sender (or recipient, on Drafts rows) cell width per view mode.
-const WHO_COMPACT_W: usize = 14;
-const WHO_FULL_W: usize = 18;
+/// Sender (or recipient, on Drafts rows) cell width — one anatomy in
+/// every layout mode: the compact list (sidebar hidden) renders exactly
+/// like the full list (issue tmail#7h3r).
+const WHO_W: usize = 18;
 /// The subject cell never drops below this, even on narrow terminals.
 const SUBJECT_MIN_W: usize = 10;
 
@@ -131,7 +132,6 @@ pub fn render(
             message,
             row_width as usize,
             &RowContext {
-                mode,
                 theme,
                 now,
                 selected,
@@ -343,7 +343,6 @@ fn render_head(
 /// frame-wide parts once and varies only the flags per row.
 #[derive(Clone, Copy)]
 struct RowContext<'a> {
-    mode: LayoutMode,
     theme: &'a Theme,
     now: chrono::DateTime<chrono::FixedOffset>,
     /// The cursor row.
@@ -366,7 +365,6 @@ fn message_spans<'a>(
     ctx: &RowContext<'a>,
 ) -> Vec<Span<'a>> {
     let RowContext {
-        mode,
         theme,
         now,
         selected,
@@ -374,15 +372,15 @@ fn message_spans<'a>(
         focused,
         shows_recipient,
     } = *ctx;
-    let full = mode == LayoutMode::Full;
-    let compact = mode == LayoutMode::Compact;
 
     // Column anatomy: marker 1 + icon 2 (star/checkbox + trailing space,
     // ticket cvc4) + who + gap 2 + subject(+snippet) + gap 2 + date 8,
     // summing to the full row width so the date lands on the right edge
     // (mockup grid). `who` is the sender, or the recipient on Drafts rows.
+    // The same composition in every layout mode (issue tmail#7h3r): the
+    // compact row is the full row with the sidebar gone.
     let date = dates::format_relative(now, message.timestamp);
-    let who_w = if compact { WHO_COMPACT_W } else { WHO_FULL_W };
+    let who_w = WHO_W;
     let subject_w = width
         .saturating_sub(MARKER_ICON_COLUMNS + who_w + CELL_GAP + CELL_GAP + DATE_CELL_W)
         .max(SUBJECT_MIN_W);
@@ -477,10 +475,10 @@ fn message_spans<'a>(
         Style::new().fg(theme.snippet).bg(bg)
     };
 
-    // Subject plus (full mode only) the faded body preview, composed so
-    // the combined cell fills exactly `cell_w`: the subject stays whole
-    // when it fits, the preview takes what is left and ends in `…` when
-    // the body text is longer (ticket wxtx).
+    // Subject plus the faded body preview, composed so the combined cell
+    // fills exactly `cell_w`: the subject stays whole when it fits, the
+    // preview takes what is left and ends in `…` when the body text is
+    // longer (ticket wxtx).
     let mut spans = vec![marker, icon];
     spans.push(Span::styled(
         text::fit_left(
@@ -494,39 +492,32 @@ fn message_spans<'a>(
         who_style,
     ));
     spans.push(Span::styled("  ", base));
-    if full {
-        let sep = " — ";
-        let subject_cols = message.subject.width();
-        let subject_cell = text::truncate(&message.subject, cell_w);
-        let subject_alone = subject_cols > cell_w;
-        let preview_cell = if subject_alone {
-            String::new()
-        } else {
-            message
-                .snippet
-                .as_ref()
-                .and_then(|snippet| {
-                    let budget = cell_w
-                        .saturating_sub(subject_cols)
-                        .saturating_sub(sep.width());
-                    (budget > 0).then(|| format!("{sep}{}", text::truncate(snippet, budget)))
-                })
-                .unwrap_or_default()
-        };
-        let used = subject_cell.width() + preview_cell.width();
-        spans.push(Span::styled(subject_cell, subject_style));
-        if !preview_cell.is_empty() {
-            spans.push(Span::styled(preview_cell, snippet_style));
-        }
-        // Pad the cell to its exact column width so the clip slot and the
-        // date stay put (mockup grid).
-        spans.push(Span::styled(" ".repeat(cell_w.saturating_sub(used)), base));
+    let sep = " — ";
+    let subject_cols = message.subject.width();
+    let subject_cell = text::truncate(&message.subject, cell_w);
+    let subject_alone = subject_cols > cell_w;
+    let preview_cell = if subject_alone {
+        String::new()
     } else {
-        spans.push(Span::styled(
-            text::fit_left(&message.subject, cell_w),
-            subject_style,
-        ));
+        message
+            .snippet
+            .as_ref()
+            .and_then(|snippet| {
+                let budget = cell_w
+                    .saturating_sub(subject_cols)
+                    .saturating_sub(sep.width());
+                (budget > 0).then(|| format!("{sep}{}", text::truncate(snippet, budget)))
+            })
+            .unwrap_or_default()
+    };
+    let used = subject_cell.width() + preview_cell.width();
+    spans.push(Span::styled(subject_cell, subject_style));
+    if !preview_cell.is_empty() {
+        spans.push(Span::styled(preview_cell, snippet_style));
     }
+    // Pad the cell to its exact column width so the clip slot and the
+    // date stay put (mockup grid).
+    spans.push(Span::styled(" ".repeat(cell_w.saturating_sub(used)), base));
     if message.has_attachments {
         // Clip (2 cells, one char) + one space, exactly where the 2-cell
         // gap used to end: the emoji's right edge lands one column left

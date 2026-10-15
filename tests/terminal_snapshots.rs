@@ -100,7 +100,7 @@ fn full_layout_renders_all_regions() {
 }
 
 #[test]
-fn compact_layout_hides_sidebar_and_snippets() {
+fn compact_layout_renders_the_list_like_the_full_layout() {
     let size = (100, 30);
     let text = text_of(&draw(size.0, size.1));
     assert!(text.contains("INBOX"), "pane title missing");
@@ -108,9 +108,13 @@ fn compact_layout_hides_sidebar_and_snippets() {
     // Sidebar hidden in compact.
     assert_absent(&text, "Compose", size);
     assert_absent(&text, "Archive", size);
-    // Still renders rows; long senders clip exactly like the mockup's
-    // compact 14ch column.
+    // One rendering in every layout mode (issue tmail#7h3r): rows carry
+    // the same subject + faded body preview composition as full width.
     assert!(text.contains("PayPal"), "rows missing");
+    assert!(
+        text.contains("gyuto — quench done at 760"),
+        "compact rows must show the body preview:\n{text}"
+    );
 }
 
 #[test]
@@ -1593,8 +1597,11 @@ fn snapshot_at_compact_floor_90x25() {
     let (buffer, _) = draw_with_hits(90, 25);
     let text = text_of(&buffer);
     assert!(text.contains("INBOX"), "pane title missing:\n{text}");
-    // The compact sender column clips to 14ch; the subject stays whole.
+    // One anatomy in every layout mode: the 18ch sender column and the
+    // inline body preview render exactly as at full width (issue
+    // tmail#7h3r); the preview truncates to what the narrow row leaves.
     assert!(text.contains("Re: WIP — 240 mm"), "rows missing:\n{text}");
+    assert!(text.contains("— quench done"), "preview missing:\n{text}");
     assert_absent(&text, "Compose", (90, 25));
     assert_absent(&text, "UTF-8", (90, 25));
 }
