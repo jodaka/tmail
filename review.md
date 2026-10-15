@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 25 | Low | app/overlays | An error modal opened over another overlay restores focus to a vanished overlay |
 | 26 | Low | input/keymap | Restoring structural defaults can leave one key bound to two actions; help text lies |
 | 27 | Low | input/mouse | Mouse drag release activates a click despite the documented contract |
 | 28 | Low | runtime/tasks | Raw URL logged unsanitized at debug (`tasks.rs:494`) |
@@ -41,10 +40,6 @@
 ---
 
 ## Detailed findings
-
-### 25. Low — Focus restored to a vanished overlay
-
-`open_error_modal` records `previous_focus: state.session.focus` (`modals.rs:867`). When a foreground failure lands while help/chooser/switcher/mailboxes is open (these let results fall through), the error modal opens over it, and Dismiss restores focus to the overlay's `Focus` variant even though the overlay is gone. Tab self-cycles; `Esc` can quit at the root.
 
 ### 26. Low — Double-bound key after default restoration
 
