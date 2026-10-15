@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 26 | Low | input/keymap | Restoring structural defaults can leave one key bound to two actions; help text lies |
 | 27 | Low | input/mouse | Mouse drag release activates a click despite the documented contract |
 | 28 | Low | runtime/tasks | Raw URL logged unsanitized at debug (`tasks.rs:494`) |
 | 29 | Low | main/signals | Signals are deferred while the external editor runs (Ctrl-Z in the editor suspends on return) |
@@ -40,10 +39,6 @@
 ---
 
 ## Detailed findings
-
-### 26. Low — Double-bound key after default restoration
-
-`set_action` inserts specs into `by_key` without evicting them from other actions (`input/keymap.rs:191-209`), and `enforce_structural` uses it to restore structural defaults (`:332-358`). A config that releases a structural key and binds it to another action (`cancel = []`, `trash = ["Esc"]`) ends with Esc cancelling while help/status still advertise "Trash Esc".
 
 ### 27. Low — Mouse drag release activates
 
