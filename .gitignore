@@ -1,5 +1,6 @@
 .DS_Store
 /target
+.jcode
 .opencode
 .pi
 .ruff_cache
