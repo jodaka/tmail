@@ -14,7 +14,6 @@
 | 29 | Low | main/signals | Signals are deferred while the external editor runs (Ctrl-Z in the editor suspends on return) |
 | 30 | Low | view/ui | `u16` overflow in overlay math at absurd terminal widths (debug panic) |
 | 35 | Low | domain/paths | `expand_tilde` corrupts non-UTF-8 paths |
-| 39 | Low | config | Several startup issues name non-existent config keys |
 | 40 | Low | config | `~user` passes `downloads_dir` validation but is never expanded |
 | 41 | Low | discovery | Timeout message says 17 s; the wrapper times out at 16 s |
 | 42 | Low | discovery | `Provider::from_host` matches substrings (`notgmail.com` → Gmail) |
@@ -49,7 +48,6 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 
 ### 36-44. Low — Config/wizard edge cases
 
-- `config/mod.rs:637,688,693,718,723,732,735,745,997`: issues name keys like `[tmail.mail].mail.page_size_auto` and `[tmail.composer].composer.editor`, which do not exist.
 - `config/mod.rs:1168-1177`: `downloads_dir` accepts any leading `~` (including `~user`), but `expand_tilde` only handles `~`/`~/`.
 - `discovery/mod.rs:198,234`: the error says "17s deadline" while the timeout is `15 + 1 = 16s`.
 - `discovery/mod.rs:103-115`: `host.contains("gmail.com")` tags `notgmail.com` and `imap.gmail.com.evil.example` as Gmail (same for outlook/hotmail/live/office365).
