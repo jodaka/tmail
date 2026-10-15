@@ -107,7 +107,7 @@ detected problem together (never just the first), then refuses to start:
 - `[tmail].account` names a missing `[accounts.*]` table
 - invalid `page_size`, `refresh_interval_seconds`, `max_concurrent_backend_calls`, or `autosave_delay_ms`
 - invalid `editor` (empty, unknown program, shell metacharacters, `$EDITOR` unset)
-- invalid `downloads_dir` (relative path, or an existing file)
+- invalid `downloads_dir` (relative path, other `~`-forms than `~`/`~/…` like `~user` — such spellings never expand, or an existing file)
 - unknown `[tmail.theme].name`
 - `himalaya` executable not found on `PATH`
 

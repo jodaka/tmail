@@ -37,9 +37,10 @@ entry is found. The flow:
 7. **Provisioning** — when the server has no folder for a role at all
    (a bare Dovecot lists `Inbox` alone), the confirm screen shows the
    canonical folders the wizard will create (`Sent`, `Drafts`, `Trash`,
-   `Junk`, `Archive`), and the save provisions them best effort before
-   merging the account — only folders the server confirms join the
-   alias table.
+   `Junk`, `Archive`), and the save provisions them before merging the
+   account — only folders the server confirms join the alias table. A
+   provisioning failure aborts the save: the confirm screen shows the
+   error and the user can retry.
 
 The account is merged into the shared config file with
 format-preserving edits: existing accounts, `[tmail]` tables, comments
