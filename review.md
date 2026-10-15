@@ -24,7 +24,6 @@
 | 42 | Low | discovery | `Provider::from_host` matches substrings (`notgmail.com` → Gmail) |
 | 43 | Low | wizard | "edit it (e)" hint points at a screen where `e` just types a character |
 | 44 | Low | runtime/tasks | Save-flow comment contradicts behavior: provisioning errors abort the save |
-| 45 | Low | backend/map | Alias role resolution is nondeterministic when two roles point at one mailbox |
 | 46 | Low | app/page_cache | Temp files outside `messages/` are never swept |
 | 47 | Low | app/reader | Reader-document cache fingerprint is length-only |
 | 48 | Low | app/state | `saved_attachments` is unbounded |
@@ -67,7 +66,6 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 - `discovery/mod.rs:103-115`: `host.contains("gmail.com")` tags `notgmail.com` and `imap.gmail.com.evil.example` as Gmail (same for outlook/hotmail/live/office365).
 - `app/wizard.rs:908-913`: "edit it (e)" is shown on W4, where `e` types a character; the instruction should point back to the server list.
 - `runtime/tasks.rs:569-575`: the comment says provisioning failures degrade to "none created", but `operation_failure` aborts the save for every non-cancelled error.
-- `backend/himalaya/map.rs:339-346`: role resolution iterates a `HashMap`, so when two alias keys map to the same mailbox the resolved role varies between runs.
 
 ### 45-51. Low — Caches, files, and concurrency
 
