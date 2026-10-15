@@ -331,10 +331,21 @@ fn build_account_item(draft: &DraftAccount, set_default: bool) -> Result<(Item, 
     let doc: DocumentMut = fragment.parse().map_err(|err| {
         format!("internal error: generated account fragment does not parse: {err}")
     })?;
-    Ok((
-        doc["accounts"][&draft.name].clone(),
-        doc["accounts"].clone(),
-    ))
+    // Literal-key lookup all the way (review 37): the account table is
+    // keyed by the Exact name — an index-style dotted traversal would
+    // treat `a.b` as nested tables and panic on the miss.
+    let accounts = doc
+        .get("accounts")
+        .and_then(Item::as_table)
+        .ok_or("internal error: generated account fragment has no accounts table")?;
+    let account = accounts.get(&draft.name).cloned().ok_or_else(|| {
+        format!(
+            "internal error: generated account fragment misses its own account ({:?})",
+            draft.name
+        )
+    })?;
+    let container = Item::Table(accounts.clone());
+    Ok((account, container))
 }
 
 /// Inserts the account block: into the existing `[accounts]` table
@@ -368,10 +379,28 @@ pub fn draft_account_fragment(draft: &DraftAccount) -> String {
     account_fragment(draft, true)
 }
 
+/// The config-facing key for an account name: bare where the name is a
+/// valid TOML bare key (letters/digits/dash/underscore), a quoted literal
+/// string otherwise. The merge matches accounts by the literal key
+/// (review 37): a bare `a.b` previously collapsed into nested tables so
+/// the fragment's own lookup missed (panic) — quoted keys keep the whole
+/// name one literal key end to end.
+fn toml_key(name: &str) -> String {
+    let bare = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if bare {
+        name.to_string()
+    } else {
+        toml_str(name)
+    }
+}
+
 /// Renders the account block exactly in the ADR §1 target shape.
 fn account_fragment(draft: &DraftAccount, set_default: bool) -> String {
     let mut fragment = String::new();
-    fragment.push_str(&format!("[accounts.{}]\n", draft.name));
+    fragment.push_str(&format!("[accounts.{}]\n", toml_key(&draft.name)));
     if set_default {
         fragment.push_str("default = true\n");
     }
@@ -641,6 +670,42 @@ mod tests {
                 ("archive".into(), "[Gmail]/All Mail".into()),
             ],
         }
+    }
+
+    /// A dotted or otherwise key-hostile account name round-trips as one
+    /// literal key (review 37): bare-key interpolation used to collide
+    /// with TOML's dotted-key semantics — [accounts.a.b] built nested
+    /// tables, and the fragment's own literal lookup panicked (“index not
+    /// found”); names reach here sanitized through the wizard, but
+    /// save_account is public API and ordinary strings must save.
+    #[test]
+    fn a_dotted_account_name_roundtrips_as_a_literal_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+
+        let report = save_account(&path, &gmail_raw_draft("a.b")).expect("dotted name saves");
+        assert!(report.created);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("[accounts.\"a.b\"]"),
+            "one literal quoted key, not nested tables: {text}"
+        );
+        assert!(!text.contains("[accounts.a.b]"), "no dotted-name table");
+
+        // The merge path replaces the same literal key cleanly.
+        let report = save_account(&path, &gmail_raw_draft("a.b")).expect("re-save succeeds");
+        assert!(!report.created, "the existing account was replaced");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("[accounts.").count(), 1, "one account block");
+
+        // A quote-hostile name is escaped into the fragment and survives
+        // the merge and the post-write validation read (toml_edit may
+        // spell the literal with single or double quotes).
+        save_account(&path, &gmail_raw_draft("he\"said")).expect("quoted name saves");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let has_key =
+            text.contains("[accounts.\"he\\\"said\"]") || text.contains("[accounts.'he\"said']");
+        assert!(has_key, "{text}");
     }
 
     /// A failed fresh write leaves nothing on disk (review 36): the file
