@@ -195,7 +195,7 @@ pub enum DiscoveryError {
 
     /// The compose did not answer within its deadline plus the
     /// `spawn_blocking` join slack.
-    #[error("discovery did not answer in time (17s deadline)")]
+    #[error("discovery did not answer in time (16s deadline)")]
     Timeout,
 }
 
@@ -450,6 +450,24 @@ mod tests {
         // Fires the LazyLock initializer at test time: an invalid const
         // URL is caught here, not on a user's first discovery run.
         assert_eq!(DEFAULT_DNS_RESOLVER.as_str(), "tcp://1.1.1.1:53");
+    }
+
+    #[test]
+    fn timeout_message_matches_the_actual_budget() {
+        // Review finding 41: the message said "17s deadline" while the
+        // wrapper timer runs `DISCOVERY_DEADLINE + BLOCKING_JOIN_SLACK`.
+        // Pin the rendered seconds to the real budget so the two can
+        // never drift apart again.
+        let budget = DISCOVERY_DEADLINE + BLOCKING_JOIN_SLACK;
+        let rendered = DiscoveryError::Timeout.to_string();
+        assert_eq!(
+            rendered,
+            format!(
+                "discovery did not answer in time ({}s deadline)",
+                budget.as_secs()
+            ),
+            "Timeout message must state the wrapper's actual timeout"
+        );
     }
 
     #[test]
