@@ -14,11 +14,11 @@
 | 29 | Low | main/signals | Signals are deferred while the external editor runs (Ctrl-Z in the editor suspends on return) |
 | 30 | Low | view/ui | `u16` overflow in overlay math at absurd terminal widths (debug panic) |
 | 35 | Low | domain/paths | `expand_tilde` corrupts non-UTF-8 paths |
-| 40 | Low | config | `~user` passes `downloads_dir` validation but is never expanded |
-| 41 | Low | discovery | Timeout message says 17 s; the wrapper times out at 16 s |
-| 42 | Low | discovery | `Provider::from_host` matches substrings (`notgmail.com` → Gmail) |
-| 43 | Low | wizard | "edit it (e)" hint points at a screen where `e` just types a character |
-| 44 | Low | runtime/tasks | Save-flow comment contradicts behavior: provisioning errors abort the save |
+| 40 | ~~Low~~ Fixed | config | ~~`~user` passes `downloads_dir` validation but is never expanded~~ |
+| 41 | ~~Low~~ Fixed | discovery | ~~Timeout message says 17 s; the wrapper times out at 16 s~~ |
+| 42 | ~~Low~~ Fixed | discovery | ~~`Provider::from_host` matches substrings (`notgmail.com` → Gmail)~~ |
+| 43 | ~~Low~~ Fixed | wizard | ~~"edit it (e)" hint points at a screen where `e` just types a character~~ |
+| 44 | ~~Low~~ Fixed | runtime/tasks | ~~Save-flow comment contradicts behavior: provisioning errors abort the save~~ |
 | 46 | Low | app/page_cache | Temp files outside `messages/` are never swept |
 | 47 | Low | app/reader | Reader-document cache fingerprint is length-only |
 | 48 | Low | app/state | `saved_attachments` is unbounded |
@@ -48,11 +48,11 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 
 ### 36-44. Low — Config/wizard edge cases
 
-- `config/mod.rs:1168-1177`: `downloads_dir` accepts any leading `~` (including `~user`), but `expand_tilde` only handles `~`/`~/`.
-- `discovery/mod.rs:198,234`: the error says "17s deadline" while the timeout is `15 + 1 = 16s`.
-- `discovery/mod.rs:103-115`: `host.contains("gmail.com")` tags `notgmail.com` and `imap.gmail.com.evil.example` as Gmail (same for outlook/hotmail/live/office365).
-- `app/wizard.rs:908-913`: "edit it (e)" is shown on W4, where `e` types a character; the instruction should point back to the server list.
-- `runtime/tasks.rs:569-575`: the comment says provisioning failures degrade to "none created", but `operation_failure` aborts the save for every non-cancelled error.
+- ~~`config/mod.rs:1168-1177`: `downloads_dir` accepts any leading `~` (including `~user`), but `expand_tilde` only handles `~`/`~/`.~~ (Fixed, kata `y0cw`.)
+- ~~`discovery/mod.rs:198,234`: the error says "17s deadline" while the timeout is `15 + 1 = 16s`.~~ (Fixed, kata `a6c6`.)
+- ~~`discovery/mod.rs:103-115`: `host.contains("gmail.com")` tags `notgmail.com` and `imap.gmail.com.evil.example` as Gmail (same for outlook/hotmail/live/office365).~~ (Fixed, kata `7rbr`.)
+- ~~`app/wizard.rs:908-913`: "edit it (e)" is shown on W4, where `e` types a character; the instruction should point back to the server list.~~ (Fixed, kata `rmb8`.)
+- ~~`runtime/tasks.rs:569-575`: the comment says provisioning failures degrade to "none created", but `operation_failure` aborts the save for every non-cancelled error.~~ (Fixed, kata `ddp3`: the comment now matches the behavior, and a contract test pins it.)
 
 ### 45-51. Low — Caches, files, and concurrency
 
