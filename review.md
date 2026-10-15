@@ -10,7 +10,6 @@
 
 | # | Severity | Area | Finding |
 |---|----------|------|---------|
-| 23 | Medium | wizard | Stale discovery results apply off-screen; `e`/`r` are not gated while discovering |
 | 24 | Low | wizard | Repeated `Enter` on Confirm starts concurrent account saves (no busy gate) |
 | 25 | Low | app/overlays | An error modal opened over another overlay restores focus to a vanished overlay |
 | 26 | Low | input/keymap | Restoring structural defaults can leave one key bound to two actions; help text lies |
@@ -43,12 +42,6 @@
 ---
 
 ## Detailed findings
-
-### 23. Medium — Stale discovery result / ungated override keys
-
-**Location:** `src/app/wizard.rs:992-995,1037-1064`; key handling `:541-568`
-
-`cancel_wizard`'s `Discovery → Email` arm does not cancel `in_flight`/clear `discovering`, and `wizard_completed` checks only the operation id, not the current step. A late `Err` paints an error on the email screen; an empty `Ok` calls `open_override` off-screen. `submit_email` never clears `override_open`/`override_fields`, so a later submission can show stale override fields. Also `e`/`r` are not gated on `discovering`, so override fields can be edited invisibly behind the spinner and `r` can spawn unbounded blocking discovery workers (which ignore cancellation and run to their 15 s deadline).
 
 ### 24. Low — Concurrent wizard saves
 
@@ -130,5 +123,5 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 
 ## Suggested priority
 
-2. Findings 12–23 — behavioral bugs clustered around composer/draft/cache lifecycles; each needs a regression test. (Remaining: finding 23.)
+2. Findings 12–23 — behavioral bugs clustered around composer/draft/cache lifecycles; each needs a regression test. (All fixed.)
 5. Remaining Low items — batch fixes with the surrounding code.
