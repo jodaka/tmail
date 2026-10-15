@@ -903,6 +903,18 @@ fn the_draft_requires_smtp_and_the_email() {
             .contains("SMTP"),
         "single-sided candidates are flagged, not silently saved"
     );
+    // Review finding 43: the error renders on W4, where `e` types a
+    // character — the hint must send the user back to the server list
+    // (W2), where `e` really opens the manual-override form.
+    let hint = wizard(&state).last_error.as_deref().unwrap_or_default();
+    assert!(
+        !hint.contains("(e)"),
+        "the W4 error must not advertise `e` as an edit shortcut: {hint}"
+    );
+    assert!(
+        hint.contains("server list"),
+        "the hint points to stepping back to the server list: {hint}"
+    );
 }
 
 #[test]

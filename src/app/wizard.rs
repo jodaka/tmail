@@ -948,8 +948,11 @@ fn submit_credentials(wizard: &mut WizardState, state: &mut AppState) -> Vec<Eff
     wizard.confirm.aliases.clear();
 
     let Some(draft) = wizard.build_draft() else {
+        // Review finding 43: this error renders on W4/credentials, where
+        // `e` types into the focused field — the edit shortcut lives on
+        // W2, the server list. Point the user there.
         wizard.last_error = Some(String::from(
-            "the candidate has no SMTP server; edit it (e)",
+            "the candidate has no SMTP server; step back with Esc to the server list and edit the servers there",
         ));
         return Vec::new();
     };
