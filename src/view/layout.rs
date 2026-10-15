@@ -14,8 +14,10 @@ use crate::config::ViewMode;
 
 /// Minimum width for the full layout.
 pub const FULL_MIN_WIDTH: u16 = 120;
-/// Minimum width for the compact layout.
-pub const COMPACT_MIN_WIDTH: u16 = 90;
+/// Minimum width for the compact layout: a half-screen terminal (~85
+/// columns) renders the compact list, so tmail fits beside another window
+/// (issue tmail#ahth).
+pub const COMPACT_MIN_WIDTH: u16 = 84;
 /// Minimum heights (the 152×40 reference leaves ample list rows).
 pub const FULL_MIN_HEIGHT: u16 = 24;
 pub const COMPACT_MIN_HEIGHT: u16 = 20;
@@ -214,8 +216,12 @@ mod tests {
         assert_eq!(mode_for(90, 20), LayoutMode::Compact);
         assert_eq!(mode_for(100, 30), LayoutMode::Compact);
         assert_eq!(mode_for(120, 23), LayoutMode::Compact);
+        // The wide half-screen → compact (issue tmail#ahth): 84 is the
+        // width floor, exact floor and one above render.
+        assert_eq!(mode_for(84, 20), LayoutMode::Compact);
+        assert_eq!(mode_for(85, 20), LayoutMode::Compact);
         // Too small: width or height below the compact floor.
-        assert_eq!(mode_for(89, 40), LayoutMode::TooSmall);
+        assert_eq!(mode_for(83, 40), LayoutMode::TooSmall);
         assert_eq!(mode_for(152, 19), LayoutMode::TooSmall);
         assert_eq!(mode_for(80, 15), LayoutMode::TooSmall);
         assert_eq!(mode_for(0, 0), LayoutMode::TooSmall);

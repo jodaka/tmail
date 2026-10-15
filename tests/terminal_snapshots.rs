@@ -121,12 +121,16 @@ fn compact_layout_renders_the_list_like_the_full_layout() {
 fn too_small_layout_shows_message_instead_of_widgets() {
     let size = (60, 15);
     let text = text_of(&draw(size.0, size.1));
+    let minimum = format!(
+        "{}×{}",
+        tmail::ui::layout::COMPACT_MIN_WIDTH,
+        tmail::ui::layout::COMPACT_MIN_HEIGHT
+    );
     assert!(
         text.contains("Terminal too small"),
         "message missing:\n{text}"
     );
-    assert!(text.contains("60×15"), "size report missing");
-    assert!(text.contains("90×20"), "minimum report missing");
+    assert!(text.contains(&minimum), "minimum report missing");
     // No overlapping chrome.
     assert_absent(&text, "NORMAL", size);
     assert_absent(&text, "INBOX", size);
@@ -1591,33 +1595,40 @@ fn snapshot_at_full_floor_120x30() {
     assert_absent(&text, "UTF-8", (120, 30));
 }
 
-/// 90×25 is the compact floor: the sidebar hides but rows still render.
+/// The compact floor: 84×20 renders the same list as full width (issue
+/// tmail#ahth), and one column under stays too small.
 #[test]
-fn snapshot_at_compact_floor_90x25() {
-    let (buffer, _) = draw_with_hits(90, 25);
-    let text = text_of(&buffer);
-    assert!(text.contains("INBOX"), "pane title missing:\n{text}");
-    // One anatomy in every layout mode: the 18ch sender column and the
-    // inline body preview render exactly as at full width (issue
-    // tmail#7h3r); the preview truncates to what the narrow row leaves.
-    assert!(text.contains("Re: WIP — 240 mm"), "rows missing:\n{text}");
-    assert!(text.contains("— quench done"), "preview missing:\n{text}");
-    assert_absent(&text, "Compose", (90, 25));
-    assert_absent(&text, "UTF-8", (90, 25));
+fn snapshot_at_compact_floor_84x20() {
+    for (width, height) in [(84, 20), (90, 25)] {
+        let (buffer, _) = draw_with_hits(width, height);
+        let text = text_of(&buffer);
+        assert!(text.contains("INBOX"), "pane title missing:\n{text}");
+        // One anatomy in every layout mode: the 18ch sender column and the
+        // inline body preview render exactly as at full width (issue
+        // tmail#7h3r); the preview truncates to what the row leaves.
+        assert!(text.contains("Re: WIP — 240 mm"), "rows missing:\n{text}");
+        assert!(text.contains("— quench"), "preview missing:\n{text}");
+        assert_absent(&text, "Compose", (width, height));
+        assert_absent(&text, "UTF-8", (width, height));
+        assert!(
+            !text.contains("Terminal too small"),
+            "the exact floor renders:\n{text}"
+        );
+    }
 }
 
-/// 89 wide is already too small (compact floor is 90): the message shows
+/// 83 wide is already too small (compact floor is 84): the message shows
 /// instead of overlapping widgets.
 #[test]
 fn snapshot_too_small_just_below_the_compact_floor() {
-    let (buffer, _) = draw_with_hits(89, 25);
+    let (buffer, _) = draw_with_hits(83, 25);
     let text = text_of(&buffer);
     assert!(
         text.contains("Terminal too small"),
         "message missing:\n{text}"
     );
-    assert!(text.contains("89×25"), "size report missing");
-    assert_absent(&text, "INBOX", (89, 25));
+    assert!(text.contains("83×25"), "size report missing");
+    assert_absent(&text, "INBOX", (83, 25));
 }
 
 /// Comfortable view mode (`[tmail].view_mode = "comfortable"`): every
