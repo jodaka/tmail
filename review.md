@@ -97,7 +97,7 @@ The signal arm is only polled by `run_event_loop` (`main.rs:591-636`), while `ha
 ## Test-quality observations
 
 - `reducer_tests/cache.rs:926` registers only `MailOperation::Preview` when testing switch cancellation, missing the `CachePreviewLoad` stage that survives a mailbox switch (fixed with finding 22: the cache stage now has its own regression tests, `a_late_cache_read_for_another_mailbox_never_fills_a_same_id_row` and siblings).- `reducer_tests/composer.rs:65` codifies the composer overwrite on mailbox switch without asserting the parked draft was secured (finding 15).
-- No test drives a foreground failure arriving while help/chooser/switcher/mailboxes is open (finding 25) — the wizard Tick half (finding 17) and the concurrent-save half (finding 24) are covered since their fixes.
+- No test drives a foreground failure arriving while help/chooser/switcher/mailboxes is open — covered since the finding 25 fix (an_error_modal_over_a_popup_restores_the_screen_behind_it); the wizard Tick half (finding 17) and the concurrent-save half (finding 24) are also covered since their fixes.
 - Attachment tests never move the reader focus between `SaveAttachment` start and completion (finding 13).
 - The suite otherwise shows unusually good discipline: process cancellation/timeouts, sanitization, private-FS modes, journal atomicity, keymap parsing, and reducer state machines all have direct tests. The gaps above cluster exactly where two subsystems interact (overlay vs. result routing; composer identity vs. send completion).
 
