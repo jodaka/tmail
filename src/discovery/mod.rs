@@ -100,14 +100,26 @@ impl Provider {
     /// Infers the provider from a server hostname (ADR 0003 §3.5:
     /// the Gmail alias preset also applies when the IMAP host is
     /// `imap.gmail.com` even without a discovery provider tag).
+    /// Only whole labels match: the host must be the provider's own
+    /// domain or a proper subdomain of it, so `notgmail.com` and
+    /// hostile look-alikes like `imap.gmail.com.evil.example` stay
+    /// unmatched (review finding 42).
     pub fn from_host(host: &str) -> Option<Self> {
-        let host = host.to_ascii_lowercase();
-        if host.contains("gmail.com") || host.contains("googlemail.com") {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        const GMAIL_DOMAINS: [&str; 2] = ["gmail.com", "googlemail.com"];
+        const OUTLOOK_DOMAINS: [&str; 4] =
+            ["outlook.com", "hotmail.com", "live.com", "office365.com"];
+        let matches_domain = |domains: &[&str]| {
+            domains.iter().any(|domain| {
+                host == *domain
+                    || host
+                        .strip_suffix(domain)
+                        .is_some_and(|rest| rest.ends_with('.'))
+            })
+        };
+        if matches_domain(&GMAIL_DOMAINS) {
             Some(Provider::Gmail)
-        } else if ["outlook.", "hotmail.", "live.", "office365."]
-            .iter()
-            .any(|marker| host.contains(marker))
-        {
+        } else if matches_domain(&OUTLOOK_DOMAINS) {
             Some(Provider::Outlook)
         } else {
             None
@@ -734,6 +746,41 @@ mod tests {
         let candidates = compose_candidates(configs);
 
         assert_eq!(candidates[0].provider, Some(Provider::Gmail));
+    }
+
+    #[test]
+    fn from_host_matches_whole_provider_domains_only() {
+        // Review finding 42: substring matching tagged `notgmail.com`
+        // and attacker-controlled hosts like
+        // `imap.gmail.com.evil.example` as Gmail. Only exact matches of
+        // the provider's domain or proper subdomains of it count.
+        // Canonical hosts still match, in any case and with a trailing
+        // root dot.
+        for (host, expected) in [
+            ("imap.gmail.com", Some(Provider::Gmail)),
+            ("IMAP.GMAIL.COM", Some(Provider::Gmail)),
+            ("gmail.com", Some(Provider::Gmail)),
+            ("mail.googlemail.com", Some(Provider::Gmail)),
+            ("googlemail.com.", Some(Provider::Gmail)),
+            ("smtp-mail.outlook.com", Some(Provider::Outlook)),
+            ("outlook.office365.com", Some(Provider::Outlook)),
+            ("imap.mailhotmail.com", None),
+        ] {
+            assert_eq!(Provider::from_host(host), expected, "host = {host:?}");
+        }
+        // Behind-the-label look-alikes must not match.
+        for hostile in [
+            "notgmail.com",
+            "imap.gmail.com.evil.example",
+            "gmail.com.attacker.net",
+            "egmail.com",
+        ] {
+            assert_eq!(
+                Provider::from_host(hostile),
+                None,
+                "look-alike {hostile:?} must not tag a provider"
+            );
+        }
     }
 
     #[test]
