@@ -1943,6 +1943,63 @@ fn wizard_save_account_provisions_missing_special_mailboxes() {
     assert!(text.contains("mailbox.alias.trash = \"Trash\""), "{text}");
 }
 
+#[test]
+fn wizard_save_account_aborts_when_provisioning_fails() {
+    // Review finding 44: the runtime comment claimed non-cancelled
+    // provisioning failures degrade to "none created" and the save
+    // proceeds; the code actually aborts the save. Pin the real
+    // behavior: inside provisioning, per-folder create refusals degrade,
+    // but a failure of the final verification listing makes
+    // `ensure_mailboxes` return Err — which aborts the whole save.
+    // The fake errors one `mailbox list` so the verification fails.
+    let fake = FakeHimalaya::spawn_full("error-json", "ok", "ok", "ok");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+
+    let outcome = block(async move {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let manager = OperationManager::new(
+            std::sync::Arc::new(backend(&fake, Some("probe"))),
+            std::sync::Arc::new(tmail::backend::SystemOpener),
+            std::sync::Arc::new(tmail::backend::SystemNotifier),
+            std::sync::Arc::new(tmail::discovery::FakeDiscoverer),
+            std::sync::Arc::new(tmail::backend::himalaya::HimalayaAccountTester::new(
+                fake.program().display().to_string(),
+            )),
+            None,
+            tx,
+        );
+        let effect = Effect {
+            id: OperationId(81),
+            origin: OperationOrigin::Foreground,
+            kind: OperationKind::Account(AccountOperation::SaveAccount {
+                path: path.clone(),
+                draft: Box::new(wizard_draft("gmail")),
+                create: vec![
+                    (String::from("drafts"), String::from("Drafts")),
+                    (String::from("trash"), String::from("Trash")),
+                ],
+            }),
+        };
+        let ctx = RequestContext {
+            operation: effect.id,
+            cancellation: CancellationToken::new(),
+        };
+        manager.launch(effect, ctx);
+        let result = rx.recv().await.expect("result for the launched effect");
+        result.outcome
+    });
+    assert!(
+        outcome.is_err(),
+        "a failed provisioning aborts the save, got {outcome:?}"
+    );
+    // The merge never ran: no config file was written.
+    assert!(
+        !dir.path().join("config.toml").exists(),
+        "the aborted save must not write the account"
+    );
+}
+
 // ── Bulk mark read (ticket aavy) ──────────────────────────────────────────
 
 /// One batched `SetReadBulk` runs ONE `flag add` invocation carrying every

@@ -677,10 +677,17 @@ async fn run_account_call(
                     .await
                 {
                     Ok(confirmed) => confirmed,
-                    // A cancelled provisioning aborts the save the same
-                    // way the test does; any other failure degrades to
-                    // "none created" and the save proceeds without the
-                    // extra aliases.
+                    // Review finding 44 (comment/behavior agreement): any
+                    // provisioning failure aborts the whole save — merely
+                    // cancelled provisioning produces no failure at all
+                    // (the mapper turns `Cancelled` into `None`), so the
+                    // user sees no error and the save silently never
+                    // happens. Non-cancelled errors surface here as a
+                    // visible failure; the save never proceeds with only
+                    // part of the previewed folders created. Inside
+                    // `ensure_mailbox_names` itself, per-folder refusals
+                    // (e.g. "already exists") degrade there, and the
+                    // server-confirmed subset still returns Ok.
                     Err(err) => return operation_failure(effect, err).map(Err),
                 }
             };
