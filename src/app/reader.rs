@@ -346,6 +346,13 @@ pub(crate) fn content(state: &AppState, width: usize) -> Vec<ReaderLine> {
 pub(crate) struct CachedReaderDoc {
     /// The open message the lines were built from.
     pub message_id: crate::domain::MessageId,
+    /// The mailbox that id belongs to. Backend envelope ids (IMAP UIDs)
+    /// are only unique per mailbox, so a same-id message in another
+    /// mailbox must never resolve to this slot — otherwise one email's
+    /// rendered body can appear under another email's headers
+    /// (review.md finding 4). Account identity is not needed: a switch
+    /// rebuilds the whole `AppState`, including the slot.
+    pub mailbox_id: crate::domain::MailboxId,
     /// Wrap width the lines were reflowed at (a resize rebuilds).
     pub width: usize,
     /// Attachment-chip cursor baked into the chip markers (tab rebuilds).
@@ -396,7 +403,8 @@ pub(crate) fn scroll_document(state: &AppState, width: usize) -> Rc<ReaderDoc> {
         cache
             .as_ref()
             .filter(|cached| {
-                cached.message_id == message.id
+                cached.mailbox_id == message.mailbox_id
+                    && cached.message_id == message.id
                     && cached.width == width
                     && cached.selected_chip == selected_chip
                     && cached.fingerprint == fingerprint
@@ -413,6 +421,7 @@ pub(crate) fn scroll_document(state: &AppState, width: usize) -> Rc<ReaderDoc> {
     });
     *state.caches.reader_doc.borrow_mut() = Some(CachedReaderDoc {
         message_id: message.id.clone(),
+        mailbox_id: message.mailbox_id.clone(),
         width,
         selected_chip,
         fingerprint,
@@ -610,6 +619,46 @@ mod tests {
             text.iter()
                 .any(|t| t.starts_with('─') && t.chars().all(|c| c == '─'))
         );
+    }
+
+    /// A same-id message in a different mailbox must never hit the cache
+    /// (review.md finding 4): backend ids collide across mailboxes, and
+    /// matched body-length fingerprints would otherwise serve the other
+    /// email's rendered document.
+    #[test]
+    fn same_id_in_another_mailbox_rebuilds_the_document() {
+        let mut state = loaded_state();
+        let first = scroll_document(&state, 100);
+        // Same id, equal body lengths and attachment count, different
+        // mailbox and content — the exact collision shape.
+        let summary = summary();
+        let message = Message {
+            id: summary.id.clone(),
+            mailbox_id: MailboxId(String::from("archive")),
+            headers: MessageHeaders::default(),
+            plain_body: Some(String::from(
+                "Foreign first line.\n\nForeign second paragraph with a long line that will need wrapping to fit the viewport width.\n",
+            )),
+            html_body: None,
+            attachments: vec![Attachment {
+                name: Some(String::from("report.pdf")),
+                mime_type: Some(String::from("application/pdf")),
+                size: Some(1_200_000),
+                part_id: 2,
+            }],
+        };
+        state.open_message = Loadable::Loaded(std::sync::Arc::new(message));
+        let second = scroll_document(&state, 100);
+        assert_ne!(
+            Rc::as_ptr(&first),
+            Rc::as_ptr(&second),
+            "the other mailbox's message hit the first mailbox's cached doc"
+        );
+        let text: String = second.lines.iter().map(ReaderLine::text).collect();
+        assert!(text.contains("Foreign first line."), "{text}");
+        // And the cache now serves the second message's document.
+        let again = scroll_document(&state, 100);
+        assert_eq!(Rc::as_ptr(&second), Rc::as_ptr(&again));
     }
 
     /// Every fixed field (subject, meta) sits two symbols in from the left
