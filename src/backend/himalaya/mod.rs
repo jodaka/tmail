@@ -1397,9 +1397,16 @@ where
 const COLLISION_WALK_LIMIT: u32 = 999;
 
 /// Page size of the envelope listings that sweep for stray draft copies
-/// (ADR 0002 §D.6): one IMAP page is enough for the handful of copies a
-/// crash or a slow save can leave behind, and the sweep is best-effort.
+/// (ADR 0002 §D.6): the sweep paginates through the whole mailbox in
+/// chunks this big — a match beyond the first page was silently surviving
+/// deletion before (review.md finding 2) — and the sweep is best-effort.
 const DRAFT_SWEEP_PAGE_SIZE: usize = 100;
+
+/// Hard pagination ceiling for the sweep listings (in pages): 10_000
+/// envelopes is far past any real Drafts/Trash mailbox, and the bound
+/// turns a listing backend that always reports full pages into a bounded
+/// sweep instead of an infinite loop.
+const DRAFT_SWEEP_MAX_PAGES: usize = 100;
 
 /// Parse one composer address field into library addresses (valid entries
 /// only). Draft fields may hold partially typed input — the composer flags
@@ -1915,33 +1922,65 @@ async fn run_stray_draft_sweep(
 
 /// List a mailbox and return the ids of the envelopes that carry
 /// `message_id` (ADR 0002 §D.6: only the Message-ID survives maildir
-/// renames). Best-effort: a failed listing yields no matches.
+/// renames), paginating through the whole mailbox so a copy beyond the
+/// first page is still found (review.md finding 2). Best-effort: a failed
+/// listing yields the ids matched so far, with a warning logged — the
+/// sweep must never look clearer than it actually ran.
 async fn list_envelope_ids_with_message_id(
     cli: &Cli,
     mailbox: &str,
     message_id: &str,
     cancellation: &tokio_util::sync::CancellationToken,
 ) -> Vec<String> {
-    let argv = command::envelope_list_argv(
-        cli.config.as_deref(),
-        cli.account.as_deref(),
-        mailbox,
-        1,
-        DRAFT_SWEEP_PAGE_SIZE,
-    );
-    let Ok(output) = process::run(&cli.program, &argv, cancellation).await else {
-        return Vec::new();
-    };
-    let Ok(listed) = process::decode_on_pool::<dto::EnvelopesDto>(output).await else {
-        return Vec::new();
-    };
-    let bare = crate::domain::message::bare_message_id(message_id);
-    listed
-        .envelopes
-        .into_iter()
-        .filter(|envelope| envelope.message_id.as_deref() == Some(bare))
-        .map(|envelope| envelope.id)
-        .collect()
+    let bare = bare_message_id(message_id);
+    let mut matched: Vec<String> = Vec::new();
+    let mut page_number = 1;
+    loop {
+        if cancellation.is_cancelled() {
+            return matched;
+        }
+        let argv = command::envelope_list_argv(
+            cli.config.as_deref(),
+            cli.account.as_deref(),
+            mailbox,
+            page_number,
+            DRAFT_SWEEP_PAGE_SIZE,
+        );
+        let Ok(output) = process::run(&cli.program, &argv, cancellation).await else {
+            tracing::warn!(
+                mailbox,
+                message_id = %bare,
+                "stray-draft sweep listing failed"
+            );
+            return matched;
+        };
+        let listed = match process::decode_on_pool::<dto::EnvelopesDto>(output).await {
+            Ok(listed) => listed,
+            Err(err) => {
+                tracing::warn!(
+                    mailbox,
+                    message_id = %bare,
+                    %err,
+                    "stray-draft sweep listing failed"
+                );
+                return matched;
+            }
+        };
+        let page = listed.envelopes.len();
+        matched.extend(
+            listed
+                .envelopes
+                .into_iter()
+                .filter(|envelope| envelope.message_id.as_deref() == Some(bare.as_str()))
+                .map(|envelope| envelope.id),
+        );
+        // A short page is the listing's end; a full one only means more
+        // may follow.
+        if page < DRAFT_SWEEP_PAGE_SIZE || page_number >= DRAFT_SWEEP_MAX_PAGES {
+            return matched;
+        }
+        page_number += 1;
+    }
 }
 
 /// Group a locator batch by mailbox (a bulk selection is single-mailbox
