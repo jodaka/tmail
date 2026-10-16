@@ -53,6 +53,16 @@ fn aliases(entries: &[(&str, &str)]) -> HashMap<String, String> {
         .collect()
 }
 
+fn send_aliases() -> HashMap<String, String> {
+    aliases(&[
+        ("inbox", "INBOX"),
+        ("trash", "Archive"),
+        // The Bcc route stores its own Sent copy, so resolution needs the
+        // role alias (review.md finding 1).
+        ("sent", "Sent"),
+    ])
+}
+
 fn block<T>(future: impl std::future::Future<Output = T>) -> T {
     Runtime::new().expect("runtime").block_on(future)
 }
@@ -1085,7 +1095,13 @@ use tmail::domain::{OutboundMessage, OutgoingContent};
 /// Backend with the configured account identity, as the real wiring builds
 /// it (the `From` of outgoing mail).
 fn backend_with_identity(fake: &FakeHimalaya) -> HimalayaCliBackend {
-    backend(fake, Some("probe")).with_account_identity(
+    let backend = HimalayaCliBackend::new(
+        fake.program().display().to_string(),
+        Some(PathBuf::from(fake.config())),
+        Some(String::from("probe")),
+        send_aliases(),
+    );
+    backend.with_account_identity(
         Some(String::from("probe@tmail.local")),
         Some(String::from("Tmail Probe")),
     )
@@ -1157,6 +1173,9 @@ fn send_pipes_the_serialized_message_on_stdin_with_exact_argv() {
 /// while the piped bytes never market the Bcc list. Only the validated
 /// email values ride argv; display names stay out of the envelope, and
 /// the same success JSON makes the outcome identical to a normal send.
+/// Because `smtp send` has no save-copy support, a definite success is
+/// completed by appending the delivered bytes to the Sent mailbox
+/// (review.md finding 1) — the second recorded invocation.
 #[test]
 fn send_with_bcc_uses_the_explicit_smtp_envelope_and_no_bcc_header() {
     let fake = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "ok");
@@ -1165,32 +1184,46 @@ fn send_with_bcc_uses_the_explicit_smtp_envelope_and_no_bcc_header() {
     assert_eq!(outcome, tmail::domain::SendOutcome::Sent);
     assert_eq!(
         fake.argv(),
-        vec![vec![
-            "-c".to_string(),
-            fake.config().display().to_string(),
-            "-a".to_string(),
-            "probe".to_string(),
-            "smtp".to_string(),
-            "send".to_string(),
-            "-f".to_string(),
-            "probe@tmail.local".to_string(),
-            "-t".to_string(),
-            "ada@example.org".to_string(),
-            "-t".to_string(),
-            "bob@example.org".to_string(),
-            "-t".to_string(),
-            "carol@example.org".to_string(),
-            "-t".to_string(),
-            "one@hidden.example".to_string(),
-            "-t".to_string(),
-            "two@hidden.example".to_string(),
-            "--json".to_string(),
-        ]]
+        vec![
+            vec![
+                "-c".to_string(),
+                fake.config().display().to_string(),
+                "-a".to_string(),
+                "probe".to_string(),
+                "smtp".to_string(),
+                "send".to_string(),
+                "-f".to_string(),
+                "probe@tmail.local".to_string(),
+                "-t".to_string(),
+                "ada@example.org".to_string(),
+                "-t".to_string(),
+                "bob@example.org".to_string(),
+                "-t".to_string(),
+                "carol@example.org".to_string(),
+                "-t".to_string(),
+                "one@hidden.example".to_string(),
+                "-t".to_string(),
+                "two@hidden.example".to_string(),
+                "--json".to_string(),
+            ],
+            vec![
+                "-c".to_string(),
+                fake.config().display().to_string(),
+                "-a".to_string(),
+                "probe".to_string(),
+                "message".to_string(),
+                "add".to_string(),
+                "-m".to_string(),
+                "Sent".to_string(),
+                "--json".to_string(),
+            ]
+        ]
     );
     let stdin = fake.stdin_bytes();
     let text = String::from_utf8(stdin).expect("serialized mail is UTF-8");
     // The visible recipients and body still reach the wire, the blind
-    // list never does (header or body leak alike).
+    // list never does (header or body leak alike). The same message is
+    // also piped again for the Sent append — the record holds both runs.
     assert!(
         text.contains("To: \"Ada Lovelace\" <ada@example.org>"),
         "{text}"
@@ -1205,6 +1238,40 @@ fn send_with_bcc_uses_the_explicit_smtp_envelope_and_no_bcc_header() {
         !text.contains("hidden.example"),
         "a blind address reached the transmitted payload:\n{text}"
     );
+    assert_eq!(
+        text.matches("Message-ID: <123.send@tmail.local>").count(),
+        2,
+        "the delivered message is piped once to smtp send and once to the Sent append"
+    );
+}
+
+/// Review.md finding 1: the Sent append failing after a definite
+/// delivery must not swallow the copy loss — the outcome becomes
+/// `SentButCopyFailed` (delivery happened; the retry warning covers the
+/// missing copy) and carries the CLI's failure detail.
+#[test]
+fn a_failing_sent_copy_of_a_delivered_bcc_send_is_not_quiet() {
+    let fake = FakeHimalaya::spawn_send("ok", "ok", "error-json", "ok", "ok");
+    let message = outbound_with_bcc();
+    let outcome = block(backend_with_identity(&fake).send_message(ctx(), message)).expect("sent");
+    match outcome {
+        tmail::domain::SendOutcome::SentButCopyFailed { code, detail } => {
+            assert_eq!(code, Some(1));
+            assert!(detail.contains("no such message"), "{detail}");
+        }
+        other => panic!("expected SentButCopyFailed, got {other:?}"),
+    }
+}
+
+/// A non-Bcc send keeps the plain `message send` route untouched — no
+/// extra append, whatever the account's save-copy policy does.
+#[test]
+fn bcc_free_sends_run_one_invocation_only() {
+    let fake = FakeHimalaya::spawn_send("ok", "ok", "ok", "ok", "ok");
+    let outcome =
+        block(backend_with_identity(&fake).send_message(ctx(), outbound())).expect("send succeeds");
+    assert_eq!(outcome, tmail::domain::SendOutcome::Sent);
+    assert_eq!(fake.argv().len(), 1, "{:#?}", fake.argv());
 }
 
 /// Ticket kws6: the explicit-envelope branch feeds the same Phase 0

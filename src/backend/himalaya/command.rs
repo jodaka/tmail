@@ -263,6 +263,21 @@ pub(crate) fn message_add_argv(
     argv
 }
 
+/// `message add -m <mailbox> --json` with a delivered message piped on
+/// stdin (review.md finding 1): the Bcc route delivers through
+/// `smtp send`, which has no save-copy support, so Tmail stores the Sent
+/// copy itself by appending the same bytes after a definite success.
+/// No flag: a sent copy is not a draft.
+pub(crate) fn message_add_copy_argv(
+    config: Option<&Path>,
+    account: Option<&str>,
+    mailbox_id: &str,
+) -> Vec<String> {
+    let mut argv = global_flags(config, account);
+    args!(argv, "message", "add", "-m", mailbox_id, "--json");
+    argv
+}
+
 /// `message send --json` with the raw RFC 5322 message piped on stdin
 /// (ADR 0001 findings table; fixtures/himalaya/send-outcomes.md: success
 /// prints `{"message":"Message successfully sent"}`, failures are JSON
@@ -739,6 +754,25 @@ mod tests {
             argv,
             vec![
                 "message", "delete", "-m", "INBOX", "env-1", "env-2", "env-3", "--json"
+            ]
+        );
+    }
+
+    #[test]
+    fn message_add_copy_argv_is_exact() {
+        let argv = message_add_copy_argv(Some(Path::new("/tmp/cfg.toml")), Some("probe"), "Sent");
+        assert_eq!(
+            argv,
+            vec![
+                "-c",
+                "/tmp/cfg.toml",
+                "-a",
+                "probe",
+                "message",
+                "add",
+                "-m",
+                "Sent",
+                "--json",
             ]
         );
     }

@@ -890,7 +890,12 @@ impl MailBackend for HimalayaCliBackend {
         //    would drop those recipients. `smtp send` takes the full
         //    envelope as argv instead (ticket kws6); Bcc-less mail keeps
         //    the plain `message send` contract.
-        let argv = if message.bcc.is_empty() {
+        // `smtp send` never saves a Sent copy — only `message send` honors
+        // `message.send.save-copy` — so the Bcc route stores its own copy
+        // after delivery (review.md finding 1). The bytes stay owned here
+        // (the child gets the payload move-in via a clone) for that append.
+        let bcc_route = !message.bcc.is_empty();
+        let argv = if !bcc_route {
             command::message_send_argv(self.config_path.as_deref(), self.account.as_deref())
         } else {
             // `serialize_outbound` just refused to run without an identity,
@@ -912,8 +917,9 @@ impl MailBackend for HimalayaCliBackend {
                     .map(|address| address.email.as_str()),
             )
         };
+        let payload = bytes.clone();
         let output =
-            match process::run_with_stdin(&self.program, &argv, Some(bytes), &ctx.cancellation)
+            match process::run_with_stdin(&self.program, &argv, Some(payload), &ctx.cancellation)
                 .await
             {
                 Ok(output) => output,
@@ -935,7 +941,16 @@ impl MailBackend for HimalayaCliBackend {
         //    from "may already be delivered" — and the output contract is
         //    the same JSON either way, so the classification is
         //    branch-independent.
-        Ok(classify_send(output))
+        let outcome = classify_send(output);
+        // 4. Bcc route only: the delivered message must surface in Sent.
+        //    Only a definite success is completed by the copy attempt —
+        //    the ambiguous and failed outcomes have no delivered message
+        //    to store a copy of.
+        Ok(if bcc_route {
+            self.store_sent_copy(ctx, bytes, outcome).await
+        } else {
+            outcome
+        })
     }
 
     async fn read_attachment(
@@ -1041,6 +1056,72 @@ impl MailBackend for HimalayaCliBackend {
 }
 
 impl HimalayaCliBackend {
+    /// Complete a Bcc-route send by appending the delivered message to
+    /// the Sent mailbox (review.md finding 1): `smtp send` carries no
+    /// save-copy support, so without this append a delivered Bcc mail
+    /// leaves nothing in Sent on accounts that do no server-side filing.
+    /// No duplicate can come from us on that route: plain-SMTP delivery
+    /// does no filing for IMAP/SMTP accounts, and the non-Bcc route keeps
+    /// whatever save-copy policy the account configures. A resolution
+    /// failure or a failed append turns the definite success into
+    /// [`SendOutcome::SentButCopyFailed`] — the delivery happened, so the
+    /// retry modal must only warn about the missing copy, not suggest a
+    /// silent loss.
+    async fn store_sent_copy(
+        &self,
+        ctx: RequestContext,
+        bytes: Vec<u8>,
+        outcome: SendOutcome,
+    ) -> SendOutcome {
+        if !matches!(outcome, SendOutcome::Sent) {
+            return outcome;
+        }
+        let sent_mailbox = match self.verified_role_target(MailboxRole::Sent, "sent") {
+            Ok(mailbox) => mailbox,
+            Err(resolution) => {
+                tracing::warn!(%resolution, "delivered message has no Sent folder to copy into");
+                return SendOutcome::SentButCopyFailed {
+                    code: None,
+                    detail: crate::domain::sanitize::sanitize(&resolution),
+                };
+            }
+        };
+        let argv = command::message_add_copy_argv(
+            self.config_path.as_deref(),
+            self.account.as_deref(),
+            &sent_mailbox,
+        );
+        let result =
+            match process::run_with_stdin(&self.program, &argv, Some(bytes), &ctx.cancellation)
+                .await
+            {
+                Ok(output) => process::require_success(output),
+                Err(err) => Err(err),
+            };
+        match result {
+            Ok(()) => SendOutcome::Sent,
+            Err(err) => {
+                tracing::warn!(
+                    mailbox = %sent_mailbox,
+                    %err,
+                    "delivered message copy could not be saved to Sent"
+                );
+                let (code, detail) = match &err {
+                    BackendError::Command {
+                        code,
+                        detail,
+                        program,
+                    } => (*code, format!("`{program}` command failed: {detail}")),
+                    other => (None, other.to_string()),
+                };
+                SendOutcome::SentButCopyFailed {
+                    code,
+                    detail: crate::domain::sanitize::sanitize(&detail),
+                }
+            }
+        }
+    }
+
     /// `flag add`/`flag remove` for one flag; output is a flag echo (ADR
     /// 0001 finding 6) that is validated but not interpreted.
     async fn run_flag(
