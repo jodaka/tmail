@@ -431,6 +431,17 @@ pub(crate) fn decode<T: DeserializeOwned>(output: ChildOutput) -> BackendResult<
     })
 }
 
+/// Exit-status check for child runs whose output carries no decodable
+/// payload (review finding 2): the draft-deletion phases only need "the
+/// child did the job or it did not" — and [`run`] reports `Ok` for any
+/// child that merely exited, so the status must be judged explicitly.
+pub(crate) fn require_success(output: ChildOutput) -> BackendResult<()> {
+    if output.code == Some(0) {
+        return Ok(());
+    }
+    Err(command_error(&output))
+}
+
 /// [`decode`] on the blocking pool: parsing child output is CPU work over
 /// bytes that can reach tens of megabytes (a full message dump, a large
 /// listing), and the main runtime is single-threaded (plan §3) — the frame
@@ -720,5 +731,31 @@ mod timeout_tests {
             Some(libc::ESRCH),
             "the killed child left a process behind: {err}"
         );
+    }
+
+    #[test]
+    fn require_success_judges_the_exit_status() {
+        let clean = ChildOutput {
+            program: String::from("himalaya"),
+            code: Some(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        assert!(require_success(clean).is_ok());
+
+        let failed = ChildOutput {
+            program: String::from("himalaya"),
+            code: Some(1),
+            stdout: br#"{"error":"database is locked"}"#.to_vec(),
+            stderr: Vec::new(),
+        };
+        let err = require_success(failed).expect_err("nonzero exit");
+        match err {
+            BackendError::Command { code, detail, .. } => {
+                assert_eq!(code, Some(1));
+                assert!(detail.contains("database is locked"), "{detail}");
+            }
+            other => panic!("unexpected error {other:?}"),
+        }
     }
 }

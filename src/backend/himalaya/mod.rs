@@ -1989,7 +1989,15 @@ async fn run_two_phase_delete(
         mailbox,
         [id].as_slice(),
     );
-    if let Err(err) = process::run(&cli.program, &argv, cancellation).await {
+    // The exit status is the only conclusion here (review finding 2):
+    // `process::run` reports `Ok` for any child that merely exited, code
+    // included, and treating a nonzero exit as deleted would let the sweep
+    // believe a surviving copy is gone.
+    let delete_result = match process::run(&cli.program, &argv, cancellation).await {
+        Ok(output) => process::require_success(output),
+        Err(err) => Err(err),
+    };
+    if let Err(err) = delete_result {
         if !matches!(err, BackendError::Cancelled) {
             tracing::warn!(old = %id, mailbox, %err, "draft copy could not be deleted");
         }
@@ -2015,8 +2023,13 @@ async fn run_two_phase_delete(
             trash,
             [id.as_str()].as_slice(),
         );
-        match process::run(&cli.program, &argv, cancellation).await {
-            Ok(_) => tracing::debug!(id = %id, "trashed draft copy purged"),
+        // Same exit-status conclusion as the base delete above.
+        let purge_result = match process::run(&cli.program, &argv, cancellation).await {
+            Ok(output) => process::require_success(output),
+            Err(err) => Err(err),
+        };
+        match purge_result {
+            Ok(()) => tracing::debug!(id = %id, "trashed draft copy purged"),
             Err(err) if !matches!(err, BackendError::Cancelled) => {
                 tracing::warn!(id = %id, %err, "trashed draft copy could not be purged");
             }
