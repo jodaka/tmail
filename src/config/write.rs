@@ -516,6 +516,9 @@ fn write_all_or_cleanup<W: std::io::Write>(
 /// Like the draft journal, the temp name carries a process-unique counter
 /// on top of the pid: two concurrent saves within one process would
 /// otherwise share one name and race the rename.
+// `owner_only` only shapes permissions in the `#[cfg(unix)]` block below;
+// Windows treats it as unused without weakening the Unix contract.
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn write_existing_atomically(path: &Path, bytes: &[u8], owner_only: bool) -> Result<(), String> {
     static TMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = path.with_extension(format!(
