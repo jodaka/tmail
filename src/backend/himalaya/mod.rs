@@ -1435,8 +1435,12 @@ fn bare_message_id(message_id: &str) -> String {
 }
 
 /// Read every outbound attachment's bytes on the blocking pool, in
-/// insertion order (deterministic wire order). A missing or unreadable
-/// file is the same detailed, retryable refusal the inline read produced.
+/// insertion order (deterministic wire order). The per-file and total
+/// caps are re-checked here at send time (review.md finding 3): chip
+/// insertion validated the source earlier, but the file may have grown
+/// since, and many individually accepted files still add up — the send
+/// path must never buffer an unbounded amount of disk. Every refusal is
+/// the same detailed, retryable error the inline read produced.
 async fn read_attachment_payloads(
     attachments: &[crate::domain::OutboundAttachment],
 ) -> BackendResult<Vec<Vec<u8>>> {
@@ -1444,20 +1448,87 @@ async fn read_attachment_payloads(
         .iter()
         .map(|attachment| attachment.path.clone())
         .collect();
-    blocking(move || {
-        let mut payloads = Vec::with_capacity(specs.len());
-        for path in &specs {
-            let bytes = std::fs::read(path).map_err(|err| {
+    blocking(move || read_attachment_payloads_bounded(&specs)).await
+}
+
+/// The production limits of [`read_attachment_payloads_inner`]: one truth
+/// per cap, quoted from `domain::paths`.
+fn read_attachment_payloads_bounded(specs: &[PathBuf]) -> BackendResult<Vec<Vec<u8>>> {
+    read_attachment_payloads_inner(
+        specs,
+        crate::domain::paths::MAX_DRAFT_ATTACHMENT_BYTES,
+        crate::domain::paths::MAX_SEND_ATTACHMENTS_TOTAL_BYTES,
+    )
+}
+
+/// Read every attachment in order against injected per-file and aggregate
+/// limits, so the caps are unit-testable without multi-MiB fixtures.
+fn read_attachment_payloads_inner(
+    specs: &[PathBuf],
+    per_file: u64,
+    per_send: u64,
+) -> BackendResult<Vec<Vec<u8>>> {
+    use std::io::Read;
+    let mut payloads = Vec::with_capacity(specs.len());
+    let mut total: u64 = 0;
+    for path in specs {
+        let file = std::fs::File::open(path).map_err(|err| {
+            BackendError::File(format!(
+                "`{}` could not be read for sending: {err}",
+                path.display()
+            ))
+        })?;
+        let size = file
+            .metadata()
+            .map_err(|err| {
+                BackendError::File(format!(
+                    "`{}` could not be read for sending: {err}",
+                    path.display()
+                ))
+            })?
+            .len();
+        // The chip insertion validated the source earlier; the send-time
+        // recheck is authoritative (a file may have grown or been swapped
+        // since). The take() cap additionally bounds the read itself, so
+        // the stat/read gap cannot buffer unbounded bytes either.
+        if size > per_file {
+            return Err(BackendError::File(format!(
+                "`{}` is {} — the limit is {}",
+                path.display(),
+                crate::ui::text::human_size(size),
+                crate::ui::text::human_size(per_file)
+            )));
+        }
+        if total + size > per_send {
+            return Err(BackendError::File(format!(
+                "the attachments total {} so far and this file adds {} — the send limit is {}",
+                crate::ui::text::human_size(total),
+                crate::ui::text::human_size(size),
+                crate::ui::text::human_size(per_send)
+            )));
+        }
+        let mut bytes = Vec::with_capacity(size as usize);
+        (&file)
+            .take(per_file + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|err| {
                 BackendError::File(format!(
                     "`{}` could not be read for sending: {err}",
                     path.display()
                 ))
             })?;
-            payloads.push(bytes);
+        if bytes.len() as u64 > per_file {
+            return Err(BackendError::File(format!(
+                "`{}` is {} — the limit is {}",
+                path.display(),
+                crate::ui::text::human_size(bytes.len() as u64),
+                crate::ui::text::human_size(per_file)
+            )));
         }
-        Ok(payloads)
-    })
-    .await
+        total += bytes.len() as u64;
+        payloads.push(bytes);
+    }
+    Ok(payloads)
 }
 
 /// Resolve the destination directory for a save (plan §15): the request's
@@ -2514,6 +2585,78 @@ mod attachment_tests {
 }
 
 #[cfg(all(test, feature = "test-fixtures"))]
+mod attachment_payload_tests {
+    use super::*;
+
+    fn temp_file(name: &str, contents: &[u8]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join(name);
+        std::fs::write(&path, contents).expect("write fixture");
+        (dir, path)
+    }
+
+    #[test]
+    fn payloads_are_read_in_insertion_order() {
+        let (_a, first) = temp_file("a.bin", b"first");
+        let (_b, second) = temp_file("b.bin", b"second");
+        let payloads = read_attachment_payloads_inner(&[first.clone(), second.clone()], 10, 100)
+            .expect("both read");
+        assert_eq!(payloads[0], b"first".to_vec());
+        assert_eq!(payloads[1], b"second".to_vec());
+    }
+
+    #[test]
+    fn missing_files_are_detailed_retryable_refusals_at_send_time() {
+        let err =
+            read_attachment_payloads_inner(&[PathBuf::from("/nonexistent/late.txt")], 10, 100)
+                .expect_err("missing");
+        match err {
+            BackendError::File(detail) => {
+                assert!(detail.contains("/nonexistent/late.txt"), "{detail}");
+            }
+            other => panic!("expected a File error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn files_grown_past_the_per_file_limit_are_refused_at_send_time() {
+        let (_dir, path) = temp_file("grown.bin", b"0123456789");
+        // The chip validated it under 10 earlier; now it (say) sits above.
+        let payloads = read_attachment_payloads_inner(std::slice::from_ref(&path), 10, 100)
+            .expect("still under the injected per-file limit");
+        assert_eq!(payloads[0], b"0123456789".to_vec());
+        let err = read_attachment_payloads_inner(&[path], 9, 100)
+            .expect_err("grown past the per-file cap");
+        match err {
+            BackendError::File(detail) => {
+                assert!(detail.contains("the limit is"), "{detail}");
+            }
+            other => panic!("expected a File error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aggregate_total_is_capped_across_attachments() {
+        let (_a, first) = temp_file("a.bin", b"12345");
+        let (_b, second) = temp_file("b.bin", b"12345");
+        let (_c, third) = temp_file("c.bin", b"12345");
+        // Two 5-byte files fit the 12-byte aggregate; the third crosses it.
+        let first_two = read_attachment_payloads_inner(&[first.clone(), second.clone()], 10, 12)
+            .expect("two files fit the 12-byte aggregate");
+        assert_eq!(first_two.len(), 2);
+        let err = read_attachment_payloads_inner(&[first, second, third], 10, 12)
+            .expect_err("third file crosses the aggregate cap");
+        match err {
+            BackendError::File(detail) => {
+                assert!(detail.contains("the attachments total"), "{detail}");
+                assert!(detail.contains("the send limit is"), "{detail}");
+            }
+            other => panic!("expected a File error, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
 mod attachment_mime_tests {
     //! Round-trip proof for outgoing attachments (plan §15, Phase 8
     //! acceptance): the serializer's bytes are parsed with `mail-parser` —

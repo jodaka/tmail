@@ -12,6 +12,16 @@ use std::path::{Path, PathBuf};
 /// acceptable size"). 25 MiB — deliberately conservative for mail.
 pub const MAX_DRAFT_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
 
+/// Largest total the send path will buffer for a message's attachments,
+/// re-checked at serialization time (review.md finding 3): a file may
+/// grow after its chip was added, and many individually accepted files
+/// still add up — reading them whole without a total cap could exhaust
+/// process memory. One attachment payload set lives in RSS alongside the
+/// builder output (≈ +37% for base64), so the ceiling exists and is a
+/// product decision: four full-size attachments. Defined in domain/ so
+/// composer, backend, and tests quote one truth.
+pub const MAX_SEND_ATTACHMENTS_TOTAL_BYTES: u64 = 4 * MAX_DRAFT_ATTACHMENT_BYTES;
+
 /// The user's home directory: `$HOME`, or `$USERPROFILE` on platforms
 /// where GitHub runners and stock shells never set `HOME` (Windows port,
 /// issue y90w). Empty values are treated as unset.
