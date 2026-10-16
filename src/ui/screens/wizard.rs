@@ -730,7 +730,9 @@ fn render_confirm(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme
         y += 2;
     }
 
-    // Shared-readable warning (ADR 0003 §3.6): raw secrets only.
+    // Shared-readable notice (review.md finding 6): raw secrets only. The
+    // save tightens the file to owner-only before the password joins it;
+    // the user is told up front, not handed a chore afterwards.
     if wizard.config.existing_shared_readable && wizard.credentials.storage_mode == StorageMode::Raw
     {
         intro(
@@ -738,7 +740,7 @@ fn render_confirm(frame: &mut Frame<'_>, body: Rect, wizard: &WizardState, theme
             column,
             &mut y,
             theme,
-            "warning: existing config is readable by others; run chmod 600",
+            "note: config is readable by others; the save tightens it to owner-only",
         );
     }
     error_line(frame, column, y, wizard.last_error.as_deref(), theme);

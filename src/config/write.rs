@@ -116,7 +116,8 @@ pub struct SaveReport {
     /// Whether the file was freshly created (and got mode 0600).
     pub created: bool,
     /// Warning for the confirm/save flow: an existing group/world-readable
-    /// config received `password.raw`.
+    /// config received `password.raw` (and was tightened to owner-only
+    /// before the write — review.md finding 6).
     pub permissions_warning: Option<String>,
 }
 
@@ -235,19 +236,23 @@ pub fn save_account(path: &Path, draft: &DraftAccount) -> Result<SaveReport, Str
     // default of a different account stays authoritative.
     let set_default = !other_account_has_default(&doc, &draft.name);
 
-    let warning = if draft.secret.stores_secret() && !created && file_shared_readable(&target) {
-        Some(format!(
-            "existing config is readable by others; run chmod 600 {}",
+    // A raw secret never joins a shared-readable file (review.md finding
+    // 6): the write tightens the file to owner-only first, and the user
+    // learns of the permission change through the report message. The
+    // reported path is the user-facing one; the resolved destination is
+    // an implementation detail.
+    let owner_only = draft.secret.stores_secret() && !created && file_shared_readable(&target);
+    let warning = owner_only.then(|| {
+        format!(
+            "existing config was readable by others; it was tightened to owner-only to protect the stored password ({})",
             path.display()
-        ))
-    } else {
-        None
-    };
+        )
+    });
 
     let (account, container) = build_account_item(draft, set_default)?;
     insert_account(&mut doc, draft.name.as_str(), account, container)?;
 
-    write_document(&target, &doc, created)?;
+    write_document(&target, &doc, created, owner_only)?;
 
     validate_written(&target, &draft.name)?;
 
@@ -459,8 +464,15 @@ fn toml_str(value: &str) -> String {
 /// (`create_new` — never world-readable at any instant); an existing
 /// file is replaced atomically (temp file, sync, rename — ticket 12h7),
 /// so a crash mid-write cannot corrupt the shared config, and its mode
-/// is preserved.
-fn write_document(path: &Path, doc: &DocumentMut, created: bool) -> Result<(), String> {
+/// is preserved — tightened to owner-only when `owner_only` requires
+/// (review.md finding 6: a raw secret never persists into a
+/// shared-readable file).
+fn write_document(
+    path: &Path,
+    doc: &DocumentMut,
+    created: bool,
+    owner_only: bool,
+) -> Result<(), String> {
     let text = doc.to_string();
     if created {
         if let Some(parent) = path
@@ -473,7 +485,7 @@ fn write_document(path: &Path, doc: &DocumentMut, created: bool) -> Result<(), S
         let mut file = open_new_private_file(path)?;
         write_all_or_cleanup(path, &mut file, text.as_bytes())
     } else {
-        write_existing_atomically(path, text.as_bytes())
+        write_existing_atomically(path, text.as_bytes(), owner_only)
     }
 }
 
@@ -504,7 +516,7 @@ fn write_all_or_cleanup<W: std::io::Write>(
 /// Like the draft journal, the temp name carries a process-unique counter
 /// on top of the pid: two concurrent saves within one process would
 /// otherwise share one name and race the rename.
-fn write_existing_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+fn write_existing_atomically(path: &Path, bytes: &[u8], owner_only: bool) -> Result<(), String> {
     static TMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = path.with_extension(format!(
         "toml.tmp-{}-{}",
@@ -520,13 +532,19 @@ fn write_existing_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            // Match the target's mode when readable, else owner-only; a
-            // shared-readable config is deliberately not downgraded
-            // silently (the wizard warns about that separately).
-            let mode = std::fs::metadata(path)
-                .ok()
-                .map(|meta| meta.permissions().mode() & 0o777)
-                .unwrap_or(crate::domain::private_fs::OWNER_FILE_MODE);
+            // Match the target's mode when readable, else owner-only;
+            // `owner_only` forces the restrictive mode before a raw
+            // secret joins the file (review.md finding 6): persistence
+            // into a shared-readable file is not a warnable-after
+            // condition, it is refused by construction.
+            let mode = if owner_only {
+                crate::domain::private_fs::OWNER_FILE_MODE
+            } else {
+                std::fs::metadata(path)
+                    .ok()
+                    .map(|meta| meta.permissions().mode() & 0o777)
+                    .unwrap_or(crate::domain::private_fs::OWNER_FILE_MODE)
+            };
             file.set_permissions(std::fs::Permissions::from_mode(mode))
                 .map_err(|err| format!("could not set config file permissions: {err}"))?;
         }
@@ -891,7 +909,7 @@ imap.server = \"imaps://imap.example.com:993\"
     }
 
     #[test]
-    fn raw_secret_into_shared_readable_file_warns() {
+    fn raw_secret_into_shared_readable_file_tightens_the_mode() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[accounts.old]\nemail = \"old@example.com\"\n").expect("seed");
@@ -907,16 +925,16 @@ imap.server = \"imaps://imap.example.com:993\"
         #[cfg(not(unix))]
         save_account(&path, &gmail_raw_draft("gmail")).expect("save succeeds");
 
+        // The mode is tightened before the secret joins the file (review.md
+        // finding 6): no raw password ever persists shared-readable.
         #[cfg(unix)]
         assert!(
             report
                 .permissions_warning
                 .as_deref()
                 .unwrap_or_default()
-                .contains("chmod 600"),
-            "raw secret into a shared-readable file must warn"
+                .contains("tightened to owner-only")
         );
-        // The existing file's mode is untouched (no silent chmod).
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -926,8 +944,8 @@ imap.server = \"imaps://imap.example.com:993\"
                     .permissions()
                     .mode()
                     & 0o777,
-                0o644,
-                "tmail must not chmod a user-owned file"
+                0o600,
+                "a shared-readable config receiving a raw secret is tightened"
             );
         }
 
@@ -1039,7 +1057,9 @@ imap.server = \"imaps://imap.example.com:993\"
             })
             .collect();
         assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
-        // …and the mode survives the rename (ticket 12h7).
+        // …and the mode survives the rename (ticket 12h7). With a raw
+        // secret joining a 0o640 (group-readable) file, the save tightens
+        // to 0600 first (review.md finding 6).
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1049,8 +1069,8 @@ imap.server = \"imaps://imap.example.com:993\"
                     .permissions()
                     .mode()
                     & 0o777,
-                0o640,
-                "the replacement must keep the original mode"
+                0o600,
+                "a raw secret tightens a shared-readable config in the rename"
             );
         }
     }

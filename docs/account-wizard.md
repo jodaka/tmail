@@ -44,7 +44,11 @@ entry is found. The flow:
 
 The account is merged into the shared config file with
 format-preserving edits: existing accounts, `[tmail]` tables, comments
-and ordering survive. A freshly created config file gets mode `0600`.
+and ordering survive. A freshly created config file gets mode `0600`;
+an existing group/world-readable config that is about to receive a
+stored raw password is tightened to owner-only before the write — the
+save screen and the completion screen both say so. `password.cmd` never
+changes the file's mode.
 `Esc` steps back at every point and `Ctrl+C` quits; in `--configure`
 mode the saved path is printed on success (exit 0) and
 `tmail: configuration not changed` on cancel (exit 1).
