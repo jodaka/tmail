@@ -64,20 +64,263 @@ impl RichLine {
     }
 }
 
+/// Largest HTML slice the reader parses through html2text (review.md
+/// finding 7: the conversion is synchronous on the single-threaded UI
+/// runtime, and a linear 7.8 MiB parse already costs ~0.6 s in release).
+/// Real text-html bodies sit far below; beyond this the body is parsed
+/// truncated, with an explicit note line. Overflow never loses mail
+/// silently: the note says what happened.
+const MAX_HTML_RENDER_BYTES: usize = 1024 * 1024;
+
+/// Deepest tag nesting the reader converts through html2text (review.md
+/// finding 7: html2text's cost grows quadratically with nesting depth —
+/// 10k tags ≈ 0.6 s, 50k ≈ 15 s release, 100k ≈ 69 s — so a crafted deep
+/// email froze the UI thread for minutes). Real email sits at tens-of-
+/// tags depth, so 500 is generous; beyond it the body renders as
+/// tag-stripped plain text instead.
+const MAX_HTML_NESTING_DEPTH: usize = 500;
+
+/// What one HTML body should enter the conversion with: the depth-refusal
+/// fallback or the bounded slice (whole, or size-truncated with a note).
+enum HtmlText<'a> {
+    /// Whole body: convert directly.
+    Render(&'a str),
+    /// Prefix slice: convert, then append the truncation note.
+    RenderTruncated(&'a str),
+    /// Depth-refusal fallback: tag-stripped text plus the reason note.
+    Plain(String, String),
+}
+
+/// Complexity gate for every HTML conversion (review.md finding 7): one
+/// linear pre-scan decides between the direct conversion and the plain
+/// fallback, so the quadratic parser never sees an unbounded input.
+fn html_for_render(html: &str) -> HtmlText<'_> {
+    let scan = scan_html(html);
+    if scan.max_depth > MAX_HTML_NESTING_DEPTH {
+        return HtmlText::Plain(
+            scan.stripped_text(),
+            format!(
+                "(rich rendering skipped: the HTML nests more than {MAX_HTML_NESTING_DEPTH} levels)"
+            ),
+        );
+    }
+    if html.len() > MAX_HTML_RENDER_BYTES {
+        // Cut at a char boundary so the slice stays valid UTF-8.
+        let mut end = MAX_HTML_RENDER_BYTES;
+        while !html.is_char_boundary(end) {
+            end -= 1;
+        }
+        return HtmlText::RenderTruncated(html.split_at(end).0);
+    }
+    HtmlText::Render(html)
+}
+
 /// Render an HTML body into rich lines wrapped to `width` columns.
 ///
 /// html5ever parses malformed markup the way browsers do (recovery, never a
 /// panic, plan §13/§19 Phase 5 acceptance) and never performs network
 /// requests for images or other remote resources (plan §13.5): `<img>`
 /// renders as its alt text only.
+///
+/// Complexity is bounded first ([`html_for_render`], review.md finding 7):
+/// inputs beyond the depth or size ceilings never reach the quadratic
+/// parser — they render as tag-stripped plain text with an explicit note,
+/// so a crafted email can cost at most one linear pass of the UI thread.
 pub(crate) fn html_to_rich(html: &str, width: usize) -> Vec<RichLine> {
     let width = width.max(10);
-    let Ok(lines) = html2text::from_read_rich(html.as_bytes(), width) else {
+    match html_for_render(html) {
+        HtmlText::Plain(text, note) => {
+            let mut lines = plain_to_rich(&text, width);
+            lines.push(RichLine::from_plain(note));
+            lines
+        }
+        HtmlText::Render(bounded) => convert_html(bounded, width),
+        HtmlText::RenderTruncated(bounded) => {
+            let mut lines = convert_html(bounded, width);
+            lines.push(RichLine::from_plain(format!(
+                "(long HTML body truncated at {})",
+                crate::ui::text::human_size(MAX_HTML_RENDER_BYTES as u64)
+            )));
+            lines
+        }
+    }
+}
+
+/// The direct html2text conversion of an already-bounded slice.
+fn convert_html(bounded: &str, width: usize) -> Vec<RichLine> {
+    let Ok(lines) = html2text::from_read_rich(bounded.as_bytes(), width) else {
         // from_read_rich only fails on I/O; an in-memory reader cannot, but
         // failing safe keeps the contract total.
         return Vec::new();
     };
     lines.iter().map(rich_line_from).collect()
+}
+
+/// What the linear HTML pre-scan learned about one input: the observed
+/// tag-nesting depth (the complexity verdict) and the tag-stripped text
+/// (the depth-refusal fallback's rendering input). The scan allocates no
+/// more than the stripped text itself.
+struct HtmlScan {
+    max_depth: usize,
+    text: Vec<u8>,
+}
+
+impl HtmlScan {
+    /// Tag-stripped text (`from_utf8_lossy` keeps the contract total on
+    /// broken utf-8, like every other body decoding).
+    fn stripped_text(&self) -> String {
+        String::from_utf8_lossy(&self.text).into_owned()
+    }
+}
+
+/// Linear HTML pre-scan. Enough lexer to know where tags start and end —
+/// comments, doctypes/processing instructions, quoted attribute values,
+/// and the raw-text `<script>`/`<style>` elements — without reproducing
+/// html5ever: the complexity guard needs unbiased-enough nesting counts
+/// and stripped text, both of which a boundary-correct lexer gives.
+/// Depth is a saturating count (open non-self-closing tags increment,
+/// closing tags decrement at zero), so malformed mail drifts downward
+/// instead of running depth away. Strictly linear: one pass, two output
+/// allocations — a crafted deep email costs one scan, never the parse.
+fn scan_html(html: &str) -> HtmlScan {
+    let bytes = html.as_bytes();
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum State {
+        /// Rendered text: collect until `<`.
+        Text,
+        /// Inside `<!--` … `-->`.
+        Comment,
+        /// Inside `<script>`/`<style>`: opaque until the case-insensitive
+        /// matching closing tag.
+        RawText { closing: RawClose },
+    }
+    /// The lazy case-insensitive search for a raw-text element's closer.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct RawClose {
+        /// `script` or `style`, lowercase.
+        kind: &'static [u8],
+        /// How much of `</kind` already matched (bytes consumed of it).
+        matched: usize,
+    }
+    let mut depth = 0usize;
+    let mut max_depth = 0usize;
+    let mut state = State::Text;
+    let mut text: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match state {
+            State::Text => {
+                if bytes[i] == b'<' {
+                    if bytes[i..].starts_with(b"<!--") {
+                        state = State::Comment;
+                        i += 4;
+                        continue;
+                    }
+                    i += 1;
+                    let tag_start = i;
+                    // Skip to the unquoted `>`; `>` inside quoted attribute
+                    // values cannot end the tag.
+                    let mut j = i;
+                    let mut quote = 0u8;
+                    while j < bytes.len() {
+                        let byte = bytes[j];
+                        if quote != 0 {
+                            if byte == quote {
+                                quote = 0;
+                            }
+                        } else if byte == b'"' || byte == b'\'' {
+                            quote = byte;
+                        } else if byte == b'>' {
+                            break;
+                        }
+                        j += 1;
+                    }
+                    let tag = &bytes[tag_start..j.min(bytes.len())];
+                    let raw = tag_first_word(tag);
+                    if raw.is_empty() {
+                        // `<>` or an unterminated tag: rendered text only.
+                        i = j + 1;
+                        continue;
+                    }
+                    let lower: Vec<u8> = raw.to_ascii_lowercase();
+                    if lower.first() == Some(&b'!') || lower.first() == Some(&b'?') {
+                        // Declaration/processing instruction: never depth.
+                    } else if raw[0] == b'/' {
+                        depth = depth.saturating_sub(1);
+                    } else if raw.last() != Some(&b'/') {
+                        // Open tag without self-closing: one level down.
+                        depth += 1;
+                        max_depth = max_depth.max(depth);
+                        if lower == b"script" || lower == b"style" {
+                            state = State::RawText {
+                                closing: RawClose {
+                                    kind: if lower == b"script" {
+                                        b"script"
+                                    } else {
+                                        b"style"
+                                    },
+                                    matched: 0,
+                                },
+                            };
+                        }
+                    }
+                    i = j + 1;
+                } else {
+                    text.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            State::Comment => {
+                if bytes[i..].starts_with(b"-->") {
+                    state = State::Text;
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+            State::RawText { mut closing } => {
+                // Byte-by-byte case-insensitive search for `</kind`: the
+                // matcher resets on any mismatch, so a stray `<` or quoting
+                // noise inside the element never derails it.
+                let matched = closing.matched;
+                let expected = if matched == 0 {
+                    b'<'
+                } else if matched == 1 {
+                    b'/'
+                } else {
+                    closing.kind[matched - 2]
+                };
+                if bytes[i].to_ascii_lowercase() == expected {
+                    closing.matched = matched + 1;
+                    if closing.matched >= closing.kind.len() + 2 {
+                        state = State::Text;
+                    } else {
+                        state = State::RawText { closing };
+                    }
+                } else {
+                    state = State::RawText {
+                        closing: RawClose {
+                            kind: closing.kind,
+                            matched: 0,
+                        },
+                    };
+                }
+                i += 1;
+            }
+        }
+    }
+    HtmlScan { max_depth, text }
+}
+
+/// The tag's first word in raw bytes: prefix decorations (`/`, `!`) and
+/// attribute noise stripped. Comparisons on it are case-sensitive here;
+/// the caller lowercases where needed.
+fn tag_first_word(tag: &[u8]) -> &[u8] {
+    let word_end = tag
+        .iter()
+        .position(|byte| byte.is_ascii_whitespace())
+        .unwrap_or(tag.len());
+    &tag[..word_end]
 }
 
 /// Convert one html2text tagged line into an app-owned [`RichLine`].
@@ -215,10 +458,20 @@ pub(crate) fn is_blank(lines: &[RichLine]) -> bool {
 pub(crate) fn preview_text(message: &crate::domain::Message) -> Option<String> {
     const MAX_PREVIEW_WIDTH: usize = 200;
     let html = message.html_body.as_deref().map(|html| {
-        html2text::config::with_decorator(html2text::render::TrivialDecorator::new())
-            .no_table_borders()
-            .string_from_read(html.as_bytes(), MAX_PREVIEW_WIDTH)
-            .unwrap_or_default()
+        // The preview builds on the same successful page draws as the list
+        // rows, so the complexity gate protects it too (review.md finding
+        // 7): a depth-bound body uses the tag-stripped fallback text and a
+        // size-bound body the truncated prefix, never the raw quadratic
+        // parser on an unbounded input.
+        match html_for_render(html) {
+            HtmlText::Render(bounded) | HtmlText::RenderTruncated(bounded) => {
+                html2text::config::with_decorator(html2text::render::TrivialDecorator::new())
+                    .no_table_borders()
+                    .string_from_read(bounded.as_bytes(), MAX_PREVIEW_WIDTH)
+                    .unwrap_or_default()
+            }
+            HtmlText::Plain(text, _note) => text,
+        }
     });
     let plain = message
         .plain_body
@@ -463,6 +716,89 @@ mod tests {
         let text = text_of(&lines).join("\n");
         assert!(text.contains("photo of a cat"), "{text:?}");
         assert!(!text.contains("tracking.example.org"), "{text:?}");
+    }
+
+    /// Review.md finding 7: quadratically deep nesting must never reach
+    /// html2text — the depth-refusal renders tag-stripped text fast (a
+    /// linear scan) with an explicit note, and the semantic markers of the
+    /// rich render (bold, headings) are cleanly absent.
+    #[test]
+    fn deeply_nested_html_skips_the_rich_parser() {
+        const DEPTH: usize = MAX_HTML_NESTING_DEPTH + 1;
+        let mut html = String::new();
+        for _ in 0..DEPTH {
+            html.push_str("<div>");
+        }
+        html.push_str("the rare centered body");
+        for _ in 0..DEPTH {
+            html.push_str("</div>");
+        }
+        let t = std::time::Instant::now();
+        let lines = html_to_rich(&html, 60);
+        let elapsed = t.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "depth refusal must be linear, took {elapsed:?}"
+        );
+        let text = text_of(&lines).join("\n");
+        assert!(text.contains("the rare centered body"), "{text:?}");
+        assert!(text.contains("rich rendering skipped"), "{text:?}");
+    }
+
+    /// Review.md finding 7: over-sized HTML renders its bounded prefix
+    /// with an explicit truncation note instead of blocking the frame on
+    /// the whole byte stream.
+    #[test]
+    fn oversized_html_is_truncated_with_a_note() {
+        let mut html = String::from("<p>start here</p>");
+        html.push_str("<p>");
+        html.push_str(&"filler".repeat(300_000));
+        html.push_str("</p>");
+        let lines = html_to_rich(&html, 40);
+        let text = text_of(&lines).join("\n");
+        assert!(text.contains("start here"), "{text:?}");
+        assert!(text.contains("truncated at"), "{text:?}");
+        // The far end of the body cannot have made it onto the screen.
+        assert!(!text.contains(&"filler".repeat(5_000)), "{text:?}");
+    }
+
+    /// The complexity gate must not misfire on ordinary mail: normal depth
+    /// and comments and quoted values stay on the direct render, and the
+    /// stripped-text fallback for depth refusal is the honest words-only
+    /// rendering (no tags, no script/style code).
+    #[test]
+    fn ordinary_html_still_rich_renders_through_the_gate() {
+        let html = concat!(
+            "<!-- a comment -->",
+            r#"<div class=\"a > b\"><strong>lead</strong><script>var x = \"<div></div>\";</script><style>div {}</style><p>rest</p></div>"#
+        );
+        let lines = html_to_rich(html, 40);
+        let text = text_of(&lines).join("\n");
+        assert!(text.contains("lead"), "{text:?}");
+        assert!(text.contains("rest"), "{text:?}");
+        assert!(!text.contains("rich rendering skipped"), "{text:?}");
+    }
+
+    /// The fallback text for a depth-refused body hides scripts and
+    /// styles and keeps the visible words.
+    #[test]
+    fn depth_refusal_fallback_hides_scripts_and_styles() {
+        const DEPTH: usize = MAX_HTML_NESTING_DEPTH + 1;
+        let mut html = String::new();
+        for _ in 0..DEPTH {
+            html.push_str("<div>");
+        }
+        html.push_str(
+            "<script>alert('leak-proof? not the point — just absent')</script><style>div{}</style>visible words",
+        );
+        for _ in 0..DEPTH {
+            html.push_str("</div>");
+        }
+        let lines = html_to_rich(&html, 60);
+        let text = text_of(&lines).join("\n");
+        assert!(text.contains("visible words"), "{text:?}");
+        assert!(!text.contains("alert"), "{text:?}");
+        assert!(!text.contains("div{}"), "{text:?}");
     }
 
     #[test]
