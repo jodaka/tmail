@@ -7,6 +7,7 @@ pub mod backend;
 pub mod config;
 pub mod discovery;
 pub mod domain;
+mod html;
 pub mod input;
 pub mod runtime;
 pub mod ui;

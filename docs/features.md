@@ -40,6 +40,14 @@ The block is introduced by the RFC 3676 §4.3 delimiter line, `"-- "`
 quoting. Set `signature-delim` to override the line, or omit `signature`
 to compose without one.
 
+## Replying and forwarding
+
+Reply, reply-all, and forward seed the composer with the original quoted
+(or forwarded) below your writing area. The source text is the message's
+`text/plain` part when it carries content; HTML-only mail is flattened to
+plain text through the same bounded converter the reader uses, so those
+messages quote their visible content instead of an empty placeholder.
+
 ## External editor
 
 With `[tmail.composer].editor` set to `"$EDITOR"` (or an explicit command

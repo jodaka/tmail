@@ -6,11 +6,13 @@
 //! only), and the templates are raw RFC 5322 output. Everything the seeds
 //! need is already available as domain data — the fetched message's parsed
 //! headers (including `In-Reply-To`/`References`, mapped in Phase 7.4) and
-//! decoded `text/plain` body.
+//! decoded text body (`text/plain`, or the `text/html` part flattened to
+//! text for HTML-only mail).
 //!
-//! Seeds are pure functions of the message: no clocks, no I/O, no config
-//! beyond the account address passed in for reply-all self-exclusion
-//! (Phase 7.5). Missing data degrades gracefully — an unknown date, an
+//! Seeds are pure functions of the message and the values the caller
+//! passes in: no clocks and no I/O. The account address drives reply-all
+//! self-exclusion (Phase 7.5) and the signature is rendered into the
+//! author's area. Missing data degrades gracefully — an unknown date, an
 //! empty body, or a message without a `Message-ID` never blocks seeding.
 
 use crate::domain::address::{Address, to_field_list};
@@ -168,10 +170,41 @@ fn wrote_line(message: &Message) -> String {
     }
 }
 
-/// The original `text/plain` body, each line prefixed `> ` (bare `>` on
-/// empty lines). Messages without a plain body quote nothing.
+/// Width used to flatten an HTML-only body into quoted plain text. It is
+/// wide enough that normal mail is not re-wrapped, yet leaves room for the
+/// `"> "` prefix under RFC 5322 §2.1.1's 998-character line guidance for
+/// ASCII text. html2text measures display columns, not octets, so non-ASCII
+/// source lines can still serialize longer (plain bodies are quoted
+/// verbatim and never re-wrapped either).
+const QUOTE_WIDTH: usize = 996;
+
+/// The source text to quote or forward: the decoded `text/plain` part
+/// when it carries visible content, else the `text/html` part converted
+/// to plain text. HTML-only mail is common and the reader shows it, so
+/// quoting a placeholder instead would drop what the user is reading.
+/// `None` only when neither part yields text.
+fn quotable_text(message: &Message) -> Option<String> {
+    if let Some(plain) = message
+        .plain_body
+        .as_deref()
+        .filter(|body| !body.trim().is_empty())
+    {
+        return Some(plain.to_owned());
+    }
+    let html = message.html_body.as_deref()?;
+    let text = crate::html::plain_text(html, QUOTE_WIDTH);
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// The original body, each line prefixed `> ` (bare `>` on empty lines).
+/// HTML-only messages are flattened to text first ([`quotable_text`]);
+/// when neither part yields text, the placeholder names the gap.
 fn quote(message: &Message) -> String {
-    let Some(body) = &message.plain_body else {
+    let Some(body) = quotable_text(message) else {
         return String::from("(no plain text body)");
     };
     body.trim_end_matches('\n')
@@ -213,7 +246,7 @@ fn forwarded_block(message: &Message) -> String {
         lines.push(format!("Cc: {}", to_field_list(&message.headers.cc)));
     }
     lines.push(String::new());
-    lines.push(message.plain_body.clone().unwrap_or_default());
+    lines.push(quotable_text(message).unwrap_or_default());
     lines.join("\n")
 }
 
@@ -328,6 +361,70 @@ mod tests {
                         \n\
                         Please review.\n\nThanks\n";
         assert_eq!(seed.body, expected);
+    }
+
+    #[test]
+    fn html_only_reply_quotes_the_converted_text() {
+        let mut message = source();
+        message.plain_body = None;
+        message.html_body = Some(String::from(
+            "<html><body><p>Hello <b>html</b> world</p></body></html>",
+        ));
+        let seed = seed_reply(&message, ReplyKind::Reply, None);
+        assert!(
+            seed.body.contains("> Hello html world"),
+            "the HTML part is flattened and quoted:\n{}",
+            seed.body
+        );
+        assert!(
+            !seed.body.contains("(no plain text body)"),
+            "no placeholder when the HTML yields text:\n{}",
+            seed.body
+        );
+    }
+
+    #[test]
+    fn reply_prefers_the_plain_alternative_over_html() {
+        let mut message = source();
+        message.html_body = Some(String::from("<p>html version</p>"));
+        let seed = seed_reply(&message, ReplyKind::Reply, None);
+        assert!(seed.body.contains("> Please review."), "{}", seed.body);
+        assert!(
+            !seed.body.contains("html version"),
+            "the plain alternative wins:\n{}",
+            seed.body
+        );
+    }
+
+    #[test]
+    fn whitespace_only_plain_body_falls_back_to_html() {
+        let mut message = source();
+        message.plain_body = Some(String::from("\n  \n"));
+        message.html_body = Some(String::from("<p>html fallback</p>"));
+        let seed = seed_reply(&message, ReplyKind::Reply, None);
+        assert!(seed.body.contains("> html fallback"), "{}", seed.body);
+    }
+
+    #[test]
+    fn html_only_forward_carries_the_converted_body() {
+        let mut message = source();
+        message.plain_body = None;
+        message.html_body = Some(String::from("<p>Forward me</p>"));
+        let seed = seed_forward(&message);
+        assert!(seed.body.contains("Forward me"), "{}", seed.body);
+    }
+
+    #[test]
+    fn blank_html_without_plain_keeps_the_placeholder() {
+        let mut message = source();
+        message.plain_body = None;
+        message.html_body = Some(String::from("<div>   </div>"));
+        let seed = seed_reply(&message, ReplyKind::Reply, None);
+        assert!(
+            seed.body.contains("(no plain text body)"),
+            "nothing to quote stays explicit:\n{}",
+            seed.body
+        );
     }
 
     #[test]

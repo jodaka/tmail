@@ -88,6 +88,11 @@ flowchart LR
   runtime switching), `rich.rs` (HTML → spans, plan §13), `text.rs`,
   `dates.rs`, `overlay.rs`.
 
+- **`html.rs`** — the bounded HTML complexity gate shared by `view::rich`
+  (rendering) and `domain::reply` (quoting and forwarding HTML-only mail):
+  one linear pre-scan caps html2text's input by byte size and tag-nesting
+  depth, so neither path runs the quadratic parser on untrusted mail.
+
 - **`input/`** — translation from key/mouse events to `Action`s.
   `keymap.rs` is the single source of bindings (`[tmail.keybindings]` +
   defaults), `keyspec.rs` the spec grammar, `keyboard.rs` the
