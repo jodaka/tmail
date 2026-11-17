@@ -14,6 +14,34 @@ fn compose_opens_the_composer_over_the_mailbox_route() {
 }
 
 #[test]
+fn compose_seeds_the_configured_signature_with_the_rfc_delimiter() {
+    let mut s = state();
+    s.settings.signature =
+        Some(crate::domain::Signature::new("Best,\nTmail", "-- \n").expect("non-empty signature"));
+    compose(&mut s);
+    let composer = s.session.composer.as_ref().unwrap();
+    assert_eq!(composer.draft.body, "\n\n-- \nBest,\nTmail");
+    assert!(!composer.draft.is_dirty(), "seeding is not an edit");
+    // The caret starts above the signature, so the first keystroke lands
+    // in the author's area rather than inside the signature block.
+    s.session.composer.as_mut().unwrap().field = ComposerField::Body;
+    reduce(&mut s, Action::ComposerEdit(ComposerEdit::Char('H')));
+    let composer = s.session.composer.as_ref().unwrap();
+    assert_eq!(
+        composer.draft.body, "H\n\n-- \nBest,\nTmail",
+        "typing happens above the signature"
+    );
+    assert!(composer.draft.is_dirty());
+}
+
+#[test]
+fn compose_without_a_signature_starts_blank() {
+    let mut s = state();
+    compose(&mut s);
+    assert_eq!(s.session.composer.as_ref().unwrap().draft.body, "");
+}
+
+#[test]
 fn composer_focus_cycles_fields_and_actions() {
     let mut s = state();
     compose(&mut s);

@@ -379,6 +379,60 @@ fn draft_fetch_result_never_clobbers_a_newer_draft() {
 // ── Attachment file chooser (plan §15, ticket 95x0) ──────────────────────
 
 #[test]
+fn reply_seed_puts_the_configured_signature_before_the_quote() {
+    let mut s = state();
+    s.settings.signature =
+        Some(crate::domain::Signature::new("Best,\nTmail", "-- \n").expect("non-empty signature"));
+    open_reader_with(&mut s, reply_source());
+    no_effects(&reduce(&mut s, Action::Reply));
+    let body = &seeded_composer(&s).draft.body;
+    assert!(
+        body.starts_with("\n\n-- \nBest,\nTmail\n\nOn "),
+        "signature leads the quote: {body:?}"
+    );
+    let signature_at = body.find("-- \nBest,\nTmail").expect("signature present");
+    let quote_at = body.find(" wrote:").expect("quote present");
+    assert!(signature_at < quote_at, "signature is not quoted: {body:?}");
+}
+
+#[test]
+fn forward_seed_puts_the_configured_signature_before_the_forwarded_block() {
+    let mut s = state();
+    s.settings.signature = Some(
+        crate::domain::Signature::new("All the best,\nTmail", "-- \n")
+            .expect("non-empty signature"),
+    );
+    open_reader_with(&mut s, reply_source());
+    no_effects(&reduce(&mut s, Action::Forward));
+    let body = &seeded_composer(&s).draft.body;
+    assert!(
+        body.starts_with("\n\n-- \nAll the best,\nTmail\n\n---------- Forwarded message ---------"),
+        "signature leads the forwarded block: {body:?}"
+    );
+}
+
+#[test]
+fn seeding_without_a_configured_signature_keeps_the_plain_body() {
+    let mut s = state();
+    open_reader_with(&mut s, reply_source());
+    no_effects(&reduce(&mut s, Action::Reply));
+    let body = &seeded_composer(&s).draft.body;
+    assert!(!body.contains("-- \n"), "no signature delimiter: {body:?}");
+}
+
+#[test]
+fn seeded_drafts_are_clean_with_exactly_one_signature() {
+    let mut s = state();
+    s.settings.signature =
+        Some(crate::domain::Signature::new("Best,\nTmail", "-- \n").expect("non-empty signature"));
+    open_reader_with(&mut s, reply_source());
+    no_effects(&reduce(&mut s, Action::Reply));
+    let composer = seeded_composer(&s);
+    assert!(!composer.draft.is_dirty(), "autosave engages on first edit");
+    assert_eq!(composer.draft.body.matches("-- \nBest").count(), 1);
+}
+
+#[test]
 fn reply_seeds_a_composer_on_top_of_the_reader() {
     let mut s = state();
     open_reader_with(&mut s, reply_source());

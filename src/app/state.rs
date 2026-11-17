@@ -134,6 +134,10 @@ pub struct Settings {
     /// Reply-all seeding excludes it from recipients (Phase 7.5); the
     /// backend independently uses it as the `From` of outgoing mail.
     pub account_email: Option<String>,
+    /// The configured account-or-global signature, seeded into new,
+    /// reply, and forward drafts under the RFC 3676 §4.3 delimiter.
+    /// `None` when no signature is configured.
+    pub signature: Option<crate::domain::Signature>,
     /// The himalaya account the backend drives (`[tmail].account`, or the
     /// resolved default — ticket c0n0). `None` in the
     /// multi-account-without-default case, where the account switcher is
@@ -424,6 +428,7 @@ impl AppState {
             settings: Settings {
                 keymap: crate::input::keymap::KeyMap::defaults(),
                 account_email: None,
+                signature: None,
                 account_name: None,
                 accounts: Vec::new(),
                 refresh_interval_seconds: 0,

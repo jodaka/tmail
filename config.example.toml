@@ -9,6 +9,13 @@
 [accounts.probe]
 email = "probe@tmail.local"
 display-name = "Tmail Probe"
+# Signature seeded into new, reply, and forward drafts. Tmail places it
+# after your text and before any quoted/forwarded source, introduced by
+# the RFC 3676 §4.3 delimiter line (see signature-delim below). The root
+# `signature` / `signature-delim` keys are the fallback when the account
+# sets neither.
+#signature = "Best,\nTmail"
+#signature-delim = "-- \n"
 
 [accounts.probe.maildir]
 root = "~/tmp/tmail-probe-maildir"

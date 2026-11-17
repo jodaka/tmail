@@ -448,6 +448,10 @@ fn seed_state(
     state.settings = tmail::app::Settings {
         keymap,
         account_email: config.account_email.clone(),
+        signature: tmail::domain::Signature::new(
+            config.account_signature.as_deref().unwrap_or_default(),
+            &config.signature_delim,
+        ),
         account_name: config.account.clone(),
         // The switcher's list (ticket c0n0): every `[accounts.<name>]` in
         // the file as it was when the session started. Startup I/O is

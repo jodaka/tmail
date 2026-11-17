@@ -14,7 +14,7 @@ use crate::app::operation::{DraftOperation, OperationId, OperationKind, Platform
 use crate::app::overlay::{ConfirmButton, DiscardDialog, Overlay};
 use crate::app::route::{MailboxRoute, Route};
 use crate::app::state::{AppState, Loadable};
-use crate::domain::{DraftSaveState, MailboxId, Page};
+use crate::domain::{Draft, DraftSaveState, MailboxId, Page};
 
 // ── External editor (plan §14, Phase 11) ─────────────────────────────────
 
@@ -129,7 +129,22 @@ pub(crate) fn open_composer(state: &mut AppState) -> Vec<Effect> {
         }
         Secured::Nothing => {}
     }
-    state.session.composer = Some(ComposerState::new());
+    // Seed the configured signature up front, with the same two blank
+    // lines the reply/forward seeds keep above the author's writing area:
+    // typing starts above the signature and the RFC 3676 delimiter line
+    // never collides with the user's first word.
+    let signature_body = state
+        .settings
+        .signature
+        .as_ref()
+        .map(|signature| format!("\n\n{}", signature.block()));
+    state.session.composer = Some(match signature_body {
+        Some(body) => ComposerState::from_draft(Draft {
+            body,
+            ..Draft::default()
+        }),
+        None => ComposerState::new(),
+    });
     open_composer_screen(state);
     effects
 }

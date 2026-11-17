@@ -22,6 +22,7 @@ pub mod write;
 use crate::domain::draft::DEFAULT_AUTOSAVE_DELAY_MS;
 use crate::domain::paths::{expand_tilde, home_dir};
 use crate::domain::sanitize::sanitize;
+use crate::domain::signature::DEFAULT_SIGNATURE_DELIM;
 
 /// Default page size when the config does not provide a usable one
 /// (plan §16/§17: explicit pagination, default 50).
@@ -296,6 +297,15 @@ pub struct Config {
     pub account_email: Option<String>,
     /// `[accounts.<account>].display-name`, when configured.
     pub account_display_name: Option<String>,
+    /// The signature seeded into new, reply, and forward drafts:
+    /// `[accounts.<account>].signature`, falling back to the root
+    /// `signature` (himalaya's global fallback). `None` means no
+    /// signature configured.
+    pub account_signature: Option<String>,
+    /// The signature delimiter written before the signature:
+    /// `[accounts.<account>].signature-delim`, falling back to the root
+    /// `signature-delim`, then the RFC 3676 §4.3 `"-- \n"` line.
+    pub signature_delim: String,
     /// `[tmail.attachments].downloads_dir` (plan §17), as written — a
     /// leading `~` is expanded by the backend when the directory is used.
     /// `None` falls back to the platform default (`$HOME/Downloads`).
@@ -433,6 +443,8 @@ impl Default for Config {
             aliases: HashMap::new(),
             account_email: None,
             account_display_name: None,
+            account_signature: None,
+            signature_delim: DEFAULT_SIGNATURE_DELIM.to_owned(),
             downloads_dir: None,
             mouse: false,
             view_mode: ViewMode::Compact,
@@ -710,6 +722,7 @@ pub fn parse_with_account(
     parse_status_timeout(tmail, &mut config, &mut issues);
     parse_notifications(tmail, &mut config, &mut issues);
     parse_cache_limits(tmail, &mut config, &mut issues);
+    parse_signature_defaults(&doc, &mut config, &mut issues);
 
     // Without `[tmail].account`, drive the account himalaya itself would
     // pick (no `-a` is forwarded): the one marked `default = true`, else
@@ -737,6 +750,12 @@ pub fn parse_with_account(
         config.aliases = aliases_for(&doc, account, &mut issues);
         config.account_email = account_field(&doc, account, "email", &mut issues);
         config.account_display_name = account_field(&doc, account, "display-name", &mut issues);
+        if let Some(signature) = account_field(&doc, account, "signature", &mut issues) {
+            config.account_signature = Some(signature);
+        }
+        if let Some(delimiter) = account_field(&doc, account, "signature-delim", &mut issues) {
+            config.signature_delim = delimiter;
+        }
     }
     (config, issues)
 }
@@ -859,6 +878,39 @@ fn parse_cache_limits(tmail: Option<&toml::Value>, config: &mut Config, issues: 
             other => issues.push(format!(
                 "[tmail.cache].{other} is unknown (known: max_messages, max_bytes)"
             )),
+        }
+    }
+}
+
+/// Root-level signature fallbacks. Himalaya lets `signature` and
+/// `signature-delim` live at the root and applies them when the selected
+/// account sets neither; Tmail mirrors that layering. An absent key is
+/// silent, a non-string is reported and ignored, and an empty string
+/// means "no signature" (or the RFC default delimiter for the delim key).
+fn parse_signature_defaults(doc: &toml::Value, config: &mut Config, issues: &mut LoadIssues) {
+    if let Some(signature) = root_string(doc.get("signature"), "signature", issues) {
+        config.account_signature = Some(signature);
+    }
+    if let Some(delimiter) = root_string(doc.get("signature-delim"), "signature-delim", issues) {
+        config.signature_delim = delimiter;
+    }
+}
+
+/// One optional root string: absent is `None` without an issue, a
+/// non-string is reported and ignored, and an empty string is treated as
+/// absent.
+fn root_string(
+    value: Option<&toml::Value>,
+    label: &str,
+    issues: &mut LoadIssues,
+) -> Option<String> {
+    let value = value?;
+    match value.as_str() {
+        Some(text) if !text.is_empty() => Some(text.to_owned()),
+        Some(_) => None,
+        None => {
+            issues.push(format!("{label} must be a string"));
+            None
         }
     }
 }
@@ -1457,6 +1509,85 @@ mod tests {
             "[accounts.a].email must be a non-empty string",
             "[accounts.a].display-name must be a non-empty string",
             "[accounts.a.mailbox.alias].inbox must be a string",
+        ] {
+            assert!(
+                issues.iter().any(|issue| issue.contains(fragment)),
+                "missing {fragment:?} in {issues:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn signature_resolves_account_then_global_with_the_rfc_delimiter() {
+        let text = r#"
+            signature = "Global,\nFallback"
+            signature-delim = "~~~\n"
+
+            [accounts.work]
+            default = true
+            email = "w@example.net"
+            signature = "С уважением,\nАнтон Кудрис"
+
+            [tmail]
+            account = "work"
+        "#;
+        let config = parse(text, None);
+        // The account signature wins over the root fallback; the root
+        // delimiter still applies because the account does not override it.
+        assert_eq!(
+            config.account_signature.as_deref(),
+            Some("С уважением,\nАнтон Кудрис")
+        );
+        assert_eq!(config.signature_delim, "~~~\n");
+
+        // Without an account-level signature the root one is the fallback,
+        // and without any delimiter the RFC 3676 line is the default.
+        let text = r#"
+            signature = "Global,\nFallback"
+
+            [accounts.work]
+            email = "w@example.net"
+        "#;
+        let config = parse(text, None);
+        assert_eq!(
+            config.account_signature.as_deref(),
+            Some("Global,\nFallback")
+        );
+        assert_eq!(config.signature_delim, "-- \n");
+    }
+
+    #[test]
+    fn account_signature_delimiter_overrides_the_global_one() {
+        let text = r#"
+            signature-delim = "~~~\n"
+
+            [accounts.work]
+            email = "w@example.net"
+            signature = "Work"
+            signature-delim = "===\n"
+        "#;
+        let config = parse(text, None);
+        assert_eq!(config.account_signature.as_deref(), Some("Work"));
+        assert_eq!(config.signature_delim, "===\n");
+    }
+
+    #[test]
+    fn malformed_signature_values_are_reported_not_ignored() {
+        let text = r#"
+            signature = 4
+
+            [accounts.work]
+            email = "w@example.net"
+            signature = true
+            signature-delim = 5
+        "#;
+        let (config, issues) = parse_with_account(text, None, None);
+        assert_eq!(config.account_signature, None);
+        assert_eq!(config.signature_delim, "-- \n");
+        for fragment in [
+            "signature must be a string",
+            "[accounts.work].signature must be a non-empty string",
+            "[accounts.work].signature-delim must be a non-empty string",
         ] {
             assert!(
                 issues.iter().any(|issue| issue.contains(fragment)),

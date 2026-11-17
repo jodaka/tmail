@@ -25,6 +25,21 @@ Switching is safe by confirmation:
 (the account vanished from the file, the file broke), Tmail falls back to
 the configured default account instead of exiting, and reports why.
 
+## Signatures
+
+Tmail reads `signature` (and `signature-delim`) from the active himalaya
+account, falling back to the root keys — the same layering himalaya itself
+uses. The signature is seeded right away into the draft body:
+
+- a new `c` draft starts with a blank writing area above it;
+- a reply/reply-all puts it between your reply and the quoted source;
+- a forward puts it between your note and the forwarded block.
+
+The block is introduced by the RFC 3676 §4.3 delimiter line, `"-- "`
+(dash dash space) by default, so clients recognize it and leave it out when
+quoting. Set `signature-delim` to override the line, or omit `signature`
+to compose without one.
+
 ## External editor
 
 With `[tmail.composer].editor` set to `"$EDITOR"` (or an explicit command

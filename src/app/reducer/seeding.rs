@@ -32,20 +32,31 @@ fn seed_for(
     message: &crate::domain::Message,
     kind: crate::app::operation::SeedKind,
     own_account: Option<&str>,
+    signature: Option<&crate::domain::Signature>,
 ) -> (crate::domain::reply::Seed, &'static str) {
     use crate::app::operation::SeedKind;
     use crate::domain::ReplyKind;
     match kind {
         SeedKind::Reply => (
-            crate::domain::reply::seed_reply(message, ReplyKind::Reply, None),
+            crate::domain::reply::seed_reply_with_signature(
+                message,
+                ReplyKind::Reply,
+                None,
+                signature,
+            ),
             "Reply draft ready",
         ),
         SeedKind::ReplyAll => (
-            crate::domain::reply::seed_reply(message, ReplyKind::ReplyAll, own_account),
+            crate::domain::reply::seed_reply_with_signature(
+                message,
+                ReplyKind::ReplyAll,
+                own_account,
+                signature,
+            ),
             "Reply-all draft ready",
         ),
         SeedKind::Forward => (
-            crate::domain::reply::seed_forward(message),
+            crate::domain::reply::seed_forward_with_signature(message, signature),
             "Forward draft ready",
         ),
     }
@@ -58,7 +69,12 @@ fn seed_for(
 pub(crate) fn open_reply(state: &mut AppState) -> Vec<Effect> {
     match state.open_message.as_loaded() {
         Some(message) => {
-            let (seed, status) = seed_for(message, crate::app::operation::SeedKind::Reply, None);
+            let (seed, status) = seed_for(
+                message,
+                crate::app::operation::SeedKind::Reply,
+                None,
+                state.settings.signature.as_ref(),
+            );
             if refuse_open_composer(state) {
                 return Vec::new();
             }
@@ -80,6 +96,7 @@ pub(crate) fn open_reply_all(state: &mut AppState) -> Vec<Effect> {
                 message,
                 crate::app::operation::SeedKind::ReplyAll,
                 own.as_deref(),
+                state.settings.signature.as_ref(),
             );
             if refuse_open_composer(state) {
                 return Vec::new();
@@ -94,7 +111,12 @@ pub(crate) fn open_reply_all(state: &mut AppState) -> Vec<Effect> {
 pub(crate) fn open_forward(state: &mut AppState) -> Vec<Effect> {
     match state.open_message.as_loaded() {
         Some(message) => {
-            let (seed, status) = seed_for(message, crate::app::operation::SeedKind::Forward, None);
+            let (seed, status) = seed_for(
+                message,
+                crate::app::operation::SeedKind::Forward,
+                None,
+                state.settings.signature.as_ref(),
+            );
             if refuse_open_composer(state) {
                 return Vec::new();
             }
@@ -166,7 +188,12 @@ pub(crate) fn install_seed(
         }
         Secured::Nothing => {}
     }
-    let (seed, status) = seed_for(&message, kind, state.settings.account_email.as_deref());
+    let (seed, status) = seed_for(
+        &message,
+        kind,
+        state.settings.account_email.as_deref(),
+        state.settings.signature.as_ref(),
+    );
     open_seeded_composer(state, seed, status);
     effects
 }

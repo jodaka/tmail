@@ -18,6 +18,7 @@ pub mod private_fs;
 pub mod reply;
 pub mod sanitize;
 pub mod send;
+pub mod signature;
 pub mod time;
 pub mod url;
 
@@ -32,7 +33,11 @@ pub use message::{
     MessageSummary, bare_message_id, bracketed_message_id, header_safe_text,
 };
 pub use page::{Page, PageRequest, SearchRequest};
-pub use reply::{ReplyKind, Seed, seed_forward, seed_reply};
+pub use reply::{
+    ReplyKind, Seed, seed_forward, seed_forward_with_signature, seed_reply,
+    seed_reply_with_signature,
+};
 pub use send::{
     OutboundAttachment, OutboundMessage, OutgoingContent, SendBlocker, SendOutcome, sent_draft_is,
 };
+pub use signature::{DEFAULT_SIGNATURE_DELIM, Signature};

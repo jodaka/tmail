@@ -120,6 +120,12 @@ Tmail reads, from himalaya's own blocks:
 - `[accounts.<name>].email` — used as the `From` identity of drafts and to
   exclude yourself from reply-all
 - `[accounts.<name>].display-name` — display identity
+- `[accounts.<name>].signature` — text seeded into new, reply, and forward
+  drafts after your writing area and before any quoted/forwarded source;
+  the root `signature` key is the fallback. The block is introduced by
+  `[accounts.<name>].signature-delim` (root fallback), defaulting to the
+  RFC 3676 §4.3 `"-- \n"` line, so mail clients recognize the signature
+  and omit it when quoting
 - `[accounts.<name>].default` — account selection when `[tmail].account` is unset
 - `[accounts.<name>.mailbox.alias]` — maps semantic roles (`inbox`, `sent`,
   `drafts`, `trash`, `archive`) to the account's real folder names; without

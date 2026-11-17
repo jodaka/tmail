@@ -15,6 +15,7 @@
 
 use crate::domain::address::{Address, to_field_list};
 use crate::domain::message::Message;
+use crate::domain::signature::Signature;
 
 /// Which reply a seeded draft represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,8 +50,21 @@ pub struct Seed {
 /// recipients (plan §14: "deduplicates addresses and excludes the
 /// configured account's own address").
 pub fn seed_reply(message: &Message, kind: ReplyKind, own_email: Option<&str>) -> Seed {
+    seed_reply_with_signature(message, kind, own_email, None)
+}
+
+/// [`seed_reply`] with a configured signature block placed after the
+/// author's writing area and before the attribution line and quoted
+/// source, per the RFC 3676 §4.3 signature convention. The signature is
+/// never quoted and never displaced below the quoted text.
+pub fn seed_reply_with_signature(
+    message: &Message,
+    kind: ReplyKind,
+    own_email: Option<&str>,
+    signature: Option<&Signature>,
+) -> Seed {
     let subject = prefixed_subject(&message.headers.subject, "Re:");
-    let body = format!("\n\n{}\n{}", wrote_line(message), quote(message));
+    let quoted = format!("{}\n{}", wrote_line(message), quote(message));
     let (to, cc) = match kind {
         ReplyKind::Reply => (message.headers.from.clone(), Vec::new()),
         ReplyKind::ReplyAll => reply_all_recipients(message, own_email),
@@ -59,7 +73,7 @@ pub fn seed_reply(message: &Message, kind: ReplyKind, own_email: Option<&str>) -
         to: to_field_list(&to),
         cc: to_field_list(&cc),
         subject,
-        body,
+        body: seeded_body(&quoted, signature),
         in_reply_to: message.headers.message_id.clone(),
         references: extended_references(message),
     }
@@ -100,13 +114,31 @@ fn reply_all_recipients(
 /// subject, and a clear forwarded header block above the original body
 /// (plan §14). A forward starts a new thread: no `In-Reply-To`/`References`.
 pub fn seed_forward(message: &Message) -> Seed {
+    seed_forward_with_signature(message, None)
+}
+
+/// [`seed_forward`] with a configured signature block placed after the
+/// author's writing area and before the forwarded header block, keeping
+/// the signature out of the forwarded source (RFC 3676 §4.3).
+pub fn seed_forward_with_signature(message: &Message, signature: Option<&Signature>) -> Seed {
     Seed {
         to: String::new(),
         cc: String::new(),
         subject: prefixed_subject(&message.headers.subject, "Fwd:"),
-        body: format!("\n\n{}", forwarded_block(message)),
+        body: seeded_body(&forwarded_block(message), signature),
         in_reply_to: None,
         references: None,
+    }
+}
+
+/// The author's writing area (two leading newlines keep the caret at the
+/// top), an optional signature block, then the quoted or forwarded
+/// source. Without a signature the body is byte-for-byte what the
+/// pre-signature seeds produced.
+fn seeded_body(source: &str, signature: Option<&Signature>) -> String {
+    match signature {
+        Some(signature) => format!("\n\n{}\n\n{source}", signature.block()),
+        None => format!("\n\n{source}"),
     }
 }
 
@@ -208,6 +240,7 @@ fn extended_references(message: &Message) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::signature::{DEFAULT_SIGNATURE_DELIM, Signature};
     use crate::domain::{MailboxId, MessageHeaders, MessageId};
 
     fn source() -> Message {
@@ -266,6 +299,34 @@ mod tests {
         let seed = seed_reply(&source(), ReplyKind::Reply, None);
         let expected = "\n\nOn 2026-09-02 10:03, Bob <bob@example.org> wrote:\n\
                         > Please review.\n>\n> Thanks";
+        assert_eq!(seed.body, expected);
+    }
+
+    #[test]
+    fn reply_signature_sits_before_the_quote() {
+        let signature = Signature::new("С уважением,\nАнтон Кудрис", DEFAULT_SIGNATURE_DELIM)
+            .expect("non-empty signature");
+        let seed = seed_reply_with_signature(&source(), ReplyKind::Reply, None, Some(&signature));
+        let expected = "\n\n-- \nС уважением,\nАнтон Кудрис\n\n\
+                        On 2026-09-02 10:03, Bob <bob@example.org> wrote:\n\
+                        > Please review.\n>\n> Thanks";
+        assert_eq!(seed.body, expected);
+    }
+
+    #[test]
+    fn forward_signature_sits_before_the_forwarded_block() {
+        let signature = Signature::new("All the best,\nAnton", DEFAULT_SIGNATURE_DELIM)
+            .expect("non-empty signature");
+        let seed = seed_forward_with_signature(&source(), Some(&signature));
+        let expected = "\n\n-- \nAll the best,\nAnton\n\n\
+                        ---------- Forwarded message ---------\n\
+                        From: Bob <bob@example.org>\n\
+                        Date: 2026-09-02 10:03\n\
+                        Subject: Plan review\n\
+                        To: probe@tmail.local\n\
+                        Cc: carol@example.org\n\
+                        \n\
+                        Please review.\n\nThanks\n";
         assert_eq!(seed.body, expected);
     }
 
