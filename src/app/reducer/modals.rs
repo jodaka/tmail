@@ -56,6 +56,16 @@ pub(crate) fn clear_expired_status(
 /// (issue 8859) queues a *foreground* failure into the open dialog
 /// instead of dropping it.
 pub(crate) fn modal_reduce(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
+    // Terminal geometry is a system action, not user input: a resize must
+    // still reach the reducer's `resize` handler while an overlay is open
+    // (ticket hpn9). Every modal's layout math and the auto-sized page
+    // (`page_size_auto`, ticket kjfq) read `session.size`; swallowing the
+    // one Resize left it — and `messages.limit` — at the old geometry, so
+    // after the overlay closed the list kept its old row count instead of
+    // refilling the now-larger window.
+    if matches!(action, Action::Resize { .. }) {
+        return None;
+    }
     match state.session.overlay {
         Some(Overlay::Error(_)) => match action {
             Action::BackendCompleted(result) => {

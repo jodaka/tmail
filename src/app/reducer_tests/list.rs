@@ -713,6 +713,10 @@ fn resize_while_a_modal_is_open_keeps_state_coherent() {
             height: 15,
         },
     );
+    // The overlay lets geometry through (ticket hpn9): a resize under an
+    // open modal updates `session.size`, so the modal's layout math and the
+    // auto-sized page follow the terminal just like with no modal.
+    assert_eq!(s.session.size, (60, 15));
     // The modal scroll only clamps on the next Move/scroll action, and the
     // clamp uses the new size — never panics, never negative.
     reduce(&mut s, Action::MoveDown);

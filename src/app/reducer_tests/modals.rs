@@ -3,6 +3,39 @@
 use super::*;
 use crate::app::operation::MailOperation;
 
+// ── Resize under an open overlay (ticket hpn9) ──────────────────────────
+
+#[test]
+fn resize_under_an_open_modal_still_repages_the_list() {
+    let mut s = state();
+    s.settings.page_size_auto = true;
+    s.session.size = (100, 30);
+    let small = crate::view::layout::messages_visible((100, 30), ViewMode::Compact).max(1);
+    s.messages = mock::mock_page(&inbox_id(), 0, small);
+    s.messages.total = Some(25);
+    // Open the error modal the way a user hits one: a page load fails.
+    let (id, req) = expect_page(&reduce(&mut s, Action::PageNext));
+    reduce(&mut s, failure(id, &page_kind(&req), "imap down"));
+    assert!(matches!(s.session.overlay, Some(Overlay::Error(_))));
+
+    // Maximizing with the modal up must still reach the page sizer: the
+    // geometry (and with it the auto-sized limit) follows the terminal,
+    // and the visible page reloads for the new row count.
+    let effects = reduce(
+        &mut s,
+        Action::Resize {
+            width: 160,
+            height: 45,
+        },
+    );
+    assert_eq!(s.session.size, (160, 45));
+    let rows = crate::view::layout::messages_visible((160, 45), ViewMode::Compact).max(1);
+    assert_eq!(s.messages.limit, rows);
+    let (_, reload) = expect_page(&effects);
+    assert_eq!(reload.limit, rows);
+    assert_eq!(reload.offset, s.messages.offset);
+}
+
 // ── Esc cancellation (plan §10/§11) ──────────────────────────────────────
 
 #[test]

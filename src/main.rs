@@ -525,6 +525,22 @@ fn start_wizard(state: &mut AppState, invocation: &Invocation) {
     state.session.focus = tmail::app::Focus::Wizard;
 }
 
+/// The terminal geometry the reducer should adopt before a frame, when the
+/// real terminal size (the source of truth for what is drawn) differs from
+/// `session.size`. `None` for an unchanged size and for a degenerate `0×0`
+/// reported while a window is minimized or torn down.
+///
+/// The event stream normally delivers `Action::Resize`, but a missed event
+/// (a terminal that never reports) or a swallowed one (ticket hpn9: an
+/// overlay layer) must not leave the auto-sized page (`page_size_auto`,
+/// ticket kjfq) at the old geometry while the frame draws larger.
+fn size_reconcile_action(state: &AppState, size: (u16, u16)) -> Option<Action> {
+    (size.0 > 0 && size.1 > 0 && size != state.session.size).then_some(Action::Resize {
+        width: size.0,
+        height: size.1,
+    })
+}
+
 /// The main loop: draw a frame, then wait for one batch of input, one
 /// backend result, or one external-kill signal, applying effects between
 /// frames. Returns the exit code the session should report: `0` for the
@@ -548,6 +564,16 @@ async fn run_event_loop(
     // owns it while `assets` itself is mutably borrowed by the arms.
     let events_pace = assets.events_control.clone();
     loop {
+        // The terminal is the source of truth for geometry: reconcile a
+        // size change the event stream never delivered before drawing, so
+        // the auto-sized page can never stay at the old row count while
+        // the frame is larger (ticket hpn9).
+        if let Ok(size) = crossterm::terminal::size()
+            && let Some(action) = size_reconcile_action(state, size)
+        {
+            let effects = reducer::reduce(state, action);
+            handle_effects(state, manager, assets, effects).await?;
+        }
         // Title sync ahead of the draw: the reducer may have changed the
         // mode (open the composer/wizard, switch mailboxes, unread tick).
         let title = state.terminal_title();
@@ -958,5 +984,23 @@ mod cli_tests {
         assert!(parse_args(args(&["--theme", "light", "--theme", "dark"])).is_err());
         assert!(parse_args(args(&["a.toml", "b.toml"])).is_err());
         assert!(parse_args(args(&["--configure", "a.toml", "b.toml"])).is_err());
+    }
+
+    #[test]
+    fn terminal_size_reconciliation_only_fires_on_a_real_change() {
+        let mut state = AppState::initial(20);
+        state.session.size = (100, 30);
+        assert!(size_reconcile_action(&state, (100, 30)).is_none());
+        assert!(
+            size_reconcile_action(&state, (0, 0)).is_none(),
+            "a minimized window's degenerate size is not a resize"
+        );
+        assert!(matches!(
+            size_reconcile_action(&state, (160, 45)),
+            Some(Action::Resize {
+                width: 160,
+                height: 45
+            })
+        ));
     }
 }
