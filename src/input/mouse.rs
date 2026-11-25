@@ -97,6 +97,38 @@ pub fn to_action(event: MouseEvent, hits: &HitMap, state: &AppState) -> Option<A
     }
 }
 
+/// Left-button gesture tracking for the raw event stream. tmail acts on
+/// clicks at *release*, so a release whose press never reached it would
+/// press whatever control sits at the release cell. Terminal chrome is the
+/// known source: Rio's tab strip consumes the press to switch tabs and
+/// still forwards the release, which maps to the top row — the search
+/// field. Only a release that closes a press accepted here is forwarded.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LeftPress {
+    pressed: bool,
+}
+
+impl LeftPress {
+    /// Record one raw mouse event; `false` means it must be dropped.
+    pub fn accept(&mut self, kind: MouseEventKind) -> bool {
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.pressed = true;
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => std::mem::take(&mut self.pressed),
+            _ => true,
+        }
+    }
+
+    /// Forget a press whose release will never arrive (focus loss, reader
+    /// pause): pairing it with a later stray release would resurrect the
+    /// click it guards against.
+    pub fn reset(&mut self) {
+        self.pressed = false;
+    }
+}
+
 /// Wheel: scroll the focused area (plan §10) with the exact actions the
 /// arrow keys produce. The reducer gives `MoveUp`/`MoveDown` their
 /// contextual meaning — list selection, sidebar selection, reader scroll,
@@ -224,5 +256,49 @@ mod tests {
             state.session.focus = focus;
             assert_eq!(wheel(&state, 1), None, "{focus:?}");
         }
+    }
+
+    #[test]
+    fn a_release_without_a_press_is_dropped() {
+        // Rio's tab strip: the press switched tabs (chrome), the release
+        // still reached tmail and used to focus the topbar's search field.
+        let mut left = LeftPress::default();
+        assert!(!left.accept(MouseEventKind::Up(MouseButton::Left)));
+        // It stays dropped however many stray releases follow.
+        assert!(!left.accept(MouseEventKind::Up(MouseButton::Left)));
+    }
+
+    #[test]
+    fn a_pressed_release_passes_exactly_once() {
+        let mut left = LeftPress::default();
+        assert!(left.accept(MouseEventKind::Down(MouseButton::Left)));
+        assert!(left.accept(MouseEventKind::Up(MouseButton::Left)));
+        // The pair is consumed: the next release has no press behind it.
+        assert!(!left.accept(MouseEventKind::Up(MouseButton::Left)));
+    }
+
+    #[test]
+    fn other_buttons_and_kinds_pass_untouched() {
+        let mut left = LeftPress::default();
+        assert!(left.accept(MouseEventKind::Up(MouseButton::Right)));
+        assert!(left.accept(MouseEventKind::Down(MouseButton::Middle)));
+        assert!(left.accept(MouseEventKind::ScrollUp));
+        assert!(left.accept(MouseEventKind::ScrollDown));
+        // Right/middle gestures never armed the left button.
+        assert!(!left.accept(MouseEventKind::Up(MouseButton::Left)));
+    }
+
+    #[test]
+    fn reset_forgets_a_press_whose_release_never_came() {
+        // Window focus loss (or a paused reader): the release goes to
+        // whoever took the focus, so a later stray release must not pair
+        // with the stale press.
+        let mut left = LeftPress::default();
+        assert!(left.accept(MouseEventKind::Down(MouseButton::Left)));
+        left.reset();
+        assert!(!left.accept(MouseEventKind::Up(MouseButton::Left)));
+        // A fresh press pairs normally afterwards.
+        assert!(left.accept(MouseEventKind::Down(MouseButton::Left)));
+        assert!(left.accept(MouseEventKind::Up(MouseButton::Left)));
     }
 }

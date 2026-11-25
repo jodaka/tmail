@@ -125,6 +125,9 @@ async fn event_loop(tx: UnboundedSender<Event>, mut control: UnboundedReceiver<C
     fast.tick().await;
     let mut fast_ticks = false;
     let mut paused = false;
+    // Release-only click guard: a press the terminal chrome swallowed must
+    // not turn its forwarded release into a click (see the mouse arm).
+    let mut left_press = mouse::LeftPress::default();
     loop {
         tokio::select! {
             biased;
@@ -137,12 +140,17 @@ async fn event_loop(tx: UnboundedSender<Event>, mut control: UnboundedReceiver<C
                     // a8n9). A second pause is idempotent.
                     reader = None;
                     paused = true;
+                    // The release of a press in flight will never be read
+                    // by this reader; forget it rather than pair it with a
+                    // later stray release.
+                    left_press.reset();
                     let _ = ack.send(());
                 }
                 Some(Control::Resume) => {
                     if reader.is_none() {
                         reader = Some(crossterm::event::EventStream::new());
                     }
+                    left_press.reset();
                     paused = false;
                 }
                 None => break,
@@ -189,9 +197,23 @@ async fn event_loop(tx: UnboundedSender<Event>, mut control: UnboundedReceiver<C
                                 | crossterm::event::MouseEventKind::Up(_)
                                 | crossterm::event::MouseEventKind::ScrollUp
                                 | crossterm::event::MouseEventKind::ScrollDown
-                        ) && tx.send(Event::Mouse(mouse)).is_err()
-                        {
-                            break;
+                        ) {
+                            // A release only is not a click: terminal chrome
+                            // (Rio's tab strip) may swallow the press and
+                            // still forward its release, which would then hit
+                            // whatever control sits at the mapped cell (the
+                            // topbar search field, typically). Drop it.
+                            if !left_press.accept(mouse.kind) {
+                                tracing::debug!(
+                                    column = mouse.column,
+                                    row = mouse.row,
+                                    "dropping a left release with no matching press"
+                                );
+                                continue;
+                            }
+                            if tx.send(Event::Mouse(mouse)).is_err() {
+                                break;
+                            }
                         }
                     }
                     Some(Ok(CrosstermEvent::FocusGained)) => {
@@ -204,6 +226,9 @@ async fn event_loop(tx: UnboundedSender<Event>, mut control: UnboundedReceiver<C
                     }
                     Some(Ok(CrosstermEvent::FocusLost)) => {
                         tracing::debug!("terminal focus lost");
+                        // The release of a press in flight goes to whoever
+                        // takes the focus; do not pair it with a later one.
+                        left_press.reset();
                         if tx.send(Event::Focus(false)).is_err() {
                             break;
                         }
